@@ -1,0 +1,2 @@
+read_id	read_len	ref_id	strand	query_start	reference_start	aligned_length	score	edit_distance	query_fragment	reference_fragment
+read_00015	19	ref	+	0	41198	19	19	0	CTAACAAGATAGGACGACT	CTAACAAGATAGGACGACT

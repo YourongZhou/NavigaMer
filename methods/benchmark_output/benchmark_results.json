@@ -1,0 +1,452 @@
+{
+  "strobemer": {
+    "k=20|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 0.051505088806152344,
+      "params": {
+        "k": 20,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.01
+    },
+    "k=15 (默认)|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 0.04518580436706543,
+      "params": {
+        "k": 15,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.01
+    },
+    "k=10|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 0.049922943115234375,
+      "params": {
+        "k": 10,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.01
+    },
+    "k=20|0.05": {
+      "recall": 0.8,
+      "hits": 8,
+      "time": 0.03856611251831055,
+      "params": {
+        "k": 20,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.05
+    },
+    "k=15 (默认)|0.05": {
+      "recall": 0.9,
+      "hits": 9,
+      "time": 0.04871344566345215,
+      "params": {
+        "k": 15,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.05
+    },
+    "k=10|0.05": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 0.04437685012817383,
+      "params": {
+        "k": 10,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.05
+    },
+    "k=20|0.1": {
+      "recall": 0.3,
+      "hits": 3,
+      "time": 0.03796052932739258,
+      "params": {
+        "k": 20,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.1
+    },
+    "k=15 (默认)|0.1": {
+      "recall": 0.6,
+      "hits": 6,
+      "time": 0.04721879959106445,
+      "params": {
+        "k": 15,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.1
+    },
+    "k=10|0.1": {
+      "recall": 0.8,
+      "hits": 8,
+      "time": 0.04456210136413574,
+      "params": {
+        "k": 10,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.1
+    },
+    "k=20|0.15": {
+      "recall": 0.1,
+      "hits": 1,
+      "time": 0.038244009017944336,
+      "params": {
+        "k": 20,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.15
+    },
+    "k=15 (默认)|0.15": {
+      "recall": 0.3,
+      "hits": 3,
+      "time": 0.0465245246887207,
+      "params": {
+        "k": 15,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.15
+    },
+    "k=10|0.15": {
+      "recall": 0.4,
+      "hits": 4,
+      "time": 0.042572736740112305,
+      "params": {
+        "k": 10,
+        "order": 2,
+        "w_min": 20,
+        "w_max": 70
+      },
+      "mutation_rate": 0.15
+    }
+  },
+  "spaced_seed": {
+    "w=14|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 25.311872243881226,
+      "params": {
+        "weight": 14,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.01
+    },
+    "w=11 (默认)|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 21.228322505950928,
+      "params": {
+        "weight": 11,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.01
+    },
+    "w=8|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 5.059597969055176,
+      "params": {
+        "weight": 8,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.01
+    },
+    "w=14|0.05": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 24.833401918411255,
+      "params": {
+        "weight": 14,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.05
+    },
+    "w=11 (默认)|0.05": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 21.475313425064087,
+      "params": {
+        "weight": 11,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.05
+    },
+    "w=8|0.05": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 5.079457759857178,
+      "params": {
+        "weight": 8,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.05
+    },
+    "w=14|0.1": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 33.21984529495239,
+      "params": {
+        "weight": 14,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.1
+    },
+    "w=11 (默认)|0.1": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 21.585559606552124,
+      "params": {
+        "weight": 11,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.1
+    },
+    "w=8|0.1": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 5.108707427978516,
+      "params": {
+        "weight": 8,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.1
+    },
+    "w=14|0.15": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 25.504991054534912,
+      "params": {
+        "weight": 14,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.15
+    },
+    "w=11 (默认)|0.15": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 21.288296937942505,
+      "params": {
+        "weight": 11,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.15
+    },
+    "w=8|0.15": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 5.057585954666138,
+      "params": {
+        "weight": 8,
+        "similarity": 0.8,
+        "k_seeds": 1,
+        "homology_length": 64
+      },
+      "mutation_rate": 0.15
+    }
+  },
+  "tensor_sketch": {
+    "ef=20|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 1.463491678237915,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 20,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.01
+    },
+    "ef=50 (默认)|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 1.4654147624969482,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 50,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.01
+    },
+    "ef=200|0.01": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 1.5303878784179688,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 200,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.01
+    },
+    "ef=20|0.05": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 1.4595098495483398,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 20,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.05
+    },
+    "ef=50 (默认)|0.05": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 1.4607515335083008,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 50,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.05
+    },
+    "ef=200|0.05": {
+      "recall": 1.0,
+      "hits": 10,
+      "time": 1.460625410079956,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 200,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.05
+    },
+    "ef=20|0.1": {
+      "recall": 0.9,
+      "hits": 9,
+      "time": 1.459533929824829,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 20,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.1
+    },
+    "ef=50 (默认)|0.1": {
+      "recall": 0.9,
+      "hits": 9,
+      "time": 1.460019826889038,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 50,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.1
+    },
+    "ef=200|0.1": {
+      "recall": 0.9,
+      "hits": 9,
+      "time": 1.4602055549621582,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 200,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.1
+    },
+    "ef=20|0.15": {
+      "recall": 0.5,
+      "hits": 5,
+      "time": 1.459467887878418,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 20,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.15
+    },
+    "ef=50 (默认)|0.15": {
+      "recall": 0.5,
+      "hits": 5,
+      "time": 1.4606554508209229,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 50,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.15
+    },
+    "ef=200|0.15": {
+      "recall": 0.5,
+      "hits": 5,
+      "time": 1.4607527256011963,
+      "params": {
+        "sketch_dim": 128,
+        "tuple_size": 3,
+        "hnsw_ef_search": 200,
+        "top_k": 5,
+        "window_size": 150
+      },
+      "mutation_rate": 0.15
+    }
+  }
+}

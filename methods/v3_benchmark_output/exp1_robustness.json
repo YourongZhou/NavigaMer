@@ -1,0 +1,58 @@
+{
+  "navigamer": [
+    {
+      "mutation_rate": 0.0,
+      "recall": 1.0
+    },
+    {
+      "mutation_rate": 0.05,
+      "recall": 0.0
+    },
+    {
+      "mutation_rate": 0.15,
+      "recall": 0.0
+    }
+  ],
+  "strobemer": [
+    {
+      "mutation_rate": 0.0,
+      "recall": 1.0
+    },
+    {
+      "mutation_rate": 0.05,
+      "recall": 1.0
+    },
+    {
+      "mutation_rate": 0.15,
+      "recall": 0.2
+    }
+  ],
+  "spaced_seed": [
+    {
+      "mutation_rate": 0.0,
+      "recall": 1.0
+    },
+    {
+      "mutation_rate": 0.05,
+      "recall": 1.0
+    },
+    {
+      "mutation_rate": 0.15,
+      "recall": 0.8
+    }
+  ],
+  "tensor_sketch": [
+    {
+      "mutation_rate": 0.0,
+      "recall": 1.0
+    },
+    {
+      "mutation_rate": 0.05,
+      "recall": 1.0
+    },
+    {
+      "mutation_rate": 0.15,
+      "recall": 1.0
+    }
+  ]
+}
