@@ -10,6 +10,11 @@ void BioSequence::add_occurrence(const std::string& ref_id, int start, int end,
   ref_positions.push_back({ref_id, start, end, strand});
 }
 
+void BioSequence::set_bwt_interval(int64_t bwt_start, int64_t bwt_end) {
+  bwt_interval.start = bwt_start;
+  bwt_interval.end = bwt_end;
+}
+
 static std::string make_node_id(int layer_level) {
   static const char* names[] = {"", "SW", "MW", "LW"};
   const char* layer_name = (layer_level >= 1 && layer_level <= 3) ? names[layer_level] : "UNK";

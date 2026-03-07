@@ -107,6 +107,9 @@ std::vector<TsvRow> search_results_to_tsv_rows(
   int score = aligned_len - edit_distance;
   std::string ref_positions_json = ref_positions_to_json(hit.ref_positions);
 
+  std::string bwt_s = hit.bwt_interval.valid() ? std::to_string(hit.bwt_interval.start) : "-1";
+  std::string bwt_e = hit.bwt_interval.valid() ? std::to_string(hit.bwt_interval.end)   : "-1";
+
   std::vector<TsvRow> rows;
   if (!hit.ref_positions.empty()) {
     for (const auto& occ : hit.ref_positions) {
@@ -126,6 +129,8 @@ std::vector<TsvRow> search_results_to_tsv_rows(
       r.edit_distance = std::to_string(edit_distance);
       r.query_fragment = query_seq;
       r.reference_fragment = hit.seq;
+      r.bwt_start = bwt_s;
+      r.bwt_end = bwt_e;
       rows.push_back(r);
     }
   } else {
@@ -145,6 +150,8 @@ std::vector<TsvRow> search_results_to_tsv_rows(
     r.edit_distance = std::to_string(edit_distance);
     r.query_fragment = query_seq;
     r.reference_fragment = hit.seq;
+    r.bwt_start = bwt_s;
+    r.bwt_end = bwt_e;
     rows.push_back(r);
   }
   return rows;

@@ -7,6 +7,21 @@
 namespace navigamer {
 
 BioGeometryIndexBuilder::BioGeometryIndexBuilder() {
+  radius_config[0] = 0;
+  radius_config[1] = R_SW;
+  radius_config[2] = R_MW;
+  radius_config[3] = R_LW;
+  for (int i = 0; i < 4; ++i) {
+    layers[i].clear();
+    layer_beacons[i].clear();
+  }
+}
+
+BioGeometryIndexBuilder::BioGeometryIndexBuilder(int r_sw, int r_mw, int r_lw) {
+  radius_config[0] = 0;
+  radius_config[1] = r_sw;
+  radius_config[2] = r_mw;
+  radius_config[3] = r_lw;
   for (int i = 0; i < 4; ++i) {
     layers[i].clear();
     layer_beacons[i].clear();
@@ -37,6 +52,8 @@ std::vector<std::shared_ptr<BioSequence>> BioGeometryIndexBuilder::deduplicate(
         it->second->add_occurrence(occ.ref_id, occ.start, occ.end, occ.strand);
       if (seq->ref_positions.empty() && it->second->ref_positions.empty())
         it->second->add_occurrence(seq->id, 0, static_cast<int>(seq->seq.size()), "+");
+      if (!it->second->bwt_interval.valid() && seq->bwt_interval.valid())
+        it->second->set_bwt_interval(seq->bwt_interval.start, seq->bwt_interval.end);
       stats_.deduplicated++;
     } else {
       seq_map[seq->seq] = seq;
@@ -113,9 +130,9 @@ std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::build_layer_spa
 
 void BioGeometryIndexBuilder::build_skeleton(
     const std::vector<std::shared_ptr<BioSequence>>& unique_seqs) {
-  layers[1] = build_layer_sparse(unique_seqs, R_SW, 1, "SW");
-  layers[2] = build_layer_sparse_from_nodes(layers[1], R_MW, 2, "MW");
-  layers[3] = build_layer_sparse_from_nodes(layers[2], R_LW, 3, "LW");
+  layers[1] = build_layer_sparse(unique_seqs, radius_config[1], 1, "SW");
+  layers[2] = build_layer_sparse_from_nodes(layers[1], radius_config[2], 2, "MW");
+  layers[3] = build_layer_sparse_from_nodes(layers[2], radius_config[3], 3, "LW");
 }
 
 void BioGeometryIndexBuilder::wire_overlap(

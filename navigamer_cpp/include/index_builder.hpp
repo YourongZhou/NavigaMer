@@ -14,7 +14,11 @@ class BioGeometryIndexBuilder {
  public:
   static constexpr int BEACON_COUNT = 3;
 
+  // 默认构造：使用默认半径 R_SW=5, R_MW=15, R_LW=30
   BioGeometryIndexBuilder();
+
+  // 指定各层半径构造：r_sw=小世界半径, r_mw=中世界半径, r_lw=大世界半径
+  BioGeometryIndexBuilder(int r_sw, int r_mw, int r_lw);
 
   // 主构建入口：raw_sequences 为输入 reads
   void build(const std::vector<std::shared_ptr<BioSequence>>& raw_sequences);

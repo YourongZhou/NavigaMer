@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <cstdint>
 
 namespace navigamer {
 
@@ -21,11 +22,19 @@ struct RefPosition {
   std::string strand = "+";
 };
 
-// 基础数据单元：DNA 序列 + 参考基因组位置列表
+// BWT/SA 区间：叶子节点在 FM-Index 中的 [start, end) 范围
+struct BwtInterval {
+  int64_t start = -1;
+  int64_t end   = -1;
+  bool valid() const { return start >= 0 && end >= start; }
+};
+
+// 基础数据单元：DNA 序列 + 参考基因组位置列表 + BWT 区间
 struct BioSequence {
   std::string id;
   std::string seq;
   std::vector<RefPosition> ref_positions;
+  BwtInterval bwt_interval;
 
   BioSequence() = default;
   BioSequence(std::string seq_id, std::string sequence)
@@ -33,6 +42,7 @@ struct BioSequence {
 
   void add_occurrence(const std::string& ref_id, int start, int end,
                       const std::string& strand = "+");
+  void set_bwt_interval(int64_t bwt_start, int64_t bwt_end);
 };
 
 // DAG 索引节点 (NavigaMer v7 - Multilateration-Enhanced)

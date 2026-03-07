@@ -24,11 +24,11 @@ namespace {
 
 void usage(const char* prog) {
   std::cerr << "Usage:\n"
-            << "  " << prog << " demo [--size N]           # 内置演示 (默认 N=500 reads)\n"
-            << "  " << prog << " build --ref <path|seq> --reads <path|seq>  # 构建索引\n"
-            << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--tolerance 2] [--mode adaptive]\n"
-            << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>]  # 构建+查询全部 reads，输出 TSV\n"
-            << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>]  # Ref 窗口建索引 + query 搜索 + stats\n";
+            << "  " << prog << " demo [--size N] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # 内置演示 (默认 N=500 reads)\n"
+            << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--r-sw 5] [--r-mw 15] [--r-lw 30]  # 构建索引\n"
+            << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--tolerance 2] [--mode adaptive] [--r-sw 5] [--r-mw 15] [--r-lw 30]\n"
+            << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # 构建+查询全部 reads，输出 TSV\n"
+            << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # Ref 窗口建索引 + query 搜索 + stats\n";
 }
 
 // 生成随机 DNA 序列
@@ -66,13 +66,14 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> generate_reads(
   return reads;
 }
 
-void run_demo(int size) {
+void run_demo(int size, int r_sw, int r_mw, int r_lw) {
   using namespace navigamer;
-  std::cerr << "NavigaMer v7 (C++) - Demo with " << size << " reads\n";
+  std::cerr << "NavigaMer v7 (C++) - Demo with " << size << " reads"
+            << " (R_SW=" << r_sw << ", R_MW=" << r_mw << ", R_LW=" << r_lw << ")\n";
   std::string ref = generate_reference(50000, 42);
   auto reads = generate_reads(ref, size, 20, 0.0, 42);
 
-  BioGeometryIndexBuilder builder;
+  BioGeometryIndexBuilder builder(r_sw, r_mw, r_lw);
   builder.build(reads);
 
   auto stats = builder.get_statistics();
@@ -109,27 +110,29 @@ void run_demo(int size) {
   std::cerr << "Demo done.\n";
 }
 
-void run_build(const std::string& ref_input, const std::string& reads_input) {
+void run_build(const std::string& ref_input, const std::string& reads_input,
+               int r_sw, int r_mw, int r_lw) {
   using namespace navigamer;
   auto [ref_id, ref_seq] = load_reference(ref_input);
   std::cerr << "Reference: " << ref_id << " length=" << ref_seq.size() << "\n";
   auto reads = load_reads(reads_input, ref_id);
   std::cerr << "Reads: " << reads.size() << "\n";
 
-  BioGeometryIndexBuilder builder;
+  BioGeometryIndexBuilder builder(r_sw, r_mw, r_lw);
   builder.build(reads);
   std::cerr << "Build done. (Index serialization not implemented; use run for full pipeline.)\n";
 }
 
 void run_query(const std::string& /*ref_input*/, const std::string& reads_input,
-               const std::string& query_seq, int tolerance, const std::string& mode) {
+               const std::string& query_seq, int tolerance, const std::string& mode,
+               int r_sw, int r_mw, int r_lw) {
   using namespace navigamer;
   auto reads = load_reads(reads_input, "ref");
   if (reads.empty()) {
     std::cerr << "No reads loaded.\n";
     return;
   }
-  BioGeometryIndexBuilder builder;
+  BioGeometryIndexBuilder builder(r_sw, r_mw, r_lw);
   builder.build(reads);
 
   BioGeometrySearchEngine engine(builder);
@@ -152,7 +155,8 @@ void run_query(const std::string& /*ref_input*/, const std::string& reads_input,
 }
 
 void run_full(const std::string& ref_input, const std::string& reads_input,
-              int tolerance, const std::string& out_tsv) {
+              int tolerance, const std::string& out_tsv,
+              int r_sw, int r_mw, int r_lw) {
   using namespace navigamer;
   auto [ref_id, ref_seq] = load_reference(ref_input);
   auto reads = load_reads(reads_input, ref_id);
@@ -160,7 +164,7 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
     std::cerr << "No reads.\n";
     return;
   }
-  BioGeometryIndexBuilder builder;
+  BioGeometryIndexBuilder builder(r_sw, r_mw, r_lw);
   builder.build(reads);
   BioGeometrySearchEngine engine(builder);
 
@@ -168,7 +172,8 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
   std::vector<std::string> columns = {
       "query_id", "hit_id", "distance", "ref_positions", "read_id", "read_len",
       "ref_id", "strand", "query_start", "reference_start", "aligned_length",
-      "score", "edit_distance", "query_fragment", "reference_fragment"};
+      "score", "edit_distance", "query_fragment", "reference_fragment",
+      "bwt_start", "bwt_end"};
 
   for (const auto& read : reads) {
     auto [res, st] = engine.search_adaptive(*read, tolerance);
@@ -179,7 +184,8 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
         all_rows.push_back({
             r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
             r.read_id, r.read_len, r.ref_id, r.strand, r.query_start, r.reference_start,
-            r.aligned_length, r.score, r.edit_distance, r.query_fragment, r.reference_fragment});
+            r.aligned_length, r.score, r.edit_distance, r.query_fragment, r.reference_fragment,
+            r.bwt_start, r.bwt_end});
       }
     }
   }
@@ -191,7 +197,8 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
 // Benchmark: reference windows -> index; query reads -> search; output hits + SearchStats
 void run_benchmark(const std::string& ref_input, const std::string& query_input,
                    int tolerance, int window_size, int stride,
-                   const std::string& out_tsv) {
+                   const std::string& out_tsv,
+                   int r_sw, int r_mw, int r_lw) {
   using namespace navigamer;
   auto [ref_id, ref_seq] = load_reference(ref_input);
   if (ref_seq.size() < static_cast<size_t>(window_size)) {
@@ -203,11 +210,12 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
     std::string frag = ref_seq.substr(static_cast<size_t>(start), static_cast<size_t>(window_size));
     auto seq = std::make_shared<BioSequence>("ref_" + std::to_string(start), frag);
     seq->add_occurrence(ref_id, start, start + window_size, "+");
+    seq->set_bwt_interval(static_cast<int64_t>(start), static_cast<int64_t>(start + window_size));
     index_seqs.push_back(seq);
   }
   std::cerr << "Index: " << index_seqs.size() << " windows from reference\n";
 
-  BioGeometryIndexBuilder builder;
+  BioGeometryIndexBuilder builder(r_sw, r_mw, r_lw);
   builder.build(index_seqs);
   BioGeometrySearchEngine engine(builder);
 
@@ -222,6 +230,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "query_id", "hit_id", "distance", "ref_positions", "read_id", "read_len",
       "ref_id", "strand", "query_start", "reference_start", "aligned_length",
       "score", "edit_distance", "query_fragment", "reference_fragment",
+      "bwt_start", "bwt_end",
       "dist_calcs", "leaf_verify_count", "candidate_count_for_prune", "beacon_prune_count"};
   std::vector<std::vector<std::string>> all_rows;
 
@@ -231,6 +240,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       all_rows.push_back({
           read->id, "", "", "", read->id, std::to_string(static_cast<int>(read->seq.size())),
           "", "+", "0", "0", "0", "0", "", read->seq, "",
+          "-1", "-1",
           std::to_string(st.dist_calc_count), std::to_string(st.leaf_verify_count),
           std::to_string(st.candidate_count_for_prune), std::to_string(st.beacon_prune_count)});
     } else {
@@ -242,6 +252,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
               r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
               r.read_id, r.read_len, r.ref_id, r.strand, r.query_start, r.reference_start,
               r.aligned_length, r.score, r.edit_distance, r.query_fragment, r.reference_fragment,
+              r.bwt_start, r.bwt_end,
               std::to_string(st.dist_calc_count), std::to_string(st.leaf_verify_count),
               std::to_string(st.candidate_count_for_prune), std::to_string(st.beacon_prune_count)});
         }
@@ -266,6 +277,9 @@ int main(int argc, char** argv) {
   int demo_size = 500;
   int window_size = 200;
   int stride = 1;
+  int r_sw = navigamer::R_SW;
+  int r_mw = navigamer::R_MW;
+  int r_lw = navigamer::R_LW;
 
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
@@ -278,11 +292,14 @@ int main(int argc, char** argv) {
     if (a == "--size" && i + 1 < argc) { demo_size = std::atoi(argv[++i]); continue; }
     if (a == "--window" && i + 1 < argc) { window_size = std::atoi(argv[++i]); continue; }
     if (a == "--stride" && i + 1 < argc) { stride = std::atoi(argv[++i]); continue; }
+    if (a == "--r-sw" && i + 1 < argc) { r_sw = std::atoi(argv[++i]); continue; }
+    if (a == "--r-mw" && i + 1 < argc) { r_mw = std::atoi(argv[++i]); continue; }
+    if (a == "--r-lw" && i + 1 < argc) { r_lw = std::atoi(argv[++i]); continue; }
   }
 
   try {
     if (cmd == "demo") {
-      run_demo(demo_size);
+      run_demo(demo_size, r_sw, r_mw, r_lw);
       return 0;
     }
     if (cmd == "build") {
@@ -290,7 +307,7 @@ int main(int argc, char** argv) {
         std::cerr << "build requires --ref and --reads\n";
         return 1;
       }
-      run_build(ref_input, reads_input);
+      run_build(ref_input, reads_input, r_sw, r_mw, r_lw);
       return 0;
     }
     if (cmd == "query") {
@@ -298,7 +315,7 @@ int main(int argc, char** argv) {
         std::cerr << "query requires --reads and --query\n";
         return 1;
       }
-      run_query(ref_input.empty() ? "ref" : ref_input, reads_input, query_seq, tolerance, mode);
+      run_query(ref_input.empty() ? "ref" : ref_input, reads_input, query_seq, tolerance, mode, r_sw, r_mw, r_lw);
       return 0;
     }
     if (cmd == "run") {
@@ -306,7 +323,7 @@ int main(int argc, char** argv) {
         std::cerr << "run requires --ref and --reads\n";
         return 1;
       }
-      run_full(ref_input, reads_input, tolerance, out_tsv);
+      run_full(ref_input, reads_input, tolerance, out_tsv, r_sw, r_mw, r_lw);
       return 0;
     }
     if (cmd == "benchmark") {
@@ -314,7 +331,7 @@ int main(int argc, char** argv) {
         std::cerr << "benchmark requires --ref and --reads\n";
         return 1;
       }
-      run_benchmark(ref_input, reads_input, tolerance, window_size, stride, out_tsv);
+      run_benchmark(ref_input, reads_input, tolerance, window_size, stride, out_tsv, r_sw, r_mw, r_lw);
       return 0;
     }
   } catch (const std::exception& e) {
