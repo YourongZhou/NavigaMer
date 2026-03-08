@@ -1,0 +1,300 @@
+{
+  "navigamer": [
+    {
+      "recall": 0.0,
+      "candidate_fraction": 1e-06,
+      "params": {
+        "tolerance": 1,
+        "window_size": 100,
+        "stride": 1,
+        "r_sw": 5,
+        "r_mw": 15,
+        "r_lw": 30
+      }
+    },
+    {
+      "recall": 0.0,
+      "candidate_fraction": 1e-06,
+      "params": {
+        "tolerance": 2,
+        "window_size": 100,
+        "stride": 1,
+        "r_sw": 5,
+        "r_mw": 15,
+        "r_lw": 30
+      }
+    },
+    {
+      "recall": 0.0,
+      "candidate_fraction": 1e-06,
+      "params": {
+        "tolerance": 3,
+        "window_size": 100,
+        "stride": 1,
+        "r_sw": 5,
+        "r_mw": 15,
+        "r_lw": 30
+      }
+    },
+    {
+      "recall": 0.05,
+      "candidate_fraction": 0.00012468827930174563,
+      "params": {
+        "tolerance": 4,
+        "window_size": 100,
+        "stride": 1,
+        "r_sw": 5,
+        "r_mw": 15,
+        "r_lw": 30
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.002743142144638404,
+      "params": {
+        "tolerance": 5,
+        "window_size": 100,
+        "stride": 1,
+        "r_sw": 5,
+        "r_mw": 15,
+        "r_lw": 30
+      }
+    }
+  ],
+  "strobemer": [
+    {
+      "recall": 0.0,
+      "candidate_fraction": 1e-06,
+      "params": {
+        "k": 80,
+        "order": 2,
+        "w_min": 2,
+        "w_max": 10
+      }
+    },
+    {
+      "recall": 0.1,
+      "candidate_fraction": 0.00024937655860349125,
+      "params": {
+        "k": 50,
+        "order": 2,
+        "w_min": 2,
+        "w_max": 10
+      }
+    },
+    {
+      "recall": 0.55,
+      "candidate_fraction": 0.001371571072319202,
+      "params": {
+        "k": 30,
+        "order": 2,
+        "w_min": 2,
+        "w_max": 10
+      }
+    },
+    {
+      "recall": 0.65,
+      "candidate_fraction": 0.001745635910224439,
+      "params": {
+        "k": 25,
+        "order": 2,
+        "w_min": 2,
+        "w_max": 10
+      }
+    },
+    {
+      "recall": 0.95,
+      "candidate_fraction": 0.003366583541147132,
+      "params": {
+        "k": 20,
+        "order": 2,
+        "w_min": 2,
+        "w_max": 10
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.006483790523690773,
+      "params": {
+        "k": 10,
+        "order": 2,
+        "w_min": 2,
+        "w_max": 10
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.1697007481296758,
+      "params": {
+        "k": 3,
+        "order": 2,
+        "w_min": 2,
+        "w_max": 10
+      }
+    }
+  ],
+  "spaced_seed": [
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.12182044887780549,
+      "params": {
+        "weight": 5,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.007356608478802993,
+      "params": {
+        "weight": 9,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.00486284289276808,
+      "params": {
+        "weight": 12,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.00399002493765586,
+      "params": {
+        "weight": 20,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 0.85,
+      "candidate_fraction": 0.0024937655860349127,
+      "params": {
+        "weight": 23,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 0.8,
+      "candidate_fraction": 0.0024937655860349127,
+      "params": {
+        "weight": 25,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 0.7,
+      "candidate_fraction": 0.0024937655860349127,
+      "params": {
+        "weight": 28,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 0.75,
+      "candidate_fraction": 0.0024937655860349127,
+      "params": {
+        "weight": 30,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 0.5,
+      "candidate_fraction": 0.0024937655860349127,
+      "params": {
+        "weight": 40,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    },
+    {
+      "recall": 0.0,
+      "candidate_fraction": 1e-06,
+      "params": {
+        "weight": 50,
+        "similarity": 0.6,
+        "homology_length": 50,
+        "k_seeds": 1
+      }
+    }
+  ],
+  "tensor_sketch": [
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.0024937655860349127,
+      "params": {
+        "hnsw_ef_search": 500,
+        "top_k": 1,
+        "window_size": 100,
+        "tuple_size": 3
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.007481296758104738,
+      "params": {
+        "hnsw_ef_search": 500,
+        "top_k": 3,
+        "window_size": 100,
+        "tuple_size": 3
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.012468827930174564,
+      "params": {
+        "hnsw_ef_search": 500,
+        "top_k": 5,
+        "window_size": 100,
+        "tuple_size": 3
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.02493765586034913,
+      "params": {
+        "hnsw_ef_search": 500,
+        "top_k": 10,
+        "window_size": 100,
+        "tuple_size": 3
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 0.3740648379052369,
+      "params": {
+        "hnsw_ef_search": 500,
+        "top_k": 150,
+        "window_size": 100,
+        "tuple_size": 3
+      }
+    },
+    {
+      "recall": 1.0,
+      "candidate_fraction": 1.0,
+      "params": {
+        "hnsw_ef_search": 500,
+        "top_k": 500,
+        "window_size": 100,
+        "tuple_size": 3
+      }
+    }
+  ]
+}

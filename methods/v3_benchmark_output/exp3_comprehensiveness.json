@@ -1,0 +1,14 @@
+{
+  "hit_recall": {
+    "navigamer": 1.0,
+    "strobemer": 0.0,
+    "spaced_seed": 0.3333333333333333,
+    "tensor_sketch": 0.0
+  },
+  "sequence_recall": {
+    "navigamer": 1.0,
+    "strobemer": 1.0,
+    "spaced_seed": 1.0,
+    "tensor_sketch": 1.0
+  }
+}
