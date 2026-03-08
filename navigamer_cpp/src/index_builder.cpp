@@ -109,11 +109,12 @@ std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::build_layer_spa
     size_t i = indices[idx];
     const auto& item = items[i];
     std::string center = item->get_center_sequence();
+    int child_radius = item->radius;
     bool covered = false;
     for (const auto& node : nodes) {
       if (!node->center_ptr) continue;
       int d = compute_distance(center, node->center_ptr->seq);
-      if (d <= radius) { covered = true; break; }
+      if (d + child_radius <= radius) { covered = true; break; }
     }
     if (!covered) {
       auto node = std::make_shared<WorldNode>(item->center_ptr, radius, layer_level);
