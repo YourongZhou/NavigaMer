@@ -1,49 +1,51 @@
-# NavigaMer v7 - C++ 实现
+# NavigaMer — C++ reference implementation
 
-基于 C++17 的 NavigaMer v7 (Multilateration-Enhanced) 实现，与 Python 版 `world_demo/src` 算法一致。
+This directory contains the **C++17** reference indexer and CLI (`navigamer`). The build pipeline follows a **top-down extended hierarchy**, **inter-tier DAG wiring**, **intermediate-tier collapse with beacon sequences and MBBs**, and **leaf attachment** to small-world (SW) nodes. Adaptive search uses **precomputed per-edge MBB rows** (see `WorldNode::child_beacon_mbbs`) for pruning.
 
-## 构建
+## Build
 
-```bash
-# 使用 Makefile（仅需 g++）
-make
-
-# 或使用 CMake（若已安装）
-mkdir build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make
-```
-
-## 用法
+Requires **g++** (or Clang) with **OpenMP**.
 
 ```bash
-# 内置演示（默认 500 条 reads，可指定 --size N）
-./navigamer demo [--size 200]
-
-# 从 FASTA/FASTQ 构建索引
-./navigamer build --ref <ref.fa|或序列字符串> --reads <reads.fq|或序列字符串>
-
-# 单条查询（先根据 reads 构建索引，再查 query）
-./navigamer query --reads <reads.fq> --query <序列> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
-
-# 完整流程：构建 + 对所有 reads 查询并输出 TSV
-./navigamer run --ref <ref.fa> --reads <reads.fq> [--tolerance 2] [--out navigamer_out.tsv]
+make -j
+# or
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ```
 
-## 模块说明
+Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 
-| 模块 | 说明 |
-|------|------|
-| `include/structure.hpp` | 核心数据结构：`BioSequence`、`WorldNode`、半径常量 R_SW/R_MW/R_LW |
-| `include/tools.hpp` | 编辑距离 `compute_distance`、FPS `farthest_point_sampling`、`shuffle_indices` |
-| `include/index_builder.hpp` | 索引构建：Phase 0 去重 → Phase 1 骨架 → Phase 2 稠密连网 → Phase 3 信标 → Phase 4 叶子挂载 |
-| `include/search_engine.hpp` | 搜索：`search_adaptive` / `search_greedy` / `search_exhaustive` / `search_brute_force` |
-| `include/io_utils.hpp` | I/O：`load_reference`、`load_reads`、`write_tsv`、`search_results_to_tsv_rows` |
+## CLI (summary)
 
-## 与 Python 版对应关系
+```bash
+./navigamer demo   [--size N] [--r-sw 5] [--r-mw 15] [--r-lw 30]
+./navigamer build  --ref <fasta|sequence> --reads <fastq|sequence>  [same radius flags]
+./navigamer query  --reads <fastq|sequence> --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
+./navigamer run    --ref <fasta|sequence> --reads <fastq|sequence> [--tolerance 2] [--out out.tsv]
+./navigamer benchmark --ref <fasta> --reads <fastq> [--tolerance 2] [--window 200] [--stride 1] [--out out.tsv]
+```
 
-- **structure.py** → `structure.hpp/cpp`
-- **tools.py** → `tools.hpp/cpp`（Levenshtein、FPS）
-- **index_builder.py** → `index_builder.hpp/cpp`（五阶段流水线）
-- **search_engine.py** → `search_engine.hpp/cpp`（Beacon Pruning、Sibling Pruning）
-- **io_utils.py** → `io_utils.hpp/cpp`（FASTA/FASTQ/TSV）
+**Full syntax and defaults:** [`CLI_REFERENCE.md`](CLI_REFERENCE.md).
 
-Phase 5（FM-Index 定位 ref_positions）未实现，输出 TSV 时 `ref_positions` 可为空；若需基因组坐标，可后续对接 C++ BWT/SA 库。
+## Module map
+
+| Header / source | Purpose |
+| --------------- | ------- |
+| `include/structure.hpp`, `src/structure.cpp` | `BioSequence`, `WorldNode`, `MBB`, radii `R_SW` / `R_MW` / `R_LW` |
+| `include/tools.hpp`, `src/tools.cpp` | Levenshtein `compute_distance`, helpers |
+| `include/index_builder.hpp`, `src/index_builder.cpp` | `BioGeometryIndexBuilder`: dedup → phase1 extended sketch → phase2 rebinding → phase3 collapse + MBB → leaves |
+| `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
+| `include/io_utils.hpp`, `src/io_utils.cpp` | FASTA/FASTQ load, TSV output |
+| `src/main.cpp` | CLI entry points |
+
+**Note:** FM-index integration for genomic `ref_positions` in TSV is not implemented; coordinates may be empty unless sequences carry pre-annotated occurrences.
+
+## Parameter sweeps
+
+[`params_test.ipynb`](params_test.ipynb) runs the binary via Python `subprocess` for quick parameter exploration. Set `NAVIGAMER` to the absolute path of `navigamer` if auto-detection fails.
+
+## Tests
+
+| Target | Command |
+| ------ | ------- |
+| Recall (adaptive vs brute force, 0 FN under test protocol) | `make test_recall && ./test_recall` |
+| Distance bounds (violations report) | `make test_distance_bound && ./test_distance_bound` |

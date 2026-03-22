@@ -6,26 +6,22 @@
 
 ## Overview
 
-**NavigaMer** (Multilateration-Based Indexing and Navigation for Error-Tolerant Read Mapping) is a multi-tiered indexer that treats read mapping as **geometric localization in a coordinate-free metric space** defined by the **edit distance**. Instead of embedding sequences in a continuous space (with unavoidable distortion) or relying solely on fixed seeds at high mutation rates, NavigaMer uses **beacon-mediated multilateration** and **triangle-inequality pruning** across a hierarchy of metric “worlds.” The adaptive search is designed so that, within a user-specified edit-distance threshold, **retrieval has zero false negatives (perfect recall)** with respect to the indexed sequence set, while aggressively pruning unrelated candidates.
+**NavigaMer** (*Multilateration-Based Indexing and Navigation for Error-Tolerant Read Mapping*) is a multi-tiered indexer that formulates read mapping as **geometric localization in a coordinate-free metric space** under **edit distance**. Rather than embedding sequences in a continuous sketch space (with embedding distortion) or relying only on fixed seeds under high mutation rates, NavigaMer uses **beacon-mediated multilateration** and **triangle-inequality pruning** over a hierarchy of metric “worlds.” The **adaptive** search aims for **zero false negatives** (perfect recall relative to the indexed sequence set) within a user-specified edit-distance threshold, while pruning candidates that cannot contain a match.
 
-## Methodology Alignment
+## Methodology ↔ Code
 
-The C++ implementation is structured so that each major theoretical object in the manuscript maps to a concrete module and entry point:
+| Concept (paper) | Implementation |
+| --------------- | -------------- |
+| **Extended world hierarchy (sketch)** | `BioGeometryIndexBuilder::phase1_build_extended_sketch()` — `navigamer_cpp/src/index_builder.cpp` |
+| **DAG topology & overlap binding** | `BioGeometryIndexBuilder::phase2_inter_tier_rebinding()` — same file |
+| **Beacon extraction & tier collapse + MBBs** | `BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb()` — intermediate tiers collapsed; **Metric Bounding Boxes (MBBs)** for consistency checks |
+| **Hierarchical multilateration search** | `BioGeometrySearchEngine::search_adaptive()` — `navigamer_cpp/src/search_engine.cpp` (MBB-based pruning via triangle inequality) |
 
-| Manuscript concept | Code location |
-| ------------------ | ------------- |
-| **The World Hierarchy (Extended Sketch)** | `BioGeometryIndexBuilder::phase1_build_extended_sketch()` in `navigamer_cpp/src/index_builder.cpp` |
-| **DAG Topology & Overlap Binding** | `BioGeometryIndexBuilder::phase2_inter_tier_rebinding()` in `navigamer_cpp/src/index_builder.cpp` |
-| **Beacon Extraction & Tier Collapse** | `BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb()` in `navigamer_cpp/src/index_builder.cpp` — intermediate tiers are collapsed and **Metric Minimum Bounding Boxes (MBBs)** are attached for \(O(1)\) consistency checks |
-| **Hierarchical Multilateration Search** | `BioGeometrySearchEngine::search_adaptive()` in `navigamer_cpp/src/search_engine.cpp` — **MBB-based pruning** using the triangle inequality (constant-time per beacon dimension, subject to the number of beacons) |
-
-Supporting definitions (metric balls, `WorldNode`, `MBB`, sequence records) live in `navigamer_cpp/include/structure.hpp`. Edit distance and I/O are in `navigamer_cpp/src/tools.cpp` and `navigamer_cpp/src/io_utils.cpp`.
+Data structures (`WorldNode`, `MBB`, `BioSequence`) are in `navigamer_cpp/include/structure.hpp`. Edit distance is in `navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in `navigamer_cpp/src/io_utils.cpp`.
 
 ## Installation
 
-**Environment:** Linux with a C++17 compiler, **OpenMP**, and optionally **CMake 3.14+**.
-
-**C++ backend (reference implementation):**
+**Requirements:** Linux, **C++17**, **OpenMP**, optional **CMake ≥ 3.14**.
 
 ```bash
 cd navigamer_cpp
@@ -34,40 +30,46 @@ make -j
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ```
 
-The main binary is `navigamer_cpp/navigamer` (or `navigamer_cpp/build/navigamer` when using CMake).
+Binary: `navigamer_cpp/navigamer` (or `navigamer_cpp/build/navigamer` with CMake).
 
-**Python (notebooks / reproduction scripts):**
+**Python** (notebooks / reproduction):
 
 ```bash
 pip install -r reproducibility/requirements.txt
 ```
 
-## Quick Start (Toy Example)
-
-From the repository root, after building:
+## Quick start
 
 ```bash
-cd navigamer_cpp && ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
-```
-
-One-line built-in stress test (synthetic reference and reads):
-
-```bash
+cd navigamer_cpp
+./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
 ./navigamer demo --size 200
 ```
 
-The CLI accepts FASTA/FASTQ paths or raw sequence strings; see `navigamer_cpp/CLI参数说明.md` for parameters (`--r-sw`, `--r-mw`, `--r-lw`, `run`, `benchmark`, etc.).
+Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFERENCE.md). C++ layout and tests: [`navigamer_cpp/README.md`](navigamer_cpp/README.md).
 
-## Reproducing Paper Results (Figure 2)
-
-To reproduce the recall and precision benchmarks shown in **Figure 2** of the manuscript, navigate to the `reproducibility/` directory and run:
+## Tests
 
 ```bash
+cd navigamer_cpp
+make test_recall test_distance_bound
+./test_recall
+./test_distance_bound
+```
+
+## Reproducing paper results (Figure 2)
+
+```bash
+cd reproducibility
 bash run_figure_2_reproduction.sh
 ```
 
-This script is provided as part of the submission artifact; it regenerates the figures and summary statistics from the paper’s experimental protocol.
+(Provided in the submission artifact when available.)
 
----
+## Repository layout
 
-*For implementation-focused build and module notes specific to the C++ tree, see [`navigamer_cpp/README.md`](navigamer_cpp/README.md).*
+| Path | Role |
+| ---- | ---- |
+| `navigamer_cpp/` | C++ reference implementation and `navigamer` CLI |
+| `reproducibility/` | Scripts and dependencies for paper figures |
+| `methods/` | Comparative baselines and experiment notebooks (historical) |
