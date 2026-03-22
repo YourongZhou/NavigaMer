@@ -1,6 +1,7 @@
 #include "search_engine.hpp"
 #include <algorithm>
 #include <limits>
+#include <omp.h>
 
 namespace navigamer {
 
@@ -233,13 +234,30 @@ BioGeometrySearchEngine::search_brute_force(
     const BioSequence& query_seq, int tolerance,
     const std::vector<std::shared_ptr<BioSequence>>& all_sequences) {
   SearchStats stats;
-  std::vector<std::shared_ptr<BioSequence>> results;
-  for (const auto& seq : all_sequences) {
-    int d = compute_distance(query_seq.seq, seq->seq);
-    stats.dist_calc_count++;
-    stats.leaf_verify_count++;
-    if (d <= tolerance) results.push_back(seq);
+  std::vector<std::vector<std::shared_ptr<BioSequence>>> thread_results;
+
+  #pragma omp parallel
+  {
+    int nthreads = omp_get_num_threads();
+    #pragma omp single
+    thread_results.resize(nthreads);
+
+    int tid = omp_get_thread_num();
+    #pragma omp for schedule(dynamic, 64)
+    for (size_t i = 0; i < all_sequences.size(); ++i) {
+      int d = compute_distance(query_seq.seq, all_sequences[i]->seq);
+      if (d <= tolerance)
+        thread_results[tid].push_back(all_sequences[i]);
+    }
   }
+
+  std::vector<std::shared_ptr<BioSequence>> results;
+  for (auto& tr : thread_results)
+    for (auto& r : tr)
+      results.push_back(std::move(r));
+
+  stats.dist_calc_count = all_sequences.size();
+  stats.leaf_verify_count = all_sequences.size();
   return {results, stats};
 }
 

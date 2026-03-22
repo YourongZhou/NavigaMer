@@ -3,6 +3,7 @@
 #include <unordered_set>
 #include <random>
 #include <algorithm>
+#include <omp.h>
 
 namespace navigamer {
 
@@ -139,7 +140,9 @@ void BioGeometryIndexBuilder::build_skeleton(
 void BioGeometryIndexBuilder::wire_overlap(
     std::vector<std::shared_ptr<WorldNode>>& parents,
     const std::vector<std::shared_ptr<WorldNode>>& children) {
-  for (auto& parent : parents) {
+  #pragma omp parallel for schedule(dynamic)
+  for (size_t pi = 0; pi < parents.size(); ++pi) {
+    auto& parent = parents[pi];
     if (!parent->center_ptr) continue;
     std::string p_seq = parent->center_ptr->seq;
     for (const auto& child : children) {
@@ -178,11 +181,19 @@ void BioGeometryIndexBuilder::inject_beacons() {
     size_t k = std::min(static_cast<size_t>(K), layers[3].size());
     auto idx = farthest_point_sampling(layers[3], k);
     for (size_t i : idx) layer_beacons[3].push_back(layers[3][i]);
-    for (auto& mw : layers[2]) {
-      for (const auto& b : layer_beacons[3]) {
-        int d = compute_distance(mw->get_center_sequence(), b->get_center_sequence());
-        mw->beacon_dists.push_back(d);
-      }
+
+    std::vector<std::string> beacon_seqs;
+    for (const auto& b : layer_beacons[3]) beacon_seqs.push_back(b->get_center_sequence());
+
+    #pragma omp parallel for schedule(dynamic)
+    for (size_t mi = 0; mi < layers[2].size(); ++mi) {
+      auto& mw = layers[2][mi];
+      std::string center = mw->get_center_sequence();
+      std::vector<int> dists;
+      dists.reserve(beacon_seqs.size());
+      for (const auto& bseq : beacon_seqs)
+        dists.push_back(compute_distance(center, bseq));
+      mw->beacon_dists = std::move(dists);
     }
     std::cerr << "    LW beacons: " << layer_beacons[3].size()
               << ", MW nodes have beacon_dists (len=" << layer_beacons[3].size() << ")\n";
@@ -191,11 +202,19 @@ void BioGeometryIndexBuilder::inject_beacons() {
     size_t k = std::min(static_cast<size_t>(K), layers[2].size());
     auto idx = farthest_point_sampling(layers[2], k);
     for (size_t i : idx) layer_beacons[2].push_back(layers[2][i]);
-    for (auto& sw : layers[1]) {
-      for (const auto& b : layer_beacons[2]) {
-        int d = compute_distance(sw->get_center_sequence(), b->get_center_sequence());
-        sw->beacon_dists.push_back(d);
-      }
+
+    std::vector<std::string> beacon_seqs;
+    for (const auto& b : layer_beacons[2]) beacon_seqs.push_back(b->get_center_sequence());
+
+    #pragma omp parallel for schedule(dynamic)
+    for (size_t si = 0; si < layers[1].size(); ++si) {
+      auto& sw = layers[1][si];
+      std::string center = sw->get_center_sequence();
+      std::vector<int> dists;
+      dists.reserve(beacon_seqs.size());
+      for (const auto& bseq : beacon_seqs)
+        dists.push_back(compute_distance(center, bseq));
+      sw->beacon_dists = std::move(dists);
     }
     std::cerr << "    MW beacons: " << layer_beacons[2].size()
               << ", SW nodes have beacon_dists (len=" << layer_beacons[2].size() << ")\n";
@@ -204,18 +223,19 @@ void BioGeometryIndexBuilder::inject_beacons() {
 
 void BioGeometryIndexBuilder::attach_leaves(
     const std::vector<std::shared_ptr<BioSequence>>& unique_seqs) {
-  size_t total_links = 0;
-  for (auto& sw : layers[1]) {
+  #pragma omp parallel for schedule(dynamic)
+  for (size_t si = 0; si < layers[1].size(); ++si) {
+    auto& sw = layers[1][si];
     std::string center = sw->get_center_sequence();
     for (const auto& seq : unique_seqs) {
       int d = compute_distance(center, seq->seq);
-      if (d <= sw->radius) {
+      if (d <= sw->radius)
         sw->child_leaves.push_back(seq);
-        total_links++;
-      }
     }
     sw->data_count = static_cast<int>(sw->child_leaves.size());
   }
+  size_t total_links = 0;
+  for (const auto& sw : layers[1]) total_links += sw->child_leaves.size();
   double avg = layers[1].empty() ? 0 : static_cast<double>(total_links) / layers[1].size();
   std::cerr << "    Attached " << total_links << " leaf-SW links (avg " << avg << " per SW)\n";
 }

@@ -18,8 +18,7 @@ void BioSequence::set_bwt_interval(int64_t bwt_start, int64_t bwt_end) {
 static std::string make_node_id(int layer_level) {
   static const char* names[] = {"", "SW", "MW", "LW"};
   const char* layer_name = (layer_level >= 1 && layer_level <= 3) ? names[layer_level] : "UNK";
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
+  thread_local std::mt19937 gen(std::random_device{}());
   std::uniform_int_distribution<> dis(0, 15);
   const char hex[] = "0123456789abcdef";
   std::string suffix(8, '0');

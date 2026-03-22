@@ -19,6 +19,7 @@
 #include <random>
 #include <chrono>
 #include <cstring>
+#include <omp.h>
 
 namespace {
 
@@ -168,20 +169,23 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
   builder.build(reads);
   BioGeometrySearchEngine engine(builder);
 
-  std::vector<std::vector<std::string>> all_rows;
   std::vector<std::string> columns = {
       "query_id", "hit_id", "distance", "ref_positions", "read_id", "read_len",
       "ref_id", "strand", "query_start", "reference_start", "aligned_length",
       "score", "edit_distance", "query_fragment", "reference_fragment",
       "bwt_start", "bwt_end"};
 
-  for (const auto& read : reads) {
+  std::vector<std::vector<std::vector<std::string>>> per_read_rows(reads.size());
+
+  #pragma omp parallel for schedule(dynamic)
+  for (size_t ri = 0; ri < reads.size(); ++ri) {
+    const auto& read = reads[ri];
     auto [res, st] = engine.search_adaptive(*read, tolerance);
     for (const auto& hit : res) {
       int ed = compute_distance(read->seq, hit->seq);
       auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, *hit, ed);
       for (const auto& r : rows) {
-        all_rows.push_back({
+        per_read_rows[ri].push_back({
             r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
             r.read_id, r.read_len, r.ref_id, r.strand, r.query_start, r.reference_start,
             r.aligned_length, r.score, r.edit_distance, r.query_fragment, r.reference_fragment,
@@ -189,6 +193,12 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
       }
     }
   }
+
+  std::vector<std::vector<std::string>> all_rows;
+  for (auto& rows : per_read_rows)
+    for (auto& row : rows)
+      all_rows.push_back(std::move(row));
+
   if (!out_tsv.empty())
     write_tsv(out_tsv, columns, all_rows);
   std::cerr << "Total rows: " << all_rows.size() << "\n";
@@ -232,12 +242,15 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "score", "edit_distance", "query_fragment", "reference_fragment",
       "bwt_start", "bwt_end",
       "dist_calcs", "leaf_verify_count", "candidate_count_for_prune", "beacon_prune_count"};
-  std::vector<std::vector<std::string>> all_rows;
 
-  for (const auto& read : queries) {
+  std::vector<std::vector<std::vector<std::string>>> per_query_rows(queries.size());
+
+  #pragma omp parallel for schedule(dynamic)
+  for (size_t qi = 0; qi < queries.size(); ++qi) {
+    const auto& read = queries[qi];
     auto [res, st] = engine.search_adaptive(*read, tolerance);
     if (res.empty()) {
-      all_rows.push_back({
+      per_query_rows[qi].push_back({
           read->id, "", "", "", read->id, std::to_string(static_cast<int>(read->seq.size())),
           "", "+", "0", "0", "0", "0", "", read->seq, "",
           "-1", "-1",
@@ -248,7 +261,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
         int ed = compute_distance(read->seq, hit->seq);
         auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, *hit, ed);
         for (const auto& r : rows) {
-          all_rows.push_back({
+          per_query_rows[qi].push_back({
               r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
               r.read_id, r.read_len, r.ref_id, r.strand, r.query_start, r.reference_start,
               r.aligned_length, r.score, r.edit_distance, r.query_fragment, r.reference_fragment,
@@ -259,6 +272,12 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       }
     }
   }
+
+  std::vector<std::vector<std::string>> all_rows;
+  for (auto& rows : per_query_rows)
+    for (auto& row : rows)
+      all_rows.push_back(std::move(row));
+
   if (!out_tsv.empty())
     write_tsv(out_tsv, columns, all_rows);
   std::cerr << "Benchmark rows: " << all_rows.size() << "\n";
