@@ -1,1 +1,26 @@
 data/
+
+# Third-party baselines & notebooks not part of core NavigaMer (keep locally)
+methods/
+
+# Ad-hoc outputs
+results/
+
+# Root-level experiment / demo artifacts
+benchmark_result.png
+bio_index_demo.py
+distance_heatmap.png
+layer_pyramid.png
+main_test.py
+navigamer_out.tsv
+v3_benchmark.ipynb
+
+# Python
+__pycache__/
+*.py[cod]
+
+# navigamer_cpp build products
+navigamer_cpp/navigamer
+navigamer_cpp/test_recall
+navigamer_cpp/test_distance_bound
+navigamer_cpp/build/
