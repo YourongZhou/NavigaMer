@@ -32,7 +32,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 
 Binary: `navigamer_cpp/navigamer` (or `navigamer_cpp/build/navigamer` with CMake).
 
-**Python** (notebooks / reproduction):
+**Python** (optional; e.g. `navigamer_cpp/params_test.ipynb`; from **repository root**):
 
 ```bash
 pip install -r reproducibility/requirements.txt
@@ -57,19 +57,10 @@ make test_recall test_distance_bound
 ./test_distance_bound
 ```
 
-## Reproducing paper results (Figure 2)
-
-```bash
-cd reproducibility
-bash run_figure_2_reproduction.sh
-```
-
-(Provided in the submission artifact when available.)
-
 ## Repository layout
 
 | Path | Role |
 | ---- | ---- |
 | `navigamer_cpp/` | C++ reference implementation and `navigamer` CLI |
-| `reproducibility/` | Scripts and dependencies for paper figures |
+| `reproducibility/` | Optional Python dependencies (`requirements.txt`) for notebooks |
 | `methods/` | Comparative baselines and experiment notebooks (historical) |
