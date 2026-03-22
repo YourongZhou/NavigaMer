@@ -6,38 +6,18 @@
 namespace navigamer {
 
 BioGeometrySearchEngine::BioGeometrySearchEngine(const BioGeometryIndexBuilder& index)
-    : index_(index) {
-  for (int i = 0; i < 4; ++i)
-    layer_beacons_[i] = index_.layer_beacons[i];
-}
+    : index_(index) {}
 
-BioSequence BioGeometrySearchEngine::center_seq(const std::shared_ptr<WorldNode>& node) const {
-  return BioSequence("_center", node->get_center_sequence());
-}
-
-std::vector<int> BioGeometrySearchEngine::compute_query_beacon_dists(
-    const BioSequence& query_seq, int layer_id, SearchStats& stats) const {
-  const auto& beacons = layer_beacons_[layer_id];
-  if (beacons.empty()) return {};
-  std::vector<int> V_Q;
-  for (const auto& b : beacons) {
-    int d = compute_distance(query_seq.seq, b->get_center_sequence());
-    stats.dist_calc_count++;
-    V_Q.push_back(d);
-  }
-  return V_Q;
-}
-
-bool BioGeometrySearchEngine::beacon_prunable(const std::shared_ptr<WorldNode>& child,
-                                             const std::vector<int>& V_Q,
-                                             int tolerance) const {
-  if (child->beacon_dists.size() != V_Q.size()) return false;
-  int lb = 0;
+bool BioGeometrySearchEngine::mbb_prunable_row(const std::vector<MBB>& row,
+                                               const std::vector<int>& V_Q,
+                                               int tolerance) const {
+  if (row.size() != V_Q.size()) return false;
   for (size_t i = 0; i < V_Q.size(); ++i) {
-    int v = std::abs(V_Q[i] - child->beacon_dists[i]);
-    if (v > lb) lb = v;
+    int q_b = V_Q[i];
+    if (q_b < row[i].min_dist - tolerance || q_b > row[i].max_dist + tolerance)
+      return true;
   }
-  return lb > child->radius + tolerance;
+  return false;
 }
 
 void BioGeometrySearchEngine::process_node_adaptive(
@@ -61,25 +41,42 @@ void BioGeometrySearchEngine::process_node_adaptive(
   if (world_children.empty()) return;
 
   int child_layer = current_layer - 1;
-  const auto& beacons = layer_beacons_[current_layer];
   std::vector<std::shared_ptr<WorldNode>> surviving;
 
-  if (!beacons.empty()) {
-    std::vector<int> V_Q = compute_query_beacon_dists(query_seq, current_layer, stats);
-    if (!V_Q.empty()) {
-      for (const auto& c : world_children) {
+  if (!node->beacons.empty()) {
+    std::vector<int> V_Q;
+    V_Q.reserve(node->beacons.size());
+    for (const auto& b : node->beacons) {
+      V_Q.push_back(compute_distance(query_seq.seq, b->seq));
+      stats.dist_calc_count++;
+    }
+
+    bool mbb_ok =
+        V_Q.size() == node->beacons.size() &&
+        node->child_beacon_mbbs.size() == world_children.size();
+    if (mbb_ok) {
+      for (size_t ci = 0; ci < world_children.size(); ++ci) {
+        if (node->child_beacon_mbbs[ci].size() != V_Q.size()) {
+          mbb_ok = false;
+          break;
+        }
+      }
+    }
+
+    if (mbb_ok) {
+      for (size_t ci = 0; ci < world_children.size(); ++ci) {
         stats.candidate_count_for_prune++;
-        if (beacon_prunable(c, V_Q, tolerance)) {
+        if (mbb_prunable_row(node->child_beacon_mbbs[ci], V_Q, tolerance)) {
           stats.beacon_prune_count++;
           continue;
         }
-        surviving.push_back(c);
+        surviving.push_back(world_children[ci]);
       }
     } else {
-      surviving = world_children;
+      surviving = std::move(world_children);
     }
   } else {
-    surviving = world_children;
+    surviving = std::move(world_children);
   }
 
   search_layer_adaptive(surviving, child_layer, query_seq, tolerance,
@@ -167,12 +164,19 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
       return {results, stats};
     }
 
-    std::vector<int> V_Q = compute_query_beacon_dists(query_seq, layer_id, stats);
+    std::vector<int> V_Q;
+    for (const auto& b : best_node->beacons) {
+      V_Q.push_back(compute_distance(query_seq.seq, b->seq));
+      stats.dist_calc_count++;
+    }
+
     current.clear();
-    for (const auto& child : best_node->child_nodes) {
-      if (!V_Q.empty() && child->beacon_dists.size() == V_Q.size()) {
+    for (size_t ci = 0; ci < best_node->child_nodes.size(); ++ci) {
+      const auto& child = best_node->child_nodes[ci];
+      if (!V_Q.empty() && ci < best_node->child_beacon_mbbs.size() &&
+          best_node->child_beacon_mbbs[ci].size() == V_Q.size()) {
         stats.candidate_count_for_prune++;
-        if (beacon_prunable(child, V_Q, tolerance)) {
+        if (mbb_prunable_row(best_node->child_beacon_mbbs[ci], V_Q, tolerance)) {
           stats.beacon_prune_count++;
           continue;
         }
@@ -201,7 +205,7 @@ void BioGeometrySearchEngine::traverse_exhaustive(
 
   for (const auto& child : node->child_nodes)
     traverse_exhaustive(child, current_layer - 1, query_seq, tolerance,
-                       unique_results, visited_nodes, stats);
+                        unique_results, visited_nodes, stats);
 
   if (current_layer == 1) {
     for (const auto& child : node->child_leaves) {

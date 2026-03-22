@@ -1,21 +1,51 @@
 #include "index_builder.hpp"
 #include <iostream>
 #include <unordered_set>
-#include <random>
 #include <algorithm>
+#include <climits>
 #include <omp.h>
 
 namespace navigamer {
+
+namespace {
+
+std::shared_ptr<WorldNode> nearest_in_cover(
+    const std::vector<std::shared_ptr<WorldNode>>& W_cover,
+    const std::shared_ptr<BioSequence>& u) {
+  std::shared_ptr<WorldNode> best;
+  int best_d = INT_MAX;
+  for (const auto& w : W_cover) {
+    if (!w->center_ptr) continue;
+    int d = compute_distance(u->seq, w->center_ptr->seq);
+    if (d < best_d) {
+      best_d = d;
+      best = w;
+    }
+  }
+  return best;
+}
+
+void bump_created_stats(BioGeometryIndexBuilder::Statistics& st, int extended_tier) {
+  if (extended_tier == 0) st.created_nodes[3]++;
+  else if (extended_tier == 2) st.created_nodes[2]++;
+  else if (extended_tier == 4) st.created_nodes[1]++;
+  else st.created_nodes[0]++;
+}
+
+}  // namespace
 
 BioGeometryIndexBuilder::BioGeometryIndexBuilder() {
   radius_config[0] = 0;
   radius_config[1] = R_SW;
   radius_config[2] = R_MW;
   radius_config[3] = R_LW;
-  for (int i = 0; i < 4; ++i) {
-    layers[i].clear();
-    layer_beacons[i].clear();
-  }
+  for (int i = 0; i < 4; ++i) layers[i].clear();
+  int r_lw = radius_config[3];
+  int r_mw = radius_config[2];
+  int r_sw = radius_config[1];
+  int r_int1 = std::max(1, (r_lw + r_mw) / 2);
+  int r_int2 = std::max(1, (r_mw + r_sw) / 2);
+  extended_radii_ = {r_lw, r_int1, r_mw, r_int2, r_sw};
 }
 
 BioGeometryIndexBuilder::BioGeometryIndexBuilder(int r_sw, int r_mw, int r_lw) {
@@ -23,10 +53,10 @@ BioGeometryIndexBuilder::BioGeometryIndexBuilder(int r_sw, int r_mw, int r_lw) {
   radius_config[1] = r_sw;
   radius_config[2] = r_mw;
   radius_config[3] = r_lw;
-  for (int i = 0; i < 4; ++i) {
-    layers[i].clear();
-    layer_beacons[i].clear();
-  }
+  for (int i = 0; i < 4; ++i) layers[i].clear();
+  int r_int1 = std::max(1, (r_lw + r_mw) / 2);
+  int r_int2 = std::max(1, (r_mw + r_sw) / 2);
+  extended_radii_ = {r_lw, r_int1, r_mw, r_int2, r_sw};
 }
 
 std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::find_neighbors(
@@ -68,157 +98,112 @@ std::vector<std::shared_ptr<BioSequence>> BioGeometryIndexBuilder::deduplicate(
   return out;
 }
 
-std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::build_layer_sparse(
-    const std::vector<std::shared_ptr<BioSequence>>& items,
-    int radius, int layer_level, const std::string& label) {
-  std::vector<std::shared_ptr<WorldNode>> nodes;
-  std::vector<size_t> indices(items.size());
-  for (size_t i = 0; i < items.size(); ++i) indices[i] = i;
-  shuffle_indices(indices, static_cast<unsigned>(std::random_device{}()));
-
-  for (size_t idx = 0; idx < indices.size(); ++idx) {
-    size_t i = indices[idx];
-    const auto& item = items[i];
-    bool covered = false;
-    for (const auto& node : nodes) {
-      if (!node->center_ptr) continue;
-      int d = compute_distance(item->seq, node->center_ptr->seq);
-      if (d <= radius) { covered = true; break; }
-    }
-    if (!covered) {
-      auto node = std::make_shared<WorldNode>(item, radius, layer_level);
-      nodes.push_back(node);
-      stats_.created_nodes[layer_level]++;
-    }
-    if ((idx + 1) % 500 == 0 && items.size() > 500)
-      std::cerr << "    " << label << ": scanned " << (idx+1) << "/" << items.size()
-                << ", nodes=" << nodes.size() << "\r";
-  }
-  if (items.size() > 500) std::cerr << "\n";
-  return nodes;
-}
-
-std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::build_layer_sparse_from_nodes(
-    const std::vector<std::shared_ptr<WorldNode>>& items,
-    int radius, int layer_level, const std::string& label) {
-  std::vector<std::shared_ptr<WorldNode>> nodes;
-  std::vector<size_t> indices(items.size());
-  for (size_t i = 0; i < items.size(); ++i) indices[i] = i;
-  shuffle_indices(indices, static_cast<unsigned>(std::random_device{}()));
-
-  for (size_t idx = 0; idx < indices.size(); ++idx) {
-    size_t i = indices[idx];
-    const auto& item = items[i];
-    std::string center = item->get_center_sequence();
-    int child_radius = item->radius;
-    bool covered = false;
-    for (const auto& node : nodes) {
-      if (!node->center_ptr) continue;
-      int d = compute_distance(center, node->center_ptr->seq);
-      if (d + child_radius <= radius) { covered = true; break; }
-    }
-    if (!covered) {
-      auto node = std::make_shared<WorldNode>(item->center_ptr, radius, layer_level);
-      nodes.push_back(node);
-      stats_.created_nodes[layer_level]++;
-    }
-    if ((idx + 1) % 500 == 0 && items.size() > 500)
-      std::cerr << "    " << label << ": scanned " << (idx+1) << "/" << items.size()
-                << ", nodes=" << nodes.size() << "\r";
-  }
-  if (items.size() > 500) std::cerr << "\n";
-  return nodes;
-}
-
-void BioGeometryIndexBuilder::build_skeleton(
+void BioGeometryIndexBuilder::phase1_build_extended_sketch(
     const std::vector<std::shared_ptr<BioSequence>>& unique_seqs) {
-  layers[1] = build_layer_sparse(unique_seqs, radius_config[1], 1, "SW");
-  layers[2] = build_layer_sparse_from_nodes(layers[1], radius_config[2], 2, "MW");
-  layers[3] = build_layer_sparse_from_nodes(layers[2], radius_config[3], 3, "LW");
-}
+  extended_layers_.assign(5, std::vector<std::shared_ptr<WorldNode>>());
 
-void BioGeometryIndexBuilder::wire_overlap(
-    std::vector<std::shared_ptr<WorldNode>>& parents,
-    const std::vector<std::shared_ptr<WorldNode>>& children) {
-  #pragma omp parallel for schedule(dynamic)
-  for (size_t pi = 0; pi < parents.size(); ++pi) {
-    auto& parent = parents[pi];
-    if (!parent->center_ptr) continue;
-    std::string p_seq = parent->center_ptr->seq;
-    for (const auto& child : children) {
-      if (!child->center_ptr) continue;
-      int d = compute_distance(p_seq, child->center_ptr->seq);
-      if (d <= parent->radius + child->radius)
-        parent->child_nodes.push_back(child);
+  for (const auto& u : unique_seqs) {
+    std::shared_ptr<WorldNode> parent;
+    for (int l = 0; l < 5; ++l) {
+      std::vector<std::shared_ptr<WorldNode>> W_cover;
+      if (l == 0) {
+        for (auto& w : extended_layers_[0]) {
+          if (!w->center_ptr) continue;
+          if (compute_distance(u->seq, w->center_ptr->seq) <= extended_radii_[static_cast<size_t>(l)])
+            W_cover.push_back(w);
+        }
+      } else {
+        for (auto& w : parent->child_nodes) {
+          if (!w->center_ptr) continue;
+          if (compute_distance(u->seq, w->center_ptr->seq) <= extended_radii_[static_cast<size_t>(l)])
+            W_cover.push_back(w);
+        }
+      }
+
+      if (W_cover.empty()) {
+        auto w_new = std::make_shared<WorldNode>(u, extended_radii_[static_cast<size_t>(l)], l);
+        extended_layers_[static_cast<size_t>(l)].push_back(w_new);
+        if (parent) parent->child_nodes.push_back(w_new);
+        W_cover.push_back(w_new);
+        bump_created_stats(stats_, l);
+      }
+      parent = nearest_in_cover(W_cover, u);
+      if (!parent) break;
     }
   }
 }
 
-void BioGeometryIndexBuilder::dense_wiring() {
-  auto& sw = layers[1];
-  auto& mw = layers[2];
-  auto& lw = layers[3];
-
-  std::cerr << "    Wiring " << sw.size() << " SW -> " << mw.size() << " MW...\n";
-  for (auto& n : mw) n->child_nodes.clear();
-  wire_overlap(mw, sw);
-
-  std::cerr << "    Wiring " << mw.size() << " MW -> " << lw.size() << " LW...\n";
-  for (auto& n : lw) n->child_nodes.clear();
-  wire_overlap(lw, mw);
-
-  std::vector<std::shared_ptr<WorldNode>> mw2, lw2;
-  for (const auto& n : mw) if (!n->child_nodes.empty()) mw2.push_back(n);
-  for (const auto& n : lw) if (!n->child_nodes.empty()) lw2.push_back(n);
-  layers[2] = std::move(mw2);
-  layers[3] = std::move(lw2);
-  std::cerr << "    After cleanup: MW=" << layers[2].size() << ", LW=" << layers[3].size() << "\n";
+void BioGeometryIndexBuilder::phase2_inter_tier_rebinding() {
+  for (int l = 0; l < 4; ++l) {
+    int r_p = extended_radii_[static_cast<size_t>(l)];
+    int r_c = extended_radii_[static_cast<size_t>(l + 1)];
+    for (auto& p : extended_layers_[static_cast<size_t>(l)]) {
+      if (!p->center_ptr) continue;
+      p->child_nodes.clear();
+      std::string p_seq = p->center_ptr->seq;
+      for (auto& c : extended_layers_[static_cast<size_t>(l + 1)]) {
+        if (!c->center_ptr) continue;
+        int d = compute_distance(p_seq, c->center_ptr->seq);
+        if (d <= r_p + r_c) p->child_nodes.push_back(c);
+      }
+    }
+  }
 }
 
-void BioGeometryIndexBuilder::inject_beacons() {
-  const int K = BEACON_COUNT;
-  if (!layers[3].empty()) {
-    size_t k = std::min(static_cast<size_t>(K), layers[3].size());
-    auto idx = farthest_point_sampling(layers[3], k);
-    for (size_t i : idx) layer_beacons[3].push_back(layers[3][i]);
+void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb() {
+  layers[3] = extended_layers_[0];
+  layers[2] = extended_layers_[2];
+  layers[1] = extended_layers_[4];
 
-    std::vector<std::string> beacon_seqs;
-    for (const auto& b : layer_beacons[3]) beacon_seqs.push_back(b->get_center_sequence());
+  auto collapse_primary = [&](int primary_ext_idx, int primary_layer_id) {
+    for (auto& w : extended_layers_[static_cast<size_t>(primary_ext_idx)]) {
+      w->layer = primary_layer_id;
+      w->beacons.clear();
+      w->child_beacon_mbbs.clear();
 
-    #pragma omp parallel for schedule(dynamic)
-    for (size_t mi = 0; mi < layers[2].size(); ++mi) {
-      auto& mw = layers[2][mi];
-      std::string center = mw->get_center_sequence();
-      std::vector<int> dists;
-      dists.reserve(beacon_seqs.size());
-      for (const auto& bseq : beacon_seqs)
-        dists.push_back(compute_distance(center, bseq));
-      mw->beacon_dists = std::move(dists);
+      std::vector<std::shared_ptr<WorldNode>> int_nodes = w->child_nodes;
+
+      for (auto& v : int_nodes) {
+        if (v && v->center_ptr) w->beacons.push_back(v->center_ptr);
+      }
+
+      std::vector<std::shared_ptr<WorldNode>> direct_children;
+      for (auto& v : int_nodes) {
+        if (!v) continue;
+        for (auto& c : v->child_nodes) {
+          if (std::find(direct_children.begin(), direct_children.end(), c) == direct_children.end())
+            direct_children.push_back(c);
+        }
+      }
+      w->child_nodes = std::move(direct_children);
+
+      w->child_beacon_mbbs.assign(w->child_nodes.size(), {});
+      for (size_t j = 0; j < w->child_nodes.size(); ++j) {
+        auto& child = w->child_nodes[j];
+        if (!child->center_ptr) continue;
+        w->child_beacon_mbbs[j].reserve(w->beacons.size());
+        for (auto& b : w->beacons) {
+          if (!b) continue;
+          int d_cb = compute_distance(child->center_ptr->seq, b->seq);
+          MBB mbb;
+          mbb.min_dist = std::max(0, d_cb - child->radius);
+          mbb.max_dist = d_cb + child->radius;
+          w->child_beacon_mbbs[j].push_back(mbb);
+        }
+      }
     }
-    std::cerr << "    LW beacons: " << layer_beacons[3].size()
-              << ", MW nodes have beacon_dists (len=" << layer_beacons[3].size() << ")\n";
-  }
-  if (!layers[2].empty()) {
-    size_t k = std::min(static_cast<size_t>(K), layers[2].size());
-    auto idx = farthest_point_sampling(layers[2], k);
-    for (size_t i : idx) layer_beacons[2].push_back(layers[2][i]);
+  };
 
-    std::vector<std::string> beacon_seqs;
-    for (const auto& b : layer_beacons[2]) beacon_seqs.push_back(b->get_center_sequence());
+  collapse_primary(0, 3);
+  collapse_primary(2, 2);
 
-    #pragma omp parallel for schedule(dynamic)
-    for (size_t si = 0; si < layers[1].size(); ++si) {
-      auto& sw = layers[1][si];
-      std::string center = sw->get_center_sequence();
-      std::vector<int> dists;
-      dists.reserve(beacon_seqs.size());
-      for (const auto& bseq : beacon_seqs)
-        dists.push_back(compute_distance(center, bseq));
-      sw->beacon_dists = std::move(dists);
-    }
-    std::cerr << "    MW beacons: " << layer_beacons[2].size()
-              << ", SW nodes have beacon_dists (len=" << layer_beacons[2].size() << ")\n";
+  for (auto& w : layers[1]) {
+    w->layer = 1;
+    w->beacons.clear();
+    w->child_beacon_mbbs.clear();
   }
+
+  extended_layers_.clear();
 }
 
 void BioGeometryIndexBuilder::attach_leaves(
@@ -229,8 +214,7 @@ void BioGeometryIndexBuilder::attach_leaves(
     std::string center = sw->get_center_sequence();
     for (const auto& seq : unique_seqs) {
       int d = compute_distance(center, seq->seq);
-      if (d <= sw->radius)
-        sw->child_leaves.push_back(seq);
+      if (d <= sw->radius) sw->child_leaves.push_back(seq);
     }
     sw->data_count = static_cast<int>(sw->child_leaves.size());
   }
@@ -259,27 +243,32 @@ void BioGeometryIndexBuilder::print_summary() const {
 
 void BioGeometryIndexBuilder::build(
     const std::vector<std::shared_ptr<BioSequence>>& raw_sequences) {
-  std::cerr << "[Build v7 Multilateration] Starting for " << raw_sequences.size() << " sequences...\n";
+  std::cerr << "[Build v8 Top-down + Intermediate Collapse] Starting for " << raw_sequences.size()
+            << " sequences...\n";
   std::cerr << "  Phase 0: Deduplicating sequences...\n";
   auto unique_seqs = deduplicate(raw_sequences);
   std::cerr << "    " << raw_sequences.size() << " -> " << unique_seqs.size() << " unique ("
             << stats_.deduplicated << " merged)\n";
 
-  std::cerr << "  Phase 1: Skeleton generation (sparse selection)...\n";
-  build_skeleton(unique_seqs);
-  std::cerr << "    SW=" << layers[1].size() << ", MW=" << layers[2].size()
-            << ", LW=" << layers[3].size() << "\n";
+  std::cerr << "  Phase 1: Extended hierarchy sketch (top-down)...\n";
+  std::cerr << "    Radii LW,INT1,MW,INT2,SW = " << extended_radii_[0] << "," << extended_radii_[1] << ","
+            << extended_radii_[2] << "," << extended_radii_[3] << "," << extended_radii_[4] << "\n";
+  phase1_build_extended_sketch(unique_seqs);
+  std::cerr << "    Ext layers: "
+            << extended_layers_[0].size() << " LW, " << extended_layers_[1].size() << " I1, "
+            << extended_layers_[2].size() << " MW, " << extended_layers_[3].size() << " I2, "
+            << extended_layers_[4].size() << " SW\n";
 
-  std::cerr << "  Phase 2: Dense wiring (exhaustive overlap)...\n";
-  dense_wiring();
+  std::cerr << "  Phase 2: Inter-tier rebinding (DAG)...\n";
+  phase2_inter_tier_rebinding();
 
-  std::cerr << "  Phase 3: Beacon injection (FPS)...\n";
-  inject_beacons();
+  std::cerr << "  Phase 3: Collapse intermediate tiers + MBB...\n";
+  phase3_collapse_and_compute_mbb();
 
   std::cerr << "  Phase 4: Leaf attachment...\n";
   attach_leaves(unique_seqs);
 
-  std::cerr << "[Build v7] Completed.\n";
+  std::cerr << "[Build v8] Completed.\n";
   print_summary();
 }
 

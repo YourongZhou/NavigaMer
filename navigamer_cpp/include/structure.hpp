@@ -45,21 +45,33 @@ struct BioSequence {
   void set_bwt_interval(int64_t bwt_start, int64_t bwt_end);
 };
 
-// DAG 索引节点 (NavigaMer v7 - Multilateration-Enhanced)
-// 子节点可能是 WorldNode* 或 BioSequence*（叶子）
+// 度量边界盒：子节点球到某信标 pivot 的距离可能范围（用于剪枝）
+struct MBB {
+  int min_dist = 0;
+  int max_dist = 0;
+};
+
+// DAG 索引节点（Top-down 拓展层 + 中间层坍缩后的主层）
+// 子节点为 WorldNode*；SW 层带 BioSequence 叶子
 struct WorldNode {
   std::string node_id;
   std::shared_ptr<BioSequence> center_ptr;  // 中心序列（唯一 BioSequence）
   int radius = 0;
-  int layer = 0;  // 1=SW, 2=MW, 3=LW
+  // 构建拓展层时 0..4；坍缩完成后 1=SW, 2=MW, 3=LW
+  int layer = 0;
 
   std::vector<std::shared_ptr<WorldNode>> child_nodes;
   std::vector<std::shared_ptr<BioSequence>> child_leaves;
 
-  std::vector<int> beacon_dists;  // 到父层 K 个 Beacons 的距离
+  // 中间层坍缩后：父主层节点 w 的信标（中间层中心序列）及对每个子节点的预计算 MBB
+  // child_beacon_mbbs[j] 与 child_nodes[j] 对齐，长度 = beacons.size()
+  std::vector<std::shared_ptr<BioSequence>> beacons;
+  std::vector<std::vector<MBB>> child_beacon_mbbs;
+
   int data_count = 0;
 
-  WorldNode(std::shared_ptr<BioSequence> center, int r, int layer_level);
+  // extended_tier: 0=LW,1=INT1,2=MW,3=INT2,4=SW（仅构建拓展骨架时使用）
+  WorldNode(std::shared_ptr<BioSequence> center, int r, int extended_tier);
 
   std::string get_center_sequence() const;
 };
