@@ -1,4 +1,8 @@
-data/
+# Local data; keep the small README demo reference in Git.
+data/*
+!data/human/
+data/human/*
+!data/human/chr1_subset
 
 # Third-party baselines & notebooks not part of core NavigaMer (keep locally)
 methods/
@@ -24,6 +28,7 @@ navigamer_cpp/navigamer
 navigamer_cpp/test_recall
 navigamer_cpp/test_distance_bound
 navigamer_cpp/src/*.d
+navigamer_cpp/src/test_*.o
 navigamer_cpp/build/
 
 # VSCode settings

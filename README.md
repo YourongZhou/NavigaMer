@@ -45,7 +45,13 @@ pip install -r reproducibility/requirements.txt
 cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
 ./navigamer demo --size 200
-./navigamer boundary --ref ../chr1_subset --length 250 --stride-mode sparse --out boundary.tsv
+```
+
+Optional boundary sweep using the bundled small reference:
+
+```bash
+cd navigamer_cpp
+./navigamer boundary --ref ../data/human/chr1_subset --length 250 --stride-mode sparse --queries-per-cell 1 --error-rates 0 --tolerance-rates 0 --out /tmp/navigamer_boundary.tsv
 ```
 
 Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFERENCE.md). C++ layout and tests: [`navigamer_cpp/README.md`](navigamer_cpp/README.md).
@@ -66,5 +72,6 @@ make test_recall test_distance_bound
 | Path | Role |
 | ---- | ---- |
 | `navigamer_cpp/` | C++ v8 reference implementation and `navigamer` CLI |
+| `data/human/chr1_subset` | Small reference sequence used by README examples |
 | `methods/` | Comparative baselines, experiment notebooks, and plotting/evaluation workflows |
 | `reproducibility/` | Optional Python dependencies (`requirements.txt`) for notebooks and baseline workflows |
