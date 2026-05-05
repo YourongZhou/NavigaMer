@@ -1,15 +1,14 @@
 /**
  * test_distance_bound.cpp
  *
- * 验证搜索方法返回的 candidate 到 query 的编辑距离
- * 是否全部 <= tolerance（即 query 的搜索半径）。
+ * Verify that search methods only return candidates whose edit distance to
+ * the query is within the requested tolerance.
  *
- * 测试对象：
- *   - adaptive:    逐叶验证距离，应保证 d <= tolerance
- *   - exhaustive:  逐叶验证距离，应保证 d <= tolerance
- *   - brute_force: 线性扫描，应保证 d <= tolerance
- *   - greedy:      返回最近 SW 节点的全部叶子，不做逐叶验证，
- *                  因此可能包含 d > tolerance 的结果（已知行为，单独统计）
+ * Covered modes:
+ *   - adaptive: exact leaf verification after hierarchical pruning
+ *   - exhaustive: exact leaf verification on all admissible paths
+ *   - brute_force: linear scan baseline
+ *   - greedy: single-path descent followed by the same leaf verification
  */
 
 #include "structure.hpp"
@@ -151,10 +150,10 @@ TestResult run_test(const TestConfig& cfg) {
     check_results(gr_res, q, cfg.tolerance, result.violations_greedy, "greedy");
   }
 
-  // greedy 不做逐叶距离验证，violations 是已知行为，不计入 pass/fail
   result.passed = (result.violations_adaptive == 0 &&
                    result.violations_exhaustive == 0 &&
-                   result.violations_brute_force == 0);
+                   result.violations_brute_force == 0 &&
+                   result.violations_greedy == 0);
   return result;
 }
 
@@ -162,10 +161,10 @@ TestResult run_test(const TestConfig& cfg) {
 
 int main() {
   std::cerr << "=== NavigaMer Distance Bound Test ===\n";
-  std::cerr << "验证: 所有搜索结果的 candidate 到 query 的距离 <= tolerance\n\n";
+  std::cerr << "Check: every returned candidate has distance <= tolerance\n\n";
 
   std::vector<TestConfig> configs = {
-    // tolerance=0 (精确匹配)
+    // Exact matching.
     {5, 15, 30,  0,  100, 20,  50, 0, 42},
     // tolerance=1
     {5, 15, 30,  1,  100, 20,  50, 1, 123},
@@ -173,19 +172,19 @@ int main() {
     {5, 15, 30,  2,  150, 20,  80, 2, 456},
     // tolerance=3
     {5, 15, 30,  3,  200, 20, 100, 3, 789},
-    // tolerance=4 (刚好 < R_SW=5)
+    // Boundary case: tolerance is still below R_SW.
     {5, 15, 30,  4,  200, 20, 100, 4, 1001},
     // tolerance=5 (== R_SW)
     {5, 15, 30,  5,  150, 20,  80, 5, 2001},
     // tolerance > R_SW
     {5, 15, 30,  7,  100, 20,  50, 5, 3001},
-    // 更长序列
+    // Longer reads.
     {5, 15, 30,  2,  100, 50,  50, 2, 4001},
-    // 更大规模
+    // Larger index.
     {5, 15, 30,  2,  500, 20, 200, 2, 5001},
-    // 不同半径配置
+    // Alternate radius configuration.
     {3, 10, 20,  2,  200, 20, 100, 2, 6001},
-    // 随机 query (大量突变，可能无结果)
+    // Highly mutated random queries may have no results.
     {5, 15, 30,  1,  100, 20,  50, 10, 7001},
   };
 

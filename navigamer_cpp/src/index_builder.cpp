@@ -25,6 +25,26 @@ std::shared_ptr<WorldNode> nearest_in_cover(
   return best;
 }
 
+std::vector<int> leaf_beacon_distances(
+    const std::shared_ptr<BioSequence>& leaf,
+    const std::vector<std::shared_ptr<BioSequence>>& beacons,
+    int center_dist) {
+  std::vector<int> dists;
+  dists.reserve(beacons.size());
+  for (size_t i = 0; i < beacons.size(); ++i) {
+    if (!beacons[i]) {
+      dists.push_back(0);
+    } else if (i == 0) {
+      // The SW center is the first leaf-refinement beacon; reuse the
+      // attachment distance already computed for this leaf.
+      dists.push_back(center_dist);
+    } else {
+      dists.push_back(compute_distance(leaf->seq, beacons[i]->seq));
+    }
+  }
+  return dists;
+}
+
 void bump_created_stats(BioGeometryIndexBuilder::Statistics& st, int extended_tier) {
   if (extended_tier == 0) st.created_nodes[3]++;
   else if (extended_tier == 2) st.created_nodes[2]++;
@@ -201,6 +221,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb() {
     w->layer = 1;
     w->beacons.clear();
     w->child_beacon_mbbs.clear();
+    w->leaf_beacon_dists.clear();
   }
 
   extended_layers_.clear();
@@ -211,10 +232,18 @@ void BioGeometryIndexBuilder::attach_leaves(
   #pragma omp parallel for schedule(dynamic)
   for (size_t si = 0; si < layers[1].size(); ++si) {
     auto& sw = layers[1][si];
+    sw->child_leaves.clear();
+    sw->beacons.clear();
+    sw->leaf_beacon_dists.clear();
+    if (sw->center_ptr) sw->beacons.push_back(sw->center_ptr);
+
     std::string center = sw->get_center_sequence();
     for (const auto& seq : unique_seqs) {
       int d = compute_distance(center, seq->seq);
-      if (d <= sw->radius) sw->child_leaves.push_back(seq);
+      if (d <= sw->radius) {
+        sw->child_leaves.push_back(seq);
+        sw->leaf_beacon_dists.push_back(leaf_beacon_distances(seq, sw->beacons, d));
+      }
     }
     sw->data_count = static_cast<int>(sw->child_leaves.size());
   }

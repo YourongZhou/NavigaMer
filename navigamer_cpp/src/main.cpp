@@ -1,9 +1,10 @@
 /**
- * NavigaMer v7 (Multilateration-Enhanced) - C++ 主程序
- * 用法:
- *   navigamer build --ref <fasta|序列> --reads <fastq|序列> [--out-index <path>]
- *   navigamer query --index <dir> --query <序列> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
- *   navigamer demo  [--size 500]  # 内置小规模演示
+ * NavigaMer v8 C++ reference CLI.
+ * Usage:
+ *   navigamer build --ref <fasta|sequence> --reads <fastq|sequence>
+ *   navigamer query --reads <fastq|sequence> --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
+ *   navigamer demo  [--size 500]
+ *   navigamer boundary --ref <fasta> [--length 250] [--error-rates ...] [--tolerance-rates ...]
  */
 
 #include "structure.hpp"
@@ -19,20 +20,118 @@
 #include <random>
 #include <chrono>
 #include <cstring>
+#include <cmath>
+#include <iomanip>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_set>
 #include <omp.h>
 
 namespace {
 
 void usage(const char* prog) {
   std::cerr << "Usage:\n"
-            << "  " << prog << " demo [--size N] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # 内置演示 (默认 N=500 reads)\n"
-            << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--r-sw 5] [--r-mw 15] [--r-lw 30]  # 构建索引\n"
+            << "  " << prog << " demo [--size N] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # synthetic demo (default N=500 reads)\n"
+            << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--r-sw 5] [--r-mw 15] [--r-lw 30]  # build in-memory index\n"
             << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--tolerance 2] [--mode adaptive] [--r-sw 5] [--r-mw 15] [--r-lw 30]\n"
-            << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # 构建+查询全部 reads，输出 TSV\n"
-            << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # Ref 窗口建索引 + query 搜索 + stats\n";
+            << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # build + query all reads\n"
+            << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--r-sw 5] [--r-mw 15] [--r-lw 30]  # index reference windows + query reads\n"
+            << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--r-sw 5] [--r-mw 15] [--r-lw 30]\n";
 }
 
-// 生成随机 DNA 序列
+std::string format_double(double value) {
+  std::ostringstream os;
+  os << std::fixed << std::setprecision(6) << value;
+  return os.str();
+}
+
+std::vector<double> parse_rate_csv(const std::string& csv) {
+  std::vector<double> values;
+  std::stringstream ss(csv);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    if (token.empty()) continue;
+    values.push_back(std::stod(token));
+  }
+  if (values.empty()) throw std::runtime_error("rate list must not be empty");
+  return values;
+}
+
+std::string mutate_with_exact_substitutions(const std::string& seq, int edit_count,
+                                            std::mt19937& gen) {
+  if (seq.empty() || edit_count <= 0) return seq;
+  std::string out = seq;
+  int edits = std::min(edit_count, static_cast<int>(seq.size()));
+  std::vector<size_t> positions(seq.size());
+  std::iota(positions.begin(), positions.end(), 0);
+  std::shuffle(positions.begin(), positions.end(), gen);
+  static const char bases[] = "ATCG";
+  std::uniform_int_distribution<> base_dis(0, 3);
+  for (int i = 0; i < edits; ++i) {
+    size_t pos = positions[static_cast<size_t>(i)];
+    char orig = out[pos];
+    char repl = orig;
+    while (repl == orig) repl = bases[base_dis(gen)];
+    out[pos] = repl;
+  }
+  return out;
+}
+
+std::vector<std::shared_ptr<navigamer::BioSequence>> build_reference_windows(
+    const std::string& ref_id, const std::string& ref_seq, int window_size, int stride) {
+  using namespace navigamer;
+  std::vector<std::shared_ptr<BioSequence>> windows;
+  for (int start = 0; start + window_size <= static_cast<int>(ref_seq.size()); start += stride) {
+    std::string frag = ref_seq.substr(static_cast<size_t>(start), static_cast<size_t>(window_size));
+    auto seq = std::make_shared<BioSequence>("ref_" + std::to_string(start), frag);
+    seq->add_occurrence(ref_id, start, start + window_size, "+");
+    seq->set_bwt_interval(static_cast<int64_t>(start), static_cast<int64_t>(start + window_size));
+    windows.push_back(seq);
+  }
+  return windows;
+}
+
+struct BoundaryQuery {
+  std::string source_id;
+  navigamer::BioSequence query;
+};
+
+std::vector<BoundaryQuery> generate_boundary_queries(
+    const std::vector<std::shared_ptr<navigamer::BioSequence>>& index_seqs,
+    size_t query_count, int edit_count, unsigned seed) {
+  std::vector<BoundaryQuery> queries;
+  if (index_seqs.empty() || query_count == 0) return queries;
+  std::mt19937 gen(seed);
+  std::uniform_int_distribution<size_t> pick(0, index_seqs.size() - 1);
+  queries.reserve(query_count);
+  for (size_t i = 0; i < query_count; ++i) {
+    const auto& source = index_seqs[pick(gen)];
+    queries.push_back({
+        source->id,
+        navigamer::BioSequence(
+            "query_" + std::to_string(i),
+            mutate_with_exact_substitutions(source->seq, edit_count, gen))});
+  }
+  return queries;
+}
+
+struct BoundaryCellStats {
+  size_t query_count = 0;
+  size_t source_recovery_count = 0;
+  size_t any_hit_count = 0;
+  size_t total_hit_count = 0;
+  size_t total_dist_calcs = 0;
+  size_t total_leaf_verify_count = 0;
+  size_t total_candidate_count_for_prune = 0;
+  size_t total_beacon_prune_count = 0;
+  size_t bf_sample_count = 0;
+  size_t bf_source_recovery_count = 0;
+  size_t bf_agreement_count = 0;
+  size_t bf_source_mismatch_count = 0;
+};
+
+// Generate a reproducible random DNA reference.
 std::string generate_reference(size_t length, unsigned seed) {
   static const char bases[] = "ATCG";
   std::mt19937 gen(seed);
@@ -43,7 +142,7 @@ std::string generate_reference(size_t length, unsigned seed) {
   return s;
 }
 
-// 从参考序列生成带突变的 reads
+// Generate reads from a reference with simple substitution mutations.
 std::vector<std::shared_ptr<navigamer::BioSequence>> generate_reads(
     const std::string& ref, size_t num_reads, size_t read_len, double mutation_rate, unsigned seed) {
   std::mt19937 gen(seed);
@@ -53,7 +152,7 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> generate_reads(
     size_t start = pos_dis(gen);
     std::string fragment = ref.substr(start, read_len);
     if (fragment.size() < read_len) continue;
-    // 简单替换突变
+    // Apply independent substitution mutations to the sampled read.
     std::uniform_real_distribution<> mut_dis(0, 1);
     for (char& c : fragment) {
       if (mut_dis(gen) < mutation_rate) {
@@ -69,7 +168,7 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> generate_reads(
 
 void run_demo(int size, int r_sw, int r_mw, int r_lw) {
   using namespace navigamer;
-  std::cerr << "NavigaMer v7 (C++) - Demo with " << size << " reads"
+  std::cerr << "NavigaMer v8 (C++) - Demo with " << size << " reads"
             << " (R_SW=" << r_sw << ", R_MW=" << r_mw << ", R_LW=" << r_lw << ")\n";
   std::string ref = generate_reference(50000, 42);
   auto reads = generate_reads(ref, size, 20, 0.0, 42);
@@ -215,14 +314,8 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
     std::cerr << "Reference too short for window_size=" << window_size << "\n";
     return;
   }
-  std::vector<std::shared_ptr<BioSequence>> index_seqs;
-  for (int start = 0; start + window_size <= static_cast<int>(ref_seq.size()); start += stride) {
-    std::string frag = ref_seq.substr(static_cast<size_t>(start), static_cast<size_t>(window_size));
-    auto seq = std::make_shared<BioSequence>("ref_" + std::to_string(start), frag);
-    seq->add_occurrence(ref_id, start, start + window_size, "+");
-    seq->set_bwt_interval(static_cast<int64_t>(start), static_cast<int64_t>(start + window_size));
-    index_seqs.push_back(seq);
-  }
+  std::vector<std::shared_ptr<BioSequence>> index_seqs =
+      build_reference_windows(ref_id, ref_seq, window_size, stride);
   std::cerr << "Index: " << index_seqs.size() << " windows from reference\n";
 
   BioGeometryIndexBuilder builder(r_sw, r_mw, r_lw);
@@ -283,6 +376,150 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
   std::cerr << "Benchmark rows: " << all_rows.size() << "\n";
 }
 
+void run_boundary(const std::string& ref_input, int length,
+                  const std::vector<double>& error_rates,
+                  const std::vector<double>& tolerance_rates,
+                  size_t queries_per_cell, const std::string& stride_mode,
+                  unsigned seed, const std::string& out_tsv,
+                  int r_sw, int r_mw, int r_lw) {
+  using namespace navigamer;
+  if (length != 250) {
+    throw std::runtime_error("boundary currently only supports --length 250");
+  }
+  if (stride_mode != "sparse" && stride_mode != "dense") {
+    throw std::runtime_error("boundary --stride-mode must be sparse or dense");
+  }
+
+  auto [ref_id, ref_seq] = load_reference(ref_input);
+  if (ref_seq.size() < static_cast<size_t>(length)) {
+    throw std::runtime_error("reference too short for boundary window length");
+  }
+
+  int stride_for_mode = (stride_mode == "dense") ? 62 : length;
+  auto index_seqs = build_reference_windows(ref_id, ref_seq, length, stride_for_mode);
+  if (index_seqs.empty()) {
+    throw std::runtime_error("boundary could not generate reference windows");
+  }
+
+  std::cerr << "Boundary: stride_mode=" << stride_mode
+            << " length=" << length
+            << " stride=" << stride_for_mode
+            << " windows=" << index_seqs.size() << "\n";
+
+  BioGeometryIndexBuilder builder(r_sw, r_mw, r_lw);
+  builder.build(index_seqs);
+  BioGeometrySearchEngine engine(builder);
+
+  std::vector<std::shared_ptr<BioSequence>> unique_list;
+  unique_list.reserve(builder.unique_sequences.size());
+  for (const auto& p : builder.unique_sequences) unique_list.push_back(p.second);
+
+  std::vector<std::string> columns = {
+      "length", "stride_mode", "num_index_seqs",
+      "error_rate", "error_edits", "tolerance_rate", "tolerance_edits",
+      "query_count",
+      "source_recovery_rate", "any_hit_rate", "avg_hit_count",
+      "avg_dist_calcs", "avg_leaf_verify_count",
+      "avg_candidate_count_for_prune", "avg_beacon_prune_count", "avg_pruning_rate",
+      "bf_sample_count", "bf_source_recovery_rate", "bf_agreement_rate", "bf_source_mismatch_count"};
+  std::vector<std::vector<std::string>> rows;
+  rows.reserve(error_rates.size() * tolerance_rates.size());
+
+  for (size_t ei = 0; ei < error_rates.size(); ++ei) {
+    double error_rate = error_rates[ei];
+    int error_edits = static_cast<int>(std::llround(error_rate * static_cast<double>(length)));
+    auto queries = generate_boundary_queries(
+        index_seqs, queries_per_cell, error_edits,
+        seed + static_cast<unsigned>(ei * 7919));
+
+    for (double tolerance_rate : tolerance_rates) {
+      int tolerance_edits =
+          static_cast<int>(std::llround(tolerance_rate * static_cast<double>(length)));
+      BoundaryCellStats cell;
+      cell.query_count = queries.size();
+      size_t bf_limit = std::min<size_t>(50, queries.size());
+
+      for (size_t qi = 0; qi < queries.size(); ++qi) {
+        const auto& q = queries[qi];
+        auto [res, st] = engine.search_adaptive(q.query, tolerance_edits);
+
+        bool source_found = false;
+        for (const auto& hit : res) {
+          if (hit->id == q.source_id) {
+            source_found = true;
+            break;
+          }
+        }
+
+        if (source_found) cell.source_recovery_count++;
+        if (!res.empty()) cell.any_hit_count++;
+        cell.total_hit_count += res.size();
+        cell.total_dist_calcs += st.dist_calc_count;
+        cell.total_leaf_verify_count += st.leaf_verify_count;
+        cell.total_candidate_count_for_prune += st.candidate_count_for_prune;
+        cell.total_beacon_prune_count += st.beacon_prune_count;
+
+        if (qi < bf_limit) {
+          auto [bf_res, bf_st] = engine.search_brute_force(q.query, tolerance_edits, unique_list);
+          bool bf_source_found = false;
+          for (const auto& hit : bf_res) {
+            if (hit->id == q.source_id) {
+              bf_source_found = true;
+              break;
+            }
+          }
+          cell.bf_sample_count++;
+          if (bf_source_found) cell.bf_source_recovery_count++;
+          if (bf_source_found == source_found) {
+            cell.bf_agreement_count++;
+          } else {
+            cell.bf_source_mismatch_count++;
+          }
+          (void)bf_st;
+        }
+      }
+
+      double query_den = cell.query_count == 0 ? 1.0 : static_cast<double>(cell.query_count);
+      double prune_den = cell.total_candidate_count_for_prune == 0
+                             ? 1.0
+                             : static_cast<double>(cell.total_candidate_count_for_prune);
+      double bf_den = cell.bf_sample_count == 0 ? 1.0 : static_cast<double>(cell.bf_sample_count);
+
+      rows.push_back({
+          std::to_string(length),
+          stride_mode,
+          std::to_string(index_seqs.size()),
+          format_double(error_rate),
+          std::to_string(error_edits),
+          format_double(tolerance_rate),
+          std::to_string(tolerance_edits),
+          std::to_string(cell.query_count),
+          format_double(static_cast<double>(cell.source_recovery_count) / query_den),
+          format_double(static_cast<double>(cell.any_hit_count) / query_den),
+          format_double(static_cast<double>(cell.total_hit_count) / query_den),
+          format_double(static_cast<double>(cell.total_dist_calcs) / query_den),
+          format_double(static_cast<double>(cell.total_leaf_verify_count) / query_den),
+          format_double(static_cast<double>(cell.total_candidate_count_for_prune) / query_den),
+          format_double(static_cast<double>(cell.total_beacon_prune_count) / query_den),
+          format_double(static_cast<double>(cell.total_beacon_prune_count) / prune_den),
+          std::to_string(cell.bf_sample_count),
+          format_double(static_cast<double>(cell.bf_source_recovery_count) / bf_den),
+          format_double(static_cast<double>(cell.bf_agreement_count) / bf_den),
+          std::to_string(cell.bf_source_mismatch_count)});
+
+      if (cell.bf_source_mismatch_count > 0) {
+        std::cerr << "Boundary warning: stride_mode=" << stride_mode
+                  << " error_rate=" << format_double(error_rate)
+                  << " tolerance_rate=" << format_double(tolerance_rate)
+                  << " bf_source_mismatch_count=" << cell.bf_source_mismatch_count << "\n";
+      }
+    }
+  }
+
+  if (!out_tsv.empty()) write_tsv(out_tsv, columns, rows);
+  std::cerr << "Boundary rows: " << rows.size() << "\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -296,6 +533,12 @@ int main(int argc, char** argv) {
   int demo_size = 500;
   int window_size = 200;
   int stride = 1;
+  int boundary_length = 250;
+  size_t queries_per_cell = 200;
+  unsigned seed = 42;
+  std::string stride_mode = "sparse";
+  std::string error_rates_csv = "0,0.01,0.02,0.03,0.05,0.07,0.10,0.15,0.20";
+  std::string tolerance_rates_csv = "0,0.01,0.02,0.03,0.05,0.07,0.10,0.15,0.20";
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
   int r_lw = navigamer::R_LW;
@@ -311,6 +554,18 @@ int main(int argc, char** argv) {
     if (a == "--size" && i + 1 < argc) { demo_size = std::atoi(argv[++i]); continue; }
     if (a == "--window" && i + 1 < argc) { window_size = std::atoi(argv[++i]); continue; }
     if (a == "--stride" && i + 1 < argc) { stride = std::atoi(argv[++i]); continue; }
+    if (a == "--length" && i + 1 < argc) { boundary_length = std::atoi(argv[++i]); continue; }
+    if (a == "--queries-per-cell" && i + 1 < argc) {
+      queries_per_cell = static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
+      continue;
+    }
+    if (a == "--seed" && i + 1 < argc) {
+      seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+      continue;
+    }
+    if (a == "--stride-mode" && i + 1 < argc) { stride_mode = argv[++i]; continue; }
+    if (a == "--error-rates" && i + 1 < argc) { error_rates_csv = argv[++i]; continue; }
+    if (a == "--tolerance-rates" && i + 1 < argc) { tolerance_rates_csv = argv[++i]; continue; }
     if (a == "--r-sw" && i + 1 < argc) { r_sw = std::atoi(argv[++i]); continue; }
     if (a == "--r-mw" && i + 1 < argc) { r_mw = std::atoi(argv[++i]); continue; }
     if (a == "--r-lw" && i + 1 < argc) { r_lw = std::atoi(argv[++i]); continue; }
@@ -351,6 +606,18 @@ int main(int argc, char** argv) {
         return 1;
       }
       run_benchmark(ref_input, reads_input, tolerance, window_size, stride, out_tsv, r_sw, r_mw, r_lw);
+      return 0;
+    }
+    if (cmd == "boundary") {
+      if (ref_input.empty()) {
+        std::cerr << "boundary requires --ref\n";
+        return 1;
+      }
+      auto error_rates = parse_rate_csv(error_rates_csv);
+      auto tolerance_rates = parse_rate_csv(tolerance_rates_csv);
+      run_boundary(ref_input, boundary_length, error_rates, tolerance_rates,
+                   queries_per_cell, stride_mode, seed, out_tsv,
+                   r_sw, r_mw, r_lw);
       return 0;
     }
   } catch (const std::exception& e) {

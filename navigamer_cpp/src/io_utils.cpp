@@ -87,7 +87,7 @@ void write_tsv(const std::string& output_path,
   }
 }
 
-// 简单 JSON 转义并格式化 ref_positions 为 JSON 数组
+// Escape minimal JSON strings and format stored reference positions.
 static std::string ref_positions_to_json(const std::vector<RefPosition>& pos) {
   std::ostringstream os;
   os << "[";

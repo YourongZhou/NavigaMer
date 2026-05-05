@@ -47,6 +47,19 @@ class BioGeometrySearchEngine {
 
   bool mbb_prunable_row(const std::vector<MBB>& row, const std::vector<int>& V_Q,
                         int tolerance) const;
+  bool leaf_beacon_prunable_row(const std::vector<int>& row,
+                                const std::vector<int>& V_Q,
+                                int tolerance) const;
+  std::vector<int> compute_query_beacon_distances(
+      const std::shared_ptr<WorldNode>& node,
+      const BioSequence& query_seq,
+      SearchStats& stats) const;
+  void verify_leaf_candidates(
+      const std::shared_ptr<WorldNode>& node,
+      const BioSequence& query_seq,
+      int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      SearchStats& stats) const;
 
   void process_node_adaptive(
       const std::shared_ptr<WorldNode>& node, int current_layer,

@@ -1,17 +1,20 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -O2 -I include -Wall -Wextra -fopenmp
+CXXFLAGS = -std=c++17 -O2 -I include -Wall -Wextra -fopenmp -MMD -MP
 SRC = src/structure.cpp src/tools.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/main.cpp
 OBJ = $(SRC:.cpp=.o)
+DEP = $(OBJ:.o=.d)
 TARGET = navigamer
 
 LIB_SRC = src/structure.cpp src/tools.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp
 LIB_OBJ = $(LIB_SRC:.cpp=.o)
 TEST_SRC = src/test_recall.cpp
 TEST_OBJ = $(TEST_SRC:.cpp=.o)
+TEST_DEP = $(TEST_OBJ:.o=.d)
 TEST_TARGET = test_recall
 
 TEST_DIST_SRC = src/test_distance_bound.cpp
 TEST_DIST_OBJ = $(TEST_DIST_SRC:.cpp=.o)
+TEST_DIST_DEP = $(TEST_DIST_OBJ:.o=.d)
 TEST_DIST_TARGET = test_distance_bound
 
 .PHONY: all clean test test_dist test_all
@@ -39,4 +42,6 @@ test_all: test test_dist
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET)
+	rm -f $(OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET)
+
+-include $(DEP) $(TEST_DEP) $(TEST_DIST_DEP)

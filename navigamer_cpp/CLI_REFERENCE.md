@@ -17,7 +17,7 @@ Used by all pipelines that build the index:
 | `--r-mw` | `15` | Mid-world radius |
 | `--r-lw` | `30` | Large-world radius |
 
-The implementation also uses **extended** tiers internally (see `index_builder.cpp`); these three knobs set the primary metric balls.
+The implementation also uses **extended** tiers internally (see `index_builder.cpp`); these three knobs set the primary metric balls. SW nodes additionally store local leaf-beacon rows for the final refinement sieve.
 
 ## I/O conventions (`io_utils`)
 
@@ -50,7 +50,7 @@ Builds an index from `--reads`, then searches for `--query`.
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--tolerance` | `2` | Max edit distance |
-| `--mode` | `adaptive` | `adaptive` \| `greedy` \| `exhaustive` |
+| `--mode` | `adaptive` | `adaptive` \| `greedy` \| `exhaustive`; all modes exactly verify returned leaves |
 | `--ref` | optional | Placeholder in current flow |
 
 ### `run`
@@ -81,6 +81,24 @@ Slices the reference into windows of length `--window` with stride `--stride`; e
 
 If a query has no hit, a placeholder row is still emitted with stats.
 
+### `boundary`
+
+Builds one in-memory index from reference windows of fixed length `--length` and sweeps a full `error_rate × tolerance_rate` grid without rebuilding the index for each cell. This command is intended for capability-boundary exploration on long reference slices such as `chr1_subset`.
+
+**Required:** `--ref`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--length` | `250` | Fixed window/query length; current implementation only accepts `250` |
+| `--error-rates` | `0,0.01,0.02,0.03,0.05,0.07,0.10,0.15,0.20` | Comma-separated substitution error rates; each rate becomes `round(rate * 250)` edits |
+| `--tolerance-rates` | `0,0.01,0.02,0.03,0.05,0.07,0.10,0.15,0.20` | Comma-separated tolerance rates; each rate becomes `round(rate * 250)` edit distance |
+| `--queries-per-cell` | `200` | Number of mutated queries evaluated for each `(error_rate, tolerance_rate)` cell |
+| `--stride-mode` | `sparse` | `sparse` uses stride `250`; `dense` uses stride `62` |
+| `--seed` | `42` | Random seed used for query sampling and mutation |
+| `--out` | *(none)* | Output TSV path for the aggregated boundary table |
+
+`boundary` currently uses substitution-only mutations and, for each cell, additionally samples up to 50 queries for `brute_force` agreement checks. Like the other C++ commands, the index is built in memory only and is not serialized to disk.
+
 ## TSV columns
 
 **`run`:**  
@@ -88,6 +106,11 @@ If a query has no hit, a placeholder row is still emitted with stats.
 
 **`benchmark`** adds:  
 `dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`
+
+`candidate_count_for_prune` and `beacon_prune_count` include both hierarchy-level MBB pruning and SW leaf-beacon refinement.
+
+**`boundary`:**  
+`length`, `stride_mode`, `num_index_seqs`, `error_rate`, `error_edits`, `tolerance_rate`, `tolerance_edits`, `query_count`, `source_recovery_rate`, `any_hit_rate`, `avg_hit_count`, `avg_dist_calcs`, `avg_leaf_verify_count`, `avg_candidate_count_for_prune`, `avg_beacon_prune_count`, `avg_pruning_rate`, `bf_sample_count`, `bf_source_recovery_rate`, `bf_agreement_rate`, `bf_source_mismatch_count`
 
 ## Standalone test binaries
 

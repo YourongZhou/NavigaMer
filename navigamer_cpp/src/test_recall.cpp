@@ -1,15 +1,14 @@
 /**
  * test_recall.cpp
  *
- * 验证 search_adaptive 在 tolerance < R_SW 时能否找到所有
- * brute_force 能找到的序列（0 FN）。
+ * Verify that search_adaptive returns every sequence found by brute force
+ * when tolerance < R_SW.
  *
- * 测试策略：
- *   1. 生成随机参考序列，从中截取窗口作为 index 序列。
- *   2. 对每个 index 序列引入少量突变生成 query。
- *   3. 用 brute_force 得到 ground truth，用 adaptive 搜索，
- *      验证 adaptive 结果 ⊇ brute_force 结果。
- *   4. 多组参数（不同 tolerance、不同数据规模）全部通过才算 PASS。
+ * Strategy:
+ *   1. Generate random reference windows as indexed sequences.
+ *   2. Mutate indexed sequences to produce queries.
+ *   3. Use brute_force as ground truth and check adaptive results.
+ *   4. Run multiple tolerances, index sizes, and radius configurations.
  */
 
 #include "structure.hpp"
@@ -66,10 +65,10 @@ struct TestConfig {
 struct TestResult {
   bool passed;
   size_t total_queries;
-  size_t fn_queries;       // adaptive 漏掉至少一个 bf 结果的 query 数
+  size_t fn_queries;       // queries where adaptive misses at least one BF hit
   size_t total_bf_hits;
   size_t total_adaptive_hits;
-  size_t total_missed_hits; // 被漏掉的 hit 总数
+  size_t total_missed_hits; // total missed BF hits
 };
 
 TestResult run_test(const TestConfig& cfg) {
@@ -85,7 +84,7 @@ TestResult run_test(const TestConfig& cfg) {
         "seq_" + std::to_string(i), frag));
   }
 
-  // 额外加一些随机序列增加多样性
+  // Add random sequences to increase diversity.
   for (size_t i = 0; i < cfg.num_seqs / 5; ++i) {
     seqs.push_back(std::make_shared<navigamer::BioSequence>(
         "rand_" + std::to_string(i), random_dna(cfg.seq_len, gen)));
@@ -99,7 +98,7 @@ TestResult run_test(const TestConfig& cfg) {
   std::vector<std::shared_ptr<navigamer::BioSequence>> unique_list;
   for (const auto& p : builder.unique_sequences) unique_list.push_back(p.second);
 
-  // 生成 queries：从 index 序列中随机选取并引入突变
+  // Generate queries by mutating randomly selected indexed sequences.
   std::vector<navigamer::BioSequence> queries;
   std::uniform_int_distribution<size_t> seq_pick(0, seqs.size() - 1);
   for (size_t i = 0; i < cfg.num_queries; ++i) {
@@ -107,7 +106,7 @@ TestResult run_test(const TestConfig& cfg) {
     std::string q = mutate(base_seq, cfg.query_mutations, gen);
     queries.emplace_back("query_" + std::to_string(i), q);
   }
-  // 也加一些完全随机的 query
+  // Add fully random queries as negative/background cases.
   for (size_t i = 0; i < cfg.num_queries / 5; ++i) {
     queries.emplace_back("qrand_" + std::to_string(i), random_dna(cfg.seq_len, gen));
   }
@@ -142,24 +141,24 @@ TestResult run_test(const TestConfig& cfg) {
 }  // namespace
 
 int main() {
-  std::cerr << "=== NavigaMer v7 Recall Test (tolerance < R_SW) ===\n\n";
+  std::cerr << "=== NavigaMer v8 Recall Test (tolerance < R_SW) ===\n\n";
 
   std::vector<TestConfig> configs = {
-    // 基础测试：小规模，tolerance=1 < R_SW=5
+    // Basic small-scale test: tolerance=1 < R_SW=5.
     {5, 15, 30,  1,  100, 20,  50, 1, 42},
-    // tolerance=2
+    // Moderate tolerance.
     {5, 15, 30,  2,  100, 20,  50, 2, 123},
-    // tolerance=3
+    // Larger tolerance under the SW radius.
     {5, 15, 30,  3,  200, 20, 100, 3, 456},
-    // tolerance=4 (刚好 < R_SW=5)
+    // Boundary case: tolerance is still below R_SW.
     {5, 15, 30,  4,  200, 20, 100, 4, 789},
-    // 更长序列
+    // Longer reads.
     {5, 15, 30,  2,  100, 50,  50, 2, 1001},
-    // 更大规模
+    // Larger index.
     {5, 15, 30,  2,  500, 20, 200, 2, 2001},
-    // 不同半径配置
+    // Alternate radius configuration.
     {3, 10, 20,  2,  200, 20, 100, 2, 3001},
-    // tolerance=0（精确匹配）
+    // Exact matching.
     {5, 15, 30,  0,  100, 20,  50, 0, 4001},
   };
 

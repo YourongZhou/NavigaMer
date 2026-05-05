@@ -1,5 +1,6 @@
 #include "search_engine.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <omp.h>
 
@@ -20,6 +21,63 @@ bool BioGeometrySearchEngine::mbb_prunable_row(const std::vector<MBB>& row,
   return false;
 }
 
+bool BioGeometrySearchEngine::leaf_beacon_prunable_row(const std::vector<int>& row,
+                                                       const std::vector<int>& V_Q,
+                                                       int tolerance) const {
+  if (row.size() != V_Q.size()) return false;
+  for (size_t i = 0; i < V_Q.size(); ++i) {
+    if (std::abs(V_Q[i] - row[i]) > tolerance) return true;
+  }
+  return false;
+}
+
+std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances(
+    const std::shared_ptr<WorldNode>& node,
+    const BioSequence& query_seq,
+    SearchStats& stats) const {
+  std::vector<int> V_Q;
+  V_Q.reserve(node->beacons.size());
+  for (const auto& b : node->beacons) {
+    if (!b) {
+      V_Q.push_back(0);
+      continue;
+    }
+    V_Q.push_back(compute_distance(query_seq.seq, b->seq));
+    stats.dist_calc_count++;
+  }
+  return V_Q;
+}
+
+void BioGeometrySearchEngine::verify_leaf_candidates(
+    const std::shared_ptr<WorldNode>& node,
+    const BioSequence& query_seq,
+    int tolerance,
+    std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+    SearchStats& stats) const {
+  std::vector<int> V_Q;
+  const bool has_leaf_sieve =
+      !node->beacons.empty() &&
+      node->leaf_beacon_dists.size() == node->child_leaves.size();
+  if (has_leaf_sieve) V_Q = compute_query_beacon_distances(node, query_seq, stats);
+
+  for (size_t li = 0; li < node->child_leaves.size(); ++li) {
+    if (has_leaf_sieve && node->leaf_beacon_dists[li].size() == V_Q.size()) {
+      stats.candidate_count_for_prune++;
+      if (leaf_beacon_prunable_row(node->leaf_beacon_dists[li], V_Q, tolerance)) {
+        stats.beacon_prune_count++;
+        continue;
+      }
+    }
+
+    const auto& child = node->child_leaves[li];
+    int leaf_dist = compute_distance(query_seq.seq, child->seq);
+    stats.dist_calc_count++;
+    stats.leaf_verify_count++;
+    if (leaf_dist <= tolerance)
+      unique_results[child->id] = child;
+  }
+}
+
 void BioGeometrySearchEngine::process_node_adaptive(
     const std::shared_ptr<WorldNode>& node, int current_layer,
     const BioSequence& query_seq, int tolerance,
@@ -27,13 +85,7 @@ void BioGeometrySearchEngine::process_node_adaptive(
     std::unordered_set<std::string>& visited_nodes,
     SearchStats& stats) const {
   if (current_layer == 1) {
-    for (const auto& child : node->child_leaves) {
-      int leaf_dist = compute_distance(query_seq.seq, child->seq);
-      stats.dist_calc_count++;
-      stats.leaf_verify_count++;
-      if (leaf_dist <= tolerance)
-        unique_results[child->id] = child;
-    }
+    verify_leaf_candidates(node, query_seq, tolerance, unique_results, stats);
     return;
   }
 
@@ -44,12 +96,7 @@ void BioGeometrySearchEngine::process_node_adaptive(
   std::vector<std::shared_ptr<WorldNode>> surviving;
 
   if (!node->beacons.empty()) {
-    std::vector<int> V_Q;
-    V_Q.reserve(node->beacons.size());
-    for (const auto& b : node->beacons) {
-      V_Q.push_back(compute_distance(query_seq.seq, b->seq));
-      stats.dist_calc_count++;
-    }
+    std::vector<int> V_Q = compute_query_beacon_distances(node, query_seq, stats);
 
     bool mbb_ok =
         V_Q.size() == node->beacons.size() &&
@@ -160,15 +207,15 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
     if (!best_node) return {{}, stats};
 
     if (layer_id == 1) {
-      std::vector<std::shared_ptr<BioSequence>> results = best_node->child_leaves;
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>> unique_results;
+      verify_leaf_candidates(best_node, query_seq, tolerance, unique_results, stats);
+
+      std::vector<std::shared_ptr<BioSequence>> results;
+      for (const auto& p : unique_results) results.push_back(p.second);
       return {results, stats};
     }
 
-    std::vector<int> V_Q;
-    for (const auto& b : best_node->beacons) {
-      V_Q.push_back(compute_distance(query_seq.seq, b->seq));
-      stats.dist_calc_count++;
-    }
+    std::vector<int> V_Q = compute_query_beacon_distances(best_node, query_seq, stats);
 
     current.clear();
     for (size_t ci = 0; ci < best_node->child_nodes.size(); ++ci) {
@@ -208,13 +255,7 @@ void BioGeometrySearchEngine::traverse_exhaustive(
                         unique_results, visited_nodes, stats);
 
   if (current_layer == 1) {
-    for (const auto& child : node->child_leaves) {
-      int leaf_dist = compute_distance(query_seq.seq, child->seq);
-      stats.dist_calc_count++;
-      stats.leaf_verify_count++;
-      if (leaf_dist <= tolerance)
-        unique_results[child->id] = child;
-    }
+    verify_leaf_candidates(node, query_seq, tolerance, unique_results, stats);
   }
 }
 

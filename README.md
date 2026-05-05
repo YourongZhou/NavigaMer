@@ -8,14 +8,15 @@
 
 **NavigaMer** (*Multilateration-Based Indexing and Navigation for Error-Tolerant Read Mapping*) is a multi-tiered indexer that formulates read mapping as **geometric localization in a coordinate-free metric space** under **edit distance**. Rather than embedding sequences in a continuous sketch space (with embedding distortion) or relying only on fixed seeds under high mutation rates, NavigaMer uses **beacon-mediated multilateration** and **triangle-inequality pruning** over a hierarchy of metric “worlds.” The **adaptive** search aims for **zero false negatives** (perfect recall relative to the indexed sequence set) within a user-specified edit-distance threshold, while pruning candidates that cannot contain a match.
 
-## Methodology ↔ Code
+## Methodology ↔ Code (for better code readability)
 
 | Concept (paper) | Implementation |
 | --------------- | -------------- |
 | **Extended world hierarchy (sketch)** | `BioGeometryIndexBuilder::phase1_build_extended_sketch()` — `navigamer_cpp/src/index_builder.cpp` |
 | **DAG topology & overlap binding** | `BioGeometryIndexBuilder::phase2_inter_tier_rebinding()` — same file |
 | **Beacon extraction & tier collapse + MBBs** | `BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb()` — intermediate tiers collapsed; **Metric Bounding Boxes (MBBs)** for consistency checks |
-| **Hierarchical multilateration search** | `BioGeometrySearchEngine::search_adaptive()` — `navigamer_cpp/src/search_engine.cpp` (MBB-based pruning via triangle inequality) |
+| **Leaf beacon refinement** | `BioGeometryIndexBuilder::attach_leaves()` precomputes SW leaf-to-beacon distances; `BioGeometrySearchEngine::verify_leaf_candidates()` applies the final local beacon sieve before exact verification |
+| **Hierarchical multilateration search** | `BioGeometrySearchEngine::search_adaptive()` — `navigamer_cpp/src/search_engine.cpp` (MBB-based pruning plus SW leaf refinement via triangle inequality) |
 
 Data structures (`WorldNode`, `MBB`, `BioSequence`) are in `navigamer_cpp/include/structure.hpp`. Edit distance is in `navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in `navigamer_cpp/src/io_utils.cpp`.
 
@@ -32,7 +33,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 
 Binary: `navigamer_cpp/navigamer` (or `navigamer_cpp/build/navigamer` with CMake).
 
-**Python** (optional; e.g. `navigamer_cpp/params_test.ipynb`; from **repository root**):
+**Python** is only needed for notebooks and baseline/reproducibility scripts; there is no separate Python implementation path for the paper algorithm:
 
 ```bash
 pip install -r reproducibility/requirements.txt
@@ -44,9 +45,12 @@ pip install -r reproducibility/requirements.txt
 cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
 ./navigamer demo --size 200
+./navigamer boundary --ref ../chr1_subset --length 250 --stride-mode sparse --out boundary.tsv
 ```
 
 Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFERENCE.md). C++ layout and tests: [`navigamer_cpp/README.md`](navigamer_cpp/README.md).
+
+The current C++ index is in-memory only: `build`, `query`, `run`, `benchmark`, and `boundary` rebuild the index for each process invocation. The `boundary` command is intended for long-sequence capability sweeps and reuses a single in-memory index across the full `error_rate × tolerance_rate` grid inside one run.
 
 ## Tests
 
@@ -61,6 +65,6 @@ make test_recall test_distance_bound
 
 | Path | Role |
 | ---- | ---- |
-| `navigamer_cpp/` | C++ reference implementation and `navigamer` CLI |
-| `reproducibility/` | Optional Python dependencies (`requirements.txt`) for notebooks |
-| `methods/` | Comparative baselines and experiment notebooks (historical) |
+| `navigamer_cpp/` | C++ v8 reference implementation and `navigamer` CLI |
+| `methods/` | Comparative baselines, experiment notebooks, and plotting/evaluation workflows |
+| `reproducibility/` | Optional Python dependencies (`requirements.txt`) for notebooks and baseline workflows |

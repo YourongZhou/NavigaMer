@@ -1,0 +1,401 @@
+% This is samplepaper.tex, a sample chapter demonstrating the
+% LLNCS macro package for Springer Computer Science proceedings;
+% Version 2.21 of 2022/01/12
+%
+\documentclass[10pt,runningheads]{llncs}
+% %
+% \usepackage[T1]{fontenc}
+% T1 fonts will be used to generate the final print and online PDFs,
+% so please use T1 fonts in your manuscript whenever possible.
+% Other font encondings may result in incorrect characters.
+%
+
+% \documentclass[10pt,a4paper]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+% \usepackage{newtxtext,newtxmath}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{algpseudocode}  % 用于 \Require, \State, \If 等伪代码命令
+\usepackage{float}          % 用于 [H] 浮动体定位（可选，但推荐）
+\usepackage[jinatbib=true, style=numeric,sorting=none]{biblatex}
+\addbibresource{refs.bib}
+\bibliography{refs}
+% \bibliographystyle{splncs04}
+
+% \usepackage[ruled,vlined]{algorithm2e}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\captionsetup{font=small}
+
+
+% Used for displaying a sample figure. If possible, figure files should
+% be included in EPS format.
+%
+% If you use the hyperref package, please uncomment the following two lines
+% to display URLs in blue roman font according to Springer's eBook style:
+%\usepackage{color}
+%\renewcommand\UrlFont{\color{blue}\rmfamily}
+%\urlstyle{rm}
+%
+\begin{document}
+
+\section*{Supplementary}
+
+\subsection*{Appendix A: Detailed Definition of the DNA sequence space and Geometrical Definition of Fuzzy Multilateration}
+
+\textit{Notation Note: For notational brevity and to enhance the readability of the mathematical proofs in this supplementary section, we denote the edit distance function $\mathrm{Dist}_{\mathrm{edit}}(x, y)$ simply as $d(x, y)$ throughout this appendix.}
+\begin{definition}
+Let $\Sigma = \{A, T, C, G\}$ be the nucleotide alphabet, and $\mathcal{S} = \Sigma^*$ represents the set of all possible nucleotide sequences. Let $d: \mathcal{S} \times \mathcal{S} \to \mathbb{R}_{\geq0}$ be the edit distance between two sequences. We define the global DNA sequence space $\mathcal{M}$ as a metric space:
+\begin{align}
+    \mathcal{M} \coloneqq (\mathcal{S}, d).
+\end{align}
+Within $\mathcal{M}$, the reference genome pool $\textbf{G} \subset \mathcal{S}$ is a finite subset. The exact target candidate set, or the \textit{query sphere }$\textbf{C}_Q$ for a query $Q \in \mathcal{S}$ under error threshold $t \in \mathbb{R}_{\geq0}$ is equivalent to the intersection of $\textbf{G}$ and the closed ball centered at $Q$:
+\begin{align}
+    \textbf{C}_Q \coloneqq \{ R \in \textbf{G} \mid d(R, Q) \leq t \}.
+\end{align}
+\end{definition}
+
+% In metric space $\mathcal{M}$, the envelope $\textbf{E}_Q$ is determined by the inherent triangular inequality against a set of selected beacons.
+In metric space $\mathcal{M}$, each beacon $b \in \mathcal{S}$ could provide a specific constraint set, geometrically as an annulus, that contains $\textbf{C}_Q$.
+
+\begin{definition}
+    For a given beacon sequence $b \in \mathcal{M}$, a query sequence $Q \in  \mathcal{M}$, and an edit distance threshold $t \in \mathbb{R}_{\geq0}$, we define the \textit{annulus} $\textbf{A}_{b, t}(Q)$ as the set of sequences in $\mathcal{M}$ whose distance to $b$ is within $t$ of the distance between $Q$ and $b$:
+    \begin{align}
+       \textbf{A}_{b, t}(Q) \coloneqq \{ u \in \mathcal{M} \mid |d(Q, b) - d(u, b)| \leq t \}.
+    \end{align}
+    \label{def:annulus}
+\end{definition}
+
+\begin{theorem}
+For any arbitrary beacon $b \in \mathcal{M}$, query $Q \in \mathcal{M}$, and threshold $t \in \mathbb{R}_{\geq0}$, then the query sphere is bounded by the annulus:
+\begin{equation}
+    \textbf{C}_Q \subseteq \textbf{A}_{b, t}(Q) \cap \textbf{G}.
+\end{equation}
+    \label{thm:ballinann}
+\end{theorem}
+
+\begin{proof}
+Let $R \in \textbf{C}_Q$ be an arbitrary sequence in the query sphere. By the definition of the query sphere, we know two facts about $R$:
+\begin{enumerate}
+    \item $R \in \textbf{G}$
+    \item $d(R, Q) \leq t$
+\end{enumerate}
+
+To prove that $R \in \textbf{A}_{b, t}(Q) \cap \textbf{G}$, since we already know $R \in \textbf{G}$, it remains only to show that $R \in \textbf{A}_{b, t}(Q)$. According to Definition \ref{def:annulus}, we must prove that:
+\begin{equation*}
+    |d(Q, b) - d(R, b)| \leq t
+\end{equation*}
+
+Because $\mathcal{M} = (\mathcal{S}, d)$ is a defined metric space, the distance function $d$ strictly satisfies the triangle inequality. Therefore, for any three sequences $Q, R, b \in \mathcal{M}$, the following two inequalities hold:
+\begin{equation*}
+    d(Q, b) \leq d(Q, R) + d(R, b) \implies d(Q, b) - d(R, b) \leq d(Q, R)
+\end{equation*}
+and
+\begin{equation*}
+    d(R, b) \leq d(R, Q) + d(Q, b) \implies d(R, b) - d(Q, b) \leq d(R, Q)
+\end{equation*}
+
+Combining these two inequalities, and utilizing the symmetry property of metric spaces where $d(Q, R) = d(R, Q)$, we derive the reverse triangle inequality:
+\begin{equation*}
+    |d(Q, b) - d(R, b)| \leq d(R, Q)
+\end{equation*}
+
+From our initial premise, we know that $d(R, Q) \leq t$. Substituting this into the inequality yields:
+\begin{equation*}
+    |d(Q, b) - d(R, b)| \leq t
+\end{equation*}
+
+This satisfies the condition for $R \in \textbf{A}_{b, t}(Q)$. Since $R \in \textbf{G}$ is also true, we have $R \in \textbf{A}_{b, t}(Q) \cap \textbf{G}$. Because $R$ was chosen as an arbitrary element of $\textbf{C}_Q$, it must hold that $\textbf{C}_Q \subseteq \textbf{A}_{b, t}(Q) \cap \textbf{G}$, concluding the proof.
+\end{proof}
+
+\newpage
+\subsection*{Appendix B: Mathematical Support for Beacon Selection Strategy in DNA sequence space}
+
+\begin{definition}
+    We define the \textit{tightness} of an envelope $\textbf{E}_Q$ constructed via beacon set $\textbf{B}(Q)$, denoted as $\tau(\textbf{B}(Q))$, as the ratio of true candidates to retrieved candidates:
+    \begin{equation}
+        \tau(\textbf{B}(Q)) \coloneqq \frac{|\textbf{C}_Q|}{|\textbf{E}_Q|}, \quad \text{where } \tau \in (0, 1].
+    \end{equation}
+    Higher $\tau$ indicates fewer false positives in the envelope.
+    \label{def:tightness}
+\end{definition}
+
+The assertion that adding more beacons tightens the envelope ($\textbf{E}_Q \rightarrow \textbf{C}_Q$) is supported by the following monotonic property:
+
+\begin{remark}
+    For any two beacon sets such that $\textbf{B}_1(Q) \subseteq \textbf{B}_2(Q) \subset \textbf{G}$, their corresponding envelopes satisfy $\textbf{E}_{Q, 2} \subseteq \textbf{E}_{Q, 1}$, which guarantees:
+    \begin{equation}
+        \tau(\textbf{B}_2(Q)) \geq \tau(\textbf{B}_1(Q)).
+    \end{equation}
+    \label{cor:moreisbetter}
+\end{remark}
+
+\begin{proof}
+    By the definition of the envelope as the intersection of annuli generated by a beacon set, $\textbf{E}_{Q, 1} = \bigcap_{b \in \textbf{B}_1(Q)} (\textbf{A}_{b, t}(Q) \cap \textbf{G})$ and $\textbf{E}_{Q, 2} = \bigcap_{b \in \textbf{B}_2(Q)} (\textbf{A}_{b, t}(Q) \cap \textbf{G})$.
+    Since $\textbf{B}_1(Q) \subseteq \textbf{B}_2(Q)$, the intersection over $\textbf{B}_2(Q)$ includes all the constraints from $\textbf{B}_1(Q)$ plus potentially more. Therefore, taking the intersection over a superset of sets yields a subset of the original intersection:
+    \begin{equation*}
+        \bigcap_{b \in \textbf{B}_2(Q)} (\textbf{A}_{b, t}(Q) \cap \textbf{G}) \subseteq \bigcap_{b \in \textbf{B}_1(Q)} (\textbf{A}_{b, t}(Q) \cap \textbf{G}) \implies \textbf{E}_{Q, 2} \subseteq \textbf{E}_{Q, 1}.
+    \end{equation*}
+    Consequently, the size of the envelope satisfies $|\textbf{E}_{Q, 2}| \leq |\textbf{E}_{Q, 1}|$. 
+    Because the query sphere $\textbf{C}_Q$ remains constant regardless of the beacon set chosen, the numerator $|\textbf{C}_Q|$ in the definition of tightness (Definition \ref{def:tightness}) is constant. Thus, dividing the constant $|\textbf{C}_Q|$ by a smaller or equal denominator results in a larger or equal ratio:
+    \begin{equation*}
+        \tau(\textbf{B}_2(Q)) = \frac{|\textbf{C}_Q|}{|\textbf{E}_{Q, 2}|} \geq \frac{|\textbf{C}_Q|}{|\textbf{E}_{Q, 1}|} = \tau(\textbf{B}_1(Q)).
+    \end{equation*}
+    This completes the proof.
+\end{proof}
+
+We then illustrate that in an ideal scenario of collinearity, beacons closest to $Q$ are paramount.
+
+\begin{definition}
+    A sequence of points $a_1, a_2, \dots, a_k \in \mathcal{M}$ is strictly \textit{collinear} if 
+    \begin{equation*}
+        d(a_1, a_k) = \sum_{i=1}^{k-1} d(a_i, a_{i+1}).
+    \end{equation*} 
+    In such a set $S$, any element $Q \in S$ divides the remaining points into two disjoint ``sides'' $S_L$ and $S_R$.
+\end{definition}
+
+\begin{theorem}
+  If $\textbf{B}(Q) \cup \{Q\}$ is mutually collinear, let $b_L$ and $b_R$ be the absolute closest beacons to $Q$ from $S_L$ and $S_R$, respectively. Then, multilateration using \textit{only} these two closest beacons yields an envelope identical to using the entire set $\textbf{B}(Q)$:
+  \begin{equation}
+      \textbf{E}_{Q, \{b_L, b_R\}} = \textbf{E}_{Q, \textbf{B}(Q)}.
+  \end{equation}
+  \label{thm:nearestbest}
+\end{theorem}
+
+While strict collinearity is a strong condition rarely perfectly satisfied in DNA metric space, the fundamental principle that proximal beacons dictate tightness remains universally valid. The following theorem proves that the worst-case error (false positive distance) in $\textbf{E}_Q$ is strictly bounded by the proximity of the nearest beacon.
+
+\begin{theorem}
+    Let $b_{\mathrm{near}} \in \textbf{B}(Q)$ be the closest beacon to the query $Q$, such that $b_{\mathrm{near}} = \underset{b \in \textbf{B}(Q)}{\arg\min} \, d(b, Q)$. For any sequence $R \in \textbf{E}_Q$, its maximum distance to $Q$ is bounded by:
+    \begin{equation}
+        d(R, Q) \leq 2 \cdot d(Q, b_{\mathrm{near}}) + t.
+    \end{equation}
+    \label{thm:nearbound}
+\end{theorem}
+
+\begin{proof}
+    Let $R \in \textbf{E}_Q$ be an arbitrary sequence in the envelope. Since $b_{\mathrm{near}} \in \textbf{B}(Q)$, by the definition of the envelope, $R$ must satisfy the annulus condition for $b_{\mathrm{near}}$:
+    \begin{align}
+        |d(Q, b_{\mathrm{near}}) - d(R, b_{\mathrm{near}})| \leq t \implies d(R, b_{\mathrm{near}}) \leq d(Q, b_{\mathrm{near}}) + t. \label{eq:pb} 
+    \end{align}
+    Applying the triangle inequality to the metric space $\mathcal{M}$ for points $R, Q,$ and $b_{\mathrm{near}}$, we obtain:
+    \begin{equation}
+        d(R, Q) \leq d(R, b_{\mathrm{near}}) + d(b_{\mathrm{near}}, Q) \label{eq:ineq}.
+    \end{equation}
+    By substituting inequality (\ref{eq:pb}) into inequality (\ref{eq:ineq}) and utilizing the symmetry property $d(b_{\mathrm{near}}, Q) = d(Q, b_{\mathrm{near}})$, it yields:
+    \begin{equation*}
+        d(R, Q) \leq (d(Q, b_{\mathrm{near}}) + t) + d(Q, b_{\mathrm{near}}) = 2 \cdot d(Q, b_{\mathrm{near}}) + t.
+    \end{equation*}
+    This establishes the bound on the distance, concluding the proof.
+\end{proof}
+
+Taken together,  assuming that the query strings are close-distance variants of reference strings,
+by ensuring a maximal coverage of beacon set,
+where there exist several proximal beacon for any reference string,
+we can ensure that the produced $\textbf{E}_Q$ is both comprehensive yet sufficiently tight.
+
+\newpage
+\subsection*{Appendix C: Technical Details of Multi-Tiered Beacon Navigation via Hierarchical Multilateration}
+% \begin{algorithm}[t]
+% \caption{Hierarchical Multilateration Search}
+% \label{alg:navigation}
+% \begin{algorithmic}[1]
+% \REQUIRE Query $q$, Tolerance $\varepsilon$, Index Root $Root$
+% \ENSURE Matching sequences $Result$
+% \STATE $W_{current} \leftarrow \{Root\}$
+% \STATE \textbf{/* Phase 1: Top-Down Pruning */}
+% \FOR{$l = 1$ \textbf{to} $k-1$}
+%     \STATE $W_{next} \leftarrow \emptyset$; \quad $FastPath \leftarrow \text{FALSE}$
+%     \FORALL{$w \in W_{current}$}
+%         \FORALL{Child $c$ of $w$}
+%             \STATE \textbf{/* Step 1: $O(1)$ Prune using pre-computed MBBs */}
+%             \IF{$\exists b \in w.\text{Beacons}$ s.t. $\text{dist}(q, b) \notin [c.\text{MBB}_b.\text{min} - \varepsilon, c.\text{MBB}_b.\text{max} + \varepsilon]$}
+%                 \STATE \textbf{Continue} \COMMENT{Prune disjoint sub-world}
+%             \ENDIF
+            
+%             \STATE \textbf{/* Step 2: Center distance evaluation */}
+%             \STATE $dist \leftarrow d(q, c.\text{center})$
+%             \IF{$dist \le c.R + \varepsilon$} \COMMENT{Intersection confirmed}
+%                 \STATE $W_{next} \leftarrow W_{next} \cup \{c\}$
+%                 \IF{$dist + \varepsilon \le c.R$} \COMMENT{Strict Containment}
+%                     \STATE $W_{next} \leftarrow \{c\}$
+%                     \STATE $FastPath \leftarrow \text{TRUE}$
+%                     \STATE \textbf{Break} \COMMENT{Trigger Fast Path, ignore siblings}
+%                 \ENDIF
+%             \ENDIF
+%         \ENDFOR
+%         \IF{$FastPath$} \STATE \textbf{Break} \ENDIF
+%     \ENDFOR
+%     \STATE $W_{current} \leftarrow W_{next}$
+% \ENDFOR
+
+% \STATE \textbf{/* Phase 2: Leaf Refinement */}
+% \FORALL{Leaf $w \in W_{current}$}
+%     \FORALL{$s \in w.\text{Data}$}
+%         \IF{$\forall b \in w.\text{Beacons}, |d(q, b) - d(s, b)| \le \varepsilon$}
+%             \IF{$d(q, s) \le \varepsilon$} 
+%                 \STATE $Result \leftarrow Result \cup \{s\}$ 
+%             \ENDIF
+%         \ENDIF
+%     \ENDFOR
+% \ENDFOR
+% \RETURN $Result$
+% \end{algorithmic}
+% \end{algorithm}
+
+
+\textbf{World Encapsulation and Data Structure.}
+To enable multi-dimensional pruning, each world $\textbf{W}_C$ in the hierarchy is not merely a cluster of sequences, but a rich geometric navigator. Specifically, a world encapsulates:
+\begin{enumerate}
+    \item A \textbf{center sequence} $C \in \textbf{G}$ and a covering radius $r$.
+    \item A set of \textbf{multilateration beacons} $\textbf{B}_{\textbf{W}_C}$, which were elegantly extracted from the intermediate tiers during construction to guarantee uniform spatial dispersion.
+    \item A \textbf{Metric Minimum Bounding Box (MBB)} for each of its connected sub-worlds. For any child world $\textbf{W}_{C'}$, the parent stores the distance bounds $\textbf{W}_{C'}.\text{MBB}_b = [\min, \max]$ representing the exact spatial envelope of $\textbf{W}_{C'}$ relative to a beacon $b \in \textbf{B}_{\textbf{W}_C}$.
+\end{enumerate}
+
+\textbf{The Multilateration Algorithm.}
+Algorithm \ref{alg:navigation} details the query phase for a query sequence $Q$ with an edit distance threshold $t$. The navigation descends through the tiers using a stringent two-step filtration mechanism:
+
+\textit{1. $O(1)$ Beacon-Based Multilateration:} Before computing the computationally expensive edit distance between the query $Q$ and a child world's center $C'$, the algorithm performs a series of lightweight fuzzy multilateration checks. It computes the distance from the query to the established beacons $\mathrm{Dist}_{\mathrm{edit}}(Q, b)$. According to the inherent triangular inequality of the metric space $\mathcal{M}$, if the query sphere $\textbf{C}_Q$ intersects with the child world $\textbf{W}_{C'}$, the distance $\mathrm{Dist}_{\mathrm{edit}}(Q, b)$ must fall within the expanded metric envelope of the child: $[\textbf{W}_{C'}.\text{MBB}_b.\min - t, \textbf{W}_{C'}.\text{MBB}_b.\max + t]$. If this condition is violated for \textit{any} beacon $b$, the child world $\textbf{W}_{C'}$ is mathematically proven to be disjoint from the query sphere $\textbf{C}_Q$ and is immediately pruned.
+
+\textit{2. Intersection vs. Strict Containment:} For sub-worlds that survive the MBB filtration, the algorithm computes the actual distance to the child's center, $dist = \mathrm{Dist}_{\mathrm{edit}}(Q, C')$. Here, the algorithm dynamically adapts its branching strategy based on the spatial relationship:
+\begin{itemize}
+    \item \textbf{Strict Containment (Fast Path):} If $dist + t \le r'$, the query sphere $\textbf{C}_Q$ is perfectly swallowed by the child world $\textbf{W}_{C'}$ (where $r'$ is the radius of $\textbf{W}_{C'}$). Because the DNA sequence space is densely clustered, this is the most frequent scenario. The algorithm confidently discards all other candidate sub-worlds and exclusively descends into this single container (setting $FastPath$ to TRUE), effectively linearizing the search time.
+    \item \textbf{Boundary Intersection (Branching):} If the query sphere is not fully inclusive but merely overlaps with the world boundary (i.e., $dist \le r' + t$ but $dist + t > r'$), the query sphere $\textbf{C}_Q$ straddles multiple worlds. To prevent false negatives and ensure comprehensive retrieval, the algorithm cannot use the Fast Path. Instead, it adds $\textbf{W}_{C'}$ to the candidate set for the next layer and continues to evaluate other sibling worlds, keeping all intersecting branches alive for the next tier.
+\end{itemize}
+
+\textbf{Leaf Refinement.}
+Upon reaching the bottom tier, the search space has been drastically reduced to a highly localized neighborhood. The surviving candidate reference sequences $R \in \textbf{G}$ are filtered one final time using the local beacons, requiring $|\mathrm{Dist}_{\mathrm{edit}}(Q, b) - \mathrm{Dist}_{\mathrm{edit}}(R, b)| \le t$. Only the reference sequences that pass this final geometric sieve trigger the precise edit distance calculation $\mathrm{Dist}_{\mathrm{edit}}(Q, R)$, ensuring minimal computational overhead to assemble the final tight envelope $\textbf{E}_Q$.
+
+\begin{algorithm*}[p]
+\caption{Hierarchical Multilateration Search}
+\label{alg:navigation}
+\small
+\begin{algorithmic}[1]
+    \setlength{\itemsep}{0.05em}
+    \State \textbf{Input:} Query $Q$, Distance Threshold $t$, Index Root $\textbf{W}_{root}$
+    \State \textbf{Output:} Comprehensive candidate envelope $\textbf{E}_Q$
+    \State $W_{current} \leftarrow \{\textbf{W}_{root}\}$; \quad $\textbf{E}_Q \leftarrow \emptyset$
+
+    \State \textbf{/* Phase 1: Top-Down Pruning */}
+    \For{$l = 1$ \textbf{to} $k-1$}
+        \State $W_{next} \leftarrow \emptyset$; \quad $FastPath \leftarrow \text{FALSE}$
+        \ForAll{World $\textbf{W}_C \in W_{current}$}
+            \ForAll{Child World $\textbf{W}_{C'}$ of $\textbf{W}_C$}
+                \State \textbf{/* Step 1: $O(1)$ Prune using pre-computed MBBs */}
+                \If{$\exists b \in \textbf{B}_{\textbf{W}_C}$ \textbf{s.t.} $\mathrm{Dist}_{\mathrm{edit}}(Q, b) \notin [\textbf{W}_{C'}.\text{MBB}_b.\min - t, \textbf{W}_{C'}.\text{MBB}_b.\max + t]$}
+                    \State \textbf{continue} \Comment{Prune disjoint sub-world}
+                \EndIf
+                
+                \State \textbf{/* Step 2: Center distance evaluation */}
+                \State $dist \leftarrow \mathrm{Dist}_{\mathrm{edit}}(Q, C')$
+                \If{$dist \le r' + t$} \Comment{Intersection confirmed ($r'$ is radius of $\textbf{W}_{C'}$)}
+                    \State $W_{next} \leftarrow W_{next} \cup \{\textbf{W}_{C'}\}$
+                    \If{$dist + t \le r'$} \Comment{Strict Containment}
+                        \State $W_{next} \leftarrow \{\textbf{W}_{C'}\}$; \quad $FastPath \leftarrow \text{TRUE}$
+                        \State \textbf{break} \Comment{Trigger Fast Path, ignore siblings}
+                    \EndIf
+                \EndIf
+            \EndFor
+            \If{$FastPath$} \State \textbf{break} \EndIf
+        \EndFor
+        \State $W_{current} \leftarrow W_{next}$
+    \EndFor
+
+    \State \textbf{/* Phase 2: Leaf Refinement */}
+    \ForAll{Leaf World $\textbf{W}_C \in W_{current}$}
+        \ForAll{Reference Sequence $R \in \textbf{W}_C.\text{Data}$}
+            \If{$\forall b \in \textbf{B}_{\textbf{W}_C}, |\mathrm{Dist}_{\mathrm{edit}}(Q, b) - \mathrm{Dist}_{\mathrm{edit}}(R, b)| \le t$}
+                \If{$\mathrm{Dist}_{\mathrm{edit}}(Q, R) \le t$} 
+                    \State $\textbf{E}_Q \leftarrow \textbf{E}_Q \cup \{R\}$ 
+                \EndIf
+            \EndIf
+        \EndFor
+    \EndFor
+    \State \Return $\textbf{E}_Q$
+\end{algorithmic}
+\end{algorithm*}
+
+
+\newpage
+\subsection*{Appendix D. Technical Details of NavigaMer World Construction}
+
+
+World construction is regulated by two sets of parameters:
+a world tier count $T$, set of world radius configuration $r_i$ for tier $i$.
+
+\textbf{Step I: World hierarchy sketch construction.} 
+During this initial phase, the algorithm operates on an extended tier system comprising both the $k$ primary world tiers and $k-1$ temporary intermediate tiers. As each reference sequence $u \in \mathcal{S}$ is inserted top-down, it is assigned to the nearest covering world at each successive tier. If no existing world fully covers the sequence at a given stratum (i.e., the distance exceeds the tier's radius), a new world is instantiated. To maintain a lightweight initial structure, each sub-world establishes only a single topological link with its immediate subsuming super-world, resulting in a preliminary skeletal tree.
+
+\textbf{Step II: Comprehensive inter-tier world rebinding.} 
+To eliminate the order-dependency of the skeletal insertion process and guarantee robust navigation, the tree is transformed into a Directed Acyclic Graph (DAG). The algorithm systematically evaluates spatial overlaps between adjacent tiers in the extended hierarchy. If the distance between a parent world's center and a candidate child world's center is less than or equal to the sum of their respective radii, a valid spatial overlap is confirmed, and a directed edge is established. This ensures that a super-world is connected with all sub-worlds that fall within its geometric influence.
+
+\textbf{Step III: Beacon extraction, intermediate world by-passing, and MBB computation.} 
+In the final structural optimization, the temporary intermediate tiers are dissolved. For each primary world, the centers of its connected sub-worlds in the immediate intermediate tier are extracted and designated as its multilateration beacons. The intermediate nodes are then structurally bypassed: the primary parent world inherits all outgoing edges of its intermediate children, connecting directly to the "grandchildren" in the next primary tier. Finally, the algorithm computes the Metric Minimum Bounding Box (MBB). For each newly extracted beacon, the minimum and maximum distances to all newly bound direct sub-worlds are calculated and stored. This localized metric envelope empowers the query phase with an $O(1)$ pivot filtering mechanism.
+
+
+\begin{algorithm*}[p]
+\caption{Three-Stage Construction Process}
+\label{alg:construction}
+\small
+\begin{algorithmic}[1]
+    \setlength{\itemsep}{0.05em}
+    \State \textbf{Input:} Sequence database $\mathcal{S}$, Extended Layer Radii $\tilde{\mathcal{R}} = \{\tilde{R}_1, \dots, \tilde{R}_{2k-1}\}$
+    \State \textbf{Output:} Navigable Index Graph $G$ with Primary Tiers, Beacons, and MBBs
+
+    \State \textbf{/* Phase I: Extended Hierarchy Sketch Construction */}
+    \State Initialize $G$ with root layer $\tilde{L}_1$
+    \ForAll{$u \in \mathcal{S}$}
+        \State $Parent \leftarrow \text{BestMatchRoot}(\tilde{L}_1, u)$
+        \For{$l = 1$ \textbf{to} $2k-1$}
+            \State $W_{cover} \leftarrow \{ w \in \text{Children}(Parent) \mid d(u, w) \le \tilde{R}_l \}$
+            \If{$W_{cover} = \emptyset$}
+                \State $w_{new} \leftarrow \text{CreateNode}(u, \tilde{R}_l)$
+                \State Add edge $Parent \to w_{new}$ \Comment{Skeletal tree link}
+                \State $W_{cover} \leftarrow \{w_{new}\}$
+            \EndIf
+            \State $Parent \leftarrow \text{SelectNearest}(W_{cover}, u)$
+        \EndFor
+    \EndFor
+
+    \State \textbf{/* Phase II: Comprehensive Inter-Tier Rebinding */}
+    \For{$l = 1$ \textbf{to} $2k-2$}
+        \ForAll{Parent Node $p \in \tilde{L}_l$}
+            \ForAll{Candidate Child $c \in \tilde{L}_{l+1}$}
+                \If{$d(p.\text{center}, c.\text{center}) \le \tilde{R}_l + \tilde{R}_{l+1}$}
+                    \State Add edge $p \to c$ \Comment{Transform tree into DAG}
+                \EndIf
+            \EndFor
+        \EndFor
+    \EndFor
+
+    \State \textbf{/* Phase III: Extraction, Bypassing, and MBB Computation */}
+    \For{$i = 1$ \textbf{to} $k-1$}
+        \State $l_{primary} \leftarrow 2i - 1$
+        \ForAll{Primary Node $w \in \tilde{L}_{l_{primary}}$}
+            \State $IntNodes \leftarrow \text{Children}(w)$ \Comment{Nodes in temporary intermediate tier}
+            \State \textbf{/* Step 3.1: Beacon Extraction */}
+            \State $w.\text{Beacons} \leftarrow \{v.\text{center} \mid v \in IntNodes\}$
+            
+            \State \textbf{/* Step 3.2: Intermediate World By-passing */}
+            \State $w.\text{DirectChildren} \leftarrow \bigcup_{v \in IntNodes} \text{Children}(v)$ 
+            \State Update graph: replace $w \to IntNodes$ with $w \to w.\text{DirectChildren}$
+            
+            \State \textbf{/* Step 3.3: Compute Metric MBBs */}
+            \ForAll{$b \in w.\text{Beacons}$}
+                \State $D_{set} \leftarrow \{ d(c.\text{center}, b) \mid c \in w.\text{DirectChildren} \}$
+                \State $w.\text{MBB}[b] \leftarrow [\min(D_{set}), \max(D_{set})]$ \Comment{Pivot Filtering}
+            \EndFor
+        \EndFor
+    \EndFor
+    \State Remove all intermediate tiers from $G$
+\end{algorithmic}
+\end{algorithm*}
+
+\label{supp:algorithms}
+
+
+\end{document}

@@ -23,4 +23,12 @@ __pycache__/
 navigamer_cpp/navigamer
 navigamer_cpp/test_recall
 navigamer_cpp/test_distance_bound
+navigamer_cpp/src/*.d
 navigamer_cpp/build/
+
+# VSCode settings
+.vscode/
+
+# codex settings
+AGENTS.md
+ARCHITECTURE.md

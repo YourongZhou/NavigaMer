@@ -17,8 +17,8 @@ class BioGeometryIndexBuilder {
 
   void build(const std::vector<std::shared_ptr<BioSequence>>& raw_sequences);
 
-  // 各层节点 (1=SW, 2=MW, 3=LW)
-  std::vector<std::shared_ptr<WorldNode>> layers[4];  // 0 未用
+  // Public layers after collapse: 1=SW, 2=MW, 3=LW. Index 0 is unused.
+  std::vector<std::shared_ptr<WorldNode>> layers[4];
   std::unordered_map<std::string, std::shared_ptr<BioSequence>> unique_sequences;
 
   struct Statistics {
@@ -40,7 +40,7 @@ class BioGeometryIndexBuilder {
   Statistics stats_;
   int radius_config[4] = {0, R_SW, R_MW, R_LW};
 
-  // 5 拓展层半径: LW -> INT1 -> MW -> INT2 -> SW
+  // Five extended-tier radii before collapse: LW -> INT1 -> MW -> INT2 -> SW.
   std::vector<int> extended_radii_;
   std::vector<std::vector<std::shared_ptr<WorldNode>>> extended_layers_;
 

@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 find_package(OpenMP REQUIRED)
 
-# NavigaMer v7 (Multilateration-Enhanced) - C++ 实现
+# NavigaMer v8 C++ reference implementation.
 add_executable(navigamer
   src/main.cpp
   src/structure.cpp
@@ -21,7 +21,7 @@ target_include_directories(navigamer PRIVATE
 
 target_link_libraries(navigamer PRIVATE OpenMP::OpenMP_CXX)
 
-# Release 优化
+# Release optimization flags.
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
