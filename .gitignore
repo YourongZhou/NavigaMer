@@ -32,3 +32,9 @@ navigamer_cpp/build/
 # codex settings
 AGENTS.md
 ARCHITECTURE.md
+.codex
+
+# paper related
+Appendix.tex
+paper_draft*.tex
+output.png
