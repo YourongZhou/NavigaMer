@@ -56,9 +56,9 @@ struct WorldNode {
   std::string node_id;
   std::shared_ptr<BioSequence> center_ptr;
   int radius = 0;
-  // During construction: 0=LW, 1=INT1, 2=MW, 3=INT2, 4=SW.
-  // After collapse: 1=SW, 2=MW, 3=LW.
-  int layer = 0;
+  int expanded_layer_index = -1;
+  int primary_layer_index = -1;
+  bool is_primary = false;
 
   std::vector<std::shared_ptr<WorldNode>> child_nodes;
   std::vector<std::shared_ptr<BioSequence>> child_leaves;
@@ -74,7 +74,7 @@ struct WorldNode {
 
   int data_count = 0;
 
-  WorldNode(std::shared_ptr<BioSequence> center, int r, int extended_tier);
+  WorldNode(std::shared_ptr<BioSequence> center, int r, int expanded_layer_idx);
 
   std::string get_center_sequence() const;
 };

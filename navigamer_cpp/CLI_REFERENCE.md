@@ -7,17 +7,18 @@ The `navigamer` executable (`src/main.cpp`) implements the commands below. Paths
 - **C++17**, **OpenMP**
 - Build: `make` or CMake (see [`README.md`](README.md) in this directory)
 
-## Global radius flags
+## Global hierarchy flags
 
 Used by all pipelines that build the index:
 
 | Flag | Default | Meaning |
 | ---- | ------- | ------- |
+| `--primary-radii` | *(none)* | Comma-separated primary-layer radii from coarsest to finest, e.g. `40,28,18,10` |
 | `--r-sw` | `5` | Small-world radius (`R_SW` in `structure.hpp`) |
 | `--r-mw` | `15` | Mid-world radius |
 | `--r-lw` | `30` | Large-world radius |
 
-The implementation also uses **extended** tiers internally (see `index_builder.cpp`); these three knobs set the primary metric balls. SW nodes additionally store local leaf-beacon rows for the final refinement sieve.
+If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
 ## I/O conventions (`io_utils`)
 
@@ -33,7 +34,7 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--size` | `500` | Number of reads |
-| `--r-sw`, `--r-mw`, `--r-lw` | 5 / 15 / 30 | Radii |
+| `--primary-radii` or `--r-sw`, `--r-mw`, `--r-lw` | `30,15,5` by default through the legacy flags | Primary-layer radii |
 
 ### `build`
 
@@ -99,6 +100,28 @@ Builds one in-memory index from reference windows of fixed length `--length` and
 
 `boundary` currently uses substitution-only mutations and, for each cell, additionally samples up to 50 queries for `brute_force` agreement checks. Like the other C++ commands, the index is built in memory only and is not serialized to disk.
 
+### `layer-radius-experiment`
+
+Builds one index per `(L, r_leaf, alpha)` combination, reuses a fixed query set across the full sweep, and writes one CSV row per query with search-cost instrumentation only.
+
+**Required:** `--ref`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--length` | `250` | Reference window and query length |
+| `--tolerance` | `2` | Edit-distance threshold used during search |
+| `--query-edits` | `--tolerance` | Number of substitution edits applied when generating the fixed query set |
+| `--queries-per-cell` | `200` | Number of fixed queries reused across every `(L, r_leaf, alpha)` combination |
+| `--stride` | *(unset)* | Explicit reference-window stride; if set, overrides `--stride-mode` |
+| `--stride-mode` | `sparse` | `sparse` uses stride `length`; `dense` uses stride `length / 4` |
+| `--seed` | `42` | Seed for fixed query generation |
+| `--L-values` | `2,3,4,5` | Comma-separated primary-layer counts |
+| `--r-leaf-values` | `4,8,12` | Comma-separated finest-layer radii |
+| `--alpha-values` | `0.5,0.7` | Comma-separated geometric decay factors in `(0,1)` |
+| `--out` | `layer_radius_search_stats.csv` | Output CSV path |
+
+Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, alpha)` and written to the CSV as a pipe-delimited string such as `64|32|16|8`.
+
 ## TSV columns
 
 **`run`:**  
@@ -107,10 +130,13 @@ Builds one in-memory index from reference windows of fixed length `--length` and
 **`benchmark`** adds:  
 `dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`
 
-`candidate_count_for_prune` and `beacon_prune_count` include both hierarchy-level MBB pruning and SW leaf-beacon refinement.
+`candidate_count_for_prune` and `beacon_prune_count` include both hierarchy-level MBB pruning and finest-layer leaf-beacon refinement.
 
 **`boundary`:**  
 `length`, `stride_mode`, `num_index_seqs`, `error_rate`, `error_edits`, `tolerance_rate`, `tolerance_edits`, `query_count`, `source_recovery_rate`, `any_hit_rate`, `avg_hit_count`, `avg_dist_calcs`, `avg_leaf_verify_count`, `avg_candidate_count_for_prune`, `avg_beacon_prune_count`, `avg_pruning_rate`, `bf_sample_count`, `bf_source_recovery_rate`, `bf_agreement_rate`, `bf_source_mismatch_count`
+
+**`layer-radius-experiment`:**  
+`dataset`, `query_id`, `query_length`, `L`, `r_leaf`, `alpha`, `radius_schedule`, `query_time_ms`, `world_access_count`, `node_access_count`, `edge_access_count`, `anchor_distance_count`, `bound_check_count`, `candidate_count`, `candidate_verify_count`
 
 ## Standalone test binaries
 
@@ -118,5 +144,7 @@ Builds one in-memory index from reference windows of fixed length `--length` and
 | ------ | ------- |
 | `test_recall` | Randomized recall check: adaptive vs brute force |
 | `test_distance_bound` | Distance-bound checks across search modes |
+| `test_hierarchy_config` | Hierarchy-config validation for multi-primary-layer builds |
+| `test_search_stats_bin` | Radius-schedule and search-cost instrumentation checks |
 
 Build with `make test_recall` / `make test_distance_bound`.

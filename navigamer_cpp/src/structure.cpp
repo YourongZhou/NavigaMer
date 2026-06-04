@@ -15,23 +15,22 @@ void BioSequence::set_bwt_interval(int64_t bwt_start, int64_t bwt_end) {
   bwt_interval.end = bwt_end;
 }
 
-static std::string make_node_id_extended(int extended_tier) {
-  static const char* names[] = {"LW", "I1", "MW", "I2", "SW"};
-  const char* layer_name =
-      (extended_tier >= 0 && extended_tier <= 4) ? names[extended_tier] : "UNK";
+static std::string make_node_id_extended(int expanded_layer_idx) {
   thread_local std::mt19937 gen(std::random_device{}());
   std::uniform_int_distribution<> dis(0, 15);
   const char hex[] = "0123456789abcdef";
   std::string suffix(8, '0');
   for (int i = 0; i < 8; ++i) suffix[i] = hex[dis(gen)];
-  return std::string(layer_name) + "_" + suffix;
+  std::ostringstream os;
+  os << "L" << expanded_layer_idx << "_" << suffix;
+  return os.str();
 }
 
-WorldNode::WorldNode(std::shared_ptr<BioSequence> center, int r, int extended_tier)
-    : node_id(make_node_id_extended(extended_tier)),
+WorldNode::WorldNode(std::shared_ptr<BioSequence> center, int r, int expanded_layer_idx)
+    : node_id(make_node_id_extended(expanded_layer_idx)),
       center_ptr(std::move(center)),
       radius(r),
-      layer(extended_tier) {}
+      expanded_layer_index(expanded_layer_idx) {}
 
 std::string WorldNode::get_center_sequence() const {
   return center_ptr ? center_ptr->seq : std::string();

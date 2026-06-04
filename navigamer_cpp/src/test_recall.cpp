@@ -51,6 +51,7 @@ std::string mutate(const std::string& seq, int num_mutations, std::mt19937& gen)
 }
 
 struct TestConfig {
+  std::vector<int> primary_radii;
   int r_sw;
   int r_mw;
   int r_lw;
@@ -61,6 +62,20 @@ struct TestConfig {
   int query_mutations;
   unsigned seed;
 };
+
+std::string config_label(const TestConfig& cfg) {
+  if (!cfg.primary_radii.empty()) {
+    std::string label = "primary=";
+    for (size_t i = 0; i < cfg.primary_radii.size(); ++i) {
+      if (i) label += ",";
+      label += std::to_string(cfg.primary_radii[i]);
+    }
+    return label;
+  }
+  return "R_SW=" + std::to_string(cfg.r_sw) +
+         " R_MW=" + std::to_string(cfg.r_mw) +
+         " R_LW=" + std::to_string(cfg.r_lw);
+}
 
 struct TestResult {
   bool passed;
@@ -90,7 +105,10 @@ TestResult run_test(const TestConfig& cfg) {
         "rand_" + std::to_string(i), random_dna(cfg.seq_len, gen)));
   }
 
-  navigamer::BioGeometryIndexBuilder builder(cfg.r_sw, cfg.r_mw, cfg.r_lw);
+  navigamer::BioGeometryIndexBuilder builder =
+      cfg.primary_radii.empty()
+          ? navigamer::BioGeometryIndexBuilder(cfg.r_sw, cfg.r_mw, cfg.r_lw)
+          : navigamer::BioGeometryIndexBuilder(navigamer::HierarchyConfig(cfg.primary_radii));
   builder.build(seqs);
 
   navigamer::BioGeometrySearchEngine engine(builder);
@@ -145,21 +163,27 @@ int main() {
 
   std::vector<TestConfig> configs = {
     // Basic small-scale test: tolerance=1 < R_SW=5.
-    {5, 15, 30,  1,  100, 20,  50, 1, 42},
+    {{}, 5, 15, 30,  1,  100, 20,  50, 1, 42},
     // Moderate tolerance.
-    {5, 15, 30,  2,  100, 20,  50, 2, 123},
+    {{}, 5, 15, 30,  2,  100, 20,  50, 2, 123},
     // Larger tolerance under the SW radius.
-    {5, 15, 30,  3,  200, 20, 100, 3, 456},
+    {{}, 5, 15, 30,  3,  200, 20, 100, 3, 456},
     // Boundary case: tolerance is still below R_SW.
-    {5, 15, 30,  4,  200, 20, 100, 4, 789},
+    {{}, 5, 15, 30,  4,  200, 20, 100, 4, 789},
     // Longer reads.
-    {5, 15, 30,  2,  100, 50,  50, 2, 1001},
+    {{}, 5, 15, 30,  2,  100, 50,  50, 2, 1001},
     // Larger index.
-    {5, 15, 30,  2,  500, 20, 200, 2, 2001},
+    {{}, 5, 15, 30,  2,  500, 20, 200, 2, 2001},
     // Alternate radius configuration.
-    {3, 10, 20,  2,  200, 20, 100, 2, 3001},
+    {{}, 3, 10, 20,  2,  200, 20, 100, 2, 3001},
     // Exact matching.
-    {5, 15, 30,  0,  100, 20,  50, 0, 4001},
+    {{}, 5, 15, 30,  0,  100, 20,  50, 0, 4001},
+    // Two primary layers.
+    {{20, 5}, 0, 0, 0,  2,  200, 20, 100, 2, 5001},
+    // Four primary layers.
+    {{40, 28, 18, 8}, 0, 0, 0,  2,  200, 20, 100, 2, 6001},
+    // Five primary layers.
+    {{50, 35, 24, 16, 8}, 0, 0, 0,  2,  200, 20, 100, 2, 7001},
   };
 
   int pass_count = 0;
@@ -168,7 +192,7 @@ int main() {
   for (size_t i = 0; i < configs.size(); ++i) {
     const auto& c = configs[i];
     std::cerr << "Test " << (i + 1) << "/" << configs.size()
-              << ": R_SW=" << c.r_sw << " R_MW=" << c.r_mw << " R_LW=" << c.r_lw
+              << ": " << config_label(c)
               << " tol=" << c.tolerance
               << " seqs=" << c.num_seqs << " len=" << c.seq_len
               << " queries=" << c.num_queries
