@@ -14,9 +14,9 @@
 | --------------- | -------------- |
 | **Extended world hierarchy (sketch)** | `BioGeometryIndexBuilder::phase1_build_extended_sketch()` — `navigamer_cpp/src/index_builder.cpp` |
 | **DAG topology & overlap binding** | `BioGeometryIndexBuilder::phase2_inter_tier_rebinding()` — same file |
-| **Beacon extraction & tier collapse + MBBs** | `BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb()` — intermediate tiers collapsed; **Metric Bounding Boxes (MBBs)** for consistency checks |
-| **Leaf beacon refinement** | `BioGeometryIndexBuilder::attach_leaves()` precomputes SW leaf-to-beacon distances; `BioGeometrySearchEngine::verify_leaf_candidates()` applies the final local beacon sieve before exact verification |
-| **Hierarchical multilateration search** | `BioGeometrySearchEngine::search_adaptive()` — `navigamer_cpp/src/search_engine.cpp` (MBB-based pruning plus SW leaf refinement via triangle inequality) |
+| **Beacon extraction & tier collapse + MBBs** | `BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb()` — one auxiliary tier between each adjacent pair of primary layers is collapsed into **Metric Bounding Boxes (MBBs)** for consistency checks |
+| **Leaf beacon refinement** | `BioGeometryIndexBuilder::attach_leaves()` precomputes finest-layer leaf-to-beacon distances; `BioGeometrySearchEngine::verify_leaf_candidates()` applies the final local beacon sieve before exact verification |
+| **Hierarchical multilateration search** | `BioGeometrySearchEngine::search_adaptive()` — `navigamer_cpp/src/search_engine.cpp` (MBB-based pruning plus finest-layer leaf refinement via triangle inequality) |
 
 Data structures (`WorldNode`, `MBB`, `BioSequence`) are in `navigamer_cpp/include/structure.hpp`. Edit distance is in `navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in `navigamer_cpp/src/io_utils.cpp`.
 
@@ -45,6 +45,7 @@ pip install -r reproducibility/requirements.txt
 cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
 ./navigamer demo --size 200
+./navigamer demo --primary-radii 30,15,5
 ```
 
 Optional boundary sweep using the bundled small reference:
@@ -54,9 +55,28 @@ cd navigamer_cpp
 ./navigamer boundary --ref ../data/human/chr1_subset --length 250 --stride-mode sparse --queries-per-cell 1 --error-rates 0 --tolerance-rates 0 --out /tmp/navigamer_boundary.tsv
 ```
 
+Layer/radius sweep for search-cost instrumentation:
+
+```bash
+cd navigamer_cpp
+./navigamer layer-radius-experiment \
+  --ref ../data/human/chr1_subset \
+  --length 250 \
+  --stride 1 \
+  --tolerance 2 \
+  --query-edits 2 \
+  --queries-per-cell 50 \
+  --L-values 2,3,4,5 \
+  --r-leaf-values 4,8,12 \
+  --alpha-values 0.5,0.7 \
+  --out /tmp/layer_radius_search_stats.csv
+```
+
 Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFERENCE.md). C++ layout and tests: [`navigamer_cpp/README.md`](navigamer_cpp/README.md).
 
 The current C++ index is in-memory only: `build`, `query`, `run`, `benchmark`, and `boundary` rebuild the index for each process invocation. The `boundary` command is intended for long-sequence capability sweeps and reuses a single in-memory index across the full `error_rate × tolerance_rate` grid inside one run.
+
+The default CLI path still uses the legacy three primary layers (`LW/MW/SW`) via `--r-lw`, `--r-mw`, and `--r-sw`, but the C++ implementation now also supports any number of primary layers `K >= 2` through `--primary-radii coarse,...,fine`. One auxiliary tier is inserted automatically between each adjacent pair of primary layers during index construction and collapsed away before query-time navigation.
 
 ## Tests
 

@@ -1,23 +1,32 @@
 #ifndef NAVIGAMER_SEARCH_ENGINE_HPP
 #define NAVIGAMER_SEARCH_ENGINE_HPP
 
-#include "structure.hpp"
 #include "index_builder.hpp"
+#include "structure.hpp"
 #include "tools.hpp"
-#include <vector>
-#include <unordered_set>
-#include <unordered_map>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace navigamer {
 
 struct SearchStats {
+  size_t world_access_count = 0;
   size_t node_access_count = 0;
+  size_t edge_access_count = 0;
+  size_t anchor_distance_count = 0;
+  size_t bound_check_count = 0;
+  size_t candidate_count = 0;
+  size_t candidate_verify_count = 0;
   size_t dist_calc_count = 0;
   size_t leaf_verify_count = 0;
-  size_t layer_breakdown[4] = {0, 0, 0, 0};
+  std::vector<size_t> layer_breakdown;
   size_t beacon_prune_count = 0;
   size_t candidate_count_for_prune = 0;
+
+  SearchStats() = default;
+  explicit SearchStats(size_t num_layers) : layer_breakdown(num_layers, 0) {}
 
   double pruning_rate() const {
     if (candidate_count_for_prune == 0) return 0.0;
@@ -40,7 +49,7 @@ class BioGeometrySearchEngine {
 
   std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
   search_brute_force(const BioSequence& query_seq, int tolerance,
-                    const std::vector<std::shared_ptr<BioSequence>>& all_sequences);
+                     const std::vector<std::shared_ptr<BioSequence>>& all_sequences);
 
  private:
   const BioGeometryIndexBuilder& index_;
