@@ -65,6 +65,13 @@ class BioGeometryIndexBuilder {
     size_t phase2_exact_distance_calls = 0;
     size_t phase2_edges_added = 0;
     size_t phase2_full_scan_fallback_count = 0;
+    size_t phase2_pigeonhole_queries = 0;
+    size_t phase2_qgram_queries = 0;
+    size_t phase2_hybrid_queries = 0;
+    size_t phase2_qgram_candidate_pairs = 0;
+    size_t phase2_qgram_pruned_by_l1 = 0;
+    size_t phase2_length_pruned_pairs = 0;
+    size_t phase2_required_shared_nonpositive_count = 0;
     double phase2_candidate_reduction_ratio = 0.0;
     double phase2_exact_distance_reduction_ratio = 0.0;
     size_t total_possible_leaf_pairs = 0;
@@ -72,7 +79,15 @@ class BioGeometryIndexBuilder {
     size_t leaf_exact_distance_calls = 0;
     size_t leaf_attachments_added = 0;
     size_t leaf_full_scan_fallback_count = 0;
+    size_t leaf_pigeonhole_queries = 0;
+    size_t leaf_qgram_queries = 0;
+    size_t leaf_hybrid_queries = 0;
+    size_t leaf_qgram_candidate_pairs = 0;
+    size_t leaf_qgram_pruned_by_l1 = 0;
+    size_t leaf_length_pruned_pairs = 0;
+    size_t leaf_required_shared_nonpositive_count = 0;
     double leaf_candidate_reduction_ratio = 0.0;
+    double leaf_exact_distance_reduction_ratio = 0.0;
   };
   Statistics get_statistics() const;
   const HierarchyConfig& hierarchy_config() const { return hierarchy_; }

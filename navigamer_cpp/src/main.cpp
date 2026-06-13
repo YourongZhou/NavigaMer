@@ -43,7 +43,7 @@ void usage(const char* prog) {
             << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
-            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
+            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
             << "Global adaptive-search flags: [--mbb-filter-mode scan|rect]\n";
 }
 
@@ -816,9 +816,11 @@ int main(int argc, char** argv) {
   std::string alpha_values_csv = "0.5,0.7";
   std::string link_mode = "indexed";
   std::string leaf_attach_mode = "indexed";
+  std::string range_candidate_mode = "auto";
   std::string mbb_filter_mode = "scan";
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;
+  int qgram_q = 5;
   size_t min_rect_index_fanout = 64;
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
@@ -866,6 +868,14 @@ int main(int argc, char** argv) {
       leaf_attach_mode = argv[++i];
       continue;
     }
+    if (a == "--range-candidate-mode" && i + 1 < argc) {
+      range_candidate_mode = argv[++i];
+      continue;
+    }
+    if (a == "--qgram-q" && i + 1 < argc) {
+      qgram_q = std::atoi(argv[++i]);
+      continue;
+    }
     if (a == "--mbb-filter-mode" && i + 1 < argc) {
       mbb_filter_mode = argv[++i];
       continue;
@@ -896,6 +906,9 @@ int main(int argc, char** argv) {
         navigamer::parse_build_range_mode(leaf_attach_mode);
     range_config.range_join.min_seed_len = range_min_seed_length;
     range_config.range_join.max_seed_len = range_max_seed_length;
+    range_config.range_join.qgram_q = qgram_q;
+    range_config.range_join.candidate_mode =
+        navigamer::parse_range_candidate_mode(range_candidate_mode);
     range_config.min_rect_index_fanout = min_rect_index_fanout;
     navigamer::SearchConfig search_config;
     search_config.mbb_filter_mode = navigamer::parse_mbb_filter_mode(mbb_filter_mode);

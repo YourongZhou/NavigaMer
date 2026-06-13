@@ -88,30 +88,55 @@ navigamer::BuildRangeConfig full_config() {
   return config;
 }
 
-}  // namespace
+navigamer::BuildRangeConfig indexed_config(navigamer::RangeCandidateMode mode) {
+  navigamer::BuildRangeConfig config;
+  config.range_join.candidate_mode = mode;
+  config.range_join.qgram_q = 5;
+  return config;
+}
 
-int main() {
-  auto sequences = make_sequences(100);
-  navigamer::HierarchyConfig hierarchy({20, 10, 4});
-
-  navigamer::BioGeometryIndexBuilder full_builder(hierarchy, full_config());
-  navigamer::BioGeometryIndexBuilder indexed_builder(hierarchy);
-  full_builder.build(sequences);
-  indexed_builder.build(sequences);
-
+void assert_equivalent(
+    const navigamer::BioGeometryIndexBuilder& full_builder,
+    const navigamer::BioGeometryIndexBuilder& indexed_builder,
+    const std::vector<SequencePtr>& sequences) {
   assert(primary_edges(full_builder) == primary_edges(indexed_builder));
   assert(leaf_links(full_builder) == leaf_links(indexed_builder));
 
   std::mt19937 gen(99);
-  for (size_t i = 0; i < 25; ++i) {
+  for (size_t i = 0; i < std::min<size_t>(25, sequences.size()); ++i) {
     navigamer::BioSequence query(
         "q_" + std::to_string(i), mutate(sequences[i]->seq, 2, gen));
     assert(hit_sequences(full_builder, query, 2) ==
            hit_sequences(indexed_builder, query, 2));
   }
+}
+
+}  // namespace
+
+int main() {
+  auto sequences = make_sequences(100);
+  sequences.push_back(
+      std::make_shared<navigamer::BioSequence>("ambiguous", "AACNNGTACN"));
+  navigamer::HierarchyConfig hierarchy({20, 10, 4});
+
+  navigamer::BioGeometryIndexBuilder full_builder(hierarchy, full_config());
+  navigamer::BioGeometryIndexBuilder qgram_builder(
+      hierarchy, indexed_config(navigamer::RangeCandidateMode::QGramOnly));
+  navigamer::BioGeometryIndexBuilder hybrid_builder(
+      hierarchy, indexed_config(navigamer::RangeCandidateMode::Hybrid));
+  navigamer::BioGeometryIndexBuilder auto_builder(
+      hierarchy, indexed_config(navigamer::RangeCandidateMode::Auto));
+  full_builder.build(sequences);
+  qgram_builder.build(sequences);
+  hybrid_builder.build(sequences);
+  auto_builder.build(sequences);
+
+  assert_equivalent(full_builder, qgram_builder, sequences);
+  assert_equivalent(full_builder, hybrid_builder, sequences);
+  assert_equivalent(full_builder, auto_builder, sequences);
 
   auto full_stats = full_builder.get_statistics();
-  auto indexed_stats = indexed_builder.get_statistics();
+  auto indexed_stats = qgram_builder.get_statistics();
   assert(full_stats.phase2_exact_distance_calls ==
          full_stats.phase2_total_possible_pairs);
   assert(full_stats.leaf_exact_distance_calls ==
@@ -127,10 +152,25 @@ int main() {
   assert(full_stats.phase2_edges_added == indexed_stats.phase2_edges_added);
   assert(full_stats.leaf_attachments_added ==
          indexed_stats.leaf_attachments_added);
+  assert(indexed_stats.phase2_qgram_queries > 0);
+  assert(indexed_stats.leaf_qgram_queries > 0);
+  assert(indexed_stats.phase2_qgram_candidate_pairs >=
+         indexed_stats.phase2_candidate_pairs);
+  assert(indexed_stats.leaf_qgram_candidate_pairs >=
+         indexed_stats.leaf_candidate_pairs);
+
+  auto hybrid_stats = hybrid_builder.get_statistics();
+  assert(hybrid_stats.phase2_hybrid_queries > 0);
+  assert(hybrid_stats.leaf_hybrid_queries > 0);
+  assert(hybrid_stats.phase2_exact_distance_calls <=
+         hybrid_stats.phase2_candidate_pairs);
+  assert(hybrid_stats.leaf_exact_distance_calls <=
+         hybrid_stats.leaf_candidate_pairs);
 
   auto short_sequences = make_sequences(20);
   navigamer::BioGeometryIndexBuilder fallback_builder(
-      navigamer::HierarchyConfig({10, 5}));
+      navigamer::HierarchyConfig({10, 5}),
+      indexed_config(navigamer::RangeCandidateMode::PigeonholeOnly));
   fallback_builder.build(short_sequences);
   auto fallback_stats = fallback_builder.get_statistics();
   assert(fallback_stats.phase2_full_scan_fallback_count > 0);

@@ -22,19 +22,27 @@ Used by all pipelines that build the index:
 | `--leaf-attach-mode` | `indexed` | Leaf attachment: `full` or exact `indexed` range join |
 | `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
+| `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full` |
+| `--qgram-q` | `5` | Positive q-gram length used by q-gram and hybrid candidate generation |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
-Indexed construction is exact. For query length `L` and threshold `tau`, it
-uses `block_len = floor(L / (tau + 1))` and
-`seed_len = min(range_max_seed_length, block_len)`. If `seed_len` is below
-`range_min_seed_length`, the range-join call explicitly falls back to a full
-scan. Otherwise, pigeonhole seeds generate a safe candidate superset and every
-candidate is verified with bounded exact edit distance. Builder summaries print
-possible pairs, candidates, exact calls, accepted links, fallback counts, and
-reduction ratios.
+Indexed construction is exact. Pigeonhole mode uses
+`block_len = floor(L / (tau + 1))` and
+`seed_len = min(range_max_seed_length, block_len)`, falling back to the
+length-compatible full set when the seed is too short. Q-gram mode safely
+prunes only pairs with `qgram_l1(a,b) > 2*q*tau`. Hybrid mode intersects the
+pigeonhole and q-gram safe candidate supersets. Auto uses pigeonhole when its
+seed is long enough and q-gram otherwise. Full candidate mode returns every
+length-compatible item.
+
+Every returned candidate is still verified with bounded exact edit distance;
+candidate generation never directly adds an edge or leaf attachment. Builder
+summaries distinguish possible pairs, returned candidates, exact calls,
+accepted results, length pruning, q-gram L1 pruning, per-mode query counts,
+fallback counts, and reduction ratios.
 
 Rectangle filtering is also exact. Rect mode returns a child world if and only
 if its existing MBB row intersects the query rectangle in every beacon
@@ -195,8 +203,9 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 | `test_search_stats_bin` | Radius-schedule and search-cost instrumentation checks |
 | `test_map150_recall` | Fixed-150bp mapper recall, strand, duplicate, and verifier checks |
 | `test_bounded_edit_distance` | Banded thresholded distance vs full Levenshtein |
-| `test_range_join` | Adaptive pigeonhole no-false-negative and verified-pair checks |
-| `test_build_range_equivalence` | Full vs indexed construction and search-result equivalence |
+| `test_qgram_filter` | Q-gram counts, L1 bound, ambiguous bases, and index no-false-negative checks |
+| `test_range_join` | Pigeonhole/q-gram/hybrid no-false-negative and verified-pair checks |
+| `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
 

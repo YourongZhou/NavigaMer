@@ -19,6 +19,7 @@ add_executable(navigamer
   src/main.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
@@ -38,6 +39,7 @@ add_executable(test_recall
   src/test_recall.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
@@ -55,6 +57,7 @@ add_executable(test_distance_bound
   src/test_distance_bound.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
@@ -72,6 +75,7 @@ add_executable(test_hierarchy_config
   src/test_hierarchy_config.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
@@ -84,6 +88,7 @@ add_executable(test_search_stats_bin
   src/test_search_stats.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
@@ -96,6 +101,7 @@ add_executable(test_map150_recall
   src/test_map150_recall.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
@@ -108,18 +114,27 @@ add_executable(test_bounded_edit_distance
   src/test_bounded_edit_distance.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
 )
 add_executable(test_range_join
   src/test_range_join.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
+)
+add_executable(test_qgram_filter
+  src/test_qgram_filter.cpp
+  src/structure.cpp
+  src/tools.cpp
+  src/qgram_filter.cpp
 )
 add_executable(test_build_range_equivalence
   src/test_build_range_equivalence.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
@@ -136,6 +151,7 @@ add_executable(test_mbb_filter_equivalence
   src/test_mbb_filter_equivalence.cpp
   src/structure.cpp
   src/tools.cpp
+  src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
@@ -160,6 +176,10 @@ target_include_directories(test_range_join PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(test_range_join PRIVATE OpenMP::OpenMP_CXX)
+target_include_directories(test_qgram_filter PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_qgram_filter PRIVATE OpenMP::OpenMP_CXX)
 target_include_directories(test_build_range_equivalence PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -178,7 +198,7 @@ target_include_directories(test_hierarchy_config PRIVATE
 target_link_libraries(test_hierarchy_config PRIVATE OpenMP::OpenMP_CXX)
 
 if(NAVIGAMER_WITH_SEQAN3)
-  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_range_join test_build_range_equivalence test_mbb_rect_index test_mbb_filter_equivalence)
+  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_qgram_filter test_range_join test_build_range_equivalence test_mbb_rect_index test_mbb_filter_equivalence)
     target_compile_definitions(${target} PRIVATE NAVIGAMER_WITH_SEQAN3)
     target_link_libraries(${target} PRIVATE seqan3::seqan3)
   endforeach()
@@ -196,6 +216,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   target_compile_options(test_search_stats_bin PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_map150_recall PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_bounded_edit_distance PRIVATE -O3 -DNDEBUG)
+  target_compile_options(test_qgram_filter PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_range_join PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_build_range_equivalence PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_mbb_rect_index PRIVATE -O3 -DNDEBUG)

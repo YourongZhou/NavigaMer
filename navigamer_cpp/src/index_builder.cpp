@@ -1,6 +1,7 @@
 #include "index_builder.hpp"
 #include <algorithm>
 #include <climits>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -97,6 +98,9 @@ void validate_range_config(const BuildRangeConfig& config) {
   if (config.range_join.max_seed_len < config.range_join.min_seed_len) {
     throw std::invalid_argument(
         "range-join max seed length must be at least min seed length");
+  }
+  if (config.range_join.qgram_q <= 0) {
+    throw std::invalid_argument("range-join q-gram length must be positive");
   }
   if (config.min_rect_index_fanout == 0) {
     throw std::invalid_argument("minimum rectangle-index fanout must be positive");
@@ -326,11 +330,29 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding() {
       auto candidates =
           parent_index.query(child->center_ptr->seq, max_parent_radius + child->radius);
       stats_.phase2_candidate_pairs += candidates.candidate_item_ids.size();
-      stats_.phase2_exact_distance_calls += candidates.candidate_item_ids.size();
       if (candidates.used_full_scan) stats_.phase2_full_scan_fallback_count++;
+      if (candidates.mode_used == RangeCandidateMode::PigeonholeOnly) {
+        stats_.phase2_pigeonhole_queries++;
+      } else if (candidates.mode_used == RangeCandidateMode::QGramOnly) {
+        stats_.phase2_qgram_queries++;
+      } else if (candidates.mode_used == RangeCandidateMode::Hybrid) {
+        stats_.phase2_hybrid_queries++;
+      }
+      stats_.phase2_qgram_candidate_pairs += candidates.qgram_candidate_count;
+      stats_.phase2_qgram_pruned_by_l1 += candidates.qgram_pruned_by_l1;
+      stats_.phase2_length_pruned_pairs += candidates.length_filtered_items;
+      stats_.phase2_required_shared_nonpositive_count +=
+          candidates.required_shared_nonpositive;
       for (size_t parent_idx : candidates.candidate_item_ids) {
         auto& parent = parents[parent_idx];
         int tau = parent->radius + child->radius;
+        if (std::llabs(
+                static_cast<long long>(parent->center_ptr->seq.size()) -
+                static_cast<long long>(child->center_ptr->seq.size())) > tau) {
+          stats_.phase2_length_pruned_pairs++;
+          continue;
+        }
+        stats_.phase2_exact_distance_calls++;
         int dist = compute_distance_bounded(
             parent->center_ptr->seq, child->center_ptr->seq, tau);
         if (dist <= tau) {
@@ -483,10 +505,28 @@ void BioGeometryIndexBuilder::attach_leaves(
     for (const auto& seq : unique_seqs) {
       auto candidates = world_index.query(seq->seq, max_radius);
       stats_.leaf_candidate_pairs += candidates.candidate_item_ids.size();
-      stats_.leaf_exact_distance_calls += candidates.candidate_item_ids.size();
       if (candidates.used_full_scan) stats_.leaf_full_scan_fallback_count++;
+      if (candidates.mode_used == RangeCandidateMode::PigeonholeOnly) {
+        stats_.leaf_pigeonhole_queries++;
+      } else if (candidates.mode_used == RangeCandidateMode::QGramOnly) {
+        stats_.leaf_qgram_queries++;
+      } else if (candidates.mode_used == RangeCandidateMode::Hybrid) {
+        stats_.leaf_hybrid_queries++;
+      }
+      stats_.leaf_qgram_candidate_pairs += candidates.qgram_candidate_count;
+      stats_.leaf_qgram_pruned_by_l1 += candidates.qgram_pruned_by_l1;
+      stats_.leaf_length_pruned_pairs += candidates.length_filtered_items;
+      stats_.leaf_required_shared_nonpositive_count +=
+          candidates.required_shared_nonpositive;
       for (size_t world_idx : candidates.candidate_item_ids) {
         auto& world = finest_layer[world_idx];
+        if (std::llabs(static_cast<long long>(seq->seq.size()) -
+                       static_cast<long long>(world->center_ptr->seq.size())) >
+            world->radius) {
+          stats_.leaf_length_pruned_pairs++;
+          continue;
+        }
+        stats_.leaf_exact_distance_calls++;
         int dist =
             compute_distance_bounded(seq->seq, world->center_ptr->seq, world->radius);
         if (dist <= world->radius) {
@@ -516,12 +556,23 @@ void BioGeometryIndexBuilder::print_summary() const {
             << build_range_mode_name(range_config_.link_mode)
             << " leaves=" << build_range_mode_name(range_config_.leaf_attach_mode)
             << " seeds=" << range_config_.range_join.min_seed_len
-            << ".." << range_config_.range_join.max_seed_len << "\n";
+            << ".." << range_config_.range_join.max_seed_len
+            << " candidates="
+            << range_candidate_mode_name(range_config_.range_join.candidate_mode)
+            << " qgram_q=" << range_config_.range_join.qgram_q << "\n";
   std::cerr << "  Phase2 range join: possible=" << stats.phase2_total_possible_pairs
             << " candidates=" << stats.phase2_candidate_pairs
             << " exact_calls=" << stats.phase2_exact_distance_calls
             << " edges=" << stats.phase2_edges_added
             << " fallbacks=" << stats.phase2_full_scan_fallback_count
+            << " pigeonhole_queries=" << stats.phase2_pigeonhole_queries
+            << " qgram_queries=" << stats.phase2_qgram_queries
+            << " hybrid_queries=" << stats.phase2_hybrid_queries
+            << " qgram_candidates=" << stats.phase2_qgram_candidate_pairs
+            << " qgram_l1_pruned=" << stats.phase2_qgram_pruned_by_l1
+            << " length_pruned=" << stats.phase2_length_pruned_pairs
+            << " required_shared_nonpositive="
+            << stats.phase2_required_shared_nonpositive_count
             << " candidate_reduction=" << (stats.phase2_candidate_reduction_ratio * 100.0)
             << "% exact_reduction=" << (stats.phase2_exact_distance_reduction_ratio * 100.0)
             << "%\n";
@@ -530,7 +581,16 @@ void BioGeometryIndexBuilder::print_summary() const {
             << " exact_calls=" << stats.leaf_exact_distance_calls
             << " attachments=" << stats.leaf_attachments_added
             << " fallbacks=" << stats.leaf_full_scan_fallback_count
+            << " pigeonhole_queries=" << stats.leaf_pigeonhole_queries
+            << " qgram_queries=" << stats.leaf_qgram_queries
+            << " hybrid_queries=" << stats.leaf_hybrid_queries
+            << " qgram_candidates=" << stats.leaf_qgram_candidate_pairs
+            << " qgram_l1_pruned=" << stats.leaf_qgram_pruned_by_l1
+            << " length_pruned=" << stats.leaf_length_pruned_pairs
+            << " required_shared_nonpositive="
+            << stats.leaf_required_shared_nonpositive_count
             << " candidate_reduction=" << (stats.leaf_candidate_reduction_ratio * 100.0)
+            << "% exact_reduction=" << (stats.leaf_exact_distance_reduction_ratio * 100.0)
             << "%\n";
   std::cerr << "  Primary layers: " << num_primary_layers() << "\n";
   for (int layer_idx = 0; layer_idx < num_primary_layers(); ++layer_idx) {
@@ -615,6 +675,8 @@ BioGeometryIndexBuilder::Statistics BioGeometryIndexBuilder::get_statistics() co
       reduction_ratio(stats.phase2_total_possible_pairs, stats.phase2_exact_distance_calls);
   stats.leaf_candidate_reduction_ratio =
       reduction_ratio(stats.total_possible_leaf_pairs, stats.leaf_candidate_pairs);
+  stats.leaf_exact_distance_reduction_ratio =
+      reduction_ratio(stats.total_possible_leaf_pairs, stats.leaf_exact_distance_calls);
   const auto& finest_layer = primary_layers_[static_cast<size_t>(finest_primary_layer_index())];
   if (stats.unique_sequences > 0 && !finest_layer.empty()) {
     stats.compression_ratio =

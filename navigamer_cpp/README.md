@@ -40,7 +40,8 @@ path for small fanout, missing indexes, dimension mismatches, or exceptions.
 | --------------- | ------- |
 | `include/structure.hpp`, `src/structure.cpp` | `BioSequence`, `WorldNode`, `MBB`, finest-layer leaf beacon caches, default radii `R_SW` / `R_MW` / `R_LW` |
 | `include/tools.hpp`, `src/tools.cpp` | Levenshtein `compute_distance`, helpers |
-| `include/range_join.hpp`, `src/range_join.cpp` | Exact adaptive-pigeonhole candidate generation with explicit full-scan fallback |
+| `include/qgram_filter.hpp`, `src/qgram_filter.cpp` | Exact q-gram multiset count filter and inverted index |
+| `include/range_join.hpp`, `src/range_join.cpp` | Exact full, adaptive-pigeonhole, q-gram, hybrid, and auto candidate generation |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | `BioGeometryIndexBuilder`: dedup → phase1 extended sketch → phase2 rebinding → phase3 auxiliary collapse + MBB → leaves |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
@@ -57,9 +58,11 @@ path for small fanout, missing indexes, dimension mismatches, or exceptions.
 
 **Note:** Phase-2 rebinding and leaf attachment default to exact indexed range
 joins. Use `--link-mode full` and/or `--leaf-attach-mode full` for the original
-full-pairwise construction. Indexed mode caps adaptive pigeonhole seeds at 20
-bp, visibly falls back when seeds would be shorter than 8 bp, and exact verifies
-every candidate before adding a link.
+full-pairwise construction. `--range-candidate-mode auto` uses adaptive
+pigeonhole seeds when they are at least 8 bp and otherwise uses the q-gram
+count filter. Forced `qgram` and `hybrid` modes are also available; hybrid
+intersects two safe candidate supersets. All modes exact verify every surviving
+candidate before adding a link.
 
 ## Parameter sweeps
 
@@ -74,6 +77,7 @@ For long-sequence boundary studies, `boundary` outputs one aggregated TSV row pe
 | 150bp mapper recall and verifier checks | `make test_map150 && ./test_map150_recall` |
 | Bounded edit distance | `make test_bounded && ./test_bounded_edit_distance` |
 | Exact range join | `make test_range_join && ./test_range_join` |
+| Q-gram count filter | `make test_qgram && ./test_qgram_filter` |
 | Full/indexed construction equivalence | `make test_build_range && ./test_build_range_equivalence` |
 | Exact MBB rectangle lookup | `make test_mbb_rect && ./test_mbb_rect_index` |
 | Scan/rect adaptive equivalence and fallback | `make test_mbb_filter && ./test_mbb_filter_equivalence` |

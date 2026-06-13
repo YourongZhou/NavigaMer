@@ -45,6 +45,7 @@ pip install -r reproducibility/requirements.txt
 cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mbb-filter-mode rect --min-rect-index-fanout 2
+./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
 ```
@@ -85,6 +86,12 @@ cd navigamer_cpp
 Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFERENCE.md). C++ layout and tests: [`navigamer_cpp/README.md`](navigamer_cpp/README.md).
 
 The current C++ index is in-memory only: `build`, `query`, `run`, `benchmark`, `map150`, and `boundary` rebuild the index for each process invocation. The `boundary` command is intended for long-sequence capability sweeps and reuses a single in-memory index across the full `error_rate × tolerance_rate` grid inside one run.
+
+Indexed construction supports exact `auto`, `pigeonhole`, `qgram`, `hybrid`,
+and `full` candidate modes. Q-gram filtering uses the necessary condition
+`qgram_l1(a,b) <= 2*q*tau`; hybrid intersects the pigeonhole and q-gram safe
+candidate supersets. Every surviving pair is still verified by bounded exact
+edit distance before an edge or leaf attachment is added.
 
 Adaptive search supports `--mbb-filter-mode scan|rect` (default `scan`). The
 `rect` mode uses an exact in-memory rectangle index over the existing per-child
