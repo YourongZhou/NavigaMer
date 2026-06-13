@@ -37,6 +37,7 @@ struct BuildRangeConfig {
   BuildRangeMode link_mode = BuildRangeMode::Indexed;
   BuildRangeMode leaf_attach_mode = BuildRangeMode::Indexed;
   RangeJoinConfig range_join;
+  size_t min_rect_index_fanout = 64;
 };
 
 class BioGeometryIndexBuilder {

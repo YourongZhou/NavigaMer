@@ -59,7 +59,8 @@ std::vector<Map150Result> map150_reads_with_locator(
     const std::string& mode,
     const HierarchyConfig& config,
     const OccurrenceLocator& locator,
-    const BioGeometryIndexBuilder& builder);
+    const BioGeometryIndexBuilder& builder,
+    const SearchConfig& search_config = SearchConfig{});
 
 std::vector<Map150Result> map150_reads_refpos(
     const std::string& ref_id,

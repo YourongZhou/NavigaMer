@@ -312,7 +312,8 @@ std::vector<Map150Result> map150_reads_with_locator(
     const std::string& mode,
     const HierarchyConfig& config,
     const OccurrenceLocator& locator,
-    const BioGeometryIndexBuilder& builder) {
+    const BioGeometryIndexBuilder& builder,
+    const SearchConfig& search_config) {
   (void)ref_id;
   validate_mode(mode);
   validate_mapper_config(config, tolerance);
@@ -321,7 +322,7 @@ std::vector<Map150Result> map150_reads_with_locator(
     throw std::runtime_error("map150 reference must be at least 150 bp");
   }
 
-  BioGeometrySearchEngine engine(builder);
+  BioGeometrySearchEngine engine(builder, search_config);
   std::unordered_map<std::string, Map150Result> unique_results;
 
   for (const auto& read : reads) {

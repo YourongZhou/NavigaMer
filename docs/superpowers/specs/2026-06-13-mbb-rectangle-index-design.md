@@ -58,8 +58,8 @@ class MBBRectIndex {
 `child_id` is the child's stable position in the parent's `child_nodes` and
 `child_beacon_mbbs` vectors, not a parsed node identifier.
 
-`build()` validates that every rectangle has the same nonzero dimension and
-that each dimension satisfies `lo <= hi`. Invalid input leaves the index empty.
+`build()` validates that every rectangle has the same dimension and that each
+dimension satisfies `lo <= hi`. Invalid input leaves the index empty.
 An empty index is unavailable to search and causes scan fallback.
 
 `query_intersect()` returns a child ID if and only if every dimension overlaps:
@@ -68,9 +68,11 @@ An empty index is unavailable to search and causes scan fallback.
 child.hi[i] >= q_lo[i] && child.lo[i] <= q_hi[i]
 ```
 
-It returns an empty result for an unavailable index or query dimension
-mismatch. Search checks availability before calling it, so those conditions
-cause scan fallback rather than an empty survivor set.
+For a valid zero-dimensional index, it returns every child ID. It returns an
+empty result for an unavailable index or query dimension mismatch. Search
+requires nonempty query beacon dimensions before using an index, so
+zero-dimensional parents and other unavailable conditions cause scan fallback
+rather than an empty survivor set.
 
 The first implementation uses exact SoA filtering. It may choose dimension
 order for efficiency, but cannot alter the returned set.

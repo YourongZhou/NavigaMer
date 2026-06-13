@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <climits>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
@@ -96,6 +97,9 @@ void validate_range_config(const BuildRangeConfig& config) {
   if (config.range_join.max_seed_len < config.range_join.min_seed_len) {
     throw std::invalid_argument(
         "range-join max seed length must be at least min seed length");
+  }
+  if (config.min_rect_index_fanout == 0) {
+    throw std::invalid_argument("minimum rectangle-index fanout must be positive");
   }
 }
 
@@ -349,6 +353,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb() {
       reset_node_metadata(node, primary_idx * 2, true, primary_idx);
       node->beacons.clear();
       node->child_beacon_mbbs.clear();
+      node->mbb_rect_index.reset();
       node->leaf_beacon_dists.clear();
     }
   }
@@ -392,6 +397,43 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb() {
           mbb.min_dist = std::max(0, dist - child->radius);
           mbb.max_dist = dist + child->radius;
           node->child_beacon_mbbs[child_idx].push_back(mbb);
+        }
+      }
+
+      if (node->child_nodes.size() >= range_config_.min_rect_index_fanout &&
+          node->child_nodes.size() <= std::numeric_limits<uint32_t>::max() &&
+          !node->beacons.empty() &&
+          node->child_beacon_mbbs.size() == node->child_nodes.size()) {
+        try {
+          std::vector<MBBRectIndex::Rect> rects;
+          rects.reserve(node->child_nodes.size());
+          bool valid = true;
+          for (size_t child_idx = 0; child_idx < node->child_nodes.size(); ++child_idx) {
+            const auto& row = node->child_beacon_mbbs[child_idx];
+            if (row.size() != node->beacons.size()) {
+              valid = false;
+              break;
+            }
+            MBBRectIndex::Rect rect;
+            rect.child_id = static_cast<uint32_t>(child_idx);
+            rect.lo.reserve(row.size());
+            rect.hi.reserve(row.size());
+            for (const auto& mbb : row) {
+              rect.lo.push_back(mbb.min_dist);
+              rect.hi.push_back(mbb.max_dist);
+            }
+            rects.push_back(std::move(rect));
+          }
+          if (valid) {
+            auto rect_index = std::make_shared<MBBRectIndex>();
+            rect_index->build(rects);
+            if (rect_index->size() == node->child_nodes.size() &&
+                rect_index->dim() == node->beacons.size()) {
+              node->mbb_rect_index = std::move(rect_index);
+            }
+          }
+        } catch (...) {
+          node->mbb_rect_index.reset();
         }
       }
     }

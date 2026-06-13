@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include "mbb_rect_index.hpp"
 
 namespace navigamer {
 
@@ -68,6 +69,7 @@ struct WorldNode {
   // child_beacon_mbbs[j] is aligned with child_nodes[j].
   std::vector<std::shared_ptr<BioSequence>> beacons;
   std::vector<std::vector<MBB>> child_beacon_mbbs;
+  std::shared_ptr<MBBRectIndex> mbb_rect_index;
 
   // Leaf refinement cache for SW worlds. leaf_beacon_dists[j] is aligned
   // with child_leaves[j] and stores d(child_leaf, beacon_i).

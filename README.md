@@ -44,6 +44,7 @@ pip install -r reproducibility/requirements.txt
 ```bash
 cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
+./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mbb-filter-mode rect --min-rect-index-fanout 2
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
 ```
@@ -84,6 +85,12 @@ cd navigamer_cpp
 Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFERENCE.md). C++ layout and tests: [`navigamer_cpp/README.md`](navigamer_cpp/README.md).
 
 The current C++ index is in-memory only: `build`, `query`, `run`, `benchmark`, `map150`, and `boundary` rebuild the index for each process invocation. The `boundary` command is intended for long-sequence capability sweeps and reuses a single in-memory index across the full `error_rate × tolerance_rate` grid inside one run.
+
+Adaptive search supports `--mbb-filter-mode scan|rect` (default `scan`). The
+`rect` mode uses an exact in-memory rectangle index over the existing per-child
+MBB rows and falls back to the original scan whenever the index is unavailable
+or inconsistent. `--min-rect-index-fanout` controls the build threshold and
+defaults to `64`.
 
 The default CLI path still uses the legacy three primary layers (`LW/MW/SW`) via `--r-lw`, `--r-mw`, and `--r-sw`, but the C++ implementation now also supports any number of primary layers `K >= 2` through `--primary-radii coarse,...,fine`. One auxiliary tier is inserted automatically between each adjacent pair of primary layers during index construction and collapsed away before query-time navigation.
 

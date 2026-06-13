@@ -22,6 +22,8 @@ Used by all pipelines that build the index:
 | `--leaf-attach-mode` | `indexed` | Leaf attachment: `full` or exact `indexed` range join |
 | `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
+| `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
+| `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
@@ -33,6 +35,13 @@ scan. Otherwise, pigeonhole seeds generate a safe candidate superset and every
 candidate is verified with bounded exact edit distance. Builder summaries print
 possible pairs, candidates, exact calls, accepted links, fallback counts, and
 reduction ratios.
+
+Rectangle filtering is also exact. Rect mode returns a child world if and only
+if its existing MBB row intersects the query rectangle in every beacon
+dimension. It changes only survivor enumeration; center-distance verification,
+containment/overlap traversal, and leaf verification remain unchanged. Missing
+or inconsistent indexes, small fanout, dimension mismatches, and query
+exceptions fall back to scan.
 
 ## I/O conventions (`io_utils`)
 
@@ -157,7 +166,11 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `query_id`, `hit_id`, `distance`, `ref_positions`, `read_id`, `read_len`, `ref_id`, `strand`, `query_start`, `reference_start`, `aligned_length`, `score`, `edit_distance`, `query_fragment`, `reference_fragment`, `bwt_start`, `bwt_end`
 
 **`benchmark`** adds:  
-`dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`
+`dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`,
+`mbb_filter_mode`, `mbb_scan_child_checks`, `mbb_rect_index_queries`,
+`mbb_rect_candidate_children`, `mbb_rect_fallback_count`,
+`center_distance_calls_after_mbb`, `avg_mbb_candidates_per_parent`,
+`avg_center_distance_calls_per_query`, `query_time_ms`
 
 `candidate_count_for_prune` and `beacon_prune_count` include both hierarchy-level MBB pruning and finest-layer leaf-beacon refinement.
 
@@ -184,5 +197,7 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 | `test_bounded_edit_distance` | Banded thresholded distance vs full Levenshtein |
 | `test_range_join` | Adaptive pigeonhole no-false-negative and verified-pair checks |
 | `test_build_range_equivalence` | Full vs indexed construction and search-result equivalence |
+| `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
+| `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
 
 Build with `make test_recall` / `make test_distance_bound`.

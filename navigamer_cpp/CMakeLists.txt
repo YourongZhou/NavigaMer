@@ -20,6 +20,7 @@ add_executable(navigamer
   src/structure.cpp
   src/tools.cpp
   src/range_join.cpp
+  src/mbb_rect_index.cpp
   src/index_builder.cpp
   src/search_engine.cpp
   src/io_utils.cpp
@@ -38,6 +39,7 @@ add_executable(test_recall
   src/structure.cpp
   src/tools.cpp
   src/range_join.cpp
+  src/mbb_rect_index.cpp
   src/index_builder.cpp
   src/search_engine.cpp
   src/io_utils.cpp
@@ -54,6 +56,7 @@ add_executable(test_distance_bound
   src/structure.cpp
   src/tools.cpp
   src/range_join.cpp
+  src/mbb_rect_index.cpp
   src/index_builder.cpp
   src/search_engine.cpp
   src/io_utils.cpp
@@ -70,6 +73,7 @@ add_executable(test_hierarchy_config
   src/structure.cpp
   src/tools.cpp
   src/range_join.cpp
+  src/mbb_rect_index.cpp
   src/index_builder.cpp
   src/search_engine.cpp
   src/io_utils.cpp
@@ -81,6 +85,7 @@ add_executable(test_search_stats_bin
   src/structure.cpp
   src/tools.cpp
   src/range_join.cpp
+  src/mbb_rect_index.cpp
   src/index_builder.cpp
   src/search_engine.cpp
   src/io_utils.cpp
@@ -92,6 +97,7 @@ add_executable(test_map150_recall
   src/structure.cpp
   src/tools.cpp
   src/range_join.cpp
+  src/mbb_rect_index.cpp
   src/index_builder.cpp
   src/search_engine.cpp
   src/io_utils.cpp
@@ -115,6 +121,23 @@ add_executable(test_build_range_equivalence
   src/structure.cpp
   src/tools.cpp
   src/range_join.cpp
+  src/mbb_rect_index.cpp
+  src/index_builder.cpp
+  src/search_engine.cpp
+  src/io_utils.cpp
+  src/experiment_utils.cpp
+  src/map150.cpp
+)
+add_executable(test_mbb_rect_index
+  src/test_mbb_rect_index.cpp
+  src/mbb_rect_index.cpp
+)
+add_executable(test_mbb_filter_equivalence
+  src/test_mbb_filter_equivalence.cpp
+  src/structure.cpp
+  src/tools.cpp
+  src/range_join.cpp
+  src/mbb_rect_index.cpp
   src/index_builder.cpp
   src/search_engine.cpp
   src/io_utils.cpp
@@ -141,13 +164,21 @@ target_include_directories(test_build_range_equivalence PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(test_build_range_equivalence PRIVATE OpenMP::OpenMP_CXX)
+target_include_directories(test_mbb_rect_index PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_mbb_rect_index PRIVATE OpenMP::OpenMP_CXX)
+target_include_directories(test_mbb_filter_equivalence PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_mbb_filter_equivalence PRIVATE OpenMP::OpenMP_CXX)
 target_include_directories(test_hierarchy_config PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(test_hierarchy_config PRIVATE OpenMP::OpenMP_CXX)
 
 if(NAVIGAMER_WITH_SEQAN3)
-  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_range_join test_build_range_equivalence)
+  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_range_join test_build_range_equivalence test_mbb_rect_index test_mbb_filter_equivalence)
     target_compile_definitions(${target} PRIVATE NAVIGAMER_WITH_SEQAN3)
     target_link_libraries(${target} PRIVATE seqan3::seqan3)
   endforeach()
@@ -167,4 +198,6 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   target_compile_options(test_bounded_edit_distance PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_range_join PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_build_range_equivalence PRIVATE -O3 -DNDEBUG)
+  target_compile_options(test_mbb_rect_index PRIVATE -O3 -DNDEBUG)
+  target_compile_options(test_mbb_filter_equivalence PRIVATE -O3 -DNDEBUG)
 endif()

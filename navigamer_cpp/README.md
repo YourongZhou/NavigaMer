@@ -29,6 +29,11 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 
 **Full syntax and defaults:** [`CLI_REFERENCE.md`](CLI_REFERENCE.md).
 
+All adaptive-search commands accept `--mbb-filter-mode scan|rect` and
+`--min-rect-index-fanout N` (default `64`). Rect mode performs exact
+all-dimension MBB rectangle intersection and falls back to the original scan
+path for small fanout, missing indexes, dimension mismatches, or exceptions.
+
 ## Module map
 
 | Header / source | Purpose |
@@ -36,6 +41,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 | `include/structure.hpp`, `src/structure.cpp` | `BioSequence`, `WorldNode`, `MBB`, finest-layer leaf beacon caches, default radii `R_SW` / `R_MW` / `R_LW` |
 | `include/tools.hpp`, `src/tools.cpp` | Levenshtein `compute_distance`, helpers |
 | `include/range_join.hpp`, `src/range_join.cpp` | Exact adaptive-pigeonhole candidate generation with explicit full-scan fallback |
+| `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | `BioGeometryIndexBuilder`: dedup → phase1 extended sketch → phase2 rebinding → phase3 auxiliary collapse + MBB → leaves |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
 | `include/io_utils.hpp`, `src/io_utils.cpp` | FASTA/FASTQ load, TSV output |
@@ -69,3 +75,5 @@ For long-sequence boundary studies, `boundary` outputs one aggregated TSV row pe
 | Bounded edit distance | `make test_bounded && ./test_bounded_edit_distance` |
 | Exact range join | `make test_range_join && ./test_range_join` |
 | Full/indexed construction equivalence | `make test_build_range && ./test_build_range_equivalence` |
+| Exact MBB rectangle lookup | `make test_mbb_rect && ./test_mbb_rect_index` |
+| Scan/rect adaptive equivalence and fallback | `make test_mbb_filter && ./test_mbb_filter_equivalence` |
