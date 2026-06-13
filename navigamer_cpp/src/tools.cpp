@@ -3,6 +3,7 @@
 #include <random>
 #include <limits>
 #include <cmath>
+#include <stdexcept>
 
 namespace navigamer {
 
@@ -29,6 +30,45 @@ int compute_distance(const std::string& a, const std::string& b) {
 
 int compute_distance(const BioSequence& a, const BioSequence& b) {
   return compute_distance(a.seq, b.seq);
+}
+
+int compute_distance_bounded(const std::string& a, const std::string& b, int tau) {
+  if (tau < 0) throw std::invalid_argument("edit-distance threshold must be non-negative");
+
+  const int m = static_cast<int>(a.size());
+  const int n = static_cast<int>(b.size());
+  if (std::abs(m - n) > tau) return tau + 1;
+  if (m == 0) return n <= tau ? n : tau + 1;
+  if (n == 0) return m <= tau ? m : tau + 1;
+
+  const int outside = tau + 1;
+  std::vector<int> prev(static_cast<size_t>(n + 1), outside);
+  std::vector<int> curr(static_cast<size_t>(n + 1), outside);
+  for (int j = 0; j <= std::min(n, tau); ++j) prev[static_cast<size_t>(j)] = j;
+
+  for (int i = 1; i <= m; ++i) {
+    std::fill(curr.begin(), curr.end(), outside);
+    if (i <= tau) curr[0] = i;
+
+    const int j_begin = std::max(1, i - tau);
+    const int j_end = std::min(n, i + tau);
+    int row_min = curr[0];
+    for (int j = j_begin; j <= j_end; ++j) {
+      int value = std::min({
+          prev[static_cast<size_t>(j)] + 1,
+          curr[static_cast<size_t>(j - 1)] + 1,
+          prev[static_cast<size_t>(j - 1)] +
+              (a[static_cast<size_t>(i - 1)] == b[static_cast<size_t>(j - 1)] ? 0 : 1)});
+      curr[static_cast<size_t>(j)] = std::min(value, outside);
+      row_min = std::min(row_min, curr[static_cast<size_t>(j)]);
+    }
+    if (row_min > tau) return tau + 1;
+    std::swap(prev, curr);
+  }
+
+  return prev[static_cast<size_t>(n)] <= tau
+             ? prev[static_cast<size_t>(n)]
+             : tau + 1;
 }
 
 static int node_distance(const std::shared_ptr<WorldNode>& na,

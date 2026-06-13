@@ -3,6 +3,7 @@
 
 #include "structure.hpp"
 #include "tools.hpp"
+#include "range_join.hpp"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -24,11 +25,27 @@ struct HierarchyConfig {
   void validate() const;
 };
 
+enum class BuildRangeMode {
+  Full,
+  Indexed,
+};
+
+const char* build_range_mode_name(BuildRangeMode mode);
+BuildRangeMode parse_build_range_mode(const std::string& value);
+
+struct BuildRangeConfig {
+  BuildRangeMode link_mode = BuildRangeMode::Indexed;
+  BuildRangeMode leaf_attach_mode = BuildRangeMode::Indexed;
+  RangeJoinConfig range_join;
+};
+
 class BioGeometryIndexBuilder {
  public:
   BioGeometryIndexBuilder();
   BioGeometryIndexBuilder(int r_sw, int r_mw, int r_lw);
   explicit BioGeometryIndexBuilder(const HierarchyConfig& config);
+  BioGeometryIndexBuilder(const HierarchyConfig& config,
+                          const BuildRangeConfig& range_config);
 
   void build(const std::vector<std::shared_ptr<BioSequence>>& raw_sequences);
 
@@ -42,9 +59,23 @@ class BioGeometryIndexBuilder {
     std::vector<size_t> created_primary_nodes;
     double compression_ratio = 0.0;
     double dag_redundancy = 0.0;
+    size_t phase2_total_possible_pairs = 0;
+    size_t phase2_candidate_pairs = 0;
+    size_t phase2_exact_distance_calls = 0;
+    size_t phase2_edges_added = 0;
+    size_t phase2_full_scan_fallback_count = 0;
+    double phase2_candidate_reduction_ratio = 0.0;
+    double phase2_exact_distance_reduction_ratio = 0.0;
+    size_t total_possible_leaf_pairs = 0;
+    size_t leaf_candidate_pairs = 0;
+    size_t leaf_exact_distance_calls = 0;
+    size_t leaf_attachments_added = 0;
+    size_t leaf_full_scan_fallback_count = 0;
+    double leaf_candidate_reduction_ratio = 0.0;
   };
   Statistics get_statistics() const;
   const HierarchyConfig& hierarchy_config() const { return hierarchy_; }
+  const BuildRangeConfig& build_range_config() const { return range_config_; }
   int num_primary_layers() const { return hierarchy_.num_primary_layers(); }
   int num_expanded_layers() const { return hierarchy_.num_expanded_layers(); }
   int coarsest_primary_layer_index() const { return 0; }
@@ -62,6 +93,7 @@ class BioGeometryIndexBuilder {
  private:
   Statistics stats_;
   HierarchyConfig hierarchy_;
+  BuildRangeConfig range_config_;
   std::vector<int> expanded_radii_;
   std::vector<std::vector<std::shared_ptr<WorldNode>>> extended_layers_;
   std::vector<std::vector<std::shared_ptr<WorldNode>>> primary_layers_;

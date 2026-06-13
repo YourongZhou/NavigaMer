@@ -13,11 +13,13 @@
 #include "io_utils.hpp"
 #include "tools.hpp"
 #include "experiment_utils.hpp"
+#include "map150.hpp"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <memory>
 #include <random>
 #include <chrono>
 #include <cstring>
@@ -37,9 +39,11 @@ void usage(const char* prog) {
             << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " map150 --ref <path|seq> --reads <path|seq> --tolerance <N> --out <tsv> [--mode adaptive] [--locator refpos|seqan] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
-            << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n";
+            << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
+            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-min-seed-length 8] [--range-max-seed-length 20]\n";
 }
 
 std::string format_double(double value) {
@@ -138,7 +142,6 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> build_reference_windows(
     std::string frag = ref_seq.substr(static_cast<size_t>(start), static_cast<size_t>(window_size));
     auto seq = std::make_shared<BioSequence>("ref_" + std::to_string(start), frag);
     seq->add_occurrence(ref_id, start, start + window_size, "+");
-    seq->set_bwt_interval(static_cast<int64_t>(start), static_cast<int64_t>(start + window_size));
     windows.push_back(seq);
   }
   return windows;
@@ -218,14 +221,15 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> generate_reads(
   return reads;
 }
 
-void run_demo(int size, const navigamer::HierarchyConfig& config) {
+void run_demo(int size, const navigamer::HierarchyConfig& config,
+              const navigamer::BuildRangeConfig& range_config) {
   using namespace navigamer;
   std::cerr << "NavigaMer v8 (C++) - Demo with " << size << " reads"
             << " (primary_radii=" << format_primary_radii(config) << ")\n";
   std::string ref = generate_reference(50000, 42);
   auto reads = generate_reads(ref, size, 20, 0.0, 42);
 
-  BioGeometryIndexBuilder builder(config);
+  BioGeometryIndexBuilder builder(config, range_config);
   builder.build(reads);
 
   auto stats = builder.get_statistics();
@@ -262,28 +266,30 @@ void run_demo(int size, const navigamer::HierarchyConfig& config) {
 }
 
 void run_build(const std::string& ref_input, const std::string& reads_input,
-               const navigamer::HierarchyConfig& config) {
+               const navigamer::HierarchyConfig& config,
+               const navigamer::BuildRangeConfig& range_config) {
   using namespace navigamer;
   auto [ref_id, ref_seq] = load_reference(ref_input);
   std::cerr << "Reference: " << ref_id << " length=" << ref_seq.size() << "\n";
   auto reads = load_reads(reads_input, ref_id);
   std::cerr << "Reads: " << reads.size() << "\n";
 
-  BioGeometryIndexBuilder builder(config);
+  BioGeometryIndexBuilder builder(config, range_config);
   builder.build(reads);
   std::cerr << "Build done. (Index serialization not implemented; use run for full pipeline.)\n";
 }
 
 void run_query(const std::string& /*ref_input*/, const std::string& reads_input,
                const std::string& query_seq, int tolerance, const std::string& mode,
-               const navigamer::HierarchyConfig& config) {
+               const navigamer::HierarchyConfig& config,
+               const navigamer::BuildRangeConfig& range_config) {
   using namespace navigamer;
   auto reads = load_reads(reads_input, "ref");
   if (reads.empty()) {
     std::cerr << "No reads loaded.\n";
     return;
   }
-  BioGeometryIndexBuilder builder(config);
+  BioGeometryIndexBuilder builder(config, range_config);
   builder.build(reads);
 
   BioGeometrySearchEngine engine(builder);
@@ -307,7 +313,8 @@ void run_query(const std::string& /*ref_input*/, const std::string& reads_input,
 
 void run_full(const std::string& ref_input, const std::string& reads_input,
               int tolerance, const std::string& out_tsv,
-              const navigamer::HierarchyConfig& config) {
+              const navigamer::HierarchyConfig& config,
+              const navigamer::BuildRangeConfig& range_config) {
   using namespace navigamer;
   auto [ref_id, ref_seq] = load_reference(ref_input);
   auto reads = load_reads(reads_input, ref_id);
@@ -315,7 +322,7 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
     std::cerr << "No reads.\n";
     return;
   }
-  BioGeometryIndexBuilder builder(config);
+  BioGeometryIndexBuilder builder(config, range_config);
   builder.build(reads);
   BioGeometrySearchEngine engine(builder);
 
@@ -358,7 +365,8 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
 void run_benchmark(const std::string& ref_input, const std::string& query_input,
                    int tolerance, int window_size, int stride,
                    const std::string& out_tsv,
-                   const navigamer::HierarchyConfig& config) {
+                   const navigamer::HierarchyConfig& config,
+                   const navigamer::BuildRangeConfig& range_config) {
   using namespace navigamer;
   auto [ref_id, ref_seq] = load_reference(ref_input);
   if (ref_seq.size() < static_cast<size_t>(window_size)) {
@@ -369,7 +377,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       build_reference_windows(ref_id, ref_seq, window_size, stride);
   std::cerr << "Index: " << index_seqs.size() << " windows from reference\n";
 
-  BioGeometryIndexBuilder builder(config);
+  BioGeometryIndexBuilder builder(config, range_config);
   builder.build(index_seqs);
   BioGeometrySearchEngine engine(builder);
 
@@ -427,12 +435,72 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
   std::cerr << "Benchmark rows: " << all_rows.size() << "\n";
 }
 
+void write_tsv_with_header_even_if_empty(
+    const std::string& output_path,
+    const std::vector<std::string>& columns,
+    const std::vector<std::vector<std::string>>& rows) {
+  if (!rows.empty()) {
+    navigamer::write_tsv(output_path, columns, rows);
+    return;
+  }
+  std::ofstream out(output_path);
+  for (size_t i = 0; i < columns.size(); ++i) {
+    if (i) out << '\t';
+    out << columns[i];
+  }
+  out << '\n';
+}
+
+void run_map150(const std::string& ref_input,
+                const std::string& reads_input,
+                int tolerance,
+                const std::string& mode,
+                const std::string& locator_kind,
+                const std::string& out_tsv,
+                const navigamer::HierarchyConfig& config,
+                const navigamer::BuildRangeConfig& range_config) {
+  using namespace navigamer;
+  auto [ref_id, ref_seq] = load_reference(ref_input);
+  auto reads = load_reads(reads_input, ref_id);
+  if (reads.empty()) {
+    throw std::runtime_error("map150 loaded no reads");
+  }
+
+  auto index_seqs = build_map150_reference_windows(ref_id, ref_seq);
+  std::cerr << "map150: windows=" << index_seqs.size()
+            << " reads=" << reads.size()
+            << " tolerance=" << tolerance
+            << " candidate_tolerance=" << map150_candidate_tolerance(tolerance)
+            << " locator=" << locator_kind << "\n";
+
+  BioGeometryIndexBuilder builder(config, range_config);
+  builder.build(index_seqs);
+
+  std::unique_ptr<OccurrenceLocator> locator;
+  if (locator_kind == "refpos") {
+    locator = std::make_unique<RefPositionLocator>();
+  } else if (locator_kind == "seqan") {
+    locator = make_seqan_fm_locator(ref_id, normalize_acgt_sequence(ref_seq, "reference"), builder);
+  } else {
+    throw std::runtime_error("map150 --locator must be refpos or seqan");
+  }
+
+  auto results = map150_reads_with_locator(
+      ref_id, ref_seq, reads, tolerance, mode, config, *locator, builder);
+  auto rows = map150_results_to_tsv_rows(results);
+  if (!out_tsv.empty()) {
+    write_tsv_with_header_even_if_empty(out_tsv, map150_tsv_columns(), rows);
+  }
+  std::cerr << "map150 rows: " << rows.size() << "\n";
+}
+
 void run_boundary(const std::string& ref_input, int length,
                   const std::vector<double>& error_rates,
                   const std::vector<double>& tolerance_rates,
                   size_t queries_per_cell, const std::string& stride_mode,
                   unsigned seed, const std::string& out_tsv,
-                  const navigamer::HierarchyConfig& config) {
+                  const navigamer::HierarchyConfig& config,
+                  const navigamer::BuildRangeConfig& range_config) {
   using namespace navigamer;
   if (length != 250) {
     throw std::runtime_error("boundary currently only supports --length 250");
@@ -457,7 +525,7 @@ void run_boundary(const std::string& ref_input, int length,
             << " stride=" << stride_for_mode
             << " windows=" << index_seqs.size() << "\n";
 
-  BioGeometryIndexBuilder builder(config);
+  BioGeometryIndexBuilder builder(config, range_config);
   builder.build(index_seqs);
   BioGeometrySearchEngine engine(builder);
 
@@ -582,7 +650,8 @@ void run_layer_radius_experiment(const std::string& ref_input,
                                  int stride_override,
                                  const std::string& stride_mode,
                                  unsigned seed,
-                                 const std::string& out_csv) {
+                                 const std::string& out_csv,
+                                 const navigamer::BuildRangeConfig& range_config) {
   using namespace navigamer;
   if (length <= 0) throw std::runtime_error("experiment --length must be positive");
   if (tolerance < 0) throw std::runtime_error("experiment --tolerance must be non-negative");
@@ -625,7 +694,7 @@ void run_layer_radius_experiment(const std::string& ref_input,
     for (int r_leaf : r_leaf_values) {
       for (double alpha : alpha_values) {
         auto radius_schedule = generate_geometric_radius_schedule(L, r_leaf, alpha);
-        BioGeometryIndexBuilder builder{HierarchyConfig(radius_schedule)};
+        BioGeometryIndexBuilder builder(HierarchyConfig(radius_schedule), range_config);
         builder.build(index_seqs);
         BioGeometrySearchEngine engine(builder);
         std::string schedule_str = join_radius_schedule(radius_schedule);
@@ -683,12 +752,17 @@ int main(int argc, char** argv) {
   size_t queries_per_cell = 200;
   unsigned seed = 42;
   std::string stride_mode = "sparse";
+  std::string locator_kind = "refpos";
   std::string error_rates_csv = "0,0.01,0.02,0.03,0.05,0.07,0.10,0.15,0.20";
   std::string tolerance_rates_csv = "0,0.01,0.02,0.03,0.05,0.07,0.10,0.15,0.20";
   std::string primary_radii_csv;
   std::string layer_values_csv = "2,3,4,5";
   std::string r_leaf_values_csv = "4,8,12";
   std::string alpha_values_csv = "0.5,0.7";
+  std::string link_mode = "indexed";
+  std::string leaf_attach_mode = "indexed";
+  int range_min_seed_length = 8;
+  int range_max_seed_length = 20;
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
   int r_lw = navigamer::R_LW;
@@ -720,6 +794,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (a == "--stride-mode" && i + 1 < argc) { stride_mode = argv[++i]; continue; }
+    if (a == "--locator" && i + 1 < argc) { locator_kind = argv[++i]; continue; }
     if (a == "--L-values" && i + 1 < argc) { layer_values_csv = argv[++i]; continue; }
     if (a == "--r-leaf-values" && i + 1 < argc) { r_leaf_values_csv = argv[++i]; continue; }
     if (a == "--alpha-values" && i + 1 < argc) { alpha_values_csv = argv[++i]; continue; }
@@ -729,6 +804,19 @@ int main(int argc, char** argv) {
     if (a == "--r-sw" && i + 1 < argc) { r_sw = std::atoi(argv[++i]); continue; }
     if (a == "--r-mw" && i + 1 < argc) { r_mw = std::atoi(argv[++i]); continue; }
     if (a == "--r-lw" && i + 1 < argc) { r_lw = std::atoi(argv[++i]); continue; }
+    if (a == "--link-mode" && i + 1 < argc) { link_mode = argv[++i]; continue; }
+    if (a == "--leaf-attach-mode" && i + 1 < argc) {
+      leaf_attach_mode = argv[++i];
+      continue;
+    }
+    if (a == "--range-min-seed-length" && i + 1 < argc) {
+      range_min_seed_length = std::atoi(argv[++i]);
+      continue;
+    }
+    if (a == "--range-max-seed-length" && i + 1 < argc) {
+      range_max_seed_length = std::atoi(argv[++i]);
+      continue;
+    }
   }
 
   try {
@@ -736,9 +824,15 @@ int main(int argc, char** argv) {
         primary_radii_csv.empty()
             ? navigamer::HierarchyConfig({r_lw, r_mw, r_sw})
             : navigamer::HierarchyConfig(parse_int_csv(primary_radii_csv));
+    navigamer::BuildRangeConfig range_config;
+    range_config.link_mode = navigamer::parse_build_range_mode(link_mode);
+    range_config.leaf_attach_mode =
+        navigamer::parse_build_range_mode(leaf_attach_mode);
+    range_config.range_join.min_seed_len = range_min_seed_length;
+    range_config.range_join.max_seed_len = range_max_seed_length;
 
     if (cmd == "demo") {
-      run_demo(demo_size, hierarchy);
+      run_demo(demo_size, hierarchy, range_config);
       return 0;
     }
     if (cmd == "build") {
@@ -746,7 +840,7 @@ int main(int argc, char** argv) {
         std::cerr << "build requires --ref and --reads\n";
         return 1;
       }
-      run_build(ref_input, reads_input, hierarchy);
+      run_build(ref_input, reads_input, hierarchy, range_config);
       return 0;
     }
     if (cmd == "query") {
@@ -754,7 +848,8 @@ int main(int argc, char** argv) {
         std::cerr << "query requires --reads and --query\n";
         return 1;
       }
-      run_query(ref_input.empty() ? "ref" : ref_input, reads_input, query_seq, tolerance, mode, hierarchy);
+      run_query(ref_input.empty() ? "ref" : ref_input, reads_input, query_seq,
+                tolerance, mode, hierarchy, range_config);
       return 0;
     }
     if (cmd == "run") {
@@ -762,7 +857,16 @@ int main(int argc, char** argv) {
         std::cerr << "run requires --ref and --reads\n";
         return 1;
       }
-      run_full(ref_input, reads_input, tolerance, out_tsv, hierarchy);
+      run_full(ref_input, reads_input, tolerance, out_tsv, hierarchy, range_config);
+      return 0;
+    }
+    if (cmd == "map150") {
+      if (ref_input.empty() || reads_input.empty() || out_tsv.empty()) {
+        std::cerr << "map150 requires --ref, --reads, and --out\n";
+        return 1;
+      }
+      run_map150(ref_input, reads_input, tolerance, mode, locator_kind, out_tsv,
+                 hierarchy, range_config);
       return 0;
     }
     if (cmd == "benchmark") {
@@ -770,7 +874,8 @@ int main(int argc, char** argv) {
         std::cerr << "benchmark requires --ref and --reads\n";
         return 1;
       }
-      run_benchmark(ref_input, reads_input, tolerance, window_size, stride, out_tsv, hierarchy);
+      run_benchmark(ref_input, reads_input, tolerance, window_size, stride, out_tsv,
+                    hierarchy, range_config);
       return 0;
     }
     if (cmd == "boundary") {
@@ -781,7 +886,8 @@ int main(int argc, char** argv) {
       auto error_rates = parse_rate_csv(error_rates_csv);
       auto tolerance_rates = parse_rate_csv(tolerance_rates_csv);
       run_boundary(ref_input, boundary_length, error_rates, tolerance_rates,
-                   queries_per_cell, stride_mode, seed, out_tsv, hierarchy);
+                   queries_per_cell, stride_mode, seed, out_tsv, hierarchy,
+                   range_config);
       return 0;
     }
     if (cmd == "layer-radius-experiment") {
@@ -797,7 +903,7 @@ int main(int argc, char** argv) {
                                   L_values, r_leaf_values, alpha_values,
                                   queries_per_cell,
                                   stride_explicit ? stride : -1,
-                                  stride_mode, seed, out_tsv);
+                                  stride_mode, seed, out_tsv, range_config);
       return 0;
     }
   } catch (const std::exception& e) {
