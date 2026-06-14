@@ -24,6 +24,9 @@ Used by all pipelines that build the index:
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
 | `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full` |
 | `--qgram-q` | `5` | Positive q-gram length used by q-gram and hybrid candidate generation |
+| `--auto-pigeonhole-max-candidates` | `4096` | Auto accepts pigeonhole when its candidate count is at most this value |
+| `--auto-pigeonhole-max-ratio` | `0.25` | Auto accepts pigeonhole when candidates / length-compatible targets is at most this ratio |
+| `--auto-hybrid-on-large-candidates` | `true` | Rejected large pigeonhole sets use hybrid when true, direct q-gram when false |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 
@@ -34,9 +37,17 @@ Indexed construction is exact. Pigeonhole mode uses
 `seed_len = min(range_max_seed_length, block_len)`, falling back to the
 length-compatible full set when the seed is too short. Q-gram mode safely
 prunes only pairs with `qgram_l1(a,b) > 2*q*tau`. Hybrid mode intersects the
-pigeonhole and q-gram safe candidate supersets. Auto uses pigeonhole when its
-seed is long enough and q-gram otherwise. Full candidate mode returns every
-length-compatible item.
+pigeonhole and q-gram safe candidate supersets. Auto runs pigeonhole when its
+seed is long enough, accepting it when candidate count is below the configured
+maximum **or** candidate ratio is below the configured maximum. Otherwise it
+invokes q-gram and returns the safe hybrid intersection by default. Full
+candidate mode returns every length-compatible item.
+
+Old seed-length-only auto behavior can be reproduced with permissive thresholds
+such as `--auto-pigeonhole-max-candidates 18446744073709551615
+--auto-pigeonhole-max-ratio 1.0`. Because acceptance uses OR semantics, a
+dataset with fewer than the default `4096` length-compatible targets accepts
+pigeonhole regardless of candidate ratio.
 
 Every returned candidate is still verified with bounded exact edit distance;
 candidate generation never directly adds an edge or leaf attachment. Builder

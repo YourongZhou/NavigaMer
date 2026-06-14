@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <string>
 #include <unordered_set>
@@ -69,6 +70,18 @@ navigamer::RangeJoinConfig config_for(navigamer::RangeCandidateMode mode) {
   config.qgram_q = 5;
   config.candidate_mode = mode;
   return config;
+}
+
+std::vector<navigamer::RangeJoinItem> posting_explosion_items() {
+  std::vector<navigamer::RangeJoinItem> items;
+  const std::string shared_prefix(20, 'A');
+  for (size_t i = 0; i < 4100; ++i) {
+    std::string suffix(80, static_cast<char>('C' + (i % 2)));
+    suffix[i % suffix.size()] = i % 3 == 0 ? 'G' : 'T';
+    items.push_back({i, shared_prefix + suffix});
+  }
+  items.push_back({4100, std::string(100, 'A')});
+  return items;
 }
 
 }  // namespace
@@ -186,6 +199,57 @@ int main() {
   auto ambiguous = ambiguous_index.query("AACNNGTACN", 1);
   assert(contains(ambiguous.candidate_item_ids, 0));
   assert(contains(ambiguous.candidate_item_ids, 1));
+
+  auto explosion_items = posting_explosion_items();
+  auto auto_config = config_for(RangeCandidateMode::Auto);
+  ExactRangeJoinIndex explosion_auto(auto_config);
+  ExactRangeJoinIndex explosion_pigeonhole(
+      config_for(RangeCandidateMode::PigeonholeOnly));
+  ExactRangeJoinIndex explosion_qgram(config_for(RangeCandidateMode::QGramOnly));
+  ExactRangeJoinIndex explosion_hybrid(config_for(RangeCandidateMode::Hybrid));
+  explosion_auto.build(explosion_items);
+  explosion_pigeonhole.build(explosion_items);
+  explosion_qgram.build(explosion_items);
+  explosion_hybrid.build(explosion_items);
+  const std::string explosion_query = std::string(100, 'A');
+  auto selected = explosion_auto.query(explosion_query, 4);
+  auto explosion_p = explosion_pigeonhole.query(explosion_query, 4);
+  auto explosion_q = explosion_qgram.query(explosion_query, 4);
+  auto explosion_h = explosion_hybrid.query(explosion_query, 4);
+  assert(explosion_p.candidate_item_ids.size() >
+         auto_config.auto_pigeonhole_max_candidates);
+  assert(explosion_q.candidate_item_ids.size() <
+         explosion_p.candidate_item_ids.size());
+  assert(selected.candidate_item_ids == explosion_h.candidate_item_ids);
+  assert(selected.mode_used == RangeCandidateMode::Hybrid);
+  assert(selected.auto_pigeonhole_rejected_large_candidates == 1);
+  assert(selected.auto_qgram_invoked == 1);
+  assert(selected.auto_hybrid_invoked == 1);
+  assert(selected.auto_final_candidate_pairs == selected.candidate_item_ids.size());
+
+  auto no_hybrid_config = auto_config;
+  no_hybrid_config.auto_hybrid_on_large_candidates = false;
+  ExactRangeJoinIndex explosion_no_hybrid(no_hybrid_config);
+  explosion_no_hybrid.build(explosion_items);
+  auto selected_qgram = explosion_no_hybrid.query(explosion_query, 4);
+  assert(selected_qgram.candidate_item_ids == explosion_q.candidate_item_ids);
+  assert(selected_qgram.mode_used == RangeCandidateMode::QGramOnly);
+  assert(selected_qgram.auto_qgram_invoked == 1);
+  assert(selected_qgram.auto_hybrid_invoked == 0);
+
+  auto old_auto_config = auto_config;
+  old_auto_config.auto_pigeonhole_max_candidates =
+      std::numeric_limits<size_t>::max();
+  old_auto_config.auto_pigeonhole_max_ratio = 1.0;
+  ExactRangeJoinIndex old_auto(old_auto_config);
+  old_auto.build(explosion_items);
+  auto selected_pigeonhole = old_auto.query(explosion_query, 4);
+  assert(selected_pigeonhole.candidate_item_ids ==
+         explosion_p.candidate_item_ids);
+  assert(selected_pigeonhole.mode_used == RangeCandidateMode::PigeonholeOnly);
+  assert(selected_pigeonhole.auto_pigeonhole_accepted == 1);
+  assert(selected_pigeonhole.auto_qgram_invoked == 0);
+  assert(selected_pigeonhole.auto_hybrid_invoked == 0);
 
   std::cout << "range join tests passed\n";
   return 0;

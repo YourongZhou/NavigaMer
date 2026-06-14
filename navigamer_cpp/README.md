@@ -59,10 +59,11 @@ path for small fanout, missing indexes, dimension mismatches, or exceptions.
 **Note:** Phase-2 rebinding and leaf attachment default to exact indexed range
 joins. Use `--link-mode full` and/or `--leaf-attach-mode full` for the original
 full-pairwise construction. `--range-candidate-mode auto` uses adaptive
-pigeonhole seeds when they are at least 8 bp and otherwise uses the q-gram
-count filter. Forced `qgram` and `hybrid` modes are also available; hybrid
-intersects two safe candidate supersets. All modes exact verify every surviving
-candidate before adding a link.
+pigeonhole seeds when they are at least 8 bp, then checks actual candidate
+count and candidate ratio. Large candidate sets invoke q-gram and use the safe
+hybrid intersection by default. Forced `qgram` and `hybrid` modes are also
+available. All modes exact verify every surviving candidate before adding a
+link.
 
 ## Parameter sweeps
 

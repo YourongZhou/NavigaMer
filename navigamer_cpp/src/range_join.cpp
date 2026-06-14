@@ -1,6 +1,7 @@
 #include "range_join.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <stdexcept>
 #include <unordered_set>
@@ -36,6 +37,12 @@ ExactRangeJoinIndex::ExactRangeJoinIndex(RangeJoinConfig config)
   if (config_.max_seed_len < config_.min_seed_len) {
     throw std::invalid_argument(
         "range-join max seed length must be at least min seed length");
+  }
+  if (!std::isfinite(config_.auto_pigeonhole_max_ratio) ||
+      config_.auto_pigeonhole_max_ratio < 0.0 ||
+      config_.auto_pigeonhole_max_ratio > 1.0) {
+    throw std::invalid_argument(
+        "auto pigeonhole max ratio must be finite and in [0, 1]");
   }
 }
 
@@ -84,36 +91,79 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
     return result;
   }
 
-  if (config_.candidate_mode == RangeCandidateMode::QGramOnly ||
-      (config_.candidate_mode == RangeCandidateMode::Auto &&
-       seed_len < config_.min_seed_len)) {
+  if (config_.candidate_mode == RangeCandidateMode::QGramOnly) {
     auto result = qgram_query(query_sequence, tau);
     result.block_len = block_len;
     result.seed_len = seed_len;
     return result;
   }
 
-  if (config_.candidate_mode == RangeCandidateMode::PigeonholeOnly ||
-      config_.candidate_mode == RangeCandidateMode::Auto) {
+  if (config_.candidate_mode == RangeCandidateMode::PigeonholeOnly) {
     return pigeonhole_query(query_sequence, tau, block_len, seed_len);
   }
 
-  auto pigeonhole = pigeonhole_query(query_sequence, tau, block_len, seed_len);
+  if (config_.candidate_mode == RangeCandidateMode::Hybrid) {
+    auto pigeonhole =
+        pigeonhole_query(query_sequence, tau, block_len, seed_len);
+    auto qgram = qgram_query(query_sequence, tau);
+    return hybrid_result(pigeonhole, qgram);
+  }
+
+  if (seed_len < config_.min_seed_len) {
+    auto qgram = qgram_query(query_sequence, tau);
+    qgram.block_len = block_len;
+    qgram.seed_len = seed_len;
+    qgram.auto_qgram_invoked = 1;
+    qgram.auto_final_candidate_pairs = qgram.candidate_item_ids.size();
+    return qgram;
+  }
+
+  auto pigeonhole =
+      pigeonhole_query(query_sequence, tau, block_len, seed_len);
+  pigeonhole.compatible_item_count =
+      items_.size() - pigeonhole.length_filtered_items;
+  pigeonhole.pigeonhole_candidate_count =
+      pigeonhole.candidate_item_ids.size();
+  pigeonhole.pigeonhole_candidate_ratio =
+      pigeonhole.compatible_item_count == 0
+          ? 0.0
+          : static_cast<double>(pigeonhole.pigeonhole_candidate_count) /
+                static_cast<double>(pigeonhole.compatible_item_count);
+  pigeonhole.auto_candidate_ratio_sum =
+      pigeonhole.pigeonhole_candidate_ratio;
+  if (pigeonhole.pigeonhole_candidate_count <=
+          config_.auto_pigeonhole_max_candidates ||
+      pigeonhole.pigeonhole_candidate_ratio <=
+          config_.auto_pigeonhole_max_ratio) {
+    pigeonhole.auto_pigeonhole_accepted = 1;
+    pigeonhole.auto_final_candidate_pairs =
+        pigeonhole.candidate_item_ids.size();
+    return pigeonhole;
+  }
+
   auto qgram = qgram_query(query_sequence, tau);
-  RangeJoinQueryResult result;
-  result.mode_used = RangeCandidateMode::Hybrid;
-  result.used_full_scan = pigeonhole.used_full_scan || qgram.used_full_scan;
-  result.block_len = block_len;
-  result.seed_len = seed_len;
-  result.length_filtered_items =
-      std::max(pigeonhole.length_filtered_items, qgram.length_filtered_items);
-  result.qgram_candidate_count = qgram.candidate_item_ids.size();
-  result.qgram_pruned_by_l1 = qgram.qgram_pruned_by_l1;
-  result.required_shared_nonpositive = qgram.required_shared_nonpositive;
-  std::set_intersection(
-      pigeonhole.candidate_item_ids.begin(), pigeonhole.candidate_item_ids.end(),
-      qgram.candidate_item_ids.begin(), qgram.candidate_item_ids.end(),
-      std::back_inserter(result.candidate_item_ids));
+  if (!config_.auto_hybrid_on_large_candidates) {
+    qgram.block_len = block_len;
+    qgram.seed_len = seed_len;
+    qgram.compatible_item_count = pigeonhole.compatible_item_count;
+    qgram.pigeonhole_candidate_count = pigeonhole.pigeonhole_candidate_count;
+    qgram.pigeonhole_candidate_ratio = pigeonhole.pigeonhole_candidate_ratio;
+    qgram.auto_candidate_ratio_sum = pigeonhole.pigeonhole_candidate_ratio;
+    qgram.auto_pigeonhole_rejected_large_candidates = 1;
+    qgram.auto_qgram_invoked = 1;
+    qgram.auto_final_candidate_pairs = qgram.candidate_item_ids.size();
+    return qgram;
+  }
+
+  auto result = hybrid_result(pigeonhole, qgram);
+  result.compatible_item_count = pigeonhole.compatible_item_count;
+  result.pigeonhole_candidate_count = pigeonhole.pigeonhole_candidate_count;
+  result.pigeonhole_candidate_ratio = pigeonhole.pigeonhole_candidate_ratio;
+  result.auto_candidate_ratio_sum = pigeonhole.pigeonhole_candidate_ratio;
+  result.auto_pigeonhole_rejected_large_candidates = 1;
+  result.auto_qgram_invoked = 1;
+  result.auto_hybrid_invoked = 1;
+  result.auto_final_candidate_pairs = result.candidate_item_ids.size();
   return result;
 }
 
@@ -135,6 +185,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
       std::unique(result.candidate_item_ids.begin(),
                   result.candidate_item_ids.end()),
       result.candidate_item_ids.end());
+  result.compatible_item_count = result.candidate_item_ids.size();
   return result;
 }
 
@@ -175,6 +226,28 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   return result;
 }
 
+RangeJoinQueryResult ExactRangeJoinIndex::hybrid_result(
+    const RangeJoinQueryResult& pigeonhole,
+    const RangeJoinQueryResult& qgram) const {
+  RangeJoinQueryResult result;
+  result.mode_used = RangeCandidateMode::Hybrid;
+  result.used_full_scan = pigeonhole.used_full_scan || qgram.used_full_scan;
+  result.block_len = pigeonhole.block_len;
+  result.seed_len = pigeonhole.seed_len;
+  result.length_filtered_items =
+      std::max(pigeonhole.length_filtered_items, qgram.length_filtered_items);
+  result.compatible_item_count =
+      std::max(pigeonhole.compatible_item_count, qgram.compatible_item_count);
+  result.qgram_candidate_count = qgram.candidate_item_ids.size();
+  result.qgram_pruned_by_l1 = qgram.qgram_pruned_by_l1;
+  result.required_shared_nonpositive = qgram.required_shared_nonpositive;
+  std::set_intersection(
+      pigeonhole.candidate_item_ids.begin(), pigeonhole.candidate_item_ids.end(),
+      qgram.candidate_item_ids.begin(), qgram.candidate_item_ids.end(),
+      std::back_inserter(result.candidate_item_ids));
+  return result;
+}
+
 RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
     const std::string& query_sequence, int tau) const {
   QGramCountIndex::QueryStats stats;
@@ -186,6 +259,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
   result.qgram_candidate_count = stats.qgram_candidates;
   result.qgram_pruned_by_l1 = stats.pruned_by_l1;
   result.required_shared_nonpositive = stats.required_shared_nonpositive;
+  result.compatible_item_count = stats.total_items - stats.length_filtered_items;
   return result;
 }
 

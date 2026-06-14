@@ -1,6 +1,7 @@
 #include "index_builder.hpp"
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -101,6 +102,12 @@ void validate_range_config(const BuildRangeConfig& config) {
   }
   if (config.range_join.qgram_q <= 0) {
     throw std::invalid_argument("range-join q-gram length must be positive");
+  }
+  if (!std::isfinite(config.range_join.auto_pigeonhole_max_ratio) ||
+      config.range_join.auto_pigeonhole_max_ratio < 0.0 ||
+      config.range_join.auto_pigeonhole_max_ratio > 1.0) {
+    throw std::invalid_argument(
+        "auto pigeonhole max ratio must be finite and in [0, 1]");
   }
   if (config.min_rect_index_fanout == 0) {
     throw std::invalid_argument("minimum rectangle-index fanout must be positive");
@@ -343,6 +350,16 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding() {
       stats_.phase2_length_pruned_pairs += candidates.length_filtered_items;
       stats_.phase2_required_shared_nonpositive_count +=
           candidates.required_shared_nonpositive;
+      stats_.phase2_auto_pigeonhole_accepted +=
+          candidates.auto_pigeonhole_accepted;
+      stats_.phase2_auto_pigeonhole_rejected_large_candidates +=
+          candidates.auto_pigeonhole_rejected_large_candidates;
+      stats_.phase2_auto_qgram_invoked += candidates.auto_qgram_invoked;
+      stats_.phase2_auto_hybrid_invoked += candidates.auto_hybrid_invoked;
+      stats_.phase2_auto_final_candidate_pairs +=
+          candidates.auto_final_candidate_pairs;
+      stats_.phase2_auto_candidate_ratio_sum +=
+          candidates.auto_candidate_ratio_sum;
       for (size_t parent_idx : candidates.candidate_item_ids) {
         auto& parent = parents[parent_idx];
         int tau = parent->radius + child->radius;
@@ -518,6 +535,16 @@ void BioGeometryIndexBuilder::attach_leaves(
       stats_.leaf_length_pruned_pairs += candidates.length_filtered_items;
       stats_.leaf_required_shared_nonpositive_count +=
           candidates.required_shared_nonpositive;
+      stats_.leaf_auto_pigeonhole_accepted +=
+          candidates.auto_pigeonhole_accepted;
+      stats_.leaf_auto_pigeonhole_rejected_large_candidates +=
+          candidates.auto_pigeonhole_rejected_large_candidates;
+      stats_.leaf_auto_qgram_invoked += candidates.auto_qgram_invoked;
+      stats_.leaf_auto_hybrid_invoked += candidates.auto_hybrid_invoked;
+      stats_.leaf_auto_final_candidate_pairs +=
+          candidates.auto_final_candidate_pairs;
+      stats_.leaf_auto_candidate_ratio_sum +=
+          candidates.auto_candidate_ratio_sum;
       for (size_t world_idx : candidates.candidate_item_ids) {
         auto& world = finest_layer[world_idx];
         if (std::llabs(static_cast<long long>(seq->seq.size()) -
@@ -559,7 +586,16 @@ void BioGeometryIndexBuilder::print_summary() const {
             << ".." << range_config_.range_join.max_seed_len
             << " candidates="
             << range_candidate_mode_name(range_config_.range_join.candidate_mode)
-            << " qgram_q=" << range_config_.range_join.qgram_q << "\n";
+            << " qgram_q=" << range_config_.range_join.qgram_q
+            << " auto_max_candidates="
+            << range_config_.range_join.auto_pigeonhole_max_candidates
+            << " auto_max_ratio="
+            << range_config_.range_join.auto_pigeonhole_max_ratio
+            << " auto_hybrid="
+            << (range_config_.range_join.auto_hybrid_on_large_candidates
+                    ? "true"
+                    : "false")
+            << "\n";
   std::cerr << "  Phase2 range join: possible=" << stats.phase2_total_possible_pairs
             << " candidates=" << stats.phase2_candidate_pairs
             << " exact_calls=" << stats.phase2_exact_distance_calls
@@ -573,6 +609,16 @@ void BioGeometryIndexBuilder::print_summary() const {
             << " length_pruned=" << stats.phase2_length_pruned_pairs
             << " required_shared_nonpositive="
             << stats.phase2_required_shared_nonpositive_count
+            << " auto_pigeonhole_accepted="
+            << stats.phase2_auto_pigeonhole_accepted
+            << " auto_pigeonhole_rejected_large="
+            << stats.phase2_auto_pigeonhole_rejected_large_candidates
+            << " auto_qgram_invoked=" << stats.phase2_auto_qgram_invoked
+            << " auto_hybrid_invoked=" << stats.phase2_auto_hybrid_invoked
+            << " auto_final_candidates="
+            << stats.phase2_auto_final_candidate_pairs
+            << " auto_avg_candidate_ratio="
+            << stats.phase2_auto_candidate_ratio_avg
             << " candidate_reduction=" << (stats.phase2_candidate_reduction_ratio * 100.0)
             << "% exact_reduction=" << (stats.phase2_exact_distance_reduction_ratio * 100.0)
             << "%\n";
@@ -589,6 +635,16 @@ void BioGeometryIndexBuilder::print_summary() const {
             << " length_pruned=" << stats.leaf_length_pruned_pairs
             << " required_shared_nonpositive="
             << stats.leaf_required_shared_nonpositive_count
+            << " auto_pigeonhole_accepted="
+            << stats.leaf_auto_pigeonhole_accepted
+            << " auto_pigeonhole_rejected_large="
+            << stats.leaf_auto_pigeonhole_rejected_large_candidates
+            << " auto_qgram_invoked=" << stats.leaf_auto_qgram_invoked
+            << " auto_hybrid_invoked=" << stats.leaf_auto_hybrid_invoked
+            << " auto_final_candidates="
+            << stats.leaf_auto_final_candidate_pairs
+            << " auto_avg_candidate_ratio="
+            << stats.leaf_auto_candidate_ratio_avg
             << " candidate_reduction=" << (stats.leaf_candidate_reduction_ratio * 100.0)
             << "% exact_reduction=" << (stats.leaf_exact_distance_reduction_ratio * 100.0)
             << "%\n";
@@ -677,6 +733,22 @@ BioGeometryIndexBuilder::Statistics BioGeometryIndexBuilder::get_statistics() co
       reduction_ratio(stats.total_possible_leaf_pairs, stats.leaf_candidate_pairs);
   stats.leaf_exact_distance_reduction_ratio =
       reduction_ratio(stats.total_possible_leaf_pairs, stats.leaf_exact_distance_calls);
+  const size_t phase2_auto_ratio_count =
+      stats.phase2_auto_pigeonhole_accepted +
+      stats.phase2_auto_pigeonhole_rejected_large_candidates;
+  if (phase2_auto_ratio_count > 0) {
+    stats.phase2_auto_candidate_ratio_avg =
+        stats.phase2_auto_candidate_ratio_sum /
+        static_cast<double>(phase2_auto_ratio_count);
+  }
+  const size_t leaf_auto_ratio_count =
+      stats.leaf_auto_pigeonhole_accepted +
+      stats.leaf_auto_pigeonhole_rejected_large_candidates;
+  if (leaf_auto_ratio_count > 0) {
+    stats.leaf_auto_candidate_ratio_avg =
+        stats.leaf_auto_candidate_ratio_sum /
+        static_cast<double>(leaf_auto_ratio_count);
+  }
   const auto& finest_layer = primary_layers_[static_cast<size_t>(finest_primary_layer_index())];
   if (stats.unique_sequences > 0 && !finest_layer.empty()) {
     stats.compression_ratio =

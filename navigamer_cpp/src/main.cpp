@@ -43,7 +43,7 @@ void usage(const char* prog) {
             << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
-            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
+            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
             << "Global adaptive-search flags: [--mbb-filter-mode scan|rect]\n";
 }
 
@@ -98,6 +98,24 @@ size_t parse_positive_size(const std::string& value, const std::string& flag) {
     throw std::runtime_error(flag + " must be a positive integer");
   }
   return static_cast<size_t>(parsed);
+}
+
+size_t parse_nonnegative_size(const std::string& value, const std::string& flag) {
+  if (value.empty() || value.front() == '-') {
+    throw std::runtime_error(flag + " must be a non-negative integer");
+  }
+  size_t parsed_chars = 0;
+  unsigned long long parsed = std::stoull(value, &parsed_chars);
+  if (parsed_chars != value.size()) {
+    throw std::runtime_error(flag + " must be a non-negative integer");
+  }
+  return static_cast<size_t>(parsed);
+}
+
+bool parse_bool(const std::string& value, const std::string& flag) {
+  if (value == "true") return true;
+  if (value == "false") return false;
+  throw std::runtime_error(flag + " must be true or false");
 }
 
 void write_csv(const std::string& output_path,
@@ -821,6 +839,9 @@ int main(int argc, char** argv) {
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;
   int qgram_q = 5;
+  size_t auto_pigeonhole_max_candidates = 4096;
+  double auto_pigeonhole_max_ratio = 0.25;
+  bool auto_hybrid_on_large_candidates = true;
   size_t min_rect_index_fanout = 64;
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
@@ -876,6 +897,20 @@ int main(int argc, char** argv) {
       qgram_q = std::atoi(argv[++i]);
       continue;
     }
+    if (a == "--auto-pigeonhole-max-candidates" && i + 1 < argc) {
+      auto_pigeonhole_max_candidates =
+          parse_nonnegative_size(argv[++i], "--auto-pigeonhole-max-candidates");
+      continue;
+    }
+    if (a == "--auto-pigeonhole-max-ratio" && i + 1 < argc) {
+      auto_pigeonhole_max_ratio = std::stod(argv[++i]);
+      continue;
+    }
+    if (a == "--auto-hybrid-on-large-candidates" && i + 1 < argc) {
+      auto_hybrid_on_large_candidates =
+          parse_bool(argv[++i], "--auto-hybrid-on-large-candidates");
+      continue;
+    }
     if (a == "--mbb-filter-mode" && i + 1 < argc) {
       mbb_filter_mode = argv[++i];
       continue;
@@ -909,6 +944,12 @@ int main(int argc, char** argv) {
     range_config.range_join.qgram_q = qgram_q;
     range_config.range_join.candidate_mode =
         navigamer::parse_range_candidate_mode(range_candidate_mode);
+    range_config.range_join.auto_pigeonhole_max_candidates =
+        auto_pigeonhole_max_candidates;
+    range_config.range_join.auto_pigeonhole_max_ratio =
+        auto_pigeonhole_max_ratio;
+    range_config.range_join.auto_hybrid_on_large_candidates =
+        auto_hybrid_on_large_candidates;
     range_config.min_rect_index_fanout = min_rect_index_fanout;
     navigamer::SearchConfig search_config;
     search_config.mbb_filter_mode = navigamer::parse_mbb_filter_mode(mbb_filter_mode);

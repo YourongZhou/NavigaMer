@@ -26,6 +26,9 @@ struct RangeJoinConfig {
   int max_seed_len = 20;
   int qgram_q = 5;
   RangeCandidateMode candidate_mode = RangeCandidateMode::Auto;
+  size_t auto_pigeonhole_max_candidates = 4096;
+  double auto_pigeonhole_max_ratio = 0.25;
+  bool auto_hybrid_on_large_candidates = true;
 };
 
 struct RangeJoinItem {
@@ -43,6 +46,15 @@ struct RangeJoinQueryResult {
   size_t qgram_candidate_count = 0;
   size_t qgram_pruned_by_l1 = 0;
   size_t required_shared_nonpositive = 0;
+  size_t compatible_item_count = 0;
+  size_t pigeonhole_candidate_count = 0;
+  double pigeonhole_candidate_ratio = 0.0;
+  size_t auto_pigeonhole_accepted = 0;
+  size_t auto_pigeonhole_rejected_large_candidates = 0;
+  size_t auto_qgram_invoked = 0;
+  size_t auto_hybrid_invoked = 0;
+  size_t auto_final_candidate_pairs = 0;
+  double auto_candidate_ratio_sum = 0.0;
 };
 
 class ExactRangeJoinIndex {
@@ -67,6 +79,9 @@ class ExactRangeJoinIndex {
       const std::string& query_sequence, int tau, int block_len, int seed_len);
   RangeJoinQueryResult qgram_query(
       const std::string& query_sequence, int tau) const;
+  RangeJoinQueryResult hybrid_result(
+      const RangeJoinQueryResult& pigeonhole,
+      const RangeJoinQueryResult& qgram) const;
 };
 
 }  // namespace navigamer

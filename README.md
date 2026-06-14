@@ -93,6 +93,11 @@ and `full` candidate modes. Q-gram filtering uses the necessary condition
 candidate supersets. Every surviving pair is still verified by bounded exact
 edit distance before an edge or leaf attachment is added.
 
+Auto construction is selectivity-aware: it accepts pigeonhole candidates when
+their count is at most `4096` or their ratio among length-compatible targets is
+at most `0.25`; otherwise it invokes q-gram and returns the safe hybrid
+intersection by default.
+
 Adaptive search supports `--mbb-filter-mode scan|rect` (default `scan`). The
 `rect` mode uses an exact in-memory rectangle index over the existing per-child
 MBB rows and falls back to the original scan whenever the index is unavailable

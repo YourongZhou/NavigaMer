@@ -95,6 +95,14 @@ navigamer::BuildRangeConfig indexed_config(navigamer::RangeCandidateMode mode) {
   return config;
 }
 
+navigamer::BuildRangeConfig selective_auto_config() {
+  auto config = indexed_config(navigamer::RangeCandidateMode::Auto);
+  config.range_join.auto_pigeonhole_max_candidates = 4;
+  config.range_join.auto_pigeonhole_max_ratio = 0.0;
+  config.range_join.auto_hybrid_on_large_candidates = true;
+  return config;
+}
+
 void assert_equivalent(
     const navigamer::BioGeometryIndexBuilder& full_builder,
     const navigamer::BioGeometryIndexBuilder& indexed_builder,
@@ -125,7 +133,7 @@ int main() {
   navigamer::BioGeometryIndexBuilder hybrid_builder(
       hierarchy, indexed_config(navigamer::RangeCandidateMode::Hybrid));
   navigamer::BioGeometryIndexBuilder auto_builder(
-      hierarchy, indexed_config(navigamer::RangeCandidateMode::Auto));
+      hierarchy, selective_auto_config());
   full_builder.build(sequences);
   qgram_builder.build(sequences);
   hybrid_builder.build(sequences);
@@ -166,6 +174,18 @@ int main() {
          hybrid_stats.phase2_candidate_pairs);
   assert(hybrid_stats.leaf_exact_distance_calls <=
          hybrid_stats.leaf_candidate_pairs);
+
+  auto auto_stats = auto_builder.get_statistics();
+  assert(auto_stats.phase2_auto_pigeonhole_rejected_large_candidates > 0);
+  assert(auto_stats.phase2_auto_qgram_invoked > 0);
+  assert(auto_stats.phase2_auto_hybrid_invoked > 0);
+  assert(auto_stats.phase2_auto_final_candidate_pairs ==
+         auto_stats.phase2_candidate_pairs);
+  assert(auto_stats.leaf_auto_pigeonhole_rejected_large_candidates > 0);
+  assert(auto_stats.leaf_auto_qgram_invoked > 0);
+  assert(auto_stats.leaf_auto_hybrid_invoked > 0);
+  assert(auto_stats.leaf_auto_final_candidate_pairs ==
+         auto_stats.leaf_candidate_pairs);
 
   auto short_sequences = make_sequences(20);
   navigamer::BioGeometryIndexBuilder fallback_builder(
