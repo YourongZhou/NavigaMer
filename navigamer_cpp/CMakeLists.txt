@@ -173,6 +173,20 @@ add_executable(test_search_qgram_prefilter
   src/experiment_utils.cpp
   src/map150.cpp
 )
+add_executable(test_query_benchmark_gate
+  src/test_query_benchmark_gate.cpp
+  src/query_benchmark.cpp
+  src/structure.cpp
+  src/tools.cpp
+  src/qgram_filter.cpp
+  src/range_join.cpp
+  src/mbb_rect_index.cpp
+  src/index_builder.cpp
+  src/search_engine.cpp
+  src/io_utils.cpp
+  src/experiment_utils.cpp
+  src/map150.cpp
+)
 target_include_directories(test_search_stats_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -209,13 +223,17 @@ target_include_directories(test_search_qgram_prefilter PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(test_search_qgram_prefilter PRIVATE OpenMP::OpenMP_CXX)
+target_include_directories(test_query_benchmark_gate PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_query_benchmark_gate PRIVATE OpenMP::OpenMP_CXX)
 target_include_directories(test_hierarchy_config PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(test_hierarchy_config PRIVATE OpenMP::OpenMP_CXX)
 
 if(NAVIGAMER_WITH_SEQAN3)
-  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_qgram_filter test_range_join test_build_range_equivalence test_mbb_rect_index test_mbb_filter_equivalence test_search_qgram_prefilter)
+  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_qgram_filter test_range_join test_build_range_equivalence test_mbb_rect_index test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate)
     target_compile_definitions(${target} PRIVATE NAVIGAMER_WITH_SEQAN3)
     target_link_libraries(${target} PRIVATE seqan3::seqan3)
   endforeach()
@@ -239,4 +257,5 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   target_compile_options(test_mbb_rect_index PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_mbb_filter_equivalence PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_search_qgram_prefilter PRIVATE -O3 -DNDEBUG)
+  target_compile_options(test_query_benchmark_gate PRIVATE -O3 -DNDEBUG)
 endif()
