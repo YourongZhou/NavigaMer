@@ -27,6 +27,9 @@ int main() {
   assert((mismatch.brute_force_missing_from_optimized ==
           std::vector<std::string>{"a"}));
   assert(!navigamer::comparison_passes_gate(mismatch));
+  auto shared_false_positive =
+      compare_result_ids({"extra"}, {"extra"}, {});
+  assert(!navigamer::comparison_passes_gate(shared_false_positive));
 
   std::vector<std::shared_ptr<navigamer::BioSequence>> index_sequences = {
       std::make_shared<navigamer::BioSequence>("unique_a", "ACGTGCACTGAT"),

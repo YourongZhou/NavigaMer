@@ -325,6 +325,8 @@ ResultComparison compare_result_ids(std::vector<std::string> baseline,
 
   ResultComparison comparison;
   comparison.baseline_equals_optimized = baseline == optimized;
+  comparison.baseline_equals_brute_force = baseline == brute_force;
+  comparison.optimized_equals_brute_force = optimized == brute_force;
   comparison.baseline_only = difference(baseline, optimized);
   comparison.optimized_only = difference(optimized, baseline);
   comparison.brute_force_missing_from_baseline = difference(brute_force, baseline);
@@ -335,7 +337,9 @@ ResultComparison compare_result_ids(std::vector<std::string> baseline,
 }
 
 bool comparison_passes_gate(const ResultComparison& comparison) {
-  return comparison.baseline_equals_optimized && comparison.baseline_no_fn &&
+  return comparison.baseline_equals_optimized &&
+         comparison.baseline_equals_brute_force &&
+         comparison.optimized_equals_brute_force && comparison.baseline_no_fn &&
          comparison.optimized_no_fn;
 }
 
@@ -513,6 +517,10 @@ QueryBenchmarkRunResult run_query_benchmark(
   auto queries = generate_benchmark_queries(
       index_sequences, unique_sequences, config.query_length, config.tolerance,
       config.seed, config.queries_per_class);
+  std::map<std::string, size_t> generation_counts;
+  for (const auto& query : queries) {
+    generation_counts[query_class_name(query.query_class)]++;
+  }
 
   SearchConfig baseline_config;
   baseline_config.mbb_filter_mode = MBBFilterMode::Scan;
@@ -715,18 +723,57 @@ QueryBenchmarkRunResult run_query_benchmark(
        << "\"queries_per_class\":" << config.queries_per_class << ","
        << "\"warmup_iterations\":" << config.warmup_iterations << ","
        << "\"measured_iterations\":" << config.measured_iterations << ","
-       << "\"cold_cache_bytes\":" << config.cold_cache_bytes << "},"
+       << "\"cold_cache_bytes\":" << config.cold_cache_bytes << ","
+       << "\"detail_tsv_path\":\"" << json_escape(config.detail_tsv_path) << "\","
+       << "\"summary_tsv_path\":\"" << json_escape(config.summary_tsv_path) << "\","
+       << "\"json_path\":\"" << json_escape(config.json_path) << "\"},"
        << "\"build\":{\"duration_ms\":" << format_double(build_duration_ms)
        << ",\"added_sequences\":" << build_stats.added_sequences
-       << ",\"unique_sequences\":" << build_stats.unique_sequences << "},"
+       << ",\"unique_sequences\":" << build_stats.unique_sequences
+       << ",\"deduplicated\":" << build_stats.deduplicated
+       << ",\"created_auxiliary_nodes\":" << build_stats.created_auxiliary_nodes
+       << ",\"compression_ratio\":" << format_double(build_stats.compression_ratio)
+       << ",\"dag_redundancy\":" << format_double(build_stats.dag_redundancy)
+       << ",\"phase2_total_possible_pairs\":"
+       << build_stats.phase2_total_possible_pairs
+       << ",\"phase2_candidate_pairs\":" << build_stats.phase2_candidate_pairs
+       << ",\"phase2_exact_distance_calls\":"
+       << build_stats.phase2_exact_distance_calls
+       << ",\"phase2_edges_added\":" << build_stats.phase2_edges_added
+       << ",\"total_possible_leaf_pairs\":"
+       << build_stats.total_possible_leaf_pairs
+       << ",\"leaf_candidate_pairs\":" << build_stats.leaf_candidate_pairs
+       << ",\"leaf_exact_distance_calls\":"
+       << build_stats.leaf_exact_distance_calls
+       << ",\"leaf_attachments_added\":" << build_stats.leaf_attachments_added
+       << "},"
        << "\"profiles\":{\"baseline\":{\"mbb_filter_mode\":\"scan\","
        << "\"search_qgram_prefilter\":false},\"optimized\":{"
        << "\"mbb_filter_mode\":\""
        << mbb_filter_mode_name(optimized_search_config.mbb_filter_mode) << "\","
        << "\"search_qgram_prefilter\":"
-       << bool_string(optimized_search_config.search_qgram_prefilter) << "}},"
-       << "\"generation\":{\"query_count\":" << queries.size() << "},"
-       << "\"aggregate_row_count\":" << result.summary_rows.size() << ","
+       << bool_string(optimized_search_config.search_qgram_prefilter) << ","
+       << "\"search_qgram_q\":" << optimized_search_config.search_qgram_q << "}},"
+       << "\"generation\":{\"query_count\":" << queries.size()
+       << ",\"counts\":{";
+  size_t generation_index = 0;
+  for (const auto& entry : generation_counts) {
+    if (generation_index++) json << ",";
+    json << "\"" << json_escape(entry.first) << "\":" << entry.second;
+  }
+  json << "}},\"aggregate_rows\":[";
+  for (size_t row_index = 0; row_index < result.summary_rows.size(); ++row_index) {
+    if (row_index) json << ",";
+    json << "[";
+    for (size_t column_index = 0;
+         column_index < result.summary_rows[row_index].size(); ++column_index) {
+      if (column_index) json << ",";
+      json << "\"" << json_escape(result.summary_rows[row_index][column_index])
+           << "\"";
+    }
+    json << "]";
+  }
+  json << "],"
        << "\"mismatch_count\":" << result.mismatch_count << ","
        << "\"mismatch_queries\":[";
   for (size_t i = 0; i < mismatch_diagnostics.size(); ++i) {

@@ -45,6 +45,8 @@ struct GeneratedBenchmarkQuery {
 
 struct ResultComparison {
   bool baseline_equals_optimized = false;
+  bool baseline_equals_brute_force = false;
+  bool optimized_equals_brute_force = false;
   bool baseline_no_fn = false;
   bool optimized_no_fn = false;
   std::vector<std::string> baseline_only;
