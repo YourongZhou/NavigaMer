@@ -76,6 +76,7 @@ void assert_four_modes_equal(
     const navigamer::BioSequence& query,
     int tolerance,
     bool expect_unsafe_fallback,
+    bool expect_rect_query,
     bool* saw_pruning) {
   constexpr int search_q = 3;
   navigamer::BioGeometrySearchEngine scan_off(
@@ -99,6 +100,7 @@ void assert_four_modes_equal(
   assert(ids(scan_off_hits) == ids(scan_on_hits));
   assert(ids(scan_on_hits) == ids(rect_off_hits));
   assert(ids(rect_off_hits) == ids(rect_on_hits));
+  assert((rect_on_stats.mbb_rect_index_queries > 0) == expect_rect_query);
 
   assert(!scan_off_stats.search_qgram_prefilter_enabled);
   assert(scan_off_stats.search_qgram_checks == 0);
@@ -135,18 +137,23 @@ int main() {
   navigamer::BioGeometryIndexBuilder builder(
       navigamer::HierarchyConfig({28, 14, 5}), build_config);
   builder.build(sequences);
-  disable_mbb_pruning(builder);
 
   bool saw_pruning = false;
+  for (size_t i = 0; i < 6; ++i) {
+    navigamer::BioSequence query("rect_q_" + std::to_string(i), sequences[i]->seq);
+    assert_four_modes_equal(builder, query, 2, false, true, &saw_pruning);
+  }
+
+  disable_mbb_pruning(builder);
   for (size_t i = 0; i < 12; ++i) {
     navigamer::BioSequence query("q_" + std::to_string(i), sequences[i]->seq);
-    assert_four_modes_equal(builder, query, 2, false, &saw_pruning);
+    assert_four_modes_equal(builder, query, 2, false, false, &saw_pruning);
   }
   assert(saw_pruning);
 
   navigamer::BioSequence ambiguous("ambiguous", sequences[0]->seq);
   ambiguous.seq[10] = 'N';
-  assert_four_modes_equal(builder, ambiguous, 2, true, &saw_pruning);
+  assert_four_modes_equal(builder, ambiguous, 2, true, false, &saw_pruning);
 
   navigamer::BioGeometrySearchEngine disabled_q_engine(
       builder, config(navigamer::MBBFilterMode::Scan, true, 0));
