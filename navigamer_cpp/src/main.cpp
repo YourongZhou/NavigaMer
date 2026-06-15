@@ -14,6 +14,7 @@
 #include "tools.hpp"
 #include "experiment_utils.hpp"
 #include "map150.hpp"
+#include "query_benchmark.hpp"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -41,6 +42,7 @@ void usage(const char* prog) {
             << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " map150 --ref <path|seq> --reads <path|seq> --tolerance <N> --out <tsv> [--mode adaptive] [--locator refpos|seqan] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " query-benchmark --ref <fasta|sequence> --out <detail.tsv> --summary-out <summary.tsv> --json-out <summary.json> [--window 200] [--query-length 200] [--tolerance 2]\n"
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
             << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
@@ -893,6 +895,15 @@ int main(int argc, char** argv) {
   int r_mw = navigamer::R_MW;
   int r_lw = navigamer::R_LW;
   int query_edits = -1;
+  size_t reference_subset_length = 0;
+  int query_length = 200;
+  int threads = 1;
+  size_t queries_per_class = 1;
+  size_t warmup_iterations = 2;
+  size_t measured_iterations = 10;
+  size_t cold_cache_bytes = 256ULL * 1024ULL * 1024ULL;
+  std::string summary_out;
+  std::string json_out;
 
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
@@ -915,6 +926,47 @@ int main(int argc, char** argv) {
       continue;
     }
     if (a == "--query-edits" && i + 1 < argc) { query_edits = std::atoi(argv[++i]); continue; }
+    if (a == "--reference-subset-length" && i + 1 < argc) {
+      reference_subset_length =
+          parse_nonnegative_size(argv[++i], "--reference-subset-length");
+      continue;
+    }
+    if (a == "--query-length" && i + 1 < argc) {
+      query_length = std::atoi(argv[++i]);
+      continue;
+    }
+    if (a == "--threads" && i + 1 < argc) {
+      threads = static_cast<int>(parse_positive_size(argv[++i], "--threads"));
+      continue;
+    }
+    if (a == "--queries-per-class" && i + 1 < argc) {
+      queries_per_class =
+          parse_positive_size(argv[++i], "--queries-per-class");
+      continue;
+    }
+    if (a == "--warmup-iterations" && i + 1 < argc) {
+      warmup_iterations =
+          parse_nonnegative_size(argv[++i], "--warmup-iterations");
+      continue;
+    }
+    if (a == "--measured-iterations" && i + 1 < argc) {
+      measured_iterations =
+          parse_positive_size(argv[++i], "--measured-iterations");
+      continue;
+    }
+    if (a == "--cold-cache-bytes" && i + 1 < argc) {
+      cold_cache_bytes =
+          parse_nonnegative_size(argv[++i], "--cold-cache-bytes");
+      continue;
+    }
+    if (a == "--summary-out" && i + 1 < argc) {
+      summary_out = argv[++i];
+      continue;
+    }
+    if (a == "--json-out" && i + 1 < argc) {
+      json_out = argv[++i];
+      continue;
+    }
     if (a == "--seed" && i + 1 < argc) {
       seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
       continue;
@@ -1057,6 +1109,40 @@ int main(int argc, char** argv) {
       }
       run_benchmark(ref_input, reads_input, tolerance, window_size, stride, out_tsv,
                     hierarchy, range_config, search_config);
+      return 0;
+    }
+    if (cmd == "query-benchmark") {
+      if (ref_input.empty() || out_tsv.empty() || summary_out.empty() ||
+          json_out.empty()) {
+        std::cerr << "query-benchmark requires --ref, --out, --summary-out, "
+                     "and --json-out\n";
+        return 1;
+      }
+      navigamer::QueryBenchmarkConfig config;
+      config.ref_input = ref_input;
+      config.reference_subset_length = reference_subset_length;
+      config.window_length = window_size;
+      config.stride = stride;
+      config.query_length = query_length;
+      config.tolerance = tolerance;
+      config.seed = seed;
+      config.threads = threads;
+      config.queries_per_class = queries_per_class;
+      config.warmup_iterations = warmup_iterations;
+      config.measured_iterations = measured_iterations;
+      config.cold_cache_bytes = cold_cache_bytes;
+      config.detail_tsv_path = out_tsv;
+      config.summary_tsv_path = summary_out;
+      config.json_path = json_out;
+      auto benchmark_result =
+          navigamer::run_query_benchmark(config, hierarchy, range_config,
+                                         search_config);
+      if (!benchmark_result.gate_passed) {
+        std::cerr << "query-benchmark gate failed: mismatches="
+                  << benchmark_result.mismatch_count << "\n";
+        return 2;
+      }
+      std::cerr << "query-benchmark gate passed\n";
       return 0;
     }
     if (cmd == "boundary") {

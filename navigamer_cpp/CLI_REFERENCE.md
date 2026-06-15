@@ -150,6 +150,43 @@ Slices the reference into windows of length `--window` with stride `--stride`; e
 
 If a query has no hit, a placeholder row is still emitted with stats.
 
+### `query-benchmark`
+
+Builds one shared in-memory index, deterministically generates six query
+classes (`random_region`, `ordinary_region`, `low_complexity_region`,
+`no_hit`, `single_hit`, and `multi_hit`), and compares:
+
+- baseline: fixed `scan` MBB filtering with search q-gram disabled
+- optimized: `--mbb-filter-mode`, `--search-qgram-prefilter`, and
+  `--search-qgram-q`
+- exact brute-force result IDs computed before timing
+
+**Required:** `--ref`, `--out`, `--summary-out`, `--json-out`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--reference-subset-length` | `0` | Reference prefix length; `0` uses the full input |
+| `--window` | `200` | Indexed reference-window length |
+| `--stride` | `1` | Indexed window stride |
+| `--query-length` | `200` | Generated query length |
+| `--tolerance` | `2` | Exact edit-distance threshold |
+| `--seed` | `42` | Deterministic generation seed |
+| `--threads` | `1` | Recorded/applied OpenMP thread count; Step 0 query execution remains serial |
+| `--queries-per-class` | `1` | Queries generated for each class |
+| `--warmup-iterations` | `2` | Untimed warmups per query/profile |
+| `--measured-iterations` | `10` | Timed warm samples per query/profile |
+| `--cold-cache-bytes` | `268435456` | Best-effort eviction buffer touched before each cold sample; `0` disables it |
+| `--out` | required | Detailed per-sample TSV |
+| `--summary-out` | required | Per-class/profile plus `all` aggregate TSV |
+| `--json-out` | required | Configuration, build, memory, aggregate, mismatch, and gate JSON |
+
+The timed region contains only `search_adaptive`. Results must be stable across
+repeated executions and exactly match between profiles and brute force. The
+command writes all outputs before returning and exits `0` when the gate passes,
+`2` on a result/no-FN mismatch, and `1` on configuration or runtime errors.
+Current/peak RSS telemetry is best effort. Candidate-set comparison and
+per-query allocation counting are explicitly reported as `unavailable`.
+
 ### `boundary`
 
 Builds one in-memory index from reference windows of fixed length `--length` and sweeps a full `error_rate × tolerance_rate` grid without rebuilding the index for each cell. This command is intended for capability-boundary exploration on long reference slices such as `chr1_subset`.
@@ -208,6 +245,19 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `avg_mbb_candidates_per_parent`,
 `avg_center_distance_calls_per_query`, `query_time_ms`
 
+**`query-benchmark` detail:**  
+`query_id`, `query_class`, `profile`, `sample_kind`, `iteration`,
+`first_profile`, `latency_ms`, `result_count`, `brute_force_result_count`,
+`result_equal`, `no_fn`, `world_access_count`, `node_access_count`,
+`edge_access_count`, `mbb_checks`, `mbb_survivors`, `qgram_checks`,
+`center_exact_distance_calls`, `leaf_beacon_checks`,
+`leaf_exact_distance_calls`, `visited_checks`, `visited_hits`,
+`candidate_count`, `verified_candidate_count`
+
+The summary TSV reports cold/warm average, p50, p95, and p99 latency; query,
+sample, result, equality-failure, and false-negative totals; and average
+logical counters for each query-class/profile pair plus `all`.
+
 `center_distance_calls_after_mbb` is retained as a compatibility alias for
 `center_distance_calls_before_qgram`. The actual bounded center edit-distance
 calls are reported by `center_distance_calls_after_qgram`.
@@ -241,5 +291,6 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
 | `test_search_qgram_prefilter` | Search q-gram on/off, scan/rect, ambiguous-base fallback, containment, and center-call reduction checks |
+| `test_query_benchmark_gate` | Deterministic query classes, dual-profile output, exact result equality, and no-FN gate |
 
 Build with `make test_recall` / `make test_distance_bound`.

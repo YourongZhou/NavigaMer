@@ -23,6 +23,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer run    --ref <fasta|sequence> --reads <fastq|sequence> [--tolerance 2] [--out out.tsv]
 ./navigamer map150 --ref <fasta|sequence> --reads <fastq|sequence> --tolerance <N> --out out.tsv [--locator refpos|seqan]
 ./navigamer benchmark --ref <fasta> --reads <fastq> [--tolerance 2] [--window 200] [--stride 1] [--out out.tsv]
+./navigamer query-benchmark --ref <fasta|sequence> --out detail.tsv --summary-out summary.tsv --json-out summary.json [--window 200] [--query-length 200]
 ./navigamer boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out out.tsv]
 ./navigamer layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits 2] [--queries-per-cell 200] [--stride 1 | --stride-mode sparse|dense] [--seed 42] [--L-values 2,3,4,5] [--r-leaf-values 4,8,12] [--alpha-values 0.5,0.7] [--out out.csv]
 ```
@@ -38,6 +39,16 @@ They also accept `--search-qgram-prefilter off|on` (default `off`) and
 construction `--qgram-q`. Enabled search-side filtering runs only on
 MBB-surviving child-world centers before bounded exact center verification;
 unsafe or missing signatures fall back to no pruning.
+
+`query-benchmark` fixes the baseline profile to MBB scan with search q-gram
+disabled and compares it with the profile selected by
+`--mbb-filter-mode`, `--search-qgram-prefilter`, and `--search-qgram-q`.
+It deterministically generates random-region, ordinary-region,
+low-complexity-region, no-hit, single-hit, and multi-hit queries. Step 0 runs
+queries serially even though `--threads` is recorded and applied to OpenMP.
+One best-effort eviction-buffer cold sample and configured warm samples are
+reported per query/profile. Any repeated-result, cross-profile, or brute-force
+no-FN mismatch makes the command return `2`.
 
 ## Module map
 

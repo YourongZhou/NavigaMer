@@ -27,6 +27,7 @@ add_executable(navigamer
   src/io_utils.cpp
   src/experiment_utils.cpp
   src/map150.cpp
+  src/query_benchmark.cpp
 )
 
 target_include_directories(navigamer PRIVATE

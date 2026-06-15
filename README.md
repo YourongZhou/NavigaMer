@@ -49,6 +49,7 @@ cd navigamer_cpp
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
+./navigamer query-benchmark --ref ACGTGCACTGATTGCATAGCTACGAAAAAAAAAAAACCCCGGGGCCCCCCCCCGGGCCCC --window 12 --stride 12 --query-length 12 --tolerance 1 --primary-radii 12,6,2 --min-rect-index-fanout 1 --mbb-filter-mode rect --search-qgram-prefilter on --search-qgram-q 3 --warmup-iterations 1 --measured-iterations 2 --cold-cache-bytes 0 --out /tmp/query_detail.tsv --summary-out /tmp/query_summary.tsv --json-out /tmp/query_summary.json
 ```
 
 Fixed-length 150 bp mapper path with final gap-aware verification:
@@ -112,6 +113,12 @@ Adaptive child-world traversal also supports the optional
 still receives bounded exact edit-distance verification. The default is
 `off`; unsupported q values or non-ACGT sequences conservatively fall back to
 no pruning.
+
+`query-benchmark` is a deterministic correctness and latency gate for adaptive
+search. It compares a fixed baseline (`scan`, search q-gram off), the optimized
+profile selected by adaptive-search flags, and exact brute-force IDs across
+six query classes. It writes detailed TSV, aggregate TSV, and JSON output and
+returns exit status `2` on any result mismatch or false negative.
 
 The default CLI path still uses the legacy three primary layers (`LW/MW/SW`) via `--r-lw`, `--r-mw`, and `--r-sw`, but the C++ implementation now also supports any number of primary layers `K >= 2` through `--primary-radii coarse,...,fine`. One auxiliary tier is inserted automatically between each adjacent pair of primary layers during index construction and collapsed away before query-time navigation.
 

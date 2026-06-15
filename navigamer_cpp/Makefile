@@ -7,7 +7,7 @@ CXXSTD = c++23
 SEQAN3_FLAGS = -DNAVIGAMER_WITH_SEQAN3
 endif
 CXXFLAGS = -std=$(CXXSTD) -O2 -I include -Wall -Wextra -fopenmp -MMD -MP $(SEQAN3_FLAGS)
-SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/mbb_rect_index.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/main.cpp
+SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/mbb_rect_index.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp src/main.cpp
 OBJ = $(SRC:.cpp=.o)
 DEP = $(OBJ:.o=.d)
 TARGET = navigamer
