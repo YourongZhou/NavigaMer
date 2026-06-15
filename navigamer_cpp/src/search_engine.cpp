@@ -342,6 +342,7 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
 
   std::vector<std::shared_ptr<BioSequence>> out;
   for (const auto& entry : unique_results) out.push_back(entry.second);
+  stats.result_count = out.size();
   return {out, stats};
 }
 

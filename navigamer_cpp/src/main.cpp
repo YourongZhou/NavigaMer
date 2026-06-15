@@ -44,7 +44,7 @@ void usage(const char* prog) {
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
             << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
-            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect]\n";
+            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
 }
 
 std::string format_double(double value) {
@@ -116,6 +116,12 @@ bool parse_bool(const std::string& value, const std::string& flag) {
   if (value == "true") return true;
   if (value == "false") return false;
   throw std::runtime_error(flag + " must be true or false");
+}
+
+bool parse_on_off(const std::string& value, const std::string& flag) {
+  if (value == "on") return true;
+  if (value == "off") return false;
+  throw std::runtime_error(flag + " must be off or on");
 }
 
 void write_csv(const std::string& output_path,
@@ -346,7 +352,25 @@ void run_query(const std::string& /*ref_input*/, const std::string& reads_input,
               << " mbb_rect_candidate_children=" << st.mbb_rect_candidate_children
               << " mbb_rect_fallback_count=" << st.mbb_rect_fallback_count
               << " center_distance_calls_after_mbb="
-              << st.center_distance_calls_after_mbb << ")\n";
+              << st.center_distance_calls_after_mbb
+              << " search_qgram_prefilter_enabled="
+              << (st.search_qgram_prefilter_enabled ? "true" : "false")
+              << " search_qgram_q=" << st.search_qgram_q
+              << " search_qgram_signature_build_count="
+              << st.search_qgram_signature_build_count
+              << " search_qgram_signature_missing_count="
+              << st.search_qgram_signature_missing_count
+              << " search_qgram_checks=" << st.search_qgram_checks
+              << " search_qgram_pruned_children="
+              << st.search_qgram_pruned_children
+              << " search_qgram_passed_children="
+              << st.search_qgram_passed_children
+              << " center_distance_calls_before_qgram="
+              << st.center_distance_calls_before_qgram
+              << " center_distance_calls_after_qgram="
+              << st.center_distance_calls_after_qgram
+              << " qgram_prune_ratio=" << st.qgram_prune_ratio()
+              << " result_count=" << st.result_count << ")\n";
     for (const auto& h : res) std::cout << "  " << h->id << " dist=" << compute_distance(query_seq, h->seq) << "\n";
   }
 }
@@ -438,7 +462,13 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "dist_calcs", "leaf_verify_count", "candidate_count_for_prune", "beacon_prune_count",
       "mbb_filter_mode", "mbb_scan_child_checks", "mbb_rect_index_queries",
       "mbb_rect_candidate_children", "mbb_rect_fallback_count",
-      "center_distance_calls_after_mbb", "avg_mbb_candidates_per_parent",
+      "center_distance_calls_after_mbb",
+      "search_qgram_prefilter_enabled", "search_qgram_q",
+      "search_qgram_signature_build_count", "search_qgram_signature_missing_count",
+      "search_qgram_checks", "search_qgram_pruned_children",
+      "search_qgram_passed_children", "center_distance_calls_before_qgram",
+      "center_distance_calls_after_qgram", "qgram_prune_ratio", "result_count",
+      "avg_mbb_candidates_per_parent",
       "avg_center_distance_calls_per_query", "query_time_ms"};
 
   std::vector<std::vector<std::vector<std::string>>> per_query_rows(queries.size());
@@ -456,39 +486,52 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
             ? 0.0
             : static_cast<double>(st.mbb_surviving_child_count) /
                   static_cast<double>(st.mbb_filter_parent_count);
-    std::vector<std::string> mbb_stats = {
+    std::vector<std::string> search_stats = {
         mbb_filter_mode_name(search_config.mbb_filter_mode),
         std::to_string(st.mbb_scan_child_checks),
         std::to_string(st.mbb_rect_index_queries),
         std::to_string(st.mbb_rect_candidate_children),
         std::to_string(st.mbb_rect_fallback_count),
         std::to_string(st.center_distance_calls_after_mbb),
+        st.search_qgram_prefilter_enabled ? "true" : "false",
+        std::to_string(st.search_qgram_q),
+        std::to_string(st.search_qgram_signature_build_count),
+        std::to_string(st.search_qgram_signature_missing_count),
+        std::to_string(st.search_qgram_checks),
+        std::to_string(st.search_qgram_pruned_children),
+        std::to_string(st.search_qgram_passed_children),
+        std::to_string(st.center_distance_calls_before_qgram),
+        std::to_string(st.center_distance_calls_after_qgram),
+        format_double(st.qgram_prune_ratio()),
+        std::to_string(st.result_count),
         format_double(avg_mbb_candidates),
-        format_double(static_cast<double>(st.center_distance_calls_after_mbb)),
+        format_double(static_cast<double>(st.center_distance_calls_after_qgram)),
         format_double(query_time_ms)};
     if (res.empty()) {
-      per_query_rows[qi].push_back({
+      std::vector<std::string> row = {
           read->id, "", "", "", read->id, std::to_string(static_cast<int>(read->seq.size())),
           "", "+", "0", "0", "0", "0", "", read->seq, "",
           "-1", "-1",
           std::to_string(st.dist_calc_count), std::to_string(st.leaf_verify_count),
-          std::to_string(st.candidate_count_for_prune), std::to_string(st.beacon_prune_count),
-          mbb_stats[0], mbb_stats[1], mbb_stats[2], mbb_stats[3],
-          mbb_stats[4], mbb_stats[5], mbb_stats[6], mbb_stats[7], mbb_stats[8]});
+          std::to_string(st.candidate_count_for_prune),
+          std::to_string(st.beacon_prune_count)};
+      row.insert(row.end(), search_stats.begin(), search_stats.end());
+      per_query_rows[qi].push_back(std::move(row));
     } else {
       for (const auto& hit : res) {
         int ed = compute_distance(read->seq, hit->seq);
         auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, *hit, ed);
         for (const auto& r : rows) {
-          per_query_rows[qi].push_back({
+          std::vector<std::string> row = {
               r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
               r.read_id, r.read_len, r.ref_id, r.strand, r.query_start, r.reference_start,
               r.aligned_length, r.score, r.edit_distance, r.query_fragment, r.reference_fragment,
               r.bwt_start, r.bwt_end,
               std::to_string(st.dist_calc_count), std::to_string(st.leaf_verify_count),
-              std::to_string(st.candidate_count_for_prune), std::to_string(st.beacon_prune_count),
-              mbb_stats[0], mbb_stats[1], mbb_stats[2], mbb_stats[3],
-              mbb_stats[4], mbb_stats[5], mbb_stats[6], mbb_stats[7], mbb_stats[8]});
+              std::to_string(st.candidate_count_for_prune),
+              std::to_string(st.beacon_prune_count)};
+          row.insert(row.end(), search_stats.begin(), search_stats.end());
+          per_query_rows[qi].push_back(std::move(row));
         }
       }
     }
@@ -836,9 +879,11 @@ int main(int argc, char** argv) {
   std::string leaf_attach_mode = "indexed";
   std::string range_candidate_mode = "auto";
   std::string mbb_filter_mode = "scan";
+  std::string search_qgram_prefilter = "off";
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;
   int qgram_q = 5;
+  int search_qgram_q = 5;
   size_t auto_pigeonhole_max_candidates = 4096;
   double auto_pigeonhole_max_ratio = 0.25;
   bool auto_hybrid_on_large_candidates = true;
@@ -915,6 +960,14 @@ int main(int argc, char** argv) {
       mbb_filter_mode = argv[++i];
       continue;
     }
+    if (a == "--search-qgram-prefilter" && i + 1 < argc) {
+      search_qgram_prefilter = argv[++i];
+      continue;
+    }
+    if (a == "--search-qgram-q" && i + 1 < argc) {
+      search_qgram_q = std::atoi(argv[++i]);
+      continue;
+    }
     if (a == "--min-rect-index-fanout" && i + 1 < argc) {
       min_rect_index_fanout =
           parse_positive_size(argv[++i], "--min-rect-index-fanout");
@@ -953,6 +1006,9 @@ int main(int argc, char** argv) {
     range_config.min_rect_index_fanout = min_rect_index_fanout;
     navigamer::SearchConfig search_config;
     search_config.mbb_filter_mode = navigamer::parse_mbb_filter_mode(mbb_filter_mode);
+    search_config.search_qgram_prefilter =
+        parse_on_off(search_qgram_prefilter, "--search-qgram-prefilter");
+    search_config.search_qgram_q = search_qgram_q;
 
     if (cmd == "demo") {
       run_demo(demo_size, hierarchy, range_config, search_config);

@@ -55,6 +55,7 @@ struct SearchStats {
   size_t search_qgram_passed_children = 0;
   size_t center_distance_calls_before_qgram = 0;
   size_t center_distance_calls_after_qgram = 0;
+  size_t result_count = 0;
 
   SearchStats() = default;
   explicit SearchStats(size_t num_layers) : layer_breakdown(num_layers, 0) {}
