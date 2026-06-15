@@ -33,6 +33,11 @@ All adaptive-search commands accept `--mbb-filter-mode scan|rect` and
 `--min-rect-index-fanout N` (default `64`). Rect mode performs exact
 all-dimension MBB rectangle intersection and falls back to the original scan
 path for small fanout, missing indexes, dimension mismatches, or exceptions.
+They also accept `--search-qgram-prefilter off|on` (default `off`) and
+`--search-qgram-q N` (default `5`). The search q is independent from
+construction `--qgram-q`. Enabled search-side filtering runs only on
+MBB-surviving child-world centers before bounded exact center verification;
+unsafe or missing signatures fall back to no pruning.
 
 ## Module map
 
@@ -82,3 +87,7 @@ For long-sequence boundary studies, `boundary` outputs one aggregated TSV row pe
 | Full/indexed construction equivalence | `make test_build_range && ./test_build_range_equivalence` |
 | Exact MBB rectangle lookup | `make test_mbb_rect && ./test_mbb_rect_index` |
 | Scan/rect adaptive equivalence and fallback | `make test_mbb_filter && ./test_mbb_filter_equivalence` |
+| Search q-gram on/off and scan/rect equivalence | `make test_search_qgram && ./test_search_qgram_prefilter` |
+
+Search q-gram benchmark results and commands are recorded in
+[`SEARCH_QGRAM_PREFILTER_BENCHMARK.md`](SEARCH_QGRAM_PREFILTER_BENCHMARK.md).

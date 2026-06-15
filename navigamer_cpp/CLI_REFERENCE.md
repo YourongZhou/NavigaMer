@@ -29,6 +29,8 @@ Used by all pipelines that build the index:
 | `--auto-hybrid-on-large-candidates` | `true` | Rejected large pigeonhole sets use hybrid when true, direct q-gram when false |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
+| `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
+| `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
@@ -61,6 +63,15 @@ dimension. It changes only survivor enumeration; center-distance verification,
 containment/overlap traversal, and leaf verification remain unchanged. Missing
 or inconsistent indexes, small fanout, dimension mismatches, and query
 exceptions fall back to scan.
+
+Search-side q-gram filtering is also exact and no-false-negative. It runs only
+after child MBB survivor generation and safely prunes when
+`qgram_l1(query, child.center) > 2*q*(child.radius+tolerance)`. Passing children
+still receive bounded exact center edit-distance verification. It does not
+change coarsest-layer search, strict containment, overlap traversal, leaf
+refinement, construction rebinding, or leaf attachment. World-center
+signatures are cached per search engine. Non-ACGT centers/queries, unsupported
+q values, and missing signatures conservatively fall back to no pruning.
 
 ## I/O conventions (`io_utils`)
 
@@ -188,8 +199,18 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`,
 `mbb_filter_mode`, `mbb_scan_child_checks`, `mbb_rect_index_queries`,
 `mbb_rect_candidate_children`, `mbb_rect_fallback_count`,
-`center_distance_calls_after_mbb`, `avg_mbb_candidates_per_parent`,
+`mbb_surviving_child_count`, `center_distance_calls_after_mbb`,
+`search_qgram_prefilter_enabled`, `search_qgram_q`,
+`search_qgram_signature_build_count`, `search_qgram_signature_missing_count`,
+`search_qgram_checks`, `search_qgram_pruned_children`,
+`search_qgram_passed_children`, `center_distance_calls_before_qgram`,
+`center_distance_calls_after_qgram`, `qgram_prune_ratio`, `result_count`,
+`avg_mbb_candidates_per_parent`,
 `avg_center_distance_calls_per_query`, `query_time_ms`
+
+`center_distance_calls_after_mbb` is retained as a compatibility alias for
+`center_distance_calls_before_qgram`. The actual bounded center edit-distance
+calls are reported by `center_distance_calls_after_qgram`.
 
 `candidate_count_for_prune` and `beacon_prune_count` include both hierarchy-level MBB pruning and finest-layer leaf-beacon refinement.
 
@@ -219,5 +240,6 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 | `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
+| `test_search_qgram_prefilter` | Search q-gram on/off, scan/rect, ambiguous-base fallback, containment, and center-call reduction checks |
 
 Build with `make test_recall` / `make test_distance_bound`.

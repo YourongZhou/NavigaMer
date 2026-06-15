@@ -45,6 +45,7 @@ pip install -r reproducibility/requirements.txt
 cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mbb-filter-mode rect --min-rect-index-fanout 2
+./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
@@ -103,6 +104,14 @@ Adaptive search supports `--mbb-filter-mode scan|rect` (default `scan`). The
 MBB rows and falls back to the original scan whenever the index is unavailable
 or inconsistent. `--min-rect-index-fanout` controls the build threshold and
 defaults to `64`.
+
+Adaptive child-world traversal also supports the optional
+`--search-qgram-prefilter on` with independent `--search-qgram-q` (default
+`5`). After MBB filtering, it safely rejects a child center only when
+`qgram_l1(query, center) > 2*q*(child.radius+tolerance)`. Every passing child
+still receives bounded exact edit-distance verification. The default is
+`off`; unsupported q values or non-ACGT sequences conservatively fall back to
+no pruning.
 
 The default CLI path still uses the legacy three primary layers (`LW/MW/SW`) via `--r-lw`, `--r-mw`, and `--r-sw`, but the C++ implementation now also supports any number of primary layers `K >= 2` through `--primary-radii coarse,...,fine`. One auxiliary tier is inserted automatically between each adjacent pair of primary layers during index construction and collapsed away before query-time navigation.
 

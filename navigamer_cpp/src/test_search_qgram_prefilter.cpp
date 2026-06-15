@@ -148,6 +148,16 @@ int main() {
   ambiguous.seq[10] = 'N';
   assert_four_modes_equal(builder, ambiguous, 2, true, &saw_pruning);
 
+  navigamer::BioGeometrySearchEngine disabled_q_engine(
+      builder, config(navigamer::MBBFilterMode::Scan, true, 0));
+  auto [disabled_q_hits, disabled_q_stats] =
+      disabled_q_engine.search_adaptive(ambiguous, 2);
+  assert(!disabled_q_hits.empty());
+  assert(!disabled_q_stats.search_qgram_prefilter_enabled);
+  assert(disabled_q_stats.search_qgram_checks == 0);
+  assert(disabled_q_stats.center_distance_calls_before_qgram ==
+         disabled_q_stats.center_distance_calls_after_qgram);
+
   std::cout << "search qgram prefilter tests passed\n";
   return 0;
 }
