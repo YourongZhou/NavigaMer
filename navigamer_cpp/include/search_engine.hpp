@@ -45,6 +45,12 @@ struct SearchStats {
   size_t mbb_rect_fallback_count = 0;
   size_t mbb_filter_parent_count = 0;
   size_t mbb_surviving_child_count = 0;
+  size_t leaf_beacon_check_count = 0;
+  size_t mbb_check_count = 0;
+  size_t leaf_exact_distance_call_count = 0;
+  size_t center_exact_distance_call_count = 0;
+  size_t visited_check_count = 0;
+  size_t visited_hit_count = 0;
   size_t center_distance_calls_after_mbb = 0;
   bool search_qgram_prefilter_enabled = false;
   int search_qgram_q = 0;

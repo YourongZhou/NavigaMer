@@ -102,6 +102,7 @@ BioGeometrySearchEngine::scan_mbb_surviving_children(
     surviving.reserve(children.size());
     for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
       stats.edge_access_count++;
+      stats.mbb_check_count++;
       stats.candidate_count_for_prune++;
       stats.bound_check_count++;
       stats.mbb_scan_child_checks++;
@@ -173,6 +174,7 @@ BioGeometrySearchEngine::get_mbb_surviving_children(
     }
 
     stats.edge_access_count += children.size();
+    stats.mbb_check_count += children.size();
     stats.candidate_count_for_prune += children.size();
     stats.bound_check_count += children.size();
     stats.beacon_prune_count += children.size() - surviving.size();
@@ -200,6 +202,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates(
   for (size_t leaf_idx = 0; leaf_idx < node->child_leaves.size(); ++leaf_idx) {
     stats.node_access_count++;
     if (has_leaf_sieve && node->leaf_beacon_dists[leaf_idx].size() == V_Q.size()) {
+      stats.leaf_beacon_check_count++;
       stats.candidate_count_for_prune++;
       stats.bound_check_count++;
       if (leaf_beacon_prunable_row(node->leaf_beacon_dists[leaf_idx], V_Q, tolerance)) {
@@ -211,6 +214,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates(
     const auto& child = node->child_leaves[leaf_idx];
     stats.candidate_count++;
     stats.candidate_verify_count++;
+    stats.leaf_exact_distance_call_count++;
     int leaf_dist = compute_distance(query_seq.seq, child->seq);
     stats.dist_calc_count++;
     stats.leaf_verify_count++;
@@ -256,7 +260,11 @@ void BioGeometrySearchEngine::search_layer_adaptive(
   std::vector<std::shared_ptr<WorldNode>> overlap_nodes;
 
   for (const auto& node : candidates) {
-    if (visited_nodes.count(node->node_id)) continue;
+    stats.visited_check_count++;
+    if (visited_nodes.count(node->node_id)) {
+      stats.visited_hit_count++;
+      continue;
+    }
 
     const int tau = node->radius + tolerance;
     if (after_mbb_filter) {
@@ -281,6 +289,7 @@ void BioGeometrySearchEngine::search_layer_adaptive(
       }
       stats.center_distance_calls_after_qgram++;
     }
+    stats.center_exact_distance_call_count++;
     int dist = after_mbb_filter
                    ? compute_distance_bounded(
                          query_seq.seq, node->get_center_sequence(), tau)
@@ -307,7 +316,11 @@ void BioGeometrySearchEngine::search_layer_adaptive(
                           query_qgram_signature);
   } else {
     for (const auto& node : overlap_nodes) {
-      if (visited_nodes.count(node->node_id)) continue;
+      stats.visited_check_count++;
+      if (visited_nodes.count(node->node_id)) {
+        stats.visited_hit_count++;
+        continue;
+      }
       visited_nodes.insert(node->node_id);
       process_node_adaptive(node, layer_id, query_seq, tolerance,
                             unique_results, visited_nodes, stats,
