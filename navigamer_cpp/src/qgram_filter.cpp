@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -42,6 +43,104 @@ size_t compute_qgram_l1(
                    static_cast<long long>(rhs_count)));
   }
   return l1;
+}
+
+QGramSignature compute_qgram_signature(const std::string& sequence, int q) {
+  QGramSignature signature;
+  signature.q = q;
+  signature.sequence_length = sequence.size();
+  if (q <= 0 || q > 32) return signature;
+
+  std::vector<uint8_t> bases;
+  bases.reserve(sequence.size());
+  for (char c : sequence) {
+    switch (c) {
+      case 'A': bases.push_back(0); break;
+      case 'C': bases.push_back(1); break;
+      case 'G': bases.push_back(2); break;
+      case 'T': bases.push_back(3); break;
+      default: return signature;
+    }
+  }
+
+  const size_t q_size = static_cast<size_t>(q);
+  signature.total_qgrams =
+      sequence.size() < q_size ? 0 : sequence.size() - q_size + 1;
+  signature.safe_for_pruning = true;
+  if (signature.total_qgrams == 0) return signature;
+
+  const uint64_t mask =
+      q == 32 ? std::numeric_limits<uint64_t>::max()
+              : (uint64_t{1} << (2 * q)) - 1;
+  std::vector<uint64_t> codes;
+  codes.reserve(signature.total_qgrams);
+  uint64_t code = 0;
+  for (size_t i = 0; i < bases.size(); ++i) {
+    code = ((code << 2) | bases[i]) & mask;
+    if (i + 1 >= q_size) codes.push_back(code);
+  }
+  std::sort(codes.begin(), codes.end());
+
+  for (uint64_t current : codes) {
+    if (signature.entries.empty() ||
+        signature.entries.back().code != current) {
+      signature.entries.push_back({current, 1});
+    } else if (signature.entries.back().count ==
+               std::numeric_limits<uint32_t>::max()) {
+      signature.safe_for_pruning = false;
+      signature.entries.clear();
+      return signature;
+    } else {
+      signature.entries.back().count++;
+    }
+  }
+  return signature;
+}
+
+size_t qgram_l1_distance(
+    const QGramSignature& lhs, const QGramSignature& rhs) {
+  if (!lhs.safe_for_pruning || !rhs.safe_for_pruning || lhs.q != rhs.q) {
+    return std::numeric_limits<size_t>::max();
+  }
+
+  size_t l1 = 0;
+  size_t lhs_idx = 0;
+  size_t rhs_idx = 0;
+  while (lhs_idx < lhs.entries.size() || rhs_idx < rhs.entries.size()) {
+    size_t delta = 0;
+    if (rhs_idx == rhs.entries.size() ||
+        (lhs_idx < lhs.entries.size() &&
+         lhs.entries[lhs_idx].code < rhs.entries[rhs_idx].code)) {
+      delta = lhs.entries[lhs_idx++].count;
+    } else if (lhs_idx == lhs.entries.size() ||
+               rhs.entries[rhs_idx].code < lhs.entries[lhs_idx].code) {
+      delta = rhs.entries[rhs_idx++].count;
+    } else {
+      const auto lhs_count = lhs.entries[lhs_idx++].count;
+      const auto rhs_count = rhs.entries[rhs_idx++].count;
+      delta = lhs_count > rhs_count ? lhs_count - rhs_count
+                                    : rhs_count - lhs_count;
+    }
+    if (l1 > std::numeric_limits<size_t>::max() - delta) {
+      return std::numeric_limits<size_t>::max();
+    }
+    l1 += delta;
+  }
+  return l1;
+}
+
+bool qgram_can_prune_edit_distance(
+    const QGramSignature& lhs, const QGramSignature& rhs, int tau) {
+  if (!lhs.safe_for_pruning || !rhs.safe_for_pruning ||
+      lhs.q <= 0 || lhs.q != rhs.q || tau < 0) {
+    return false;
+  }
+  const size_t q = static_cast<size_t>(lhs.q);
+  const size_t threshold_tau = static_cast<size_t>(tau);
+  if (threshold_tau > std::numeric_limits<size_t>::max() / q / 2) {
+    return false;
+  }
+  return qgram_l1_distance(lhs, rhs) > 2 * q * threshold_tau;
 }
 
 QGramCountIndex::QGramCountIndex(int q) : q_(q) {

@@ -61,6 +61,46 @@ void test_qgram_l1_basic() {
   assert(navigamer::compute_qgram_l1("ANNT", "ANNT", 2) == 0);
 }
 
+void test_qgram_signature_basic() {
+  auto short_sig = navigamer::compute_qgram_signature("ACGT", 2);
+  assert(short_sig.safe_for_pruning);
+  assert(short_sig.q == 2);
+  assert(short_sig.sequence_length == 4);
+  assert(short_sig.total_qgrams == 3);
+  assert(short_sig.entries.size() == 3);
+  assert(short_sig.entries[0].code == 1 && short_sig.entries[0].count == 1);
+  assert(short_sig.entries[1].code == 6 && short_sig.entries[1].count == 1);
+  assert(short_sig.entries[2].code == 11 && short_sig.entries[2].count == 1);
+
+  auto repeated_sig = navigamer::compute_qgram_signature("ACGTAC", 2);
+  assert(repeated_sig.safe_for_pruning);
+  assert(repeated_sig.total_qgrams == 5);
+  assert(repeated_sig.entries.size() == 4);
+  assert(repeated_sig.entries[0].code == 1 && repeated_sig.entries[0].count == 2);
+  assert(repeated_sig.entries[1].code == 6 && repeated_sig.entries[1].count == 1);
+  assert(repeated_sig.entries[2].code == 11 && repeated_sig.entries[2].count == 1);
+  assert(repeated_sig.entries[3].code == 12 && repeated_sig.entries[3].count == 1);
+}
+
+void test_qgram_signature_safe_fallbacks() {
+  auto empty = navigamer::compute_qgram_signature("A", 2);
+  assert(empty.safe_for_pruning);
+  assert(empty.total_qgrams == 0);
+  assert(empty.entries.empty());
+
+  auto ambiguous = navigamer::compute_qgram_signature("ACNT", 2);
+  assert(!ambiguous.safe_for_pruning);
+  auto invalid_q = navigamer::compute_qgram_signature("ACGT", 0);
+  assert(!invalid_q.safe_for_pruning);
+  auto unsupported_q = navigamer::compute_qgram_signature("ACGT", 33);
+  assert(!unsupported_q.safe_for_pruning);
+
+  auto safe = navigamer::compute_qgram_signature("ACGT", 2);
+  assert(!navigamer::qgram_can_prune_edit_distance(ambiguous, safe, 0));
+  assert(!navigamer::qgram_can_prune_edit_distance(invalid_q, safe, 0));
+  assert(!navigamer::qgram_can_prune_edit_distance(safe, safe, -1));
+}
+
 void test_qgram_l1_bound_no_false_negative() {
   std::mt19937 gen(12345);
   for (size_t length : {size_t{20}, size_t{50}, size_t{100}, size_t{250}}) {
@@ -73,6 +113,10 @@ void test_qgram_l1_bound_no_false_negative() {
           if (distance <= tau) {
             assert(navigamer::compute_qgram_l1(lhs, rhs, q) <=
                    static_cast<size_t>(2 * q * tau));
+            auto lhs_sig = navigamer::compute_qgram_signature(lhs, q);
+            auto rhs_sig = navigamer::compute_qgram_signature(rhs, q);
+            assert(!navigamer::qgram_can_prune_edit_distance(
+                lhs_sig, rhs_sig, tau));
           }
         }
       }
@@ -127,6 +171,8 @@ void test_qgram_index_no_false_negative() {
 int main() {
   test_qgram_counts_basic();
   test_qgram_l1_basic();
+  test_qgram_signature_basic();
+  test_qgram_signature_safe_fallbacks();
   test_qgram_l1_bound_no_false_negative();
   test_qgram_index_no_false_negative();
   std::cout << "qgram filter tests passed\n";

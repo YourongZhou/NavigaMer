@@ -2,6 +2,7 @@
 #define NAVIGAMER_QGRAM_FILTER_HPP
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -14,6 +15,25 @@ QGramCounts compute_qgram_counts(const std::string& sequence, int q);
 size_t qgram_total(const std::string& sequence, int q);
 size_t compute_qgram_l1(
     const std::string& lhs, const std::string& rhs, int q);
+
+struct QGramEntry {
+  uint64_t code = 0;
+  uint32_t count = 0;
+};
+
+struct QGramSignature {
+  int q = 0;
+  size_t sequence_length = 0;
+  size_t total_qgrams = 0;
+  bool safe_for_pruning = false;
+  std::vector<QGramEntry> entries;
+};
+
+QGramSignature compute_qgram_signature(const std::string& sequence, int q);
+size_t qgram_l1_distance(
+    const QGramSignature& lhs, const QGramSignature& rhs);
+bool qgram_can_prune_edit_distance(
+    const QGramSignature& lhs, const QGramSignature& rhs, int tau);
 
 class QGramCountIndex {
  public:
