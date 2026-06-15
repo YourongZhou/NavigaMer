@@ -66,6 +66,13 @@ double nearest_rank_percentile(std::vector<double> values, double quantile);
 ResultComparison compare_result_ids(std::vector<std::string> baseline,
                                     std::vector<std::string> optimized,
                                     std::vector<std::string> brute_force);
+std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
+    const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
+    const std::vector<std::shared_ptr<BioSequence>>& unique_sequences,
+    int query_length,
+    int tolerance,
+    unsigned seed,
+    size_t queries_per_class);
 
 }  // namespace navigamer
 
