@@ -6,6 +6,7 @@ The `navigamer` executable (`src/main.cpp`) implements the commands below. Paths
 
 - **C++17**, **OpenMP**
 - Build: `make` or CMake (see [`README.md`](README.md) in this directory)
+- Optional SeqAn3 FM-index locator for `map150`: `make WITH_SEQAN3=1` or CMake with `-DNAVIGAMER_WITH_SEQAN3=ON`
 
 ## Global hierarchy flags
 
@@ -17,8 +18,30 @@ Used by all pipelines that build the index:
 | `--r-sw` | `5` | Small-world radius (`R_SW` in `structure.hpp`) |
 | `--r-mw` | `15` | Mid-world radius |
 | `--r-lw` | `30` | Large-world radius |
+| `--link-mode` | `indexed` | Phase-2 rebinding: `full` or exact `indexed` range join |
+| `--leaf-attach-mode` | `indexed` | Leaf attachment: `full` or exact `indexed` range join |
+| `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
+| `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
+| `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
+| `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
+
+Indexed construction is exact. For query length `L` and threshold `tau`, it
+uses `block_len = floor(L / (tau + 1))` and
+`seed_len = min(range_max_seed_length, block_len)`. If `seed_len` is below
+`range_min_seed_length`, the range-join call explicitly falls back to a full
+scan. Otherwise, pigeonhole seeds generate a safe candidate superset and every
+candidate is verified with bounded exact edit distance. Builder summaries print
+possible pairs, candidates, exact calls, accepted links, fallback counts, and
+reduction ratios.
+
+Rectangle filtering is also exact. Rect mode returns a child world if and only
+if its existing MBB row intersects the query rectangle in every beacon
+dimension. It changes only survivor enumeration; center-distance verification,
+containment/overlap traversal, and leaf verification remain unchanged. Missing
+or inconsistent indexes, small fanout, dimension mismatches, and query
+exceptions fall back to scan.
 
 ## I/O conventions (`io_utils`)
 
@@ -66,6 +89,21 @@ Full pipeline: load ref + reads, build, **adaptive** search for every read, opti
 | `--out` | *(none)* | If set, write TSV; otherwise only stderr summary |
 
 Uses OpenMP over reads.
+
+### `map150`
+
+Fixed-length mapper path for 150 bp reads. Builds an in-memory index from all forward reference 150-mers at stride 1, searches each read on both strands with `candidate_tolerance = 2 * --tolerance`, then verifies candidate occurrence neighborhoods exactly and emits only alignments with edit distance `<= --tolerance`.
+
+**Required:** `--ref`, `--reads`, `--out`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--tolerance` | `2` | Final edit-distance threshold; the candidate search uses `2 * tolerance` |
+| `--mode` | `adaptive` | Currently only `adaptive` is accepted |
+| `--locator` | `refpos` | `refpos` uses stored reference-window positions; `seqan` requires optional SeqAn3 support |
+| `--out` | *(required)* | Output TSV path; header is written even when there are no hits |
+
+Safety constraints: every read must be exactly 150 bp, reference and reads must contain only A/C/G/T, and the finest primary radius must be greater than `2 * tolerance`.
 
 ### `benchmark`
 
@@ -128,9 +166,18 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `query_id`, `hit_id`, `distance`, `ref_positions`, `read_id`, `read_len`, `ref_id`, `strand`, `query_start`, `reference_start`, `aligned_length`, `score`, `edit_distance`, `query_fragment`, `reference_fragment`, `bwt_start`, `bwt_end`
 
 **`benchmark`** adds:  
-`dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`
+`dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`,
+`mbb_filter_mode`, `mbb_scan_child_checks`, `mbb_rect_index_queries`,
+`mbb_rect_candidate_children`, `mbb_rect_fallback_count`,
+`center_distance_calls_after_mbb`, `avg_mbb_candidates_per_parent`,
+`avg_center_distance_calls_per_query`, `query_time_ms`
 
 `candidate_count_for_prune` and `beacon_prune_count` include both hierarchy-level MBB pruning and finest-layer leaf-beacon refinement.
+
+**`map150`:**
+`query_id`, `hit_id`, `distance`, `ref_id`, `strand`, `query_start`, `reference_start`, `aligned_length`, `score`, `edit_distance`, `query_fragment`, `reference_fragment`, `bwt_start`, `bwt_end`, `dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`
+
+For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the optional SeqAn locator they represent the half-open suffix-array interval for the matched 150-mer leaf, not genomic coordinates; mapping uses that stored interval as the occurrence lookup handle.
 
 **`boundary`:**  
 `length`, `stride_mode`, `num_index_seqs`, `error_rate`, `error_edits`, `tolerance_rate`, `tolerance_edits`, `query_count`, `source_recovery_rate`, `any_hit_rate`, `avg_hit_count`, `avg_dist_calcs`, `avg_leaf_verify_count`, `avg_candidate_count_for_prune`, `avg_beacon_prune_count`, `avg_pruning_rate`, `bf_sample_count`, `bf_source_recovery_rate`, `bf_agreement_rate`, `bf_source_mismatch_count`
@@ -146,5 +193,11 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 | `test_distance_bound` | Distance-bound checks across search modes |
 | `test_hierarchy_config` | Hierarchy-config validation for multi-primary-layer builds |
 | `test_search_stats_bin` | Radius-schedule and search-cost instrumentation checks |
+| `test_map150_recall` | Fixed-150bp mapper recall, strand, duplicate, and verifier checks |
+| `test_bounded_edit_distance` | Banded thresholded distance vs full Levenshtein |
+| `test_range_join` | Adaptive pigeonhole no-false-negative and verified-pair checks |
+| `test_build_range_equivalence` | Full vs indexed construction and search-result equivalence |
+| `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
+| `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
 
 Build with `make test_recall` / `make test_distance_bound`.

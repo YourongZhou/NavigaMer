@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include "mbb_rect_index.hpp"
 
 namespace navigamer {
 
@@ -22,7 +23,7 @@ struct RefPosition {
   std::string strand = "+";
 };
 
-// Optional BWT/SA interval placeholder: [start, end).
+// Optional suffix-array interval placeholder: [start, end).
 struct BwtInterval {
   int64_t start = -1;
   int64_t end   = -1;
@@ -42,6 +43,7 @@ struct BioSequence {
 
   void add_occurrence(const std::string& ref_id, int start, int end,
                       const std::string& strand = "+");
+  void set_sa_interval(int64_t sa_start, int64_t sa_end);
   void set_bwt_interval(int64_t bwt_start, int64_t bwt_end);
 };
 
@@ -67,6 +69,7 @@ struct WorldNode {
   // child_beacon_mbbs[j] is aligned with child_nodes[j].
   std::vector<std::shared_ptr<BioSequence>> beacons;
   std::vector<std::vector<MBB>> child_beacon_mbbs;
+  std::shared_ptr<MBBRectIndex> mbb_rect_index;
 
   // Leaf refinement cache for SW worlds. leaf_beacon_dists[j] is aligned
   // with child_leaves[j] and stores d(child_leaf, beacon_i).

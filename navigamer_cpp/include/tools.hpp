@@ -10,6 +10,7 @@ namespace navigamer {
 // Levenshtein edit distance.
 int compute_distance(const std::string& a, const std::string& b);
 int compute_distance(const BioSequence& a, const BioSequence& b);
+int compute_distance_bounded(const std::string& a, const std::string& b, int tau);
 
 // Farthest Point Sampling: choose k dispersed candidates.
 std::vector<size_t> farthest_point_sampling(

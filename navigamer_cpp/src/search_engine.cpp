@@ -2,12 +2,24 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <stdexcept>
 #include <omp.h>
 
 namespace navigamer {
 
-BioGeometrySearchEngine::BioGeometrySearchEngine(const BioGeometryIndexBuilder& index)
-    : index_(index) {}
+const char* mbb_filter_mode_name(MBBFilterMode mode) {
+  return mode == MBBFilterMode::Scan ? "scan" : "rect";
+}
+
+MBBFilterMode parse_mbb_filter_mode(const std::string& value) {
+  if (value == "scan") return MBBFilterMode::Scan;
+  if (value == "rect") return MBBFilterMode::RectIndex;
+  throw std::invalid_argument("MBB filter mode must be scan or rect");
+}
+
+BioGeometrySearchEngine::BioGeometrySearchEngine(
+    const BioGeometryIndexBuilder& index, const SearchConfig& config)
+    : index_(index), config_(config) {}
 
 bool BioGeometrySearchEngine::mbb_prunable_row(const std::vector<MBB>& row,
                                                const std::vector<int>& V_Q,
@@ -48,6 +60,116 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances(
     stats.dist_calc_count++;
   }
   return dists;
+}
+
+std::vector<std::shared_ptr<WorldNode>>
+BioGeometrySearchEngine::scan_mbb_surviving_children(
+    const std::shared_ptr<WorldNode>& node,
+    const std::vector<int>& query_beacon_dists,
+    int tolerance,
+    SearchStats& stats) const {
+  std::vector<std::shared_ptr<WorldNode>> surviving;
+  const auto& children = node->child_nodes;
+  bool mbb_ok =
+      !query_beacon_dists.empty() &&
+      query_beacon_dists.size() == node->beacons.size() &&
+      node->child_beacon_mbbs.size() == children.size();
+  if (mbb_ok) {
+    for (const auto& row : node->child_beacon_mbbs) {
+      if (row.size() != query_beacon_dists.size()) {
+        mbb_ok = false;
+        break;
+      }
+    }
+  }
+
+  if (!mbb_ok) {
+    surviving = children;
+  } else {
+    surviving.reserve(children.size());
+    for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
+      stats.edge_access_count++;
+      stats.candidate_count_for_prune++;
+      stats.bound_check_count++;
+      stats.mbb_scan_child_checks++;
+      if (mbb_prunable_row(
+              node->child_beacon_mbbs[child_idx], query_beacon_dists, tolerance)) {
+        stats.beacon_prune_count++;
+        continue;
+      }
+      surviving.push_back(children[child_idx]);
+    }
+  }
+  stats.mbb_surviving_child_count += surviving.size();
+  return surviving;
+}
+
+std::vector<std::shared_ptr<WorldNode>>
+BioGeometrySearchEngine::get_mbb_surviving_children(
+    const std::shared_ptr<WorldNode>& node,
+    const std::vector<int>& query_beacon_dists,
+    int tolerance,
+    SearchStats& stats) const {
+  stats.mbb_filter_parent_count++;
+  if (config_.mbb_filter_mode == MBBFilterMode::Scan) {
+    return scan_mbb_surviving_children(node, query_beacon_dists, tolerance, stats);
+  }
+
+  const auto& children = node->child_nodes;
+  bool index_ok =
+      node->mbb_rect_index &&
+      node->mbb_rect_index->size() == children.size() &&
+      node->mbb_rect_index->dim() == query_beacon_dists.size() &&
+      !query_beacon_dists.empty() &&
+      node->child_beacon_mbbs.size() == children.size();
+  if (index_ok) {
+    for (const auto& row : node->child_beacon_mbbs) {
+      if (row.size() != query_beacon_dists.size()) {
+        index_ok = false;
+        break;
+      }
+    }
+  }
+  if (!index_ok) {
+    stats.mbb_rect_fallback_count++;
+    return scan_mbb_surviving_children(node, query_beacon_dists, tolerance, stats);
+  }
+
+  try {
+    std::vector<int> q_lo;
+    std::vector<int> q_hi;
+    q_lo.reserve(query_beacon_dists.size());
+    q_hi.reserve(query_beacon_dists.size());
+    for (int distance : query_beacon_dists) {
+      q_lo.push_back(distance - tolerance);
+      q_hi.push_back(distance + tolerance);
+    }
+
+    stats.mbb_rect_index_queries++;
+    auto child_ids = node->mbb_rect_index->query_intersect(q_lo, q_hi);
+    std::vector<bool> seen(children.size(), false);
+    std::vector<std::shared_ptr<WorldNode>> surviving;
+    surviving.reserve(child_ids.size());
+    for (uint32_t child_id : child_ids) {
+      if (child_id >= children.size() || seen[child_id]) {
+        stats.mbb_rect_fallback_count++;
+        return scan_mbb_surviving_children(node, query_beacon_dists, tolerance, stats);
+      }
+      seen[child_id] = true;
+      surviving.push_back(children[child_id]);
+    }
+
+    stats.edge_access_count += children.size();
+    stats.candidate_count_for_prune += children.size();
+    stats.bound_check_count += children.size();
+    stats.beacon_prune_count += children.size() - surviving.size();
+    stats.mbb_rect_candidate_children += surviving.size();
+    stats.mbb_surviving_child_count += surviving.size();
+    return surviving;
+  } catch (...) {
+    stats.mbb_rect_fallback_count++;
+    return scan_mbb_surviving_children(node, query_beacon_dists, tolerance, stats);
+  }
 }
 
 void BioGeometrySearchEngine::verify_leaf_candidates(
@@ -94,46 +216,17 @@ void BioGeometrySearchEngine::process_node_adaptive(
     return;
   }
 
-  std::vector<std::shared_ptr<WorldNode>> world_children = node->child_nodes;
-  if (world_children.empty()) return;
+  if (node->child_nodes.empty()) return;
 
   int child_layer = current_layer + 1;
-  std::vector<std::shared_ptr<WorldNode>> surviving;
-
+  std::vector<int> V_Q;
   if (!node->beacons.empty()) {
-    std::vector<int> V_Q = compute_query_beacon_distances(node, query_seq, stats);
-    bool mbb_ok =
-        V_Q.size() == node->beacons.size() &&
-        node->child_beacon_mbbs.size() == world_children.size();
-    if (mbb_ok) {
-      for (size_t ci = 0; ci < world_children.size(); ++ci) {
-        if (node->child_beacon_mbbs[ci].size() != V_Q.size()) {
-          mbb_ok = false;
-          break;
-        }
-      }
-    }
-
-    if (mbb_ok) {
-      for (size_t ci = 0; ci < world_children.size(); ++ci) {
-        stats.edge_access_count++;
-        stats.candidate_count_for_prune++;
-        stats.bound_check_count++;
-        if (mbb_prunable_row(node->child_beacon_mbbs[ci], V_Q, tolerance)) {
-          stats.beacon_prune_count++;
-          continue;
-        }
-        surviving.push_back(world_children[ci]);
-      }
-    } else {
-      surviving = std::move(world_children);
-    }
-  } else {
-    surviving = std::move(world_children);
+    V_Q = compute_query_beacon_distances(node, query_seq, stats);
   }
+  auto surviving = get_mbb_surviving_children(node, V_Q, tolerance, stats);
 
   search_layer_adaptive(surviving, child_layer, query_seq, tolerance,
-                        unique_results, visited_nodes, stats);
+                        unique_results, visited_nodes, stats, true);
 }
 
 void BioGeometrySearchEngine::search_layer_adaptive(
@@ -141,13 +234,15 @@ void BioGeometrySearchEngine::search_layer_adaptive(
     const BioSequence& query_seq, int tolerance,
     std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
     std::unordered_set<std::string>& visited_nodes,
-    SearchStats& stats) const {
+    SearchStats& stats,
+    bool after_mbb_filter) const {
   std::shared_ptr<WorldNode> contained_node;
   std::vector<std::shared_ptr<WorldNode>> overlap_nodes;
 
   for (const auto& node : candidates) {
     if (visited_nodes.count(node->node_id)) continue;
 
+    if (after_mbb_filter) stats.center_distance_calls_after_mbb++;
     int dist = compute_distance(query_seq.seq, node->get_center_sequence());
     stats.dist_calc_count++;
     stats.world_access_count++;

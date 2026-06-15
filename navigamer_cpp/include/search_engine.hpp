@@ -11,6 +11,18 @@
 
 namespace navigamer {
 
+enum class MBBFilterMode {
+  Scan,
+  RectIndex,
+};
+
+const char* mbb_filter_mode_name(MBBFilterMode mode);
+MBBFilterMode parse_mbb_filter_mode(const std::string& value);
+
+struct SearchConfig {
+  MBBFilterMode mbb_filter_mode = MBBFilterMode::Scan;
+};
+
 struct SearchStats {
   size_t world_access_count = 0;
   size_t node_access_count = 0;
@@ -24,6 +36,13 @@ struct SearchStats {
   std::vector<size_t> layer_breakdown;
   size_t beacon_prune_count = 0;
   size_t candidate_count_for_prune = 0;
+  size_t mbb_scan_child_checks = 0;
+  size_t mbb_rect_index_queries = 0;
+  size_t mbb_rect_candidate_children = 0;
+  size_t mbb_rect_fallback_count = 0;
+  size_t mbb_filter_parent_count = 0;
+  size_t mbb_surviving_child_count = 0;
+  size_t center_distance_calls_after_mbb = 0;
 
   SearchStats() = default;
   explicit SearchStats(size_t num_layers) : layer_breakdown(num_layers, 0) {}
@@ -36,7 +55,9 @@ struct SearchStats {
 
 class BioGeometrySearchEngine {
  public:
-  explicit BioGeometrySearchEngine(const BioGeometryIndexBuilder& index);
+  explicit BioGeometrySearchEngine(
+      const BioGeometryIndexBuilder& index,
+      const SearchConfig& config = SearchConfig{});
 
   std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
   search_adaptive(const BioSequence& query_seq, int tolerance);
@@ -53,6 +74,7 @@ class BioGeometrySearchEngine {
 
  private:
   const BioGeometryIndexBuilder& index_;
+  SearchConfig config_;
 
   bool mbb_prunable_row(const std::vector<MBB>& row, const std::vector<int>& V_Q,
                         int tolerance) const;
@@ -62,6 +84,16 @@ class BioGeometrySearchEngine {
   std::vector<int> compute_query_beacon_distances(
       const std::shared_ptr<WorldNode>& node,
       const BioSequence& query_seq,
+      SearchStats& stats) const;
+  std::vector<std::shared_ptr<WorldNode>> scan_mbb_surviving_children(
+      const std::shared_ptr<WorldNode>& node,
+      const std::vector<int>& query_beacon_dists,
+      int tolerance,
+      SearchStats& stats) const;
+  std::vector<std::shared_ptr<WorldNode>> get_mbb_surviving_children(
+      const std::shared_ptr<WorldNode>& node,
+      const std::vector<int>& query_beacon_dists,
+      int tolerance,
       SearchStats& stats) const;
   void verify_leaf_candidates(
       const std::shared_ptr<WorldNode>& node,
@@ -82,7 +114,8 @@ class BioGeometrySearchEngine {
       const BioSequence& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       std::unordered_set<std::string>& visited_nodes,
-      SearchStats& stats) const;
+      SearchStats& stats,
+      bool after_mbb_filter = false) const;
 
   void traverse_exhaustive(
       const std::shared_ptr<WorldNode>& node, int current_layer,

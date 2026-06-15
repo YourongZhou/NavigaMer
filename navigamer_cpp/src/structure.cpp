@@ -10,9 +10,13 @@ void BioSequence::add_occurrence(const std::string& ref_id, int start, int end,
   ref_positions.push_back({ref_id, start, end, strand});
 }
 
+void BioSequence::set_sa_interval(int64_t sa_start, int64_t sa_end) {
+  bwt_interval.start = sa_start;
+  bwt_interval.end = sa_end;
+}
+
 void BioSequence::set_bwt_interval(int64_t bwt_start, int64_t bwt_end) {
-  bwt_interval.start = bwt_start;
-  bwt_interval.end = bwt_end;
+  set_sa_interval(bwt_start, bwt_end);
 }
 
 static std::string make_node_id_extended(int expanded_layer_idx) {
