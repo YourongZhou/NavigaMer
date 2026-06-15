@@ -152,8 +152,6 @@ without changing search behavior. Step 0 reports:
 
 Existing fields are mapped directly where possible:
 
-- MBB checks: `mbb_scan_child_checks` for scan, or the logical checked-child
-  count represented by existing MBB filter counters for rect.
 - MBB survivors: `mbb_surviving_child_count`.
 - q-gram checks: `search_qgram_checks`.
 - center exact-distance calls: existing center-distance counters.
@@ -161,8 +159,10 @@ Existing fields are mapped directly where possible:
 - candidate count: `candidate_count`.
 - verified candidate count: `candidate_verify_count`.
 
-Add explicit leaf-beacon, visited-check, and visited-hit counters to
-`SearchStats`. Incrementing these counters must not alter traversal or
+Add explicit logical MBB-check, leaf-beacon, visited-check, and visited-hit
+counters to `SearchStats`. One logical MBB check is counted per parent-child
+rectangle considered, including rect-index queries that inspect the children
+through the index. Incrementing these counters must not alter traversal or
 allocation behavior. Later steps may refine SIMD-specific counters while
 preserving these logical totals.
 
@@ -196,9 +196,16 @@ The JSON file contains:
 - equivalence and no-FN gate status
 - mismatch diagnostics
 - candidate-set comparison availability
+- current and peak process RSS snapshots before build, after build, and after
+  benchmark execution
 
 JSON is written with a small repository-local serializer sufficient for this
 fixed schema; no new third-party dependency is introduced.
+
+On Linux, current RSS is read from `/proc/self/status` and peak RSS from
+`getrusage`. If either value is unavailable, output records it as unavailable
+instead of failing the correctness gate. Per-query allocation counting is not
+implemented in Step 0 and is explicitly marked unavailable.
 
 ## Code Organization
 
@@ -281,5 +288,5 @@ pass.
 
 Step 0 does not add integer IDs, epoch visited arrays, scratch reuse,
 `SearchGraphView`, SIMD filtering, Myers distance, allocation measurement,
-RSS measurement, cache flushing, or parallel throughput measurement. Those
-belong to later independently reviewed optimization steps.
+hardware cache flushing, or parallel throughput measurement. Those belong to
+later independently reviewed optimization steps.
