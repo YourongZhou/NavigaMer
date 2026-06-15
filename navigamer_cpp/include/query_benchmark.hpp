@@ -66,6 +66,7 @@ double nearest_rank_percentile(std::vector<double> values, double quantile);
 ResultComparison compare_result_ids(std::vector<std::string> baseline,
                                     std::vector<std::string> optimized,
                                     std::vector<std::string> brute_force);
+bool comparison_passes_gate(const ResultComparison& comparison);
 std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
     const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
     const std::vector<std::shared_ptr<BioSequence>>& unique_sequences,
@@ -73,6 +74,11 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
     int tolerance,
     unsigned seed,
     size_t queries_per_class);
+QueryBenchmarkRunResult run_query_benchmark(
+    const QueryBenchmarkConfig& config,
+    const HierarchyConfig& hierarchy,
+    const BuildRangeConfig& build_config,
+    const SearchConfig& optimized_search_config);
 
 }  // namespace navigamer
 

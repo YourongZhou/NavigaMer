@@ -26,6 +26,7 @@ int main() {
           std::vector<std::string>{"b"}));
   assert((mismatch.brute_force_missing_from_optimized ==
           std::vector<std::string>{"a"}));
+  assert(!navigamer::comparison_passes_gate(mismatch));
 
   std::vector<std::shared_ptr<navigamer::BioSequence>> index_sequences = {
       std::make_shared<navigamer::BioSequence>("unique_a", "ACGTGCACTGAT"),
@@ -55,6 +56,38 @@ int main() {
     }
   }
   assert(class_names.size() == 6);
+
+  navigamer::QueryBenchmarkConfig config;
+  config.ref_input =
+      "ACGTGCACTGATTGCATAGCTACGAAAAAAAAAAAACCCCGGGGCCCCCCCCCGGGCCCC";
+  config.window_length = 12;
+  config.stride = 12;
+  config.query_length = 12;
+  config.tolerance = 1;
+  config.queries_per_class = 1;
+  config.warmup_iterations = 1;
+  config.measured_iterations = 2;
+  config.cold_cache_bytes = 0;
+  config.detail_tsv_path = "/tmp/navigamer_query_benchmark_test_detail.tsv";
+  config.summary_tsv_path = "/tmp/navigamer_query_benchmark_test_summary.tsv";
+  config.json_path = "/tmp/navigamer_query_benchmark_test_summary.json";
+
+  navigamer::BuildRangeConfig build_config;
+  build_config.min_rect_index_fanout = 1;
+  navigamer::SearchConfig optimized_config;
+  optimized_config.mbb_filter_mode = navigamer::MBBFilterMode::RectIndex;
+  optimized_config.search_qgram_prefilter = true;
+  optimized_config.search_qgram_q = 3;
+  auto result = navigamer::run_query_benchmark(
+      config, navigamer::HierarchyConfig({12, 6, 2}), build_config,
+      optimized_config);
+  assert(result.gate_passed);
+  assert(result.mismatch_count == 0);
+  assert(result.detail_rows.size() == 6 * 2 * (1 + 2));
+  assert(!result.summary_rows.empty());
+  assert(result.json_summary.find("\"gate_passed\":true") != std::string::npos);
+  assert(result.json_summary.find("\"candidate_set_comparison\":\"unavailable\"")
+         != std::string::npos);
 
   std::cout << "query benchmark gate tests passed\n";
   return 0;

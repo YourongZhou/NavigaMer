@@ -1,13 +1,22 @@
 #include "query_benchmark.hpp"
+#include "io_utils.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_set>
+#include <sys/resource.h>
+#include <omp.h>
 
 namespace navigamer {
 namespace {
@@ -17,12 +26,14 @@ struct ExecutionRecord {
   std::string profile;
   QueryClass query_class = QueryClass::RandomRegion;
   std::string sample_kind;
+  std::string first_profile;
   size_t iteration = 0;
   double latency_ms = 0.0;
   size_t result_count = 0;
   size_t brute_force_result_count = 0;
   bool result_equal = false;
   bool no_fn = false;
+  std::vector<std::string> result_ids;
   SearchStats stats;
 };
 
@@ -34,8 +45,28 @@ struct AggregateRecord {
   size_t result_total = 0;
   size_t equality_failure_count = 0;
   size_t false_negative_count = 0;
+  size_t world_access_count = 0;
+  size_t node_access_count = 0;
+  size_t edge_access_count = 0;
+  size_t mbb_check_count = 0;
+  size_t mbb_surviving_child_count = 0;
+  size_t search_qgram_checks = 0;
+  size_t center_exact_distance_call_count = 0;
+  size_t leaf_beacon_check_count = 0;
+  size_t leaf_exact_distance_call_count = 0;
+  size_t visited_check_count = 0;
+  size_t visited_hit_count = 0;
+  size_t candidate_count = 0;
+  size_t candidate_verify_count = 0;
   std::vector<double> cold_latencies;
   std::vector<double> warm_latencies;
+};
+
+struct MemorySnapshot {
+  bool current_available = false;
+  size_t current_rss_kb = 0;
+  bool peak_available = false;
+  size_t peak_rss_kb = 0;
 };
 
 std::vector<std::string> sorted_unique(std::vector<std::string> values) {
@@ -103,14 +134,14 @@ std::string mutate_substitutions(const std::string& input, size_t edit_count,
   return out;
 }
 
-[[maybe_unused]] double average(const std::vector<double>& values) {
+double average(const std::vector<double>& values) {
   return values.empty()
              ? 0.0
              : std::accumulate(values.begin(), values.end(), 0.0) /
                    static_cast<double>(values.size());
 }
 
-[[maybe_unused]] std::vector<AggregateRecord> aggregate_records(
+std::vector<AggregateRecord> aggregate_records(
     const std::vector<ExecutionRecord>& records) {
   std::map<std::pair<std::string, std::string>, AggregateRecord> grouped;
   for (const auto& record : records) {
@@ -123,6 +154,21 @@ std::string mutate_substitutions(const std::string& input, size_t edit_count,
       aggregate.result_total += record.result_count;
       aggregate.equality_failure_count += record.result_equal ? 0 : 1;
       aggregate.false_negative_count += record.no_fn ? 0 : 1;
+      aggregate.world_access_count += record.stats.world_access_count;
+      aggregate.node_access_count += record.stats.node_access_count;
+      aggregate.edge_access_count += record.stats.edge_access_count;
+      aggregate.mbb_check_count += record.stats.mbb_check_count;
+      aggregate.mbb_surviving_child_count += record.stats.mbb_surviving_child_count;
+      aggregate.search_qgram_checks += record.stats.search_qgram_checks;
+      aggregate.center_exact_distance_call_count +=
+          record.stats.center_exact_distance_call_count;
+      aggregate.leaf_beacon_check_count += record.stats.leaf_beacon_check_count;
+      aggregate.leaf_exact_distance_call_count +=
+          record.stats.leaf_exact_distance_call_count;
+      aggregate.visited_check_count += record.stats.visited_check_count;
+      aggregate.visited_hit_count += record.stats.visited_hit_count;
+      aggregate.candidate_count += record.stats.candidate_count;
+      aggregate.candidate_verify_count += record.stats.candidate_verify_count;
       if (record.sample_kind == "cold") {
         aggregate.cold_latencies.push_back(record.latency_ms);
       } else if (record.sample_kind == "warm") {
@@ -133,6 +179,108 @@ std::string mutate_substitutions(const std::string& input, size_t edit_count,
   std::vector<AggregateRecord> out;
   for (auto& entry : grouped) out.push_back(std::move(entry.second));
   return out;
+}
+
+std::string format_double(double value) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(6) << value;
+  return out.str();
+}
+
+std::string bool_string(bool value) { return value ? "true" : "false"; }
+
+std::string json_escape(const std::string& value) {
+  std::ostringstream out;
+  for (unsigned char c : value) {
+    switch (c) {
+      case '"': out << "\\\""; break;
+      case '\\': out << "\\\\"; break;
+      case '\n': out << "\\n"; break;
+      case '\r': out << "\\r"; break;
+      case '\t': out << "\\t"; break;
+      default:
+        if (c < 0x20) {
+          out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+              << static_cast<int>(c) << std::dec;
+        } else {
+          out << static_cast<char>(c);
+        }
+    }
+  }
+  return out.str();
+}
+
+std::vector<std::shared_ptr<BioSequence>> build_reference_windows(
+    const std::string& ref_id, const std::string& reference, int window_length,
+    int stride) {
+  std::vector<std::shared_ptr<BioSequence>> out;
+  for (int start = 0; start + window_length <= static_cast<int>(reference.size());
+       start += stride) {
+    auto sequence = std::make_shared<BioSequence>(
+        "ref_" + std::to_string(start),
+        reference.substr(static_cast<size_t>(start),
+                         static_cast<size_t>(window_length)));
+    sequence->add_occurrence(ref_id, start, start + window_length, "+");
+    out.push_back(std::move(sequence));
+  }
+  return out;
+}
+
+std::vector<std::string> result_ids(
+    const std::vector<std::shared_ptr<BioSequence>>& results) {
+  std::vector<std::string> ids;
+  ids.reserve(results.size());
+  for (const auto& result : results) {
+    if (result) ids.push_back(result->id);
+  }
+  return sorted_unique(std::move(ids));
+}
+
+MemorySnapshot memory_snapshot() {
+  MemorySnapshot snapshot;
+  std::ifstream status("/proc/self/status");
+  std::string key;
+  while (status >> key) {
+    if (key == "VmRSS:") {
+      status >> snapshot.current_rss_kb;
+      snapshot.current_available = true;
+      break;
+    }
+    std::string rest;
+    std::getline(status, rest);
+  }
+  struct rusage usage {};
+  if (getrusage(RUSAGE_SELF, &usage) == 0) {
+    snapshot.peak_available = true;
+    snapshot.peak_rss_kb = static_cast<size_t>(usage.ru_maxrss);
+  }
+  return snapshot;
+}
+
+void append_memory_json(std::ostringstream& out, const char* name,
+                        const MemorySnapshot& snapshot) {
+  out << "\"" << name << "\":{";
+  if (snapshot.current_available) {
+    out << "\"current_rss_kb\":" << snapshot.current_rss_kb;
+  } else {
+    out << "\"current_rss_kb\":\"unavailable\"";
+  }
+  out << ",";
+  if (snapshot.peak_available) {
+    out << "\"peak_rss_kb\":" << snapshot.peak_rss_kb;
+  } else {
+    out << "\"peak_rss_kb\":\"unavailable\"";
+  }
+  out << "}";
+}
+
+double percentile_or_zero(const std::vector<double>& values, double quantile) {
+  return values.empty() ? 0.0 : nearest_rank_percentile(values, quantile);
+}
+
+double average_counter(size_t value, size_t samples) {
+  return samples == 0 ? 0.0 : static_cast<double>(value) /
+                                  static_cast<double>(samples);
 }
 
 }  // namespace
@@ -184,6 +332,11 @@ ResultComparison compare_result_ids(std::vector<std::string> baseline,
   comparison.baseline_no_fn = comparison.brute_force_missing_from_baseline.empty();
   comparison.optimized_no_fn = comparison.brute_force_missing_from_optimized.empty();
   return comparison;
+}
+
+bool comparison_passes_gate(const ResultComparison& comparison) {
+  return comparison.baseline_equals_optimized && comparison.baseline_no_fn &&
+         comparison.optimized_no_fn;
 }
 
 std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
@@ -304,6 +457,299 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
   append_by_hit_count(QueryClass::MultiHit, 2,
                       std::numeric_limits<size_t>::max());
   return out;
+}
+
+QueryBenchmarkRunResult run_query_benchmark(
+    const QueryBenchmarkConfig& config,
+    const HierarchyConfig& hierarchy,
+    const BuildRangeConfig& build_config,
+    const SearchConfig& optimized_search_config) {
+  if (config.window_length <= 0 || config.query_length <= 0 ||
+      config.stride <= 0 || config.threads <= 0 ||
+      config.queries_per_class == 0 || config.measured_iterations == 0) {
+    throw std::invalid_argument(
+        "window/query length, stride, threads, queries per class, and "
+        "measured iterations must be positive");
+  }
+  if (config.tolerance < 0) {
+    throw std::invalid_argument("tolerance must be non-negative");
+  }
+  if (config.detail_tsv_path.empty() || config.summary_tsv_path.empty() ||
+      config.json_path.empty()) {
+    throw std::invalid_argument("all query benchmark output paths are required");
+  }
+
+  omp_set_num_threads(config.threads);
+  auto [ref_id, loaded_reference] = load_reference(config.ref_input);
+  std::string reference = loaded_reference;
+  if (config.reference_subset_length > 0 &&
+      reference.size() > config.reference_subset_length) {
+    reference.resize(config.reference_subset_length);
+  }
+  if (reference.size() < static_cast<size_t>(config.window_length)) {
+    throw std::invalid_argument("reference is shorter than benchmark window length");
+  }
+  auto index_sequences = build_reference_windows(
+      ref_id, reference, config.window_length, config.stride);
+  if (index_sequences.empty()) {
+    throw std::runtime_error("query benchmark could not generate index windows");
+  }
+
+  const MemorySnapshot before_build = memory_snapshot();
+  const auto build_start = std::chrono::steady_clock::now();
+  BioGeometryIndexBuilder builder(hierarchy, build_config);
+  builder.build(index_sequences);
+  const auto build_end = std::chrono::steady_clock::now();
+  const double build_duration_ms =
+      std::chrono::duration<double, std::milli>(build_end - build_start).count();
+  const MemorySnapshot after_build = memory_snapshot();
+  const auto build_stats = builder.get_statistics();
+
+  std::vector<std::shared_ptr<BioSequence>> unique_sequences;
+  unique_sequences.reserve(builder.unique_sequences.size());
+  for (const auto& entry : builder.unique_sequences) {
+    unique_sequences.push_back(entry.second);
+  }
+  auto queries = generate_benchmark_queries(
+      index_sequences, unique_sequences, config.query_length, config.tolerance,
+      config.seed, config.queries_per_class);
+
+  SearchConfig baseline_config;
+  baseline_config.mbb_filter_mode = MBBFilterMode::Scan;
+  baseline_config.search_qgram_prefilter = false;
+  BioGeometrySearchEngine baseline(builder, baseline_config);
+  BioGeometrySearchEngine optimized(builder, optimized_search_config);
+
+  std::vector<uint8_t> eviction_buffer(config.cold_cache_bytes, 0);
+  volatile uint64_t eviction_checksum = 0;
+  auto evict_best_effort = [&]() {
+    for (size_t offset = 0; offset < eviction_buffer.size(); offset += 64) {
+      eviction_buffer[offset] =
+          static_cast<uint8_t>(eviction_buffer[offset] + 1);
+      eviction_checksum += eviction_buffer[offset];
+    }
+  };
+
+  std::vector<ExecutionRecord> records;
+  std::vector<std::string> mismatch_diagnostics;
+  QueryBenchmarkRunResult result;
+  auto execute = [&](BioGeometrySearchEngine& engine,
+                     const GeneratedBenchmarkQuery& generated,
+                     const std::string& profile, const std::string& sample_kind,
+                     size_t iteration, const std::string& first_profile,
+                     bool timed, bool cold) {
+    if (cold) evict_best_effort();
+    const auto start = std::chrono::steady_clock::now();
+    auto [hits, stats] =
+        engine.search_adaptive(generated.query, config.tolerance);
+    const auto end = std::chrono::steady_clock::now();
+    ExecutionRecord record;
+    record.query_id = generated.query.id;
+    record.profile = profile;
+    record.query_class = generated.query_class;
+    record.sample_kind = sample_kind;
+    record.first_profile = first_profile;
+    record.iteration = iteration;
+    record.latency_ms =
+        timed ? std::chrono::duration<double, std::milli>(end - start).count()
+              : 0.0;
+    record.result_ids = result_ids(hits);
+    record.result_count = record.result_ids.size();
+    record.brute_force_result_count = generated.brute_force_ids.size();
+    record.stats = std::move(stats);
+    return record;
+  };
+
+  for (size_t query_index = 0; query_index < queries.size(); ++query_index) {
+    const auto& generated = queries[query_index];
+    const std::string first_profile =
+        query_index % 2 == 0 ? "baseline" : "optimized";
+    const std::array<std::string, 2> order =
+        query_index % 2 == 0
+            ? std::array<std::string, 2>{"baseline", "optimized"}
+            : std::array<std::string, 2>{"optimized", "baseline"};
+    const size_t query_record_start = records.size();
+    std::map<std::string, std::vector<std::string>> canonical_ids;
+    bool repeated_results_equal = true;
+
+    for (const auto& profile : order) {
+      BioGeometrySearchEngine& engine =
+          profile == "baseline" ? baseline : optimized;
+      auto cold = execute(engine, generated, profile, "cold", 0, first_profile,
+                          true, true);
+      canonical_ids[profile] = cold.result_ids;
+      records.push_back(std::move(cold));
+
+      for (size_t iteration = 0; iteration < config.warmup_iterations;
+           ++iteration) {
+        auto warmup = execute(engine, generated, profile, "warmup", iteration,
+                              first_profile, false, false);
+        repeated_results_equal &=
+            warmup.result_ids == canonical_ids[profile];
+      }
+      for (size_t iteration = 0; iteration < config.measured_iterations;
+           ++iteration) {
+        auto warm = execute(engine, generated, profile, "warm", iteration,
+                            first_profile, true, false);
+        repeated_results_equal &= warm.result_ids == canonical_ids[profile];
+        records.push_back(std::move(warm));
+      }
+    }
+
+    const ResultComparison comparison = compare_result_ids(
+        canonical_ids["baseline"], canonical_ids["optimized"],
+        generated.brute_force_ids);
+    const bool query_gate_passed =
+        repeated_results_equal && comparison_passes_gate(comparison);
+    if (!query_gate_passed) {
+      result.mismatch_count++;
+      mismatch_diagnostics.push_back(generated.query.id);
+    }
+    for (size_t i = query_record_start; i < records.size(); ++i) {
+      records[i].result_equal =
+          repeated_results_equal && comparison.baseline_equals_optimized;
+      records[i].no_fn =
+          records[i].profile == "baseline" ? comparison.baseline_no_fn
+                                             : comparison.optimized_no_fn;
+    }
+  }
+  static_cast<void>(eviction_checksum);
+  result.gate_passed = result.mismatch_count == 0;
+  const MemorySnapshot after_benchmark = memory_snapshot();
+
+  const std::vector<std::string> detail_columns = {
+      "query_id", "query_class", "profile", "sample_kind", "iteration",
+      "first_profile", "latency_ms", "result_count",
+      "brute_force_result_count", "result_equal", "no_fn",
+      "world_access_count", "node_access_count", "edge_access_count",
+      "mbb_checks", "mbb_survivors", "qgram_checks",
+      "center_exact_distance_calls", "leaf_beacon_checks",
+      "leaf_exact_distance_calls", "visited_checks", "visited_hits",
+      "candidate_count", "verified_candidate_count"};
+  for (const auto& record : records) {
+    result.detail_rows.push_back({
+        record.query_id,
+        query_class_name(record.query_class),
+        record.profile,
+        record.sample_kind,
+        std::to_string(record.iteration),
+        record.first_profile,
+        format_double(record.latency_ms),
+        std::to_string(record.result_count),
+        std::to_string(record.brute_force_result_count),
+        bool_string(record.result_equal),
+        bool_string(record.no_fn),
+        std::to_string(record.stats.world_access_count),
+        std::to_string(record.stats.node_access_count),
+        std::to_string(record.stats.edge_access_count),
+        std::to_string(record.stats.mbb_check_count),
+        std::to_string(record.stats.mbb_surviving_child_count),
+        std::to_string(record.stats.search_qgram_checks),
+        std::to_string(record.stats.center_exact_distance_call_count),
+        std::to_string(record.stats.leaf_beacon_check_count),
+        std::to_string(record.stats.leaf_exact_distance_call_count),
+        std::to_string(record.stats.visited_check_count),
+        std::to_string(record.stats.visited_hit_count),
+        std::to_string(record.stats.candidate_count),
+        std::to_string(record.stats.candidate_verify_count),
+    });
+  }
+
+  const std::vector<std::string> summary_columns = {
+      "query_class", "profile", "query_count", "sample_count", "result_total",
+      "equality_failure_count", "false_negative_count", "cold_avg_ms",
+      "cold_p50_ms", "cold_p95_ms", "cold_p99_ms", "warm_avg_ms",
+      "warm_p50_ms", "warm_p95_ms", "warm_p99_ms", "avg_world_access_count",
+      "avg_node_access_count", "avg_edge_access_count", "avg_mbb_checks",
+      "avg_mbb_survivors", "avg_qgram_checks",
+      "avg_center_exact_distance_calls", "avg_leaf_beacon_checks",
+      "avg_leaf_exact_distance_calls", "avg_visited_checks",
+      "avg_visited_hits", "avg_candidate_count",
+      "avg_verified_candidate_count"};
+  auto aggregates = aggregate_records(records);
+  for (const auto& aggregate : aggregates) {
+    const size_t sample_count = aggregate.sample_count;
+    const size_t samples_per_query = 1 + config.measured_iterations;
+    result.summary_rows.push_back({
+        aggregate.query_class,
+        aggregate.profile,
+        std::to_string(sample_count / samples_per_query),
+        std::to_string(sample_count),
+        std::to_string(aggregate.result_total),
+        std::to_string(aggregate.equality_failure_count),
+        std::to_string(aggregate.false_negative_count),
+        format_double(average(aggregate.cold_latencies)),
+        format_double(percentile_or_zero(aggregate.cold_latencies, 0.50)),
+        format_double(percentile_or_zero(aggregate.cold_latencies, 0.95)),
+        format_double(percentile_or_zero(aggregate.cold_latencies, 0.99)),
+        format_double(average(aggregate.warm_latencies)),
+        format_double(percentile_or_zero(aggregate.warm_latencies, 0.50)),
+        format_double(percentile_or_zero(aggregate.warm_latencies, 0.95)),
+        format_double(percentile_or_zero(aggregate.warm_latencies, 0.99)),
+        format_double(average_counter(aggregate.world_access_count, sample_count)),
+        format_double(average_counter(aggregate.node_access_count, sample_count)),
+        format_double(average_counter(aggregate.edge_access_count, sample_count)),
+        format_double(average_counter(aggregate.mbb_check_count, sample_count)),
+        format_double(average_counter(aggregate.mbb_surviving_child_count, sample_count)),
+        format_double(average_counter(aggregate.search_qgram_checks, sample_count)),
+        format_double(average_counter(aggregate.center_exact_distance_call_count, sample_count)),
+        format_double(average_counter(aggregate.leaf_beacon_check_count, sample_count)),
+        format_double(average_counter(aggregate.leaf_exact_distance_call_count, sample_count)),
+        format_double(average_counter(aggregate.visited_check_count, sample_count)),
+        format_double(average_counter(aggregate.visited_hit_count, sample_count)),
+        format_double(average_counter(aggregate.candidate_count, sample_count)),
+        format_double(average_counter(aggregate.candidate_verify_count, sample_count)),
+    });
+  }
+
+  std::ostringstream json;
+  json << "{\"schema_version\":1,\"configuration\":{"
+       << "\"ref_input\":\"" << json_escape(config.ref_input) << "\","
+       << "\"reference_subset_length\":" << config.reference_subset_length << ","
+       << "\"window_length\":" << config.window_length << ","
+       << "\"stride\":" << config.stride << ","
+       << "\"query_length\":" << config.query_length << ","
+       << "\"tolerance\":" << config.tolerance << ","
+       << "\"seed\":" << config.seed << ","
+       << "\"threads\":" << config.threads << ","
+       << "\"queries_per_class\":" << config.queries_per_class << ","
+       << "\"warmup_iterations\":" << config.warmup_iterations << ","
+       << "\"measured_iterations\":" << config.measured_iterations << ","
+       << "\"cold_cache_bytes\":" << config.cold_cache_bytes << "},"
+       << "\"build\":{\"duration_ms\":" << format_double(build_duration_ms)
+       << ",\"added_sequences\":" << build_stats.added_sequences
+       << ",\"unique_sequences\":" << build_stats.unique_sequences << "},"
+       << "\"profiles\":{\"baseline\":{\"mbb_filter_mode\":\"scan\","
+       << "\"search_qgram_prefilter\":false},\"optimized\":{"
+       << "\"mbb_filter_mode\":\""
+       << mbb_filter_mode_name(optimized_search_config.mbb_filter_mode) << "\","
+       << "\"search_qgram_prefilter\":"
+       << bool_string(optimized_search_config.search_qgram_prefilter) << "}},"
+       << "\"generation\":{\"query_count\":" << queries.size() << "},"
+       << "\"aggregate_row_count\":" << result.summary_rows.size() << ","
+       << "\"mismatch_count\":" << result.mismatch_count << ","
+       << "\"mismatch_queries\":[";
+  for (size_t i = 0; i < mismatch_diagnostics.size(); ++i) {
+    if (i) json << ",";
+    json << "\"" << json_escape(mismatch_diagnostics[i]) << "\"";
+  }
+  json << "],\"memory\":{";
+  append_memory_json(json, "before_build", before_build);
+  json << ",";
+  append_memory_json(json, "after_build", after_build);
+  json << ",";
+  append_memory_json(json, "after_benchmark", after_benchmark);
+  json << "},\"candidate_set_comparison\":\"unavailable\","
+       << "\"allocation_counting\":\"unavailable\","
+       << "\"gate_passed\":" << bool_string(result.gate_passed) << "}";
+  result.json_summary = json.str();
+
+  write_tsv(config.detail_tsv_path, detail_columns, result.detail_rows);
+  write_tsv(config.summary_tsv_path, summary_columns, result.summary_rows);
+  std::ofstream json_out(config.json_path);
+  if (!json_out) throw std::runtime_error("unable to open query benchmark JSON output");
+  json_out << result.json_summary << "\n";
+  return result;
 }
 
 }  // namespace navigamer
