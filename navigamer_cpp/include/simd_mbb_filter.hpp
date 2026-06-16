@@ -21,6 +21,12 @@ struct MBBFilterSimdStats {
   size_t simd_fallbacks = 0;
 };
 
+struct LeafBeaconFilterSimdStats {
+  size_t scalar_checks = 0;
+  size_t simd_batches = 0;
+  size_t simd_fallbacks = 0;
+};
+
 const char* simd_mode_name(SimdMode mode);
 SimdMode parse_simd_mode(const std::string& value);
 bool simd_avx2_runtime_supported();
@@ -34,6 +40,15 @@ std::vector<uint32_t> filter_mbb_survivors(
     int32_t tolerance,
     SimdMode mode,
     MBBFilterSimdStats* stats = nullptr);
+
+std::vector<uint32_t> filter_leaf_beacon_survivors(
+    const int32_t* dist_by_dim,
+    size_t leaf_count,
+    size_t dim,
+    const int32_t* query_beacon_dists,
+    int32_t tolerance,
+    SimdMode mode,
+    LeafBeaconFilterSimdStats* stats = nullptr);
 
 }  // namespace navigamer
 

@@ -226,6 +226,11 @@ add_executable(test_simd_mbb_filter
   src/simd_mbb_filter.cpp
 )
 
+add_executable(test_simd_leaf_beacon_filter
+  src/test_simd_leaf_beacon_filter.cpp
+  src/simd_mbb_filter.cpp
+)
+
 target_include_directories(test_search_stats_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -282,9 +287,13 @@ target_include_directories(test_simd_mbb_filter PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(test_simd_mbb_filter PRIVATE OpenMP::OpenMP_CXX)
+target_include_directories(test_simd_leaf_beacon_filter PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_simd_leaf_beacon_filter PRIVATE OpenMP::OpenMP_CXX)
 
 if(NAVIGAMER_WITH_SEQAN3)
-  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_qgram_filter test_range_join test_build_range_equivalence test_mbb_rect_index test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_simd_mbb_filter)
+  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_qgram_filter test_range_join test_build_range_equivalence test_mbb_rect_index test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_simd_mbb_filter test_simd_leaf_beacon_filter)
     target_compile_definitions(${target} PRIVATE NAVIGAMER_WITH_SEQAN3)
     target_link_libraries(${target} PRIVATE seqan3::seqan3)
   endforeach()
@@ -312,4 +321,5 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   target_compile_options(test_epoch_visited PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_search_graph_view PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_simd_mbb_filter PRIVATE -O3 -DNDEBUG)
+  target_compile_options(test_simd_leaf_beacon_filter PRIVATE -O3 -DNDEBUG)
 endif()
