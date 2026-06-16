@@ -78,6 +78,18 @@ struct SearchStats {
   }
 };
 
+struct SearchScratch {
+  std::vector<uint32_t> visited_epoch;
+  uint32_t current_epoch = 0;
+  std::vector<std::shared_ptr<WorldNode>> frontier;
+  std::vector<std::shared_ptr<WorldNode>> next_frontier;
+  std::vector<std::shared_ptr<WorldNode>> mbb_candidates;
+  std::vector<std::shared_ptr<WorldNode>> verified_children;
+
+  void begin_query(size_t node_count);
+  bool mark_visited(NodeId id);
+};
+
 class BioGeometrySearchEngine {
  public:
   explicit BioGeometrySearchEngine(

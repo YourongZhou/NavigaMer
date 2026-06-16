@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <vector>
@@ -49,10 +50,34 @@ void assert_integer_ids_unique() {
   for (bool seen : seen_sequences) assert(seen);
 }
 
+void assert_epoch_visited_basic() {
+  navigamer::SearchScratch scratch;
+  scratch.begin_query(4);
+  assert(scratch.current_epoch == 1);
+  assert(scratch.visited_epoch.size() == 4);
+
+  assert(scratch.mark_visited(2));
+  assert(!scratch.mark_visited(2));
+  assert(scratch.mark_visited(3));
+
+  scratch.begin_query(4);
+  assert(scratch.current_epoch == 2);
+  assert(scratch.mark_visited(2));
+  assert(!scratch.mark_visited(2));
+
+  scratch.current_epoch = std::numeric_limits<uint32_t>::max();
+  scratch.visited_epoch[1] = scratch.current_epoch;
+  scratch.begin_query(4);
+  assert(scratch.current_epoch == 1);
+  assert(scratch.mark_visited(1));
+  assert(!scratch.mark_visited(1));
+}
+
 }  // namespace
 
 int main() {
   assert_integer_ids_unique();
+  assert_epoch_visited_basic();
   std::cout << "epoch visited tests passed\n";
   return 0;
 }

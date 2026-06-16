@@ -17,6 +17,32 @@ MBBFilterMode parse_mbb_filter_mode(const std::string& value) {
   throw std::invalid_argument("MBB filter mode must be scan or rect");
 }
 
+void SearchScratch::begin_query(size_t node_count) {
+  if (visited_epoch.size() != node_count) {
+    visited_epoch.assign(node_count, 0);
+    current_epoch = 0;
+  }
+  if (current_epoch == std::numeric_limits<uint32_t>::max()) {
+    std::fill(visited_epoch.begin(), visited_epoch.end(), 0);
+    current_epoch = 1;
+  } else {
+    current_epoch++;
+  }
+  frontier.clear();
+  next_frontier.clear();
+  mbb_candidates.clear();
+  verified_children.clear();
+}
+
+bool SearchScratch::mark_visited(NodeId id) {
+  if (id >= visited_epoch.size()) {
+    throw std::out_of_range("visited node id is outside scratch epoch array");
+  }
+  if (visited_epoch[id] == current_epoch) return false;
+  visited_epoch[id] = current_epoch;
+  return true;
+}
+
 BioGeometrySearchEngine::BioGeometrySearchEngine(
     const BioGeometryIndexBuilder& index, const SearchConfig& config)
     : index_(index), config_(config) {
