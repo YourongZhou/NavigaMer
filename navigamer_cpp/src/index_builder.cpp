@@ -240,6 +240,132 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
   return true;
 }
 
+bool BioGeometryIndexBuilder::validate_search_graph_view() const {
+  const auto& view = search_graph_view_;
+  if (!validate_integer_ids()) return false;
+  if (view.nodes.size() != world_node_count_ ||
+      view.leaves.size() != sequence_count_ ||
+      view.child_begin.size() != world_node_count_ ||
+      view.child_end.size() != world_node_count_ ||
+      view.leaf_begin.size() != world_node_count_ ||
+      view.leaf_end.size() != world_node_count_ ||
+      view.mbb_begin.size() != world_node_count_ ||
+      view.mbb_dim.size() != world_node_count_ ||
+      view.beacon_begin.size() != world_node_count_ ||
+      view.beacon_end.size() != world_node_count_ ||
+      view.leaf_beacon_begin.size() != world_node_count_ ||
+      view.leaf_beacon_dim.size() != world_node_count_) {
+    return false;
+  }
+
+  for (const auto& entry : unique_sequences) {
+    const auto& sequence = entry.second;
+    if (!sequence || sequence->sequence_id >= view.leaves.size()) return false;
+    if (view.leaves[sequence->sequence_id] != sequence) return false;
+  }
+
+  for (const auto& layer : primary_layers_) {
+    for (const auto& node : layer) {
+      if (!node || node->integer_id >= view.nodes.size()) return false;
+      const NodeId node_id = node->integer_id;
+      if (view.nodes[node_id] != node) return false;
+
+      if (view.child_end[node_id] < view.child_begin[node_id] ||
+          view.leaf_end[node_id] < view.leaf_begin[node_id] ||
+          view.beacon_end[node_id] < view.beacon_begin[node_id]) {
+        return false;
+      }
+      if (view.child_end[node_id] > view.child_ids.size() ||
+          view.leaf_end[node_id] > view.leaf_ids.size() ||
+          view.beacon_end[node_id] > view.beacon_ids.size()) {
+        return false;
+      }
+
+      const uint32_t child_begin = view.child_begin[node_id];
+      if (view.child_end[node_id] - child_begin != node->child_nodes.size()) {
+        return false;
+      }
+      for (size_t child_idx = 0; child_idx < node->child_nodes.size(); ++child_idx) {
+        const auto& child = node->child_nodes[child_idx];
+        if (!child || view.child_ids[child_begin + child_idx] != child->integer_id) {
+          return false;
+        }
+      }
+
+      const uint32_t leaf_begin = view.leaf_begin[node_id];
+      if (view.leaf_end[node_id] - leaf_begin != node->child_leaves.size()) {
+        return false;
+      }
+      for (size_t leaf_idx = 0; leaf_idx < node->child_leaves.size(); ++leaf_idx) {
+        const auto& leaf = node->child_leaves[leaf_idx];
+        if (!leaf || view.leaf_ids[leaf_begin + leaf_idx] != leaf->sequence_id) {
+          return false;
+        }
+      }
+
+      const uint32_t beacon_begin = view.beacon_begin[node_id];
+      if (view.beacon_end[node_id] - beacon_begin != node->beacons.size()) {
+        return false;
+      }
+      for (size_t beacon_idx = 0; beacon_idx < node->beacons.size(); ++beacon_idx) {
+        const auto& beacon = node->beacons[beacon_idx];
+        if (!beacon || view.beacon_ids[beacon_begin + beacon_idx] !=
+                           beacon->sequence_id) {
+          return false;
+        }
+      }
+
+      const size_t child_count = node->child_nodes.size();
+      const size_t mbb_dim = view.mbb_dim[node_id];
+      const size_t mbb_begin = view.mbb_begin[node_id];
+      if (mbb_dim != node->beacons.size()) return false;
+      if (mbb_begin + mbb_dim * child_count > view.mbb_lo.size() ||
+          mbb_begin + mbb_dim * child_count > view.mbb_hi.size()) {
+        return false;
+      }
+      if (!node->child_beacon_mbbs.empty() &&
+          node->child_beacon_mbbs.size() != child_count) {
+        return false;
+      }
+      for (size_t child_idx = 0; child_idx < node->child_beacon_mbbs.size(); ++child_idx) {
+        if (node->child_beacon_mbbs[child_idx].size() != mbb_dim) return false;
+        for (size_t dim = 0; dim < mbb_dim; ++dim) {
+          const size_t flat = mbb_begin + dim * child_count + child_idx;
+          if (view.mbb_lo[flat] != node->child_beacon_mbbs[child_idx][dim].min_dist ||
+              view.mbb_hi[flat] != node->child_beacon_mbbs[child_idx][dim].max_dist) {
+            return false;
+          }
+        }
+      }
+
+      const size_t leaf_count = node->child_leaves.size();
+      const size_t leaf_dim = view.leaf_beacon_dim[node_id];
+      const size_t leaf_beacon_begin = view.leaf_beacon_begin[node_id];
+      if (leaf_dim != node->beacons.size()) return false;
+      if (leaf_beacon_begin + leaf_dim * leaf_count >
+          view.leaf_beacon_dists.size()) {
+        return false;
+      }
+      if (!node->leaf_beacon_dists.empty() &&
+          node->leaf_beacon_dists.size() != leaf_count) {
+        return false;
+      }
+      for (size_t leaf_idx = 0; leaf_idx < node->leaf_beacon_dists.size(); ++leaf_idx) {
+        if (node->leaf_beacon_dists[leaf_idx].size() != leaf_dim) return false;
+        for (size_t dim = 0; dim < leaf_dim; ++dim) {
+          const size_t flat = leaf_beacon_begin + dim * leaf_count + leaf_idx;
+          if (view.leaf_beacon_dists[flat] !=
+              node->leaf_beacon_dists[leaf_idx][dim]) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
 std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::find_neighbors(
     const BioSequence& query_seq,
     const std::vector<std::shared_ptr<WorldNode>>& candidates,
@@ -655,6 +781,126 @@ void BioGeometryIndexBuilder::assign_integer_ids() {
   }
 }
 
+void BioGeometryIndexBuilder::build_search_graph_view() {
+  auto to_u32 = [](size_t value, const char* field) -> uint32_t {
+    if (value > std::numeric_limits<uint32_t>::max()) {
+      throw std::runtime_error(std::string(field) + " exceeds 32-bit view range");
+    }
+    return static_cast<uint32_t>(value);
+  };
+
+  SearchGraphView view;
+  view.nodes.assign(world_node_count_, nullptr);
+  view.leaves.assign(sequence_count_, nullptr);
+  view.child_begin.assign(world_node_count_, 0);
+  view.child_end.assign(world_node_count_, 0);
+  view.leaf_begin.assign(world_node_count_, 0);
+  view.leaf_end.assign(world_node_count_, 0);
+  view.mbb_begin.assign(world_node_count_, 0);
+  view.mbb_dim.assign(world_node_count_, 0);
+  view.beacon_begin.assign(world_node_count_, 0);
+  view.beacon_end.assign(world_node_count_, 0);
+  view.leaf_beacon_begin.assign(world_node_count_, 0);
+  view.leaf_beacon_dim.assign(world_node_count_, 0);
+
+  for (const auto& entry : unique_sequences) {
+    const auto& sequence = entry.second;
+    if (!sequence || sequence->sequence_id >= sequence_count_) {
+      throw std::runtime_error("cannot build search graph view with invalid leaf id");
+    }
+    view.leaves[sequence->sequence_id] = sequence;
+  }
+
+  for (const auto& layer : primary_layers_) {
+    for (const auto& node : layer) {
+      if (!node || node->integer_id >= world_node_count_) {
+        throw std::runtime_error("cannot build search graph view with invalid node id");
+      }
+      const NodeId node_id = node->integer_id;
+      view.nodes[node_id] = node;
+
+      view.child_begin[node_id] = to_u32(view.child_ids.size(), "child_ids");
+      for (const auto& child : node->child_nodes) {
+        if (!child || child->integer_id >= world_node_count_) {
+          throw std::runtime_error("cannot build search graph view with invalid child id");
+        }
+        view.child_ids.push_back(child->integer_id);
+      }
+      view.child_end[node_id] = to_u32(view.child_ids.size(), "child_ids");
+
+      view.leaf_begin[node_id] = to_u32(view.leaf_ids.size(), "leaf_ids");
+      for (const auto& leaf : node->child_leaves) {
+        if (!leaf || leaf->sequence_id >= sequence_count_) {
+          throw std::runtime_error("cannot build search graph view with invalid leaf id");
+        }
+        view.leaf_ids.push_back(leaf->sequence_id);
+      }
+      view.leaf_end[node_id] = to_u32(view.leaf_ids.size(), "leaf_ids");
+
+      view.beacon_begin[node_id] = to_u32(view.beacon_ids.size(), "beacon_ids");
+      for (const auto& beacon : node->beacons) {
+        if (!beacon || beacon->sequence_id >= sequence_count_) {
+          throw std::runtime_error("cannot build search graph view with invalid beacon id");
+        }
+        view.beacon_ids.push_back(beacon->sequence_id);
+      }
+      view.beacon_end[node_id] = to_u32(view.beacon_ids.size(), "beacon_ids");
+
+      const size_t child_count = node->child_nodes.size();
+      const size_t mbb_dim = node->beacons.size();
+      view.mbb_begin[node_id] = to_u32(view.mbb_lo.size(), "mbb arrays");
+      view.mbb_dim[node_id] = to_u32(mbb_dim, "mbb_dim");
+      const size_t mbb_cells = child_count * mbb_dim;
+      view.mbb_lo.resize(view.mbb_lo.size() + mbb_cells, 0);
+      view.mbb_hi.resize(view.mbb_hi.size() + mbb_cells, 0);
+      if (!node->child_beacon_mbbs.empty()) {
+        if (node->child_beacon_mbbs.size() != child_count) {
+          throw std::runtime_error("child MBB rows are not aligned with child nodes");
+        }
+        for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
+          if (node->child_beacon_mbbs[child_idx].size() != mbb_dim) {
+            throw std::runtime_error("child MBB row dimension mismatch");
+          }
+          for (size_t dim = 0; dim < mbb_dim; ++dim) {
+            const size_t flat = view.mbb_begin[node_id] +
+                                dim * child_count + child_idx;
+            view.mbb_lo[flat] =
+                static_cast<int32_t>(node->child_beacon_mbbs[child_idx][dim].min_dist);
+            view.mbb_hi[flat] =
+                static_cast<int32_t>(node->child_beacon_mbbs[child_idx][dim].max_dist);
+          }
+        }
+      }
+
+      const size_t leaf_count = node->child_leaves.size();
+      const size_t leaf_dim = node->beacons.size();
+      view.leaf_beacon_begin[node_id] =
+          to_u32(view.leaf_beacon_dists.size(), "leaf_beacon_dists");
+      view.leaf_beacon_dim[node_id] = to_u32(leaf_dim, "leaf_beacon_dim");
+      const size_t leaf_cells = leaf_count * leaf_dim;
+      view.leaf_beacon_dists.resize(view.leaf_beacon_dists.size() + leaf_cells, 0);
+      if (!node->leaf_beacon_dists.empty()) {
+        if (node->leaf_beacon_dists.size() != leaf_count) {
+          throw std::runtime_error("leaf beacon rows are not aligned with leaves");
+        }
+        for (size_t leaf_idx = 0; leaf_idx < leaf_count; ++leaf_idx) {
+          if (node->leaf_beacon_dists[leaf_idx].size() != leaf_dim) {
+            throw std::runtime_error("leaf beacon row dimension mismatch");
+          }
+          for (size_t dim = 0; dim < leaf_dim; ++dim) {
+            const size_t flat = view.leaf_beacon_begin[node_id] +
+                                dim * leaf_count + leaf_idx;
+            view.leaf_beacon_dists[flat] =
+                static_cast<int32_t>(node->leaf_beacon_dists[leaf_idx][dim]);
+          }
+        }
+      }
+    }
+  }
+
+  search_graph_view_ = std::move(view);
+}
+
 void BioGeometryIndexBuilder::print_summary() const {
   Statistics stats = get_statistics();
   std::cerr << "  Construction range modes: links="
@@ -758,6 +1004,7 @@ void BioGeometryIndexBuilder::build(
   unique_sequences.clear();
   world_node_count_ = 0;
   sequence_count_ = 0;
+  search_graph_view_ = SearchGraphView{};
   primary_layers_.assign(static_cast<size_t>(num_primary_layers()),
                          std::vector<std::shared_ptr<WorldNode>>());
   extended_layers_.clear();
@@ -799,6 +1046,7 @@ void BioGeometryIndexBuilder::build(
   std::cerr << "  Phase 4: Leaf attachment...\n";
   attach_leaves(unique_seqs);
   assign_integer_ids();
+  build_search_graph_view();
 
   std::cerr << "[Build generalized hierarchy] Completed.\n";
   print_summary();

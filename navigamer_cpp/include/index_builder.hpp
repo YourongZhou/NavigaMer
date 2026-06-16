@@ -40,6 +40,31 @@ struct BuildRangeConfig {
   size_t min_rect_index_fanout = 64;
 };
 
+struct SearchGraphView {
+  std::vector<std::shared_ptr<WorldNode>> nodes;
+  std::vector<std::shared_ptr<BioSequence>> leaves;
+
+  std::vector<NodeId> child_ids;
+  std::vector<uint32_t> child_begin;
+  std::vector<uint32_t> child_end;
+
+  std::vector<LeafId> leaf_ids;
+  std::vector<uint32_t> leaf_begin;
+  std::vector<uint32_t> leaf_end;
+
+  std::vector<int32_t> mbb_lo;
+  std::vector<int32_t> mbb_hi;
+  std::vector<uint32_t> mbb_begin;
+  std::vector<uint32_t> mbb_dim;
+  std::vector<LeafId> beacon_ids;
+  std::vector<uint32_t> beacon_begin;
+  std::vector<uint32_t> beacon_end;
+
+  std::vector<int32_t> leaf_beacon_dists;
+  std::vector<uint32_t> leaf_beacon_begin;
+  std::vector<uint32_t> leaf_beacon_dim;
+};
+
 class BioGeometryIndexBuilder {
  public:
   BioGeometryIndexBuilder();
@@ -117,6 +142,8 @@ class BioGeometryIndexBuilder {
   size_t num_world_nodes() const { return world_node_count_; }
   size_t num_sequences() const { return sequence_count_; }
   bool validate_integer_ids() const;
+  const SearchGraphView& search_graph_view() const { return search_graph_view_; }
+  bool validate_search_graph_view() const;
 
   std::vector<std::shared_ptr<WorldNode>> find_neighbors(
       const BioSequence& query_seq,
@@ -129,6 +156,7 @@ class BioGeometryIndexBuilder {
   BuildRangeConfig range_config_;
   size_t world_node_count_ = 0;
   size_t sequence_count_ = 0;
+  SearchGraphView search_graph_view_;
   std::vector<int> expanded_radii_;
   std::vector<std::vector<std::shared_ptr<WorldNode>>> extended_layers_;
   std::vector<std::vector<std::shared_ptr<WorldNode>>> primary_layers_;
@@ -142,6 +170,7 @@ class BioGeometryIndexBuilder {
 
   void attach_leaves(const std::vector<std::shared_ptr<BioSequence>>& unique_seqs);
   void assign_integer_ids();
+  void build_search_graph_view();
 
   void print_summary() const;
 };
