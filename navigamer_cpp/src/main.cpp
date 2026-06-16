@@ -46,7 +46,7 @@ void usage(const char* prog) {
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
             << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
-            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
+            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
 }
 
 std::string format_double(double value) {
@@ -464,7 +464,9 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "dist_calcs", "leaf_verify_count", "candidate_count_for_prune", "beacon_prune_count",
       "mbb_filter_mode", "mbb_scan_child_checks", "mbb_rect_index_queries",
       "mbb_rect_candidate_children", "mbb_rect_fallback_count",
-      "mbb_surviving_child_count", "center_distance_calls_after_mbb",
+      "mbb_surviving_child_count", "mbb_scalar_checks",
+      "mbb_simd_batches", "mbb_simd_fallbacks",
+      "center_distance_calls_after_mbb",
       "search_qgram_prefilter_enabled", "search_qgram_q",
       "search_qgram_signature_build_count", "search_qgram_signature_missing_count",
       "search_qgram_checks", "search_qgram_pruned_children",
@@ -495,6 +497,9 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
         std::to_string(st.mbb_rect_candidate_children),
         std::to_string(st.mbb_rect_fallback_count),
         std::to_string(st.mbb_surviving_child_count),
+        std::to_string(st.mbb_scalar_checks),
+        std::to_string(st.mbb_simd_batches),
+        std::to_string(st.mbb_simd_fallbacks),
         std::to_string(st.center_distance_calls_after_mbb),
         st.search_qgram_prefilter_enabled ? "true" : "false",
         std::to_string(st.search_qgram_q),
@@ -884,6 +889,7 @@ int main(int argc, char** argv) {
   std::string mbb_filter_mode = "scan";
   std::string visited_mode = "epoch";
   std::string graph_view_mode = "flat";
+  std::string simd_mode = "auto";
   std::string search_qgram_prefilter = "off";
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;
@@ -1023,6 +1029,10 @@ int main(int argc, char** argv) {
       graph_view_mode = argv[++i];
       continue;
     }
+    if (a == "--simd-mode" && i + 1 < argc) {
+      simd_mode = argv[++i];
+      continue;
+    }
     if (a == "--search-qgram-prefilter" && i + 1 < argc) {
       search_qgram_prefilter = argv[++i];
       continue;
@@ -1071,6 +1081,7 @@ int main(int argc, char** argv) {
     search_config.mbb_filter_mode = navigamer::parse_mbb_filter_mode(mbb_filter_mode);
     search_config.visited_mode = navigamer::parse_visited_mode(visited_mode);
     search_config.graph_view_mode = navigamer::parse_graph_view_mode(graph_view_mode);
+    search_config.simd_mode = navigamer::parse_simd_mode(simd_mode);
     search_config.search_qgram_prefilter =
         parse_on_off(search_qgram_prefilter, "--search-qgram-prefilter");
     search_config.search_qgram_q = search_qgram_q;

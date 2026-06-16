@@ -106,6 +106,10 @@ MBB rows and falls back to the original scan whenever the index is unavailable
 or inconsistent. `--min-rect-index-fanout` controls the build threshold and
 defaults to `64`.
 
+Flat adaptive traversal supports `--simd-mode auto|scalar|avx2|avx512`
+(default `auto`) for child MBB rectangle filtering. Unsupported SIMD paths
+fall back to the scalar filter and preserve the same survivor set.
+
 Adaptive child-world traversal also supports the optional
 `--search-qgram-prefilter on` with independent `--search-qgram-q` (default
 `5`). After MBB filtering, it safely rejects a child center only when
@@ -115,10 +119,11 @@ still receives bounded exact edit-distance verification. The default is
 no pruning.
 
 `query-benchmark` is a deterministic correctness and latency gate for adaptive
-search. It compares a fixed baseline (`scan`, search q-gram off), the optimized
-profile selected by adaptive-search flags, and exact brute-force IDs across
-six query classes. It writes detailed TSV, aggregate TSV, and JSON output and
-returns exit status `2` on any result mismatch or false negative.
+search. It compares a fixed baseline (`scan`, scalar MBB filtering, search
+q-gram off), the optimized profile selected by adaptive-search flags, and exact
+brute-force IDs across six query classes. It writes detailed TSV, aggregate
+TSV, and JSON output and returns exit status `2` on any result mismatch or
+false negative.
 
 The default CLI path still uses the legacy three primary layers (`LW/MW/SW`) via `--r-lw`, `--r-mw`, and `--r-sw`, but the C++ implementation now also supports any number of primary layers `K >= 2` through `--primary-radii coarse,...,fine`. One auxiliary tier is inserted automatically between each adjacent pair of primary layers during index construction and collapsed away before query-time navigation.
 

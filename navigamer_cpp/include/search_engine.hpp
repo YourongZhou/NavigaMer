@@ -3,6 +3,7 @@
 
 #include "index_builder.hpp"
 #include "qgram_filter.hpp"
+#include "simd_mbb_filter.hpp"
 #include "structure.hpp"
 #include "tools.hpp"
 #include <string>
@@ -38,6 +39,7 @@ struct SearchConfig {
   MBBFilterMode mbb_filter_mode = MBBFilterMode::Scan;
   VisitedMode visited_mode = VisitedMode::Epoch;
   GraphViewMode graph_view_mode = GraphViewMode::Flat;
+  SimdMode simd_mode = SimdMode::Auto;
   bool search_qgram_prefilter = false;
   int search_qgram_q = 5;
 };
@@ -61,6 +63,9 @@ struct SearchStats {
   size_t mbb_rect_fallback_count = 0;
   size_t mbb_filter_parent_count = 0;
   size_t mbb_surviving_child_count = 0;
+  size_t mbb_scalar_checks = 0;
+  size_t mbb_simd_batches = 0;
+  size_t mbb_simd_fallbacks = 0;
   size_t leaf_beacon_check_count = 0;
   size_t mbb_check_count = 0;
   size_t leaf_exact_distance_call_count = 0;

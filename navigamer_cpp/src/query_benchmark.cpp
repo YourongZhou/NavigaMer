@@ -50,6 +50,9 @@ struct AggregateRecord {
   size_t edge_access_count = 0;
   size_t mbb_check_count = 0;
   size_t mbb_surviving_child_count = 0;
+  size_t mbb_scalar_checks = 0;
+  size_t mbb_simd_batches = 0;
+  size_t mbb_simd_fallbacks = 0;
   size_t search_qgram_checks = 0;
   size_t center_exact_distance_call_count = 0;
   size_t leaf_beacon_check_count = 0;
@@ -165,6 +168,9 @@ std::vector<AggregateRecord> aggregate_records(
       aggregate.edge_access_count += record.stats.edge_access_count;
       aggregate.mbb_check_count += record.stats.mbb_check_count;
       aggregate.mbb_surviving_child_count += record.stats.mbb_surviving_child_count;
+      aggregate.mbb_scalar_checks += record.stats.mbb_scalar_checks;
+      aggregate.mbb_simd_batches += record.stats.mbb_simd_batches;
+      aggregate.mbb_simd_fallbacks += record.stats.mbb_simd_fallbacks;
       aggregate.search_qgram_checks += record.stats.search_qgram_checks;
       aggregate.center_exact_distance_call_count +=
           record.stats.center_exact_distance_call_count;
@@ -551,6 +557,7 @@ QueryBenchmarkRunResult run_query_benchmark(
   baseline_config.mbb_filter_mode = MBBFilterMode::Scan;
   baseline_config.visited_mode = VisitedMode::StringSet;
   baseline_config.graph_view_mode = GraphViewMode::Original;
+  baseline_config.simd_mode = SimdMode::Scalar;
   baseline_config.search_qgram_prefilter = false;
   BioGeometrySearchEngine baseline(builder, baseline_config);
   BioGeometrySearchEngine optimized(builder, optimized_search_config);
@@ -659,7 +666,8 @@ QueryBenchmarkRunResult run_query_benchmark(
       "first_profile", "latency_ms", "result_count",
       "brute_force_result_count", "result_equal", "no_fn",
       "world_access_count", "node_access_count", "edge_access_count",
-      "mbb_checks", "mbb_survivors", "qgram_checks",
+      "mbb_checks", "mbb_survivors", "mbb_scalar_checks",
+      "mbb_simd_batches", "mbb_simd_fallbacks", "qgram_checks",
       "center_exact_distance_calls", "leaf_beacon_checks",
       "leaf_exact_distance_calls", "visited_checks", "visited_hits",
       "candidate_count", "verified_candidate_count"};
@@ -681,6 +689,9 @@ QueryBenchmarkRunResult run_query_benchmark(
         std::to_string(record.stats.edge_access_count),
         std::to_string(record.stats.mbb_check_count),
         std::to_string(record.stats.mbb_surviving_child_count),
+        std::to_string(record.stats.mbb_scalar_checks),
+        std::to_string(record.stats.mbb_simd_batches),
+        std::to_string(record.stats.mbb_simd_fallbacks),
         std::to_string(record.stats.search_qgram_checks),
         std::to_string(record.stats.center_exact_distance_call_count),
         std::to_string(record.stats.leaf_beacon_check_count),
@@ -698,7 +709,8 @@ QueryBenchmarkRunResult run_query_benchmark(
       "cold_p50_ms", "cold_p95_ms", "cold_p99_ms", "warm_avg_ms",
       "warm_p50_ms", "warm_p95_ms", "warm_p99_ms", "avg_world_access_count",
       "avg_node_access_count", "avg_edge_access_count", "avg_mbb_checks",
-      "avg_mbb_survivors", "avg_qgram_checks",
+      "avg_mbb_survivors", "avg_mbb_scalar_checks",
+      "avg_mbb_simd_batches", "avg_mbb_simd_fallbacks", "avg_qgram_checks",
       "avg_center_exact_distance_calls", "avg_leaf_beacon_checks",
       "avg_leaf_exact_distance_calls", "avg_visited_checks",
       "avg_visited_hits", "avg_candidate_count",
@@ -728,6 +740,9 @@ QueryBenchmarkRunResult run_query_benchmark(
         format_double(average_counter(aggregate.edge_access_count, sample_count)),
         format_double(average_counter(aggregate.mbb_check_count, sample_count)),
         format_double(average_counter(aggregate.mbb_surviving_child_count, sample_count)),
+        format_double(average_counter(aggregate.mbb_scalar_checks, sample_count)),
+        format_double(average_counter(aggregate.mbb_simd_batches, sample_count)),
+        format_double(average_counter(aggregate.mbb_simd_fallbacks, sample_count)),
         format_double(average_counter(aggregate.search_qgram_checks, sample_count)),
         format_double(average_counter(aggregate.center_exact_distance_call_count, sample_count)),
         format_double(average_counter(aggregate.leaf_beacon_check_count, sample_count)),
@@ -779,6 +794,7 @@ QueryBenchmarkRunResult run_query_benchmark(
        << "\"profiles\":{\"baseline\":{\"mbb_filter_mode\":\"scan\","
        << "\"visited_mode\":\"string\","
        << "\"graph_view\":\"original\","
+       << "\"simd_mode\":\"scalar\","
        << "\"search_qgram_prefilter\":false},\"optimized\":{"
        << "\"mbb_filter_mode\":\""
        << mbb_filter_mode_name(optimized_search_config.mbb_filter_mode) << "\","
@@ -786,6 +802,8 @@ QueryBenchmarkRunResult run_query_benchmark(
        << visited_mode_name(optimized_search_config.visited_mode) << "\","
        << "\"graph_view\":\""
        << graph_view_mode_name(optimized_search_config.graph_view_mode) << "\","
+       << "\"simd_mode\":\""
+       << simd_mode_name(optimized_search_config.simd_mode) << "\","
        << "\"search_qgram_prefilter\":"
        << bool_string(optimized_search_config.search_qgram_prefilter) << ","
        << "\"search_qgram_q\":" << optimized_search_config.search_qgram_q << "}},"

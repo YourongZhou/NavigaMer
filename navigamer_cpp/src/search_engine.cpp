@@ -159,6 +159,7 @@ BioGeometrySearchEngine::scan_mbb_surviving_children(
       stats.candidate_count_for_prune++;
       stats.bound_check_count++;
       stats.mbb_scan_child_checks++;
+      stats.mbb_scalar_checks++;
       if (mbb_prunable_row(
               node->child_beacon_mbbs[child_idx], query_beacon_dists, tolerance)) {
         stats.beacon_prune_count++;
@@ -621,28 +622,39 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
       surviving.push_back(view.child_ids[child_begin + child_idx]);
     }
   } else {
-    surviving.reserve(child_count);
-    for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
-      stats.edge_access_count++;
-      stats.mbb_check_count++;
-      stats.candidate_count_for_prune++;
-      stats.bound_check_count++;
-      stats.mbb_scan_child_checks++;
-      bool prunable = false;
-      for (size_t dim_idx = 0; dim_idx < dim; ++dim_idx) {
-        const size_t flat = mbb_begin + dim_idx * child_count + child_idx;
-        const int q_b = query_beacon_dists[dim_idx];
-        if (q_b < view.mbb_lo[flat] - tolerance ||
-            q_b > view.mbb_hi[flat] + tolerance) {
-          prunable = true;
-          break;
-        }
+    std::vector<int32_t> query32;
+    query32.reserve(query_beacon_dists.size());
+    for (int distance : query_beacon_dists) {
+      query32.push_back(static_cast<int32_t>(distance));
+    }
+
+    MBBFilterSimdStats simd_stats;
+    auto survivor_offsets = filter_mbb_survivors(
+        view.mbb_lo.data() + mbb_begin,
+        view.mbb_hi.data() + mbb_begin,
+        child_count,
+        dim,
+        query32.data(),
+        static_cast<int32_t>(tolerance),
+        config_.simd_mode,
+        &simd_stats);
+
+    stats.edge_access_count += child_count;
+    stats.mbb_check_count += child_count;
+    stats.candidate_count_for_prune += child_count;
+    stats.bound_check_count += child_count;
+    stats.mbb_scan_child_checks += child_count;
+    stats.beacon_prune_count += child_count - survivor_offsets.size();
+    stats.mbb_scalar_checks += simd_stats.scalar_checks;
+    stats.mbb_simd_batches += simd_stats.simd_batches;
+    stats.mbb_simd_fallbacks += simd_stats.simd_fallbacks;
+
+    surviving.reserve(survivor_offsets.size());
+    for (uint32_t child_offset : survivor_offsets) {
+      if (child_offset >= child_count) {
+        throw std::runtime_error("SIMD MBB filter returned child offset out of range");
       }
-      if (prunable) {
-        stats.beacon_prune_count++;
-        continue;
-      }
-      surviving.push_back(view.child_ids[child_begin + child_idx]);
+      surviving.push_back(view.child_ids[child_begin + child_offset]);
     }
   }
   stats.mbb_surviving_child_count += surviving.size();

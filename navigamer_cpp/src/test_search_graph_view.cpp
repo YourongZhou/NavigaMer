@@ -132,19 +132,26 @@ void assert_flat_search_matches_original() {
         original_config.search_qgram_q = 3;
         original_config.visited_mode = visited_mode;
         original_config.graph_view_mode = navigamer::GraphViewMode::Original;
-
-        navigamer::SearchConfig flat_config = original_config;
-        flat_config.graph_view_mode = navigamer::GraphViewMode::Flat;
+        original_config.simd_mode = navigamer::SimdMode::Scalar;
 
         navigamer::BioGeometrySearchEngine original_engine(builder, original_config);
-        navigamer::BioGeometrySearchEngine flat_engine(builder, flat_config);
 
-        for (const auto& query : queries) {
-          auto [original_hits, original_stats] =
-              original_engine.search_adaptive(query, 2);
-          auto [flat_hits, flat_stats] = flat_engine.search_adaptive(query, 2);
-          assert(ids(original_hits) == ids(flat_hits));
-          assert(original_stats.result_count == flat_stats.result_count);
+        for (navigamer::SimdMode simd_mode :
+             {navigamer::SimdMode::Scalar,
+              navigamer::SimdMode::Auto,
+              navigamer::SimdMode::AVX2}) {
+          navigamer::SearchConfig flat_config = original_config;
+          flat_config.graph_view_mode = navigamer::GraphViewMode::Flat;
+          flat_config.simd_mode = simd_mode;
+          navigamer::BioGeometrySearchEngine flat_engine(builder, flat_config);
+
+          for (const auto& query : queries) {
+            auto [original_hits, original_stats] =
+                original_engine.search_adaptive(query, 2);
+            auto [flat_hits, flat_stats] = flat_engine.search_adaptive(query, 2);
+            assert(ids(original_hits) == ids(flat_hits));
+            assert(original_stats.result_count == flat_stats.result_count);
+          }
         }
       }
     }
