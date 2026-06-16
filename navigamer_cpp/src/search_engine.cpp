@@ -429,8 +429,9 @@ void BioGeometrySearchEngine::search_layer_adaptive(
     }
     stats.center_exact_distance_call_count++;
     int dist = after_mbb_filter
-                   ? compute_distance_bounded(
-                         query_seq.seq, node->get_center_sequence(), tau)
+                   ? compute_distance_bounded_with_mode(
+                         query_seq.seq, node->get_center_sequence(), tau,
+                         config_.distance_mode)
                    : compute_distance(query_seq.seq, node->get_center_sequence());
     stats.dist_calc_count++;
     stats.world_access_count++;
@@ -536,8 +537,9 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
     }
     stats.center_exact_distance_call_count++;
     int dist = after_mbb_filter
-                   ? compute_distance_bounded(
-                         query_seq.seq, node->get_center_sequence(), tau)
+                   ? compute_distance_bounded_with_mode(
+                         query_seq.seq, node->get_center_sequence(), tau,
+                         config_.distance_mode)
                    : compute_distance(query_seq.seq, node->get_center_sequence());
     stats.dist_calc_count++;
     stats.world_access_count++;
@@ -763,8 +765,9 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
     }
     stats.center_exact_distance_call_count++;
     int dist = after_mbb_filter
-                   ? compute_distance_bounded(
-                         query_seq.seq, node->get_center_sequence(), tau)
+                   ? compute_distance_bounded_with_mode(
+                         query_seq.seq, node->get_center_sequence(), tau,
+                         config_.distance_mode)
                    : compute_distance(query_seq.seq, node->get_center_sequence());
     stats.dist_calc_count++;
     stats.world_access_count++;
