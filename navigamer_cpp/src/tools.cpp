@@ -1,11 +1,32 @@
 #include "tools.hpp"
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <random>
 #include <limits>
 #include <cmath>
 #include <stdexcept>
 
 namespace navigamer {
+
+const char* distance_mode_name(DistanceMode mode) {
+  switch (mode) {
+    case DistanceMode::DP:
+      return "dp";
+    case DistanceMode::Myers:
+      return "myers";
+    case DistanceMode::Auto:
+      return "auto";
+  }
+  return "dp";
+}
+
+DistanceMode parse_distance_mode(const std::string& value) {
+  if (value == "dp") return DistanceMode::DP;
+  if (value == "myers") return DistanceMode::Myers;
+  if (value == "auto") return DistanceMode::Auto;
+  throw std::invalid_argument("distance mode must be dp, myers, or auto");
+}
 
 int compute_distance(const std::string& a, const std::string& b) {
   const size_t m = a.size();
@@ -32,7 +53,8 @@ int compute_distance(const BioSequence& a, const BioSequence& b) {
   return compute_distance(a.seq, b.seq);
 }
 
-int compute_distance_bounded(const std::string& a, const std::string& b, int tau) {
+int compute_distance_bounded_dp(const std::string& a, const std::string& b,
+                                int tau) {
   if (tau < 0) throw std::invalid_argument("edit-distance threshold must be non-negative");
 
   const int m = static_cast<int>(a.size());
@@ -69,6 +91,105 @@ int compute_distance_bounded(const std::string& a, const std::string& b, int tau
   return prev[static_cast<size_t>(n)] <= tau
              ? prev[static_cast<size_t>(n)]
              : tau + 1;
+}
+
+namespace {
+
+int dna_base_index(char c) {
+  switch (c) {
+    case 'A':
+      return 0;
+    case 'C':
+      return 1;
+    case 'G':
+      return 2;
+    case 'T':
+      return 3;
+    default:
+      return -1;
+  }
+}
+
+bool is_acgt_string(const std::string& value) {
+  for (char c : value) {
+    if (dna_base_index(c) < 0) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+int compute_distance_bounded_myers(const std::string& a, const std::string& b,
+                                   int tau) {
+  if (tau < 0) throw std::invalid_argument("edit-distance threshold must be non-negative");
+
+  const int m_input = static_cast<int>(a.size());
+  const int n_input = static_cast<int>(b.size());
+  if (std::abs(m_input - n_input) > tau) return tau + 1;
+  if (a.empty()) return n_input <= tau ? n_input : tau + 1;
+  if (b.empty()) return m_input <= tau ? m_input : tau + 1;
+
+  const std::string* pattern = &a;
+  const std::string* text = &b;
+  if (pattern->size() > text->size()) std::swap(pattern, text);
+  const size_t m = pattern->size();
+  if (m > 64 || !is_acgt_string(*pattern) || !is_acgt_string(*text)) {
+    return compute_distance_bounded_dp(a, b, tau);
+  }
+
+  std::array<uint64_t, 4> peq = {0, 0, 0, 0};
+  for (size_t i = 0; i < m; ++i) {
+    const int base = dna_base_index((*pattern)[i]);
+    peq[static_cast<size_t>(base)] |= (uint64_t{1} << i);
+  }
+
+  const uint64_t valid_mask = m == 64 ? ~uint64_t{0} : ((uint64_t{1} << m) - 1);
+  const uint64_t top_bit = uint64_t{1} << (m - 1);
+  uint64_t vp = valid_mask;
+  uint64_t vn = 0;
+  int score = static_cast<int>(m);
+
+  for (char c : *text) {
+    const uint64_t eq = peq[static_cast<size_t>(dna_base_index(c))];
+    const uint64_t x = eq | vn;
+    const uint64_t d0 = (((x & vp) + vp) ^ vp) | x;
+    uint64_t hp = vn | ~(d0 | vp);
+    uint64_t hn = d0 & vp;
+
+    if (hp & top_bit) {
+      ++score;
+    } else if (hn & top_bit) {
+      --score;
+    }
+
+    hp = ((hp << 1) | uint64_t{1}) & valid_mask;
+    hn = (hn << 1) & valid_mask;
+    vn = hp & d0;
+    vp = hn | ~(hp | d0);
+    vn &= valid_mask;
+    vp &= valid_mask;
+  }
+
+  return score <= tau ? score : tau + 1;
+}
+
+int compute_distance_bounded_with_mode(const std::string& a,
+                                       const std::string& b, int tau,
+                                       DistanceMode mode) {
+  switch (mode) {
+    case DistanceMode::DP:
+      return compute_distance_bounded_dp(a, b, tau);
+    case DistanceMode::Myers:
+      return compute_distance_bounded_myers(a, b, tau);
+    case DistanceMode::Auto:
+      return compute_distance_bounded_dp(a, b, tau);
+  }
+  return compute_distance_bounded_dp(a, b, tau);
+}
+
+int compute_distance_bounded(const std::string& a, const std::string& b,
+                             int tau) {
+  return compute_distance_bounded_dp(a, b, tau);
 }
 
 static int node_distance(const std::shared_ptr<WorldNode>& na,

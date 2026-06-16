@@ -44,6 +44,11 @@ TEST_BOUNDED_OBJ = $(TEST_BOUNDED_SRC:.cpp=.o)
 TEST_BOUNDED_DEP = $(TEST_BOUNDED_OBJ:.o=.d)
 TEST_BOUNDED_TARGET = test_bounded_edit_distance
 
+TEST_BOUNDED_MYERS_SRC = src/test_bounded_myers.cpp
+TEST_BOUNDED_MYERS_OBJ = $(TEST_BOUNDED_MYERS_SRC:.cpp=.o)
+TEST_BOUNDED_MYERS_DEP = $(TEST_BOUNDED_MYERS_OBJ:.o=.d)
+TEST_BOUNDED_MYERS_TARGET = test_bounded_myers_bin
+
 TEST_RANGE_JOIN_SRC = src/test_range_join.cpp
 TEST_RANGE_JOIN_OBJ = $(TEST_RANGE_JOIN_SRC:.cpp=.o)
 TEST_RANGE_JOIN_DEP = $(TEST_RANGE_JOIN_OBJ:.o=.d)
@@ -106,7 +111,7 @@ EXP_DEP = $(EXP_OBJ:.cpp=.d)
 LIB_SRC += $(EXP_SRC) src/query_benchmark.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
 
-.PHONY: all clean test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_qgram test_range_join_check test_build_range test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_simd_mbb_filter test_simd_leaf_beacon_filter test_all
+.PHONY: all clean test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_simd_mbb_filter test_simd_leaf_beacon_filter test_all
 
 all: $(TARGET)
 
@@ -129,6 +134,9 @@ $(TEST_MAP150_TARGET): $(LIB_OBJ) $(TEST_MAP150_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 $(TEST_BOUNDED_TARGET): $(LIB_OBJ) $(TEST_BOUNDED_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+$(TEST_BOUNDED_MYERS_TARGET): src/structure.o src/tools.o $(TEST_BOUNDED_MYERS_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 $(TEST_RANGE_JOIN_TARGET): $(LIB_OBJ) $(TEST_RANGE_JOIN_OBJ)
@@ -182,6 +190,9 @@ test_map150: $(TEST_MAP150_TARGET)
 test_bounded: $(TEST_BOUNDED_TARGET)
 	./$(TEST_BOUNDED_TARGET)
 
+test_bounded_myers: $(TEST_BOUNDED_MYERS_TARGET)
+	./$(TEST_BOUNDED_MYERS_TARGET)
+
 test_range_join_check: $(TEST_RANGE_JOIN_TARGET)
 	./$(TEST_RANGE_JOIN_TARGET)
 
@@ -215,12 +226,12 @@ test_simd_mbb_filter: $(TEST_SIMD_MBB_TARGET)
 test_simd_leaf_beacon_filter: $(TEST_SIMD_LEAF_TARGET)
 	./$(TEST_SIMD_LEAF_TARGET)
 
-test_all: test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_qgram test_range_join_check test_build_range test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_simd_mbb_filter test_simd_leaf_beacon_filter
+test_all: test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_simd_mbb_filter test_simd_leaf_beacon_filter
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJ) $(LIB_OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TEST_HIER_OBJ) $(TEST_SEARCH_STATS_OBJ) $(TEST_MAP150_OBJ) $(TEST_BOUNDED_OBJ) $(TEST_QGRAM_OBJ) $(TEST_RANGE_JOIN_OBJ) $(TEST_BUILD_RANGE_OBJ) $(TEST_MBB_RECT_OBJ) $(TEST_MBB_FILTER_OBJ) $(TEST_SEARCH_QGRAM_OBJ) $(TEST_QUERY_BENCHMARK_OBJ) $(TEST_EPOCH_VISITED_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ) $(TEST_SIMD_MBB_OBJ) $(TEST_SIMD_LEAF_OBJ) $(DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET) $(TEST_HIER_TARGET) $(TEST_SEARCH_STATS_TARGET) $(TEST_MAP150_TARGET) $(TEST_BOUNDED_TARGET) $(TEST_QGRAM_TARGET) $(TEST_RANGE_JOIN_TARGET) $(TEST_BUILD_RANGE_TARGET) $(TEST_MBB_RECT_TARGET) $(TEST_MBB_FILTER_TARGET) $(TEST_SEARCH_QGRAM_TARGET) $(TEST_QUERY_BENCHMARK_TARGET) $(TEST_EPOCH_VISITED_TARGET) $(TEST_SEARCH_GRAPH_VIEW_TARGET) $(TEST_SIMD_MBB_TARGET) $(TEST_SIMD_LEAF_TARGET)
+	rm -f $(OBJ) $(LIB_OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TEST_HIER_OBJ) $(TEST_SEARCH_STATS_OBJ) $(TEST_MAP150_OBJ) $(TEST_BOUNDED_OBJ) $(TEST_BOUNDED_MYERS_OBJ) $(TEST_QGRAM_OBJ) $(TEST_RANGE_JOIN_OBJ) $(TEST_BUILD_RANGE_OBJ) $(TEST_MBB_RECT_OBJ) $(TEST_MBB_FILTER_OBJ) $(TEST_SEARCH_QGRAM_OBJ) $(TEST_QUERY_BENCHMARK_OBJ) $(TEST_EPOCH_VISITED_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ) $(TEST_SIMD_MBB_OBJ) $(TEST_SIMD_LEAF_OBJ) $(DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET) $(TEST_HIER_TARGET) $(TEST_SEARCH_STATS_TARGET) $(TEST_MAP150_TARGET) $(TEST_BOUNDED_TARGET) $(TEST_BOUNDED_MYERS_TARGET) $(TEST_QGRAM_TARGET) $(TEST_RANGE_JOIN_TARGET) $(TEST_BUILD_RANGE_TARGET) $(TEST_MBB_RECT_TARGET) $(TEST_MBB_FILTER_TARGET) $(TEST_SEARCH_QGRAM_TARGET) $(TEST_QUERY_BENCHMARK_TARGET) $(TEST_EPOCH_VISITED_TARGET) $(TEST_SEARCH_GRAPH_VIEW_TARGET) $(TEST_SIMD_MBB_TARGET) $(TEST_SIMD_LEAF_TARGET)
 
--include $(DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP)
+-include $(DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP)
