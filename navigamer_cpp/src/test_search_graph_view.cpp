@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <set>
+#include <string>
 #include <vector>
 
 namespace {
@@ -89,11 +91,62 @@ void assert_view_equivalent_to_original() {
   }
 }
 
+std::set<std::string> ids(
+    const std::vector<std::shared_ptr<navigamer::BioSequence>>& hits) {
+  std::set<std::string> out;
+  for (const auto& hit : hits) out.insert(hit->id);
+  return out;
+}
+
+void assert_flat_search_matches_original() {
+  navigamer::BuildRangeConfig build_config;
+  build_config.min_rect_index_fanout = 1;
+  navigamer::BioGeometryIndexBuilder builder(
+      navigamer::HierarchyConfig({20, 10, 3}), build_config);
+  builder.build(build_sequences());
+
+  std::vector<navigamer::BioSequence> queries = {
+      navigamer::BioSequence("q0", "ACGTACGTACGTACGTACGT"),
+      navigamer::BioSequence("q1", "ACGTACGTACGTACGTACAA"),
+      navigamer::BioSequence("q2", "TTTTACGTACGTACGTACGT"),
+      navigamer::BioSequence("q3", "AAAAGGGGAAAAGGGGAAAA"),
+  };
+
+  for (navigamer::MBBFilterMode mbb_mode :
+       {navigamer::MBBFilterMode::Scan, navigamer::MBBFilterMode::RectIndex}) {
+    for (bool qgram_enabled : {false, true}) {
+      for (navigamer::VisitedMode visited_mode :
+           {navigamer::VisitedMode::StringSet, navigamer::VisitedMode::Epoch}) {
+        navigamer::SearchConfig original_config;
+        original_config.mbb_filter_mode = mbb_mode;
+        original_config.search_qgram_prefilter = qgram_enabled;
+        original_config.search_qgram_q = 3;
+        original_config.visited_mode = visited_mode;
+        original_config.graph_view_mode = navigamer::GraphViewMode::Original;
+
+        navigamer::SearchConfig flat_config = original_config;
+        flat_config.graph_view_mode = navigamer::GraphViewMode::Flat;
+
+        navigamer::BioGeometrySearchEngine original_engine(builder, original_config);
+        navigamer::BioGeometrySearchEngine flat_engine(builder, flat_config);
+
+        for (const auto& query : queries) {
+          auto [original_hits, original_stats] =
+              original_engine.search_adaptive(query, 2);
+          auto [flat_hits, flat_stats] = flat_engine.search_adaptive(query, 2);
+          assert(ids(original_hits) == ids(flat_hits));
+          assert(original_stats.result_count == flat_stats.result_count);
+        }
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
   assert_view_equivalent_to_original();
+  assert_flat_search_matches_original();
   std::cout << "search graph view tests passed\n";
   return 0;
 }
-

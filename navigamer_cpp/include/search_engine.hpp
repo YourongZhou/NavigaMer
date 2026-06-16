@@ -22,14 +22,22 @@ enum class VisitedMode {
   Epoch,
 };
 
+enum class GraphViewMode {
+  Original,
+  Flat,
+};
+
 const char* mbb_filter_mode_name(MBBFilterMode mode);
 MBBFilterMode parse_mbb_filter_mode(const std::string& value);
 const char* visited_mode_name(VisitedMode mode);
 VisitedMode parse_visited_mode(const std::string& value);
+const char* graph_view_mode_name(GraphViewMode mode);
+GraphViewMode parse_graph_view_mode(const std::string& value);
 
 struct SearchConfig {
   MBBFilterMode mbb_filter_mode = MBBFilterMode::Scan;
   VisitedMode visited_mode = VisitedMode::Epoch;
+  GraphViewMode graph_view_mode = GraphViewMode::Flat;
   bool search_qgram_prefilter = false;
   int search_qgram_q = 5;
 };
@@ -148,6 +156,12 @@ class BioGeometrySearchEngine {
       int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       SearchStats& stats) const;
+  void verify_leaf_candidates_view(
+      NodeId node_id,
+      const BioSequence& query_seq,
+      int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      SearchStats& stats) const;
 
   void process_node_adaptive(
       const std::shared_ptr<WorldNode>& node, int current_layer,
@@ -177,6 +191,37 @@ class BioGeometrySearchEngine {
       const BioSequence& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       SearchScratch& scratch,
+      SearchStats& stats,
+      bool after_mbb_filter,
+      const QGramSignature* query_qgram_signature) const;
+
+  bool flat_is_visited(
+      NodeId node_id,
+      const std::unordered_set<std::string>* visited_nodes,
+      const SearchScratch* scratch) const;
+  bool flat_mark_visited(
+      NodeId node_id,
+      std::unordered_set<std::string>* visited_nodes,
+      SearchScratch* scratch) const;
+  std::vector<NodeId> get_mbb_surviving_child_ids_view(
+      NodeId node_id,
+      const std::vector<int>& query_beacon_dists,
+      int tolerance,
+      SearchStats& stats) const;
+  void process_node_adaptive_view(
+      NodeId node_id, int current_layer,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      std::unordered_set<std::string>* visited_nodes,
+      SearchScratch* scratch,
+      SearchStats& stats,
+      const QGramSignature* query_qgram_signature) const;
+  void search_layer_adaptive_view(
+      const std::vector<NodeId>& candidates, int layer_id,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      std::unordered_set<std::string>* visited_nodes,
+      SearchScratch* scratch,
       SearchStats& stats,
       bool after_mbb_filter,
       const QGramSignature* query_qgram_signature) const;
