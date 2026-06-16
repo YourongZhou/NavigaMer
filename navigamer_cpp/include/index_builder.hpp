@@ -33,9 +33,19 @@ enum class BuildRangeMode {
 const char* build_range_mode_name(BuildRangeMode mode);
 BuildRangeMode parse_build_range_mode(const std::string& value);
 
+enum class BuildDistanceMode {
+  DP,
+  Edlib,
+  Auto,
+};
+
+const char* build_distance_mode_name(BuildDistanceMode mode);
+BuildDistanceMode parse_build_distance_mode(const std::string& value);
+
 struct BuildRangeConfig {
   BuildRangeMode link_mode = BuildRangeMode::Indexed;
   BuildRangeMode leaf_attach_mode = BuildRangeMode::Indexed;
+  BuildDistanceMode distance_mode = BuildDistanceMode::DP;
   RangeJoinConfig range_join;
   size_t min_rect_index_fanout = 64;
 };

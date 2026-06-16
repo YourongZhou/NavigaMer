@@ -111,10 +111,12 @@ Flat adaptive traversal supports `--simd-mode auto|scalar|avx2|avx512`
 Unsupported SIMD paths fall back to the scalar filter and preserve the same
 survivor set.
 
-Adaptive bounded child-center distance supports `--distance-mode dp|myers|auto`
+Adaptive bounded child-center distance supports `--distance-mode dp|myers|edlib|auto`
 (default `myers`). Myers supports ACGT inputs through 256bp shorter input
-length and falls back to DP for unsupported inputs. `dp` remains the reference
-mode; `auto` currently remains DP.
+length and falls back to DP for unsupported inputs. `edlib` uses the vendored
+Edlib bounded distance backend. `dp` remains the reference mode; `auto`
+currently remains DP. Index construction separately supports
+`--build-distance-mode dp|edlib|auto` and defaults to `dp`.
 
 Adaptive child-world traversal also supports the optional
 `--search-qgram-prefilter on` with independent `--search-qgram-q` (default

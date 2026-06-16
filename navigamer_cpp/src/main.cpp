@@ -46,7 +46,7 @@ void usage(const char* prog) {
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
             << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
-            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--distance-mode dp|myers|auto] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
+            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--distance-mode dp|myers|edlib|auto] [--build-distance-mode dp|edlib|auto] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
 }
 
 std::string format_double(double value) {
@@ -896,6 +896,7 @@ int main(int argc, char** argv) {
   std::string graph_view_mode = "flat";
   std::string simd_mode = "auto";
   std::string distance_mode = "myers";
+  std::string build_distance_mode = "dp";
   std::string search_qgram_prefilter = "off";
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;
@@ -1043,6 +1044,10 @@ int main(int argc, char** argv) {
       distance_mode = argv[++i];
       continue;
     }
+    if (a == "--build-distance-mode" && i + 1 < argc) {
+      build_distance_mode = argv[++i];
+      continue;
+    }
     if (a == "--search-qgram-prefilter" && i + 1 < argc) {
       search_qgram_prefilter = argv[++i];
       continue;
@@ -1075,6 +1080,8 @@ int main(int argc, char** argv) {
     range_config.link_mode = navigamer::parse_build_range_mode(link_mode);
     range_config.leaf_attach_mode =
         navigamer::parse_build_range_mode(leaf_attach_mode);
+    range_config.distance_mode =
+        navigamer::parse_build_distance_mode(build_distance_mode);
     range_config.range_join.min_seed_len = range_min_seed_length;
     range_config.range_join.max_seed_len = range_max_seed_length;
     range_config.range_join.qgram_q = qgram_q;

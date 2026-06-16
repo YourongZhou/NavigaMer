@@ -1,4 +1,5 @@
 #include "tools.hpp"
+#include "edlib.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -15,6 +16,8 @@ const char* distance_mode_name(DistanceMode mode) {
       return "dp";
     case DistanceMode::Myers:
       return "myers";
+    case DistanceMode::Edlib:
+      return "edlib";
     case DistanceMode::Auto:
       return "auto";
   }
@@ -24,8 +27,9 @@ const char* distance_mode_name(DistanceMode mode) {
 DistanceMode parse_distance_mode(const std::string& value) {
   if (value == "dp") return DistanceMode::DP;
   if (value == "myers") return DistanceMode::Myers;
+  if (value == "edlib") return DistanceMode::Edlib;
   if (value == "auto") return DistanceMode::Auto;
-  throw std::invalid_argument("distance mode must be dp, myers, or auto");
+  throw std::invalid_argument("distance mode must be dp, myers, edlib, or auto");
 }
 
 int compute_distance(const std::string& a, const std::string& b) {
@@ -91,6 +95,41 @@ int compute_distance_bounded_dp(const std::string& a, const std::string& b,
   return prev[static_cast<size_t>(n)] <= tau
              ? prev[static_cast<size_t>(n)]
              : tau + 1;
+}
+
+int compute_distance_edlib(const std::string& a, const std::string& b) {
+  EdlibAlignConfig config =
+      edlibNewAlignConfig(-1, EDLIB_MODE_NW, EDLIB_TASK_DISTANCE, nullptr, 0);
+  EdlibAlignResult result =
+      edlibAlign(a.data(), static_cast<int>(a.size()), b.data(),
+                 static_cast<int>(b.size()), config);
+  if (result.status != EDLIB_STATUS_OK) {
+    edlibFreeAlignResult(result);
+    return compute_distance(a, b);
+  }
+  const int distance = result.editDistance;
+  edlibFreeAlignResult(result);
+  return distance;
+}
+
+int compute_distance_bounded_edlib(const std::string& a, const std::string& b,
+                                   int tau) {
+  if (tau < 0) throw std::invalid_argument("edit-distance threshold must be non-negative");
+  const int m = static_cast<int>(a.size());
+  const int n = static_cast<int>(b.size());
+  if (std::abs(m - n) > tau) return tau + 1;
+
+  EdlibAlignConfig config =
+      edlibNewAlignConfig(tau, EDLIB_MODE_NW, EDLIB_TASK_DISTANCE, nullptr, 0);
+  EdlibAlignResult result =
+      edlibAlign(a.data(), m, b.data(), n, config);
+  if (result.status != EDLIB_STATUS_OK) {
+    edlibFreeAlignResult(result);
+    return compute_distance_bounded_dp(a, b, tau);
+  }
+  const int distance = result.editDistance < 0 ? tau + 1 : result.editDistance;
+  edlibFreeAlignResult(result);
+  return distance <= tau ? distance : tau + 1;
 }
 
 namespace {
@@ -282,6 +321,8 @@ int compute_distance_bounded_with_mode(const std::string& a,
       return compute_distance_bounded_dp(a, b, tau);
     case DistanceMode::Myers:
       return compute_distance_bounded_myers(a, b, tau);
+    case DistanceMode::Edlib:
+      return compute_distance_bounded_edlib(a, b, tau);
     case DistanceMode::Auto:
       return compute_distance_bounded_dp(a, b, tau);
   }

@@ -54,9 +54,12 @@ void assert_mode_equivalence(navigamer::GraphViewMode graph_mode,
 
   navigamer::SearchConfig myers_config = dp_config;
   myers_config.distance_mode = navigamer::DistanceMode::Myers;
+  navigamer::SearchConfig edlib_config = dp_config;
+  edlib_config.distance_mode = navigamer::DistanceMode::Edlib;
 
   navigamer::BioGeometrySearchEngine dp_engine(builder, dp_config);
   navigamer::BioGeometrySearchEngine myers_engine(builder, myers_config);
+  navigamer::BioGeometrySearchEngine edlib_engine(builder, edlib_config);
 
   const std::vector<navigamer::BioSequence> queries = {
       navigamer::BioSequence("q0", "ACGTACGTACGTACGTACGT"),
@@ -74,8 +77,12 @@ void assert_mode_equivalence(navigamer::GraphViewMode graph_mode,
       auto [dp_hits, dp_stats] = dp_engine.search_adaptive(query, tolerance);
       auto [myers_hits, myers_stats] =
           myers_engine.search_adaptive(query, tolerance);
+      auto [edlib_hits, edlib_stats] =
+          edlib_engine.search_adaptive(query, tolerance);
       assert(ids(dp_hits) == ids(myers_hits));
+      assert(ids(dp_hits) == ids(edlib_hits));
       assert(dp_stats.result_count == myers_stats.result_count);
+      assert(dp_stats.result_count == edlib_stats.result_count);
     }
   }
 }

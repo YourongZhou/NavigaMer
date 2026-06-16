@@ -789,6 +789,8 @@ QueryBenchmarkRunResult run_query_benchmark(
        << "\"summary_tsv_path\":\"" << json_escape(config.summary_tsv_path) << "\","
        << "\"json_path\":\"" << json_escape(config.json_path) << "\"},"
        << "\"build\":{\"duration_ms\":" << format_double(build_duration_ms)
+       << ",\"distance_mode\":\""
+       << build_distance_mode_name(build_config.distance_mode) << "\""
        << ",\"added_sequences\":" << build_stats.added_sequences
        << ",\"unique_sequences\":" << build_stats.unique_sequences
        << ",\"deduplicated\":" << build_stats.deduplicated

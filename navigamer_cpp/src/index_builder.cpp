@@ -16,12 +16,15 @@ namespace {
 
 std::shared_ptr<WorldNode> nearest_in_cover(
     const std::vector<std::shared_ptr<WorldNode>>& cover,
-    const std::shared_ptr<BioSequence>& sequence) {
+    const std::shared_ptr<BioSequence>& sequence,
+    BuildDistanceMode distance_mode) {
   std::shared_ptr<WorldNode> best;
   int best_dist = INT_MAX;
   for (const auto& node : cover) {
     if (!node->center_ptr) continue;
-    int dist = compute_distance(sequence->seq, node->center_ptr->seq);
+    int dist = distance_mode == BuildDistanceMode::Edlib
+                   ? compute_distance_edlib(sequence->seq, node->center_ptr->seq)
+                   : compute_distance(sequence->seq, node->center_ptr->seq);
     if (dist < best_dist) {
       best_dist = dist;
       best = node;
@@ -43,7 +46,8 @@ std::vector<int> make_auxiliary_radii(const std::vector<int>& primary_radii) {
 std::vector<int> leaf_beacon_distances(
     const std::shared_ptr<BioSequence>& leaf,
     const std::vector<std::shared_ptr<BioSequence>>& beacons,
-    int center_dist) {
+    int center_dist,
+    BuildDistanceMode distance_mode) {
   std::vector<int> dists;
   dists.reserve(beacons.size());
   for (size_t i = 0; i < beacons.size(); ++i) {
@@ -52,10 +56,25 @@ std::vector<int> leaf_beacon_distances(
     } else if (i == 0) {
       dists.push_back(center_dist);
     } else {
-      dists.push_back(compute_distance(leaf->seq, beacons[i]->seq));
+      dists.push_back(distance_mode == BuildDistanceMode::Edlib
+                          ? compute_distance_edlib(leaf->seq, beacons[i]->seq)
+                          : compute_distance(leaf->seq, beacons[i]->seq));
     }
   }
   return dists;
+}
+
+int build_distance(const std::string& a, const std::string& b,
+                   BuildDistanceMode mode) {
+  return mode == BuildDistanceMode::Edlib ? compute_distance_edlib(a, b)
+                                          : compute_distance(a, b);
+}
+
+int build_distance_bounded(const std::string& a, const std::string& b, int tau,
+                           BuildDistanceMode mode) {
+  return mode == BuildDistanceMode::Edlib
+             ? compute_distance_bounded_edlib(a, b, tau)
+             : compute_distance_bounded_dp(a, b, tau);
 }
 
 std::vector<int> build_expanded_radii(const HierarchyConfig& config) {
@@ -171,6 +190,25 @@ BuildRangeMode parse_build_range_mode(const std::string& value) {
   if (value == "full") return BuildRangeMode::Full;
   if (value == "indexed") return BuildRangeMode::Indexed;
   throw std::invalid_argument("build range mode must be full or indexed");
+}
+
+const char* build_distance_mode_name(BuildDistanceMode mode) {
+  switch (mode) {
+    case BuildDistanceMode::DP:
+      return "dp";
+    case BuildDistanceMode::Edlib:
+      return "edlib";
+    case BuildDistanceMode::Auto:
+      return "auto";
+  }
+  return "dp";
+}
+
+BuildDistanceMode parse_build_distance_mode(const std::string& value) {
+  if (value == "dp") return BuildDistanceMode::DP;
+  if (value == "edlib") return BuildDistanceMode::Edlib;
+  if (value == "auto") return BuildDistanceMode::Auto;
+  throw std::invalid_argument("build distance mode must be dp, edlib, or auto");
 }
 
 BioGeometryIndexBuilder::BioGeometryIndexBuilder()
@@ -373,7 +411,8 @@ std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::find_neighbors(
   std::vector<std::shared_ptr<WorldNode>> result;
   for (const auto& node : candidates) {
     if (!node->center_ptr) continue;
-    int dist = compute_distance(query_seq.seq, node->center_ptr->seq);
+    int dist = build_distance(query_seq.seq, node->center_ptr->seq,
+                              range_config_.distance_mode);
     if (dist <= radius) result.push_back(node);
   }
   return result;
@@ -423,7 +462,8 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
       if (layer_idx == 0) {
         for (const auto& node : extended_layers_[0]) {
           if (!node->center_ptr) continue;
-          if (compute_distance(sequence->seq, node->center_ptr->seq) <=
+          if (build_distance(sequence->seq, node->center_ptr->seq,
+                             range_config_.distance_mode) <=
               expanded_radii_[static_cast<size_t>(layer_idx)]) {
             cover.push_back(node);
           }
@@ -431,7 +471,8 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
       } else if (parent) {
         for (const auto& node : parent->child_nodes) {
           if (!node->center_ptr) continue;
-          if (compute_distance(sequence->seq, node->center_ptr->seq) <=
+          if (build_distance(sequence->seq, node->center_ptr->seq,
+                             range_config_.distance_mode) <=
               expanded_radii_[static_cast<size_t>(layer_idx)]) {
             cover.push_back(node);
           }
@@ -454,7 +495,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
         }
       }
 
-      parent = nearest_in_cover(cover, sequence);
+      parent = nearest_in_cover(cover, sequence, range_config_.distance_mode);
       if (!parent) break;
     }
   }
@@ -474,7 +515,9 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding() {
           if (!child->center_ptr) continue;
           stats_.phase2_candidate_pairs++;
           stats_.phase2_exact_distance_calls++;
-          int dist = compute_distance(parent->center_ptr->seq, child->center_ptr->seq);
+          int dist = build_distance(parent->center_ptr->seq,
+                                    child->center_ptr->seq,
+                                    range_config_.distance_mode);
           if (dist <= parent->radius + child->radius) {
             parent->child_nodes.push_back(child);
             stats_.phase2_edges_added++;
@@ -533,8 +576,9 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding() {
           continue;
         }
         stats_.phase2_exact_distance_calls++;
-        int dist = compute_distance_bounded(
-            parent->center_ptr->seq, child->center_ptr->seq, tau);
+        int dist = build_distance_bounded(
+            parent->center_ptr->seq, child->center_ptr->seq, tau,
+            range_config_.distance_mode);
         if (dist <= tau) {
           parent->child_nodes.push_back(child);
           stats_.phase2_edges_added++;
@@ -594,7 +638,8 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb() {
         node->child_beacon_mbbs[child_idx].reserve(node->beacons.size());
         for (const auto& beacon : node->beacons) {
           if (!beacon) continue;
-          int dist = compute_distance(child->center_ptr->seq, beacon->seq);
+          int dist = build_distance(child->center_ptr->seq, beacon->seq,
+                                    range_config_.distance_mode);
           MBB mbb;
           mbb.min_dist = std::max(0, dist - child->radius);
           mbb.max_dist = dist + child->radius;
@@ -659,11 +704,12 @@ void BioGeometryIndexBuilder::attach_leaves(
       auto& node = finest_layer[layer_idx];
       std::string center = node->get_center_sequence();
       for (const auto& seq : unique_seqs) {
-        int dist = compute_distance(center, seq->seq);
+        int dist = build_distance(center, seq->seq, range_config_.distance_mode);
         if (dist <= node->radius) {
           node->child_leaves.push_back(seq);
           node->leaf_beacon_dists.push_back(
-              leaf_beacon_distances(seq, node->beacons, dist));
+              leaf_beacon_distances(seq, node->beacons, dist,
+                                    range_config_.distance_mode));
         }
       }
       node->data_count = static_cast<int>(node->child_leaves.size());
@@ -717,12 +763,14 @@ void BioGeometryIndexBuilder::attach_leaves(
           continue;
         }
         stats_.leaf_exact_distance_calls++;
-        int dist =
-            compute_distance_bounded(seq->seq, world->center_ptr->seq, world->radius);
+        int dist = build_distance_bounded(seq->seq, world->center_ptr->seq,
+                                          world->radius,
+                                          range_config_.distance_mode);
         if (dist <= world->radius) {
           world->child_leaves.push_back(seq);
           world->leaf_beacon_dists.push_back(
-              leaf_beacon_distances(seq, world->beacons, dist));
+              leaf_beacon_distances(seq, world->beacons, dist,
+                                    range_config_.distance_mode));
         }
       }
     }

@@ -22,10 +22,13 @@ void assert_bounded_semantics(const std::string& a, const std::string& b,
                               int tau) {
   const int full = navigamer::compute_distance(a, b);
   const int myers = navigamer::compute_distance_bounded_myers(a, b, tau);
+  const int edlib = navigamer::compute_distance_bounded_edlib(a, b, tau);
   if (full <= tau) {
     assert(myers == full);
+    assert(edlib == full);
   } else {
     assert(myers > tau);
+    assert(edlib > tau);
   }
 }
 
@@ -40,12 +43,16 @@ void test_parse_and_names() {
   assert(navigamer::parse_distance_mode("dp") == navigamer::DistanceMode::DP);
   assert(navigamer::parse_distance_mode("myers") ==
          navigamer::DistanceMode::Myers);
+  assert(navigamer::parse_distance_mode("edlib") ==
+         navigamer::DistanceMode::Edlib);
   assert(navigamer::parse_distance_mode("auto") ==
          navigamer::DistanceMode::Auto);
   assert(std::string(navigamer::distance_mode_name(
              navigamer::DistanceMode::DP)) == "dp");
   assert(std::string(navigamer::distance_mode_name(
              navigamer::DistanceMode::Myers)) == "myers");
+  assert(std::string(navigamer::distance_mode_name(
+             navigamer::DistanceMode::Edlib)) == "edlib");
   assert(std::string(navigamer::distance_mode_name(
              navigamer::DistanceMode::Auto)) == "auto");
 
@@ -98,6 +105,10 @@ void test_non_acgt_fallback() {
   for (const auto& pair : pairs) {
     for (int tau : {0, 1, 2, 5, 10}) {
       assert_matches_dp_fallback(pair.first, pair.second, tau);
+      assert(navigamer::compute_distance_bounded_edlib(
+                 pair.first, pair.second, tau) ==
+             navigamer::compute_distance_bounded_dp(
+                 pair.first, pair.second, tau));
     }
   }
 }
@@ -123,6 +134,9 @@ void test_mode_wrapper() {
     assert(navigamer::compute_distance_bounded_with_mode(
                a, b, tau, navigamer::DistanceMode::Myers) ==
            navigamer::compute_distance_bounded_myers(a, b, tau));
+    assert(navigamer::compute_distance_bounded_with_mode(
+               a, b, tau, navigamer::DistanceMode::Edlib) ==
+           navigamer::compute_distance_bounded_edlib(a, b, tau));
     assert(navigamer::compute_distance_bounded_with_mode(
                a, b, tau, navigamer::DistanceMode::Auto) ==
            navigamer::compute_distance_bounded_dp(a, b, tau));

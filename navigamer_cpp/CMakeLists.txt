@@ -14,6 +14,13 @@ if(NAVIGAMER_WITH_SEQAN3)
   find_package(seqan3 REQUIRED)
 endif()
 
+set(NAVIGAMER_EDLIB_SOURCE
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/edlib/src/edlib.cpp
+)
+set(NAVIGAMER_EDLIB_INCLUDE
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/edlib/include
+)
+
 # NavigaMer v8 C++ reference implementation.
 add_executable(navigamer
   src/main.cpp
@@ -149,6 +156,20 @@ add_executable(test_build_range_equivalence
   src/experiment_utils.cpp
   src/map150.cpp
 )
+add_executable(test_build_distance_mode
+  src/test_build_distance_mode.cpp
+  src/query_benchmark.cpp
+  src/structure.cpp
+  src/tools.cpp
+  src/qgram_filter.cpp
+  src/range_join.cpp
+  src/mbb_rect_index.cpp
+  src/index_builder.cpp
+  src/search_engine.cpp
+  src/io_utils.cpp
+  src/experiment_utils.cpp
+  src/map150.cpp
+)
 add_executable(test_mbb_rect_index
   src/test_mbb_rect_index.cpp
   src/mbb_rect_index.cpp
@@ -235,7 +256,7 @@ add_executable(test_search_distance_mode
   src/map150.cpp
 )
 
-foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_build_range_equivalence test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode)
+foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_build_range_equivalence test_build_distance_mode test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode)
   target_sources(${target} PRIVATE src/simd_mbb_filter.cpp)
 endforeach()
 
@@ -248,6 +269,11 @@ add_executable(test_simd_leaf_beacon_filter
   src/test_simd_leaf_beacon_filter.cpp
   src/simd_mbb_filter.cpp
 )
+
+foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_bounded_myers test_qgram_filter test_range_join test_build_range_equivalence test_build_distance_mode test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode)
+  target_sources(${target} PRIVATE ${NAVIGAMER_EDLIB_SOURCE})
+  target_include_directories(${target} PRIVATE ${NAVIGAMER_EDLIB_INCLUDE})
+endforeach()
 
 target_include_directories(test_search_stats_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -277,6 +303,10 @@ target_include_directories(test_build_range_equivalence PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(test_build_range_equivalence PRIVATE OpenMP::OpenMP_CXX)
+target_include_directories(test_build_distance_mode PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_build_distance_mode PRIVATE OpenMP::OpenMP_CXX)
 target_include_directories(test_mbb_rect_index PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -319,7 +349,7 @@ target_include_directories(test_simd_leaf_beacon_filter PRIVATE
 target_link_libraries(test_simd_leaf_beacon_filter PRIVATE OpenMP::OpenMP_CXX)
 
 if(NAVIGAMER_WITH_SEQAN3)
-  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_bounded_myers test_qgram_filter test_range_join test_build_range_equivalence test_mbb_rect_index test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter)
+  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_bounded_myers test_qgram_filter test_range_join test_build_range_equivalence test_build_distance_mode test_mbb_rect_index test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter)
     target_compile_definitions(${target} PRIVATE NAVIGAMER_WITH_SEQAN3)
     target_link_libraries(${target} PRIVATE seqan3::seqan3)
   endforeach()
@@ -341,6 +371,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   target_compile_options(test_qgram_filter PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_range_join PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_build_range_equivalence PRIVATE -O3 -DNDEBUG)
+  target_compile_options(test_build_distance_mode PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_mbb_rect_index PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_mbb_filter_equivalence PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_search_qgram_prefilter PRIVATE -O3 -DNDEBUG)
