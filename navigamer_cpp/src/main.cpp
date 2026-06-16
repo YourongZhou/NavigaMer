@@ -46,7 +46,7 @@ void usage(const char* prog) {
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
             << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
-            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
+            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
 }
 
 std::string format_double(double value) {
@@ -883,6 +883,7 @@ int main(int argc, char** argv) {
   std::string range_candidate_mode = "auto";
   std::string mbb_filter_mode = "scan";
   std::string visited_mode = "epoch";
+  std::string graph_view_mode = "flat";
   std::string search_qgram_prefilter = "off";
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;
@@ -1018,6 +1019,10 @@ int main(int argc, char** argv) {
       visited_mode = argv[++i];
       continue;
     }
+    if (a == "--graph-view" && i + 1 < argc) {
+      graph_view_mode = argv[++i];
+      continue;
+    }
     if (a == "--search-qgram-prefilter" && i + 1 < argc) {
       search_qgram_prefilter = argv[++i];
       continue;
@@ -1065,6 +1070,7 @@ int main(int argc, char** argv) {
     navigamer::SearchConfig search_config;
     search_config.mbb_filter_mode = navigamer::parse_mbb_filter_mode(mbb_filter_mode);
     search_config.visited_mode = navigamer::parse_visited_mode(visited_mode);
+    search_config.graph_view_mode = navigamer::parse_graph_view_mode(graph_view_mode);
     search_config.search_qgram_prefilter =
         parse_on_off(search_qgram_prefilter, "--search-qgram-prefilter");
     search_config.search_qgram_q = search_qgram_q;

@@ -550,6 +550,7 @@ QueryBenchmarkRunResult run_query_benchmark(
   SearchConfig baseline_config;
   baseline_config.mbb_filter_mode = MBBFilterMode::Scan;
   baseline_config.visited_mode = VisitedMode::StringSet;
+  baseline_config.graph_view_mode = GraphViewMode::Original;
   baseline_config.search_qgram_prefilter = false;
   BioGeometrySearchEngine baseline(builder, baseline_config);
   BioGeometrySearchEngine optimized(builder, optimized_search_config);
@@ -777,11 +778,14 @@ QueryBenchmarkRunResult run_query_benchmark(
        << "},"
        << "\"profiles\":{\"baseline\":{\"mbb_filter_mode\":\"scan\","
        << "\"visited_mode\":\"string\","
+       << "\"graph_view\":\"original\","
        << "\"search_qgram_prefilter\":false},\"optimized\":{"
        << "\"mbb_filter_mode\":\""
        << mbb_filter_mode_name(optimized_search_config.mbb_filter_mode) << "\","
        << "\"visited_mode\":\""
        << visited_mode_name(optimized_search_config.visited_mode) << "\","
+       << "\"graph_view\":\""
+       << graph_view_mode_name(optimized_search_config.graph_view_mode) << "\","
        << "\"search_qgram_prefilter\":"
        << bool_string(optimized_search_config.search_qgram_prefilter) << ","
        << "\"search_qgram_q\":" << optimized_search_config.search_qgram_q << "}},"

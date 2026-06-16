@@ -99,6 +99,15 @@ std::set<std::string> ids(
 }
 
 void assert_flat_search_matches_original() {
+  assert(navigamer::parse_graph_view_mode("original") ==
+         navigamer::GraphViewMode::Original);
+  assert(navigamer::parse_graph_view_mode("flat") ==
+         navigamer::GraphViewMode::Flat);
+  assert(std::string(navigamer::graph_view_mode_name(
+             navigamer::GraphViewMode::Original)) == "original");
+  assert(std::string(navigamer::graph_view_mode_name(
+             navigamer::GraphViewMode::Flat)) == "flat");
+
   navigamer::BuildRangeConfig build_config;
   build_config.min_rect_index_fanout = 1;
   navigamer::BioGeometryIndexBuilder builder(

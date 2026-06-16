@@ -30,6 +30,7 @@ Used by all pipelines that build the index:
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 | `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
+| `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 
@@ -157,9 +158,9 @@ Builds one shared in-memory index, deterministically generates six query
 classes (`random_region`, `ordinary_region`, `low_complexity_region`,
 `no_hit`, `single_hit`, and `multi_hit`), and compares:
 
-- baseline: fixed `scan` MBB filtering, legacy `string` visited mode, and
-  search q-gram disabled
-- optimized: `--mbb-filter-mode`, `--visited-mode`,
+- baseline: fixed `scan` MBB filtering, legacy `string` visited mode,
+  `original` graph traversal, and search q-gram disabled
+- optimized: `--mbb-filter-mode`, `--visited-mode`, `--graph-view`,
   `--search-qgram-prefilter`, and `--search-qgram-q`
 - exact brute-force result IDs computed before timing
 
