@@ -32,6 +32,7 @@ Used by all pipelines that build the index:
 | `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
 | `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
 | `--simd-mode` | `auto` | Flat child-MBB and leaf-beacon filter backend: `auto`, `scalar`, `avx2`, or `avx512`; unsupported SIMD falls back to scalar |
+| `--distance-mode` | `dp` | Adaptive bounded child-center distance backend: reference `dp`, optional `myers`, or conservative `auto` (currently DP) |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 
@@ -160,9 +161,11 @@ classes (`random_region`, `ordinary_region`, `low_complexity_region`,
 `no_hit`, `single_hit`, and `multi_hit`), and compares:
 
 - baseline: fixed `scan` MBB filtering, legacy `string` visited mode,
-  `original` graph traversal, scalar MBB filtering, and search q-gram disabled
+  `original` graph traversal, scalar MBB filtering, `dp` distance mode, and
+  search q-gram disabled
 - optimized: `--mbb-filter-mode`, `--visited-mode`, `--graph-view`,
-  `--simd-mode`, `--search-qgram-prefilter`, and `--search-qgram-q`
+  `--simd-mode`, `--distance-mode`, `--search-qgram-prefilter`, and
+  `--search-qgram-q`
 - exact brute-force result IDs computed before timing
 
 **Required:** `--ref`, `--out`, `--summary-out`, `--json-out`
@@ -295,12 +298,14 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 | `test_search_stats_bin` | Radius-schedule and search-cost instrumentation checks |
 | `test_map150_recall` | Fixed-150bp mapper recall, strand, duplicate, and verifier checks |
 | `test_bounded_edit_distance` | Banded thresholded distance vs full Levenshtein |
+| `test_bounded_myers_bin` | Optional bounded Myers backend vs full Levenshtein and DP fallback |
 | `test_qgram_filter` | Q-gram counts, L1 bound, ambiguous bases, and index no-false-negative checks |
 | `test_range_join` | Pigeonhole/q-gram/hybrid no-false-negative and verified-pair checks |
 | `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
 | `test_search_qgram_prefilter` | Search q-gram on/off, scan/rect, ambiguous-base fallback, containment, and center-call reduction checks |
+| `test_search_distance_mode_bin` | Adaptive `dp` vs `myers` bounded center-distance equivalence |
 | `test_query_benchmark_gate` | Deterministic query classes, dual-profile output, exact result equality, and no-FN gate |
 
 Build with `make test_recall` / `make test_distance_bound`.

@@ -92,6 +92,7 @@ int main() {
   optimized_config.visited_mode = navigamer::VisitedMode::Epoch;
   optimized_config.graph_view_mode = navigamer::GraphViewMode::Flat;
   optimized_config.simd_mode = navigamer::SimdMode::Auto;
+  optimized_config.distance_mode = navigamer::DistanceMode::Myers;
   optimized_config.search_qgram_prefilter = true;
   optimized_config.search_qgram_q = 3;
   auto result = navigamer::run_query_benchmark(
@@ -106,12 +107,14 @@ int main() {
              "\"baseline\":{\"mbb_filter_mode\":\"scan\","
              "\"visited_mode\":\"string\","
              "\"graph_view\":\"original\","
-             "\"simd_mode\":\"scalar\"") != std::string::npos);
+             "\"simd_mode\":\"scalar\","
+             "\"distance_mode\":\"dp\"") != std::string::npos);
   assert(result.json_summary.find(
              "\"optimized\":{\"mbb_filter_mode\":\"rect\","
              "\"visited_mode\":\"epoch\","
              "\"graph_view\":\"flat\","
-             "\"simd_mode\":\"auto\"") != std::string::npos);
+             "\"simd_mode\":\"auto\","
+             "\"distance_mode\":\"myers\"") != std::string::npos);
   assert(result.json_summary.find("\"candidate_set_comparison\":\"unavailable\"")
          != std::string::npos);
   {

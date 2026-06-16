@@ -37,6 +37,7 @@ path for small fanout, missing indexes, dimension mismatches, or exceptions.
 They also accept `--visited-mode string|epoch` (default `epoch`),
 `--graph-view original|flat` (default `flat`),
 `--simd-mode auto|scalar|avx2|avx512` (default `auto`),
+`--distance-mode dp|myers|auto` (default `dp`),
 `--search-qgram-prefilter off|on` (default `off`), and `--search-qgram-q N`
 (default `5`). `string` keeps the legacy per-query string visited set for
 regression comparisons; `epoch` uses integer node IDs and a reused epoch array.
@@ -46,12 +47,16 @@ rectangle filtering and flat leaf-beacon filtering; unsupported modes
 conservatively fall back to scalar and keep the same survivor set. The search q is independent from
 construction `--qgram-q`. Enabled search-side filtering runs only on
 MBB-surviving child-world centers before bounded exact center verification;
-unsafe or missing signatures fall back to no pruning.
+unsafe or missing signatures fall back to no pruning. Distance mode affects
+only adaptive bounded child-center checks after MBB/q-gram filtering. `dp` is
+the reference/default mode; `myers` uses the optional single-word Myers backend
+when supported and falls back to DP otherwise; `auto` is conservative and
+currently uses DP.
 
 `query-benchmark` fixes the baseline profile to MBB scan, legacy string
-visited mode, original graph traversal, and search q-gram disabled. It compares
-that with the profile selected by `--mbb-filter-mode`, `--visited-mode`,
-`--graph-view`, `--simd-mode`,
+visited mode, original graph traversal, `dp` distance mode, and search q-gram
+disabled. It compares that with the profile selected by `--mbb-filter-mode`,
+`--visited-mode`, `--graph-view`, `--simd-mode`, `--distance-mode`,
 `--search-qgram-prefilter`, and `--search-qgram-q`.
 It deterministically generates random-region, ordinary-region,
 low-complexity-region, no-hit, single-hit, and multi-hit queries. Step 0 runs
@@ -103,6 +108,7 @@ For long-sequence boundary studies, `boundary` outputs one aggregated TSV row pe
 | Distance bounds (violations report) | `make test_distance_bound && ./test_distance_bound` |
 | 150bp mapper recall and verifier checks | `make test_map150 && ./test_map150_recall` |
 | Bounded edit distance | `make test_bounded && ./test_bounded_edit_distance` |
+| Bounded Myers edit distance | `make test_bounded_myers && ./test_bounded_myers_bin` |
 | Exact range join | `make test_range_join && ./test_range_join` |
 | Q-gram count filter | `make test_qgram && ./test_qgram_filter` |
 | Full/indexed construction equivalence | `make test_build_range && ./test_build_range_equivalence` |

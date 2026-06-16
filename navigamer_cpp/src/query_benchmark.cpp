@@ -564,6 +564,7 @@ QueryBenchmarkRunResult run_query_benchmark(
   baseline_config.visited_mode = VisitedMode::StringSet;
   baseline_config.graph_view_mode = GraphViewMode::Original;
   baseline_config.simd_mode = SimdMode::Scalar;
+  baseline_config.distance_mode = DistanceMode::DP;
   baseline_config.search_qgram_prefilter = false;
   BioGeometrySearchEngine baseline(builder, baseline_config);
   BioGeometrySearchEngine optimized(builder, optimized_search_config);
@@ -811,6 +812,7 @@ QueryBenchmarkRunResult run_query_benchmark(
        << "\"visited_mode\":\"string\","
        << "\"graph_view\":\"original\","
        << "\"simd_mode\":\"scalar\","
+       << "\"distance_mode\":\"dp\","
        << "\"search_qgram_prefilter\":false},\"optimized\":{"
        << "\"mbb_filter_mode\":\""
        << mbb_filter_mode_name(optimized_search_config.mbb_filter_mode) << "\","
@@ -820,6 +822,8 @@ QueryBenchmarkRunResult run_query_benchmark(
        << graph_view_mode_name(optimized_search_config.graph_view_mode) << "\","
        << "\"simd_mode\":\""
        << simd_mode_name(optimized_search_config.simd_mode) << "\","
+       << "\"distance_mode\":\""
+       << distance_mode_name(optimized_search_config.distance_mode) << "\","
        << "\"search_qgram_prefilter\":"
        << bool_string(optimized_search_config.search_qgram_prefilter) << ","
        << "\"search_qgram_q\":" << optimized_search_config.search_qgram_q << "}},"
