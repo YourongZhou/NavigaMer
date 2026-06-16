@@ -203,6 +203,43 @@ const std::vector<std::shared_ptr<WorldNode>>& BioGeometryIndexBuilder::primary_
   return primary_layers_.at(static_cast<size_t>(idx));
 }
 
+bool BioGeometryIndexBuilder::validate_integer_ids() const {
+  if (world_node_count_ == 0 && !primary_layers_.empty()) return false;
+  std::vector<bool> seen_nodes(world_node_count_, false);
+  size_t visited_nodes = 0;
+  for (const auto& layer : primary_layers_) {
+    for (const auto& node : layer) {
+      if (!node || node->integer_id >= world_node_count_) return false;
+      if (seen_nodes[node->integer_id]) return false;
+      seen_nodes[node->integer_id] = true;
+      visited_nodes++;
+      for (const auto& child : node->child_nodes) {
+        if (!child || child->integer_id >= world_node_count_) return false;
+      }
+      for (const auto& leaf : node->child_leaves) {
+        if (!leaf || leaf->sequence_id >= sequence_count_) return false;
+      }
+    }
+  }
+  if (visited_nodes != world_node_count_) return false;
+  for (bool seen : seen_nodes) {
+    if (!seen) return false;
+  }
+
+  if (unique_sequences.size() != sequence_count_) return false;
+  std::vector<bool> seen_sequences(sequence_count_, false);
+  for (const auto& entry : unique_sequences) {
+    const auto& sequence = entry.second;
+    if (!sequence || sequence->sequence_id >= sequence_count_) return false;
+    if (seen_sequences[sequence->sequence_id]) return false;
+    seen_sequences[sequence->sequence_id] = true;
+  }
+  for (bool seen : seen_sequences) {
+    if (!seen) return false;
+  }
+  return true;
+}
+
 std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::find_neighbors(
     const BioSequence& query_seq,
     const std::vector<std::shared_ptr<WorldNode>>& candidates,
@@ -577,6 +614,47 @@ void BioGeometryIndexBuilder::attach_leaves(
             << " (avg " << avg_links << " per node)\n";
 }
 
+void BioGeometryIndexBuilder::assign_integer_ids() {
+  world_node_count_ = 0;
+  sequence_count_ = 0;
+
+  for (const auto& layer : primary_layers_) {
+    for (const auto& node : layer) {
+      if (node) node->integer_id = INVALID_NODE_ID;
+    }
+  }
+
+  for (const auto& layer : primary_layers_) {
+    for (const auto& node : layer) {
+      if (!node || node->integer_id != INVALID_NODE_ID) continue;
+      if (world_node_count_ > static_cast<size_t>(INVALID_NODE_ID - 1)) {
+        throw std::runtime_error("too many world nodes for 32-bit NodeId");
+      }
+      node->integer_id = static_cast<NodeId>(world_node_count_++);
+    }
+  }
+
+  std::vector<std::shared_ptr<BioSequence>> sequences;
+  sequences.reserve(unique_sequences.size());
+  for (const auto& entry : unique_sequences) {
+    if (entry.second) {
+      entry.second->sequence_id = INVALID_LEAF_ID;
+      sequences.push_back(entry.second);
+    }
+  }
+  std::sort(sequences.begin(), sequences.end(),
+            [](const std::shared_ptr<BioSequence>& left,
+               const std::shared_ptr<BioSequence>& right) {
+              return left->id < right->id;
+            });
+  for (const auto& sequence : sequences) {
+    if (sequence_count_ > static_cast<size_t>(INVALID_LEAF_ID - 1)) {
+      throw std::runtime_error("too many sequences for 32-bit LeafId");
+    }
+    sequence->sequence_id = static_cast<LeafId>(sequence_count_++);
+  }
+}
+
 void BioGeometryIndexBuilder::print_summary() const {
   Statistics stats = get_statistics();
   std::cerr << "  Construction range modes: links="
@@ -678,6 +756,8 @@ void BioGeometryIndexBuilder::build(
   stats_ = Statistics{};
   stats_.created_primary_nodes.assign(static_cast<size_t>(num_primary_layers()), 0);
   unique_sequences.clear();
+  world_node_count_ = 0;
+  sequence_count_ = 0;
   primary_layers_.assign(static_cast<size_t>(num_primary_layers()),
                          std::vector<std::shared_ptr<WorldNode>>());
   extended_layers_.clear();
@@ -718,6 +798,7 @@ void BioGeometryIndexBuilder::build(
 
   std::cerr << "  Phase 4: Leaf attachment...\n";
   attach_leaves(unique_seqs);
+  assign_integer_ids();
 
   std::cerr << "[Build generalized hierarchy] Completed.\n";
   print_summary();

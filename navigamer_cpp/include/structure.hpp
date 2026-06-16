@@ -9,6 +9,12 @@
 
 namespace navigamer {
 
+using NodeId = uint32_t;
+using LeafId = uint32_t;
+
+constexpr NodeId INVALID_NODE_ID = UINT32_MAX;
+constexpr LeafId INVALID_LEAF_ID = UINT32_MAX;
+
 // Default radius and length constants used by the C++ reference implementation.
 constexpr int R_SW = 5;
 constexpr int R_MW = 15;
@@ -34,6 +40,7 @@ struct BwtInterval {
 struct BioSequence {
   std::string id;
   std::string seq;
+  LeafId sequence_id = INVALID_LEAF_ID;
   std::vector<RefPosition> ref_positions;
   BwtInterval bwt_interval;
 
@@ -56,6 +63,7 @@ struct MBB {
 // Node in the navigable world DAG.
 struct WorldNode {
   std::string node_id;
+  NodeId integer_id = INVALID_NODE_ID;
   std::shared_ptr<BioSequence> center_ptr;
   int radius = 0;
   int expanded_layer_index = -1;

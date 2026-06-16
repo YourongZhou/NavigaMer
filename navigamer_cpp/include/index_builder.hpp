@@ -114,6 +114,9 @@ class BioGeometryIndexBuilder {
   const std::vector<std::vector<std::shared_ptr<WorldNode>>>& primary_layers() const {
     return primary_layers_;
   }
+  size_t num_world_nodes() const { return world_node_count_; }
+  size_t num_sequences() const { return sequence_count_; }
+  bool validate_integer_ids() const;
 
   std::vector<std::shared_ptr<WorldNode>> find_neighbors(
       const BioSequence& query_seq,
@@ -124,6 +127,8 @@ class BioGeometryIndexBuilder {
   Statistics stats_;
   HierarchyConfig hierarchy_;
   BuildRangeConfig range_config_;
+  size_t world_node_count_ = 0;
+  size_t sequence_count_ = 0;
   std::vector<int> expanded_radii_;
   std::vector<std::vector<std::shared_ptr<WorldNode>>> extended_layers_;
   std::vector<std::vector<std::shared_ptr<WorldNode>>> primary_layers_;
@@ -136,6 +141,7 @@ class BioGeometryIndexBuilder {
   void phase3_collapse_and_compute_mbb();
 
   void attach_leaves(const std::vector<std::shared_ptr<BioSequence>>& unique_seqs);
+  void assign_integer_ids();
 
   void print_summary() const;
 };
