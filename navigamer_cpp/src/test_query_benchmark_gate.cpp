@@ -88,6 +88,7 @@ int main() {
   build_config.min_rect_index_fanout = 1;
   navigamer::SearchConfig optimized_config;
   optimized_config.mbb_filter_mode = navigamer::MBBFilterMode::RectIndex;
+  optimized_config.visited_mode = navigamer::VisitedMode::Epoch;
   optimized_config.search_qgram_prefilter = true;
   optimized_config.search_qgram_q = 3;
   auto result = navigamer::run_query_benchmark(
@@ -98,6 +99,12 @@ int main() {
   assert(result.detail_rows.size() == 6 * 2 * (1 + 2));
   assert(!result.summary_rows.empty());
   assert(result.json_summary.find("\"gate_passed\":true") != std::string::npos);
+  assert(result.json_summary.find(
+             "\"baseline\":{\"mbb_filter_mode\":\"scan\","
+             "\"visited_mode\":\"string\"") != std::string::npos);
+  assert(result.json_summary.find(
+             "\"optimized\":{\"mbb_filter_mode\":\"rect\","
+             "\"visited_mode\":\"epoch\"") != std::string::npos);
   assert(result.json_summary.find("\"candidate_set_comparison\":\"unavailable\"")
          != std::string::npos);
 

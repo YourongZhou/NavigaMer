@@ -29,6 +29,7 @@ Used by all pipelines that build the index:
 | `--auto-hybrid-on-large-candidates` | `true` | Rejected large pigeonhole sets use hybrid when true, direct q-gram when false |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
+| `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 
@@ -156,9 +157,10 @@ Builds one shared in-memory index, deterministically generates six query
 classes (`random_region`, `ordinary_region`, `low_complexity_region`,
 `no_hit`, `single_hit`, and `multi_hit`), and compares:
 
-- baseline: fixed `scan` MBB filtering with search q-gram disabled
-- optimized: `--mbb-filter-mode`, `--search-qgram-prefilter`, and
-  `--search-qgram-q`
+- baseline: fixed `scan` MBB filtering, legacy `string` visited mode, and
+  search q-gram disabled
+- optimized: `--mbb-filter-mode`, `--visited-mode`,
+  `--search-qgram-prefilter`, and `--search-qgram-q`
 - exact brute-force result IDs computed before timing
 
 **Required:** `--ref`, `--out`, `--summary-out`, `--json-out`

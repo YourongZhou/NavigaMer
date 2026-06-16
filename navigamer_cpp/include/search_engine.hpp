@@ -17,11 +17,19 @@ enum class MBBFilterMode {
   RectIndex,
 };
 
+enum class VisitedMode {
+  StringSet,
+  Epoch,
+};
+
 const char* mbb_filter_mode_name(MBBFilterMode mode);
 MBBFilterMode parse_mbb_filter_mode(const std::string& value);
+const char* visited_mode_name(VisitedMode mode);
+VisitedMode parse_visited_mode(const std::string& value);
 
 struct SearchConfig {
   MBBFilterMode mbb_filter_mode = MBBFilterMode::Scan;
+  VisitedMode visited_mode = VisitedMode::Epoch;
   bool search_qgram_prefilter = false;
   int search_qgram_q = 5;
 };
@@ -87,6 +95,7 @@ struct SearchScratch {
   std::vector<std::shared_ptr<WorldNode>> verified_children;
 
   void begin_query(size_t node_count);
+  bool is_visited(NodeId id) const;
   bool mark_visited(NodeId id);
 };
 
@@ -147,12 +156,27 @@ class BioGeometrySearchEngine {
       std::unordered_set<std::string>& visited_nodes,
       SearchStats& stats,
       const QGramSignature* query_qgram_signature) const;
+  void process_node_adaptive_epoch(
+      const std::shared_ptr<WorldNode>& node, int current_layer,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      SearchScratch& scratch,
+      SearchStats& stats,
+      const QGramSignature* query_qgram_signature) const;
 
   void search_layer_adaptive(
       const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
       const BioSequence& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       std::unordered_set<std::string>& visited_nodes,
+      SearchStats& stats,
+      bool after_mbb_filter,
+      const QGramSignature* query_qgram_signature) const;
+  void search_layer_adaptive_epoch(
+      const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      SearchScratch& scratch,
       SearchStats& stats,
       bool after_mbb_filter,
       const QGramSignature* query_qgram_signature) const;

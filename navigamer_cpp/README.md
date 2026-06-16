@@ -34,15 +34,18 @@ All adaptive-search commands accept `--mbb-filter-mode scan|rect` and
 `--min-rect-index-fanout N` (default `64`). Rect mode performs exact
 all-dimension MBB rectangle intersection and falls back to the original scan
 path for small fanout, missing indexes, dimension mismatches, or exceptions.
-They also accept `--search-qgram-prefilter off|on` (default `off`) and
-`--search-qgram-q N` (default `5`). The search q is independent from
-construction `--qgram-q`. Enabled search-side filtering runs only on
-MBB-surviving child-world centers before bounded exact center verification;
-unsafe or missing signatures fall back to no pruning.
+They also accept `--visited-mode string|epoch` (default `epoch`),
+`--search-qgram-prefilter off|on` (default `off`), and `--search-qgram-q N`
+(default `5`). `string` keeps the legacy per-query string visited set for
+regression comparisons; `epoch` uses integer node IDs and a reused epoch array.
+The search q is independent from construction `--qgram-q`. Enabled search-side
+filtering runs only on MBB-surviving child-world centers before bounded exact
+center verification; unsafe or missing signatures fall back to no pruning.
 
 `query-benchmark` fixes the baseline profile to MBB scan with search q-gram
-disabled and compares it with the profile selected by
-`--mbb-filter-mode`, `--search-qgram-prefilter`, and `--search-qgram-q`.
+disabled and legacy string visited mode, then compares it with the profile
+selected by `--mbb-filter-mode`, `--visited-mode`,
+`--search-qgram-prefilter`, and `--search-qgram-q`.
 It deterministically generates random-region, ordinary-region,
 low-complexity-region, no-hit, single-hit, and multi-hit queries. Step 0 runs
 queries serially even though `--threads` is recorded and applied to OpenMP.
