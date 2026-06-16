@@ -37,9 +37,9 @@ cd navigamer_cpp && make test_bounded_myers
 
 Expected: compile failure because the new distance APIs are not defined yet.
 
-- [ ] **Step 4: Implement minimal API and single-word Myers**
+- [ ] **Step 4: Implement minimal API and bounded Myers**
 
-Add `DistanceMode`, parse/name helpers, `compute_distance_bounded_dp()`, `compute_distance_bounded_myers()`, and `compute_distance_bounded_with_mode()`. Move the existing bounded DP body into `compute_distance_bounded_dp()` and keep `compute_distance_bounded()` as a DP wrapper.
+Add `DistanceMode`, parse/name helpers, `compute_distance_bounded_dp()`, `compute_distance_bounded_myers()`, and `compute_distance_bounded_with_mode()`. Move the existing bounded DP body into `compute_distance_bounded_dp()` and keep `compute_distance_bounded()` as a DP wrapper. Myers uses a single-word path through 64 bases and a multiword path through 256 bases; unsupported inputs fall back to DP.
 
 - [ ] **Step 5: Verify GREEN**
 

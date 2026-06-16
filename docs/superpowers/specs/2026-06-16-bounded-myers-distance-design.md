@@ -26,12 +26,12 @@ enum class DistanceMode {
 
 ## Myers Backend
 
-The first implementation uses single-word Myers for DNA strings where the shorter input length is at most 64 and both inputs contain only `A`, `C`, `G`, and `T`. The shorter string is used as the bit-vector pattern because edit distance is symmetric.
+The implementation uses single-word Myers for DNA strings where the shorter input length is at most 64, and multiword Myers up to 256 shorter-input bases. Both inputs must contain only `A`, `C`, `G`, and `T`. The shorter string is used as the bit-vector pattern because edit distance is symmetric.
 
 Fallback to DP is required for:
 
 - negative thresholds, after preserving the current exception behavior;
-- shorter input length greater than 64;
+- shorter input length greater than 256;
 - empty input after simple exact handling;
 - `N`, lowercase, or any non-ACGT character;
 - any unsupported path.

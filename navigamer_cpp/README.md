@@ -49,9 +49,9 @@ construction `--qgram-q`. Enabled search-side filtering runs only on
 MBB-surviving child-world centers before bounded exact center verification;
 unsafe or missing signatures fall back to no pruning. Distance mode affects
 only adaptive bounded child-center checks after MBB/q-gram filtering. `dp` is
-the reference/default mode; `myers` uses the optional single-word Myers backend
-when supported and falls back to DP otherwise; `auto` is conservative and
-currently uses DP.
+the reference/default mode; `myers` uses the optional Myers backend through
+256bp ACGT shorter-input length and falls back to DP otherwise; `auto` is
+conservative and currently uses DP.
 
 `query-benchmark` fixes the baseline profile to MBB scan, legacy string
 visited mode, original graph traversal, `dp` distance mode, and search q-gram

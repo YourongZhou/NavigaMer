@@ -102,6 +102,17 @@ void test_non_acgt_fallback() {
   }
 }
 
+void test_multiword_supports_250bp_acgt() {
+  std::mt19937 gen(20260617);
+  const std::string a = random_dna(250, gen);
+  const std::string b = random_dna(250, gen);
+  assert(navigamer::compute_distance_bounded_myers_supported(a, b));
+  assert(!navigamer::compute_distance_bounded_myers_supported(
+      a, std::string("ACGTN") + b.substr(5)));
+  assert(!navigamer::compute_distance_bounded_myers_supported(
+      std::string(300, 'A'), std::string(300, 'A')));
+}
+
 void test_mode_wrapper() {
   for (int tau : {0, 1, 2, 5}) {
     const std::string a = "ACGTACGTACGT";
@@ -125,6 +136,7 @@ int main() {
   test_known_indels_and_substitutions();
   test_random_against_full_dp();
   test_non_acgt_fallback();
+  test_multiword_supports_250bp_acgt();
   test_mode_wrapper();
 
   std::cout << "bounded Myers edit distance tests passed\n";
