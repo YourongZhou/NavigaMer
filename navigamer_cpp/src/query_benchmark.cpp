@@ -69,6 +69,12 @@ struct MemorySnapshot {
   size_t peak_rss_kb = 0;
 };
 
+struct MismatchDiagnostic {
+  std::string query_id;
+  bool repeated_results_equal = false;
+  ResultComparison comparison;
+};
+
 std::vector<std::string> sorted_unique(std::vector<std::string> values) {
   std::sort(values.begin(), values.end());
   values.erase(std::unique(values.begin(), values.end()), values.end());
@@ -210,6 +216,16 @@ std::string json_escape(const std::string& value) {
   return out.str();
 }
 
+void append_json_string_array(std::ostringstream& out,
+                              const std::vector<std::string>& values) {
+  out << "[";
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i) out << ",";
+    out << "\"" << json_escape(values[i]) << "\"";
+  }
+  out << "]";
+}
+
 std::vector<std::shared_ptr<BioSequence>> build_reference_windows(
     const std::string& ref_id, const std::string& reference, int window_length,
     int stride) {
@@ -329,6 +345,8 @@ ResultComparison compare_result_ids(std::vector<std::string> baseline,
   comparison.optimized_equals_brute_force = optimized == brute_force;
   comparison.baseline_only = difference(baseline, optimized);
   comparison.optimized_only = difference(optimized, baseline);
+  comparison.baseline_extra_vs_brute_force = difference(baseline, brute_force);
+  comparison.optimized_extra_vs_brute_force = difference(optimized, brute_force);
   comparison.brute_force_missing_from_baseline = difference(brute_force, baseline);
   comparison.brute_force_missing_from_optimized = difference(brute_force, optimized);
   comparison.baseline_no_fn = comparison.brute_force_missing_from_baseline.empty();
@@ -341,6 +359,13 @@ bool comparison_passes_gate(const ResultComparison& comparison) {
          comparison.baseline_equals_brute_force &&
          comparison.optimized_equals_brute_force && comparison.baseline_no_fn &&
          comparison.optimized_no_fn;
+}
+
+bool profile_results_equal_brute_force(const ResultComparison& comparison,
+                                       const std::string& profile) {
+  if (profile == "baseline") return comparison.baseline_equals_brute_force;
+  if (profile == "optimized") return comparison.optimized_equals_brute_force;
+  throw std::invalid_argument("profile must be baseline or optimized");
 }
 
 std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
@@ -539,7 +564,7 @@ QueryBenchmarkRunResult run_query_benchmark(
   };
 
   std::vector<ExecutionRecord> records;
-  std::vector<std::string> mismatch_diagnostics;
+  std::vector<MismatchDiagnostic> mismatch_diagnostics;
   QueryBenchmarkRunResult result;
   auto execute = [&](BioGeometrySearchEngine& engine,
                      const GeneratedBenchmarkQuery& generated,
@@ -611,11 +636,13 @@ QueryBenchmarkRunResult run_query_benchmark(
         repeated_results_equal && comparison_passes_gate(comparison);
     if (!query_gate_passed) {
       result.mismatch_count++;
-      mismatch_diagnostics.push_back(generated.query.id);
+      mismatch_diagnostics.push_back(
+          {generated.query.id, repeated_results_equal, comparison});
     }
     for (size_t i = query_record_start; i < records.size(); ++i) {
       records[i].result_equal =
-          repeated_results_equal && comparison.baseline_equals_optimized;
+          repeated_results_equal && comparison.baseline_equals_optimized &&
+          profile_results_equal_brute_force(comparison, records[i].profile);
       records[i].no_fn =
           records[i].profile == "baseline" ? comparison.baseline_no_fn
                                              : comparison.optimized_no_fn;
@@ -778,7 +805,38 @@ QueryBenchmarkRunResult run_query_benchmark(
        << "\"mismatch_queries\":[";
   for (size_t i = 0; i < mismatch_diagnostics.size(); ++i) {
     if (i) json << ",";
-    json << "\"" << json_escape(mismatch_diagnostics[i]) << "\"";
+    json << "\"" << json_escape(mismatch_diagnostics[i].query_id) << "\"";
+  }
+  json << "],\"mismatch_diagnostics\":[";
+  for (size_t i = 0; i < mismatch_diagnostics.size(); ++i) {
+    if (i) json << ",";
+    const auto& diagnostic = mismatch_diagnostics[i];
+    const auto& comparison = diagnostic.comparison;
+    json << "{\"query_id\":\"" << json_escape(diagnostic.query_id) << "\","
+         << "\"repeated_results_equal\":"
+         << bool_string(diagnostic.repeated_results_equal) << ","
+         << "\"baseline_equals_optimized\":"
+         << bool_string(comparison.baseline_equals_optimized) << ","
+         << "\"baseline_equals_brute_force\":"
+         << bool_string(comparison.baseline_equals_brute_force) << ","
+         << "\"optimized_equals_brute_force\":"
+         << bool_string(comparison.optimized_equals_brute_force) << ","
+         << "\"baseline_no_fn\":" << bool_string(comparison.baseline_no_fn)
+         << ",\"optimized_no_fn\":"
+         << bool_string(comparison.optimized_no_fn)
+         << ",\"baseline_only\":";
+    append_json_string_array(json, comparison.baseline_only);
+    json << ",\"optimized_only\":";
+    append_json_string_array(json, comparison.optimized_only);
+    json << ",\"baseline_extra_vs_brute_force\":";
+    append_json_string_array(json, comparison.baseline_extra_vs_brute_force);
+    json << ",\"optimized_extra_vs_brute_force\":";
+    append_json_string_array(json, comparison.optimized_extra_vs_brute_force);
+    json << ",\"brute_force_missing_from_baseline\":";
+    append_json_string_array(json, comparison.brute_force_missing_from_baseline);
+    json << ",\"brute_force_missing_from_optimized\":";
+    append_json_string_array(json, comparison.brute_force_missing_from_optimized);
+    json << "}";
   }
   json << "],\"memory\":{";
   append_memory_json(json, "before_build", before_build);
@@ -796,6 +854,10 @@ QueryBenchmarkRunResult run_query_benchmark(
   std::ofstream json_out(config.json_path);
   if (!json_out) throw std::runtime_error("unable to open query benchmark JSON output");
   json_out << result.json_summary << "\n";
+  json_out.close();
+  if (!json_out) {
+    throw std::runtime_error("failed to write query benchmark JSON output");
+  }
   return result;
 }
 

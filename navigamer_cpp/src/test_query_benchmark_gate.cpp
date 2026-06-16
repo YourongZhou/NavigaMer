@@ -4,6 +4,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 int main() {
@@ -30,6 +31,14 @@ int main() {
   auto shared_false_positive =
       compare_result_ids({"extra"}, {"extra"}, {});
   assert(!navigamer::comparison_passes_gate(shared_false_positive));
+  assert((shared_false_positive.baseline_extra_vs_brute_force ==
+          std::vector<std::string>{"extra"}));
+  assert((shared_false_positive.optimized_extra_vs_brute_force ==
+          std::vector<std::string>{"extra"}));
+  assert(!navigamer::profile_results_equal_brute_force(
+      shared_false_positive, "baseline"));
+  assert(!navigamer::profile_results_equal_brute_force(
+      shared_false_positive, "optimized"));
 
   std::vector<std::shared_ptr<navigamer::BioSequence>> index_sequences = {
       std::make_shared<navigamer::BioSequence>("unique_a", "ACGTGCACTGAT"),
@@ -91,6 +100,23 @@ int main() {
   assert(result.json_summary.find("\"gate_passed\":true") != std::string::npos);
   assert(result.json_summary.find("\"candidate_set_comparison\":\"unavailable\"")
          != std::string::npos);
+
+  auto bad_output_config = config;
+  bad_output_config.detail_tsv_path =
+      "/tmp/navigamer_query_benchmark_missing_dir/detail.tsv";
+  bad_output_config.summary_tsv_path =
+      "/tmp/navigamer_query_benchmark_test_bad_summary.tsv";
+  bad_output_config.json_path =
+      "/tmp/navigamer_query_benchmark_test_bad_summary.json";
+  bool saw_tsv_error = false;
+  try {
+    (void)navigamer::run_query_benchmark(
+        bad_output_config, navigamer::HierarchyConfig({12, 6, 2}),
+        build_config, optimized_config);
+  } catch (const std::runtime_error&) {
+    saw_tsv_error = true;
+  }
+  assert(saw_tsv_error);
 
   std::cout << "query benchmark gate tests passed\n";
   return 0;

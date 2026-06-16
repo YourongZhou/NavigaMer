@@ -51,6 +51,8 @@ struct ResultComparison {
   bool optimized_no_fn = false;
   std::vector<std::string> baseline_only;
   std::vector<std::string> optimized_only;
+  std::vector<std::string> baseline_extra_vs_brute_force;
+  std::vector<std::string> optimized_extra_vs_brute_force;
   std::vector<std::string> brute_force_missing_from_baseline;
   std::vector<std::string> brute_force_missing_from_optimized;
 };
@@ -69,6 +71,8 @@ ResultComparison compare_result_ids(std::vector<std::string> baseline,
                                     std::vector<std::string> optimized,
                                     std::vector<std::string> brute_force);
 bool comparison_passes_gate(const ResultComparison& comparison);
+bool profile_results_equal_brute_force(const ResultComparison& comparison,
+                                       const std::string& profile);
 std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
     const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
     const std::vector<std::shared_ptr<BioSequence>>& unique_sequences,
