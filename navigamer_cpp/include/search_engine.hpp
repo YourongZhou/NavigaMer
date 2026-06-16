@@ -40,7 +40,7 @@ struct SearchConfig {
   VisitedMode visited_mode = VisitedMode::Epoch;
   GraphViewMode graph_view_mode = GraphViewMode::Flat;
   SimdMode simd_mode = SimdMode::Auto;
-  DistanceMode distance_mode = DistanceMode::DP;
+  DistanceMode distance_mode = DistanceMode::Myers;
   bool search_qgram_prefilter = false;
   int search_qgram_q = 5;
 };

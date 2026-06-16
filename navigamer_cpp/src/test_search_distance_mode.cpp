@@ -83,6 +83,8 @@ void assert_mode_equivalence(navigamer::GraphViewMode graph_mode,
 }  // namespace
 
 int main() {
+  assert(navigamer::SearchConfig{}.distance_mode == navigamer::DistanceMode::Myers);
+
   for (navigamer::GraphViewMode graph_mode :
        {navigamer::GraphViewMode::Original, navigamer::GraphViewMode::Flat}) {
     for (navigamer::VisitedMode visited_mode :

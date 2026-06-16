@@ -112,9 +112,9 @@ Unsupported SIMD paths fall back to the scalar filter and preserve the same
 survivor set.
 
 Adaptive bounded child-center distance supports `--distance-mode dp|myers|auto`
-(default `dp`). Myers is optional, supports ACGT inputs through 256bp shorter
-input length, and falls back to DP for unsupported inputs; `auto` currently
-remains DP.
+(default `myers`). Myers supports ACGT inputs through 256bp shorter input
+length and falls back to DP for unsupported inputs. `dp` remains the reference
+mode; `auto` currently remains DP.
 
 Adaptive child-world traversal also supports the optional
 `--search-qgram-prefilter on` with independent `--search-qgram-q` (default

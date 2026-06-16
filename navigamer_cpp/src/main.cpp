@@ -895,7 +895,7 @@ int main(int argc, char** argv) {
   std::string visited_mode = "epoch";
   std::string graph_view_mode = "flat";
   std::string simd_mode = "auto";
-  std::string distance_mode = "dp";
+  std::string distance_mode = "myers";
   std::string search_qgram_prefilter = "off";
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;

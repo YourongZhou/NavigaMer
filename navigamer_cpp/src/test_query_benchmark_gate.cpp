@@ -92,7 +92,6 @@ int main() {
   optimized_config.visited_mode = navigamer::VisitedMode::Epoch;
   optimized_config.graph_view_mode = navigamer::GraphViewMode::Flat;
   optimized_config.simd_mode = navigamer::SimdMode::Auto;
-  optimized_config.distance_mode = navigamer::DistanceMode::Myers;
   optimized_config.search_qgram_prefilter = true;
   optimized_config.search_qgram_q = 3;
   auto result = navigamer::run_query_benchmark(

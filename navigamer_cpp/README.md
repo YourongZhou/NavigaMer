@@ -37,7 +37,7 @@ path for small fanout, missing indexes, dimension mismatches, or exceptions.
 They also accept `--visited-mode string|epoch` (default `epoch`),
 `--graph-view original|flat` (default `flat`),
 `--simd-mode auto|scalar|avx2|avx512` (default `auto`),
-`--distance-mode dp|myers|auto` (default `dp`),
+`--distance-mode dp|myers|auto` (default `myers`),
 `--search-qgram-prefilter off|on` (default `off`), and `--search-qgram-q N`
 (default `5`). `string` keeps the legacy per-query string visited set for
 regression comparisons; `epoch` uses integer node IDs and a reused epoch array.
@@ -48,10 +48,10 @@ conservatively fall back to scalar and keep the same survivor set. The search q 
 construction `--qgram-q`. Enabled search-side filtering runs only on
 MBB-surviving child-world centers before bounded exact center verification;
 unsafe or missing signatures fall back to no pruning. Distance mode affects
-only adaptive bounded child-center checks after MBB/q-gram filtering. `dp` is
-the reference/default mode; `myers` uses the optional Myers backend through
-256bp ACGT shorter-input length and falls back to DP otherwise; `auto` is
-conservative and currently uses DP.
+only adaptive bounded child-center checks after MBB/q-gram filtering. `myers`
+is the default mode and uses the optional Myers backend through 256bp ACGT
+shorter-input length, falling back to DP otherwise. `dp` remains the reference
+mode; `auto` is conservative and currently uses DP.
 
 `query-benchmark` fixes the baseline profile to MBB scan, legacy string
 visited mode, original graph traversal, `dp` distance mode, and search q-gram

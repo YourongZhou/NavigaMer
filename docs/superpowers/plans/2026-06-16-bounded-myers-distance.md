@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an optional bounded Myers edit-distance backend for adaptive query search while keeping DP as the default and preserving exact result-set equivalence.
+**Goal:** Add a bounded Myers edit-distance backend for adaptive query search while preserving exact result-set equivalence and keeping DP available as the reference mode.
 
 **Architecture:** `tools.hpp/cpp` owns distance mode parsing and bounded distance implementations. `SearchConfig` carries `distance_mode`, and adaptive search uses the mode-aware wrapper only for bounded child-center checks. CLI and query-benchmark expose/report the mode while baseline remains DP.
 
@@ -87,7 +87,7 @@ Expected: compile failure because `SearchConfig::distance_mode` is not wired yet
 
 - [ ] **Step 4: Add search mode plumbing**
 
-Add `DistanceMode distance_mode = DistanceMode::DP` to `SearchConfig`. Replace adaptive bounded child-center calls with `compute_distance_bounded_with_mode(query, center, tau, config_.distance_mode)`. Leave index construction and exact leaf verification unchanged.
+Add `DistanceMode distance_mode` to `SearchConfig`; it is now defaulted to `DistanceMode::Myers` after 250bp equivalence and benchmark validation. Replace adaptive bounded child-center calls with `compute_distance_bounded_with_mode(query, center, tau, config_.distance_mode)`. Leave index construction and exact leaf verification unchanged.
 
 - [ ] **Step 5: Verify GREEN**
 
@@ -136,7 +136,7 @@ Parse `--distance-mode dp|myers|auto`, set `search_config.distance_mode`, includ
 
 - [ ] **Step 4: Update docs**
 
-Document the new flag in `README.md`, `navigamer_cpp/README.md`, and `navigamer_cpp/CLI_REFERENCE.md`, including that `dp` remains default and `auto` is conservative in this PR.
+Document the new flag in `README.md`, `navigamer_cpp/README.md`, and `navigamer_cpp/CLI_REFERENCE.md`, including that `myers` is the adaptive search default and `auto` remains conservative DP.
 
 - [ ] **Step 5: Verify GREEN**
 

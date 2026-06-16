@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add an optional bounded Myers edit-distance backend for query/adaptive search without changing the default distance behavior, index construction, pruning semantics, or final result sets.
+Enable the bounded Myers edit-distance backend by default for query/adaptive search while preserving index construction, pruning semantics, and final result sets. Keep DP available as the explicit reference mode.
 
 ## Scope
 
@@ -22,7 +22,7 @@ enum class DistanceMode {
 };
 ```
 
-`dp` is the default and reference mode. `myers` enables the new bounded Myers backend when its preconditions are met and falls back to DP otherwise. `auto` remains conservative in this PR and routes to DP until equivalence and benchmark results justify making Myers automatic.
+`myers` is the adaptive search default. It enables the bounded Myers backend when its preconditions are met and falls back to DP otherwise. `dp` remains the reference mode. `auto` remains conservative and routes to DP.
 
 ## Myers Backend
 
@@ -45,7 +45,7 @@ Semantics:
 
 ## Search Integration
 
-`SearchConfig` gains `distance_mode`, defaulting to `DistanceMode::DP`. Adaptive search uses `compute_distance_bounded_with_mode()` only for child-center checks after MBB/qgram filtering. Full distances, beacon distances, leaf exact verification, exhaustive search, brute-force search, and index construction remain unchanged.
+`SearchConfig` carries `distance_mode`, defaulting to `DistanceMode::Myers`. Adaptive search uses `compute_distance_bounded_with_mode()` only for child-center checks after MBB/qgram filtering. Full distances, beacon distances, leaf exact verification, exhaustive search, brute-force search, and index construction remain unchanged.
 
 The CLI adds:
 
