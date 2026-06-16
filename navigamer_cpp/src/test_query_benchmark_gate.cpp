@@ -1,5 +1,6 @@
 #include "query_benchmark.hpp"
 #include <cassert>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <set>
@@ -113,6 +114,22 @@ int main() {
              "\"simd_mode\":\"auto\"") != std::string::npos);
   assert(result.json_summary.find("\"candidate_set_comparison\":\"unavailable\"")
          != std::string::npos);
+  {
+    std::ifstream detail(config.detail_tsv_path);
+    std::string header;
+    std::getline(detail, header);
+    assert(header.find("leaf_beacon_scalar_checks") != std::string::npos);
+    assert(header.find("leaf_beacon_simd_batches") != std::string::npos);
+    assert(header.find("leaf_beacon_simd_fallbacks") != std::string::npos);
+  }
+  {
+    std::ifstream summary(config.summary_tsv_path);
+    std::string header;
+    std::getline(summary, header);
+    assert(header.find("avg_leaf_beacon_scalar_checks") != std::string::npos);
+    assert(header.find("avg_leaf_beacon_simd_batches") != std::string::npos);
+    assert(header.find("avg_leaf_beacon_simd_fallbacks") != std::string::npos);
+  }
 
   auto bad_output_config = config;
   bad_output_config.detail_tsv_path =

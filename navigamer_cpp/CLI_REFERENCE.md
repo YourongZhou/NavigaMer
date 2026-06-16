@@ -31,7 +31,7 @@ Used by all pipelines that build the index:
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 | `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
 | `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
-| `--simd-mode` | `auto` | Flat child-MBB filter backend: `auto`, `scalar`, `avx2`, or `avx512`; unsupported SIMD falls back to scalar |
+| `--simd-mode` | `auto` | Flat child-MBB and leaf-beacon filter backend: `auto`, `scalar`, `avx2`, or `avx512`; unsupported SIMD falls back to scalar |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 
@@ -242,6 +242,8 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `mbb_rect_candidate_children`, `mbb_rect_fallback_count`,
 `mbb_surviving_child_count`, `mbb_scalar_checks`, `mbb_simd_batches`,
 `mbb_simd_fallbacks`, `center_distance_calls_after_mbb`,
+`leaf_beacon_scalar_checks`, `leaf_beacon_simd_batches`,
+`leaf_beacon_simd_fallbacks`,
 `search_qgram_prefilter_enabled`, `search_qgram_q`,
 `search_qgram_signature_build_count`, `search_qgram_signature_missing_count`,
 `search_qgram_checks`, `search_qgram_pruned_children`,
@@ -257,6 +259,8 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `edge_access_count`, `mbb_checks`, `mbb_survivors`, `mbb_scalar_checks`,
 `mbb_simd_batches`, `mbb_simd_fallbacks`, `qgram_checks`,
 `center_exact_distance_calls`, `leaf_beacon_checks`,
+`leaf_beacon_scalar_checks`, `leaf_beacon_simd_batches`,
+`leaf_beacon_simd_fallbacks`,
 `leaf_exact_distance_calls`, `visited_checks`, `visited_hits`,
 `candidate_count`, `verified_candidate_count`
 

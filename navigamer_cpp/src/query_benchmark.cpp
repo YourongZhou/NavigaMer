@@ -56,6 +56,9 @@ struct AggregateRecord {
   size_t search_qgram_checks = 0;
   size_t center_exact_distance_call_count = 0;
   size_t leaf_beacon_check_count = 0;
+  size_t leaf_beacon_scalar_checks = 0;
+  size_t leaf_beacon_simd_batches = 0;
+  size_t leaf_beacon_simd_fallbacks = 0;
   size_t leaf_exact_distance_call_count = 0;
   size_t visited_check_count = 0;
   size_t visited_hit_count = 0;
@@ -175,6 +178,9 @@ std::vector<AggregateRecord> aggregate_records(
       aggregate.center_exact_distance_call_count +=
           record.stats.center_exact_distance_call_count;
       aggregate.leaf_beacon_check_count += record.stats.leaf_beacon_check_count;
+      aggregate.leaf_beacon_scalar_checks += record.stats.leaf_beacon_scalar_checks;
+      aggregate.leaf_beacon_simd_batches += record.stats.leaf_beacon_simd_batches;
+      aggregate.leaf_beacon_simd_fallbacks += record.stats.leaf_beacon_simd_fallbacks;
       aggregate.leaf_exact_distance_call_count +=
           record.stats.leaf_exact_distance_call_count;
       aggregate.visited_check_count += record.stats.visited_check_count;
@@ -669,6 +675,8 @@ QueryBenchmarkRunResult run_query_benchmark(
       "mbb_checks", "mbb_survivors", "mbb_scalar_checks",
       "mbb_simd_batches", "mbb_simd_fallbacks", "qgram_checks",
       "center_exact_distance_calls", "leaf_beacon_checks",
+      "leaf_beacon_scalar_checks", "leaf_beacon_simd_batches",
+      "leaf_beacon_simd_fallbacks",
       "leaf_exact_distance_calls", "visited_checks", "visited_hits",
       "candidate_count", "verified_candidate_count"};
   for (const auto& record : records) {
@@ -695,6 +703,9 @@ QueryBenchmarkRunResult run_query_benchmark(
         std::to_string(record.stats.search_qgram_checks),
         std::to_string(record.stats.center_exact_distance_call_count),
         std::to_string(record.stats.leaf_beacon_check_count),
+        std::to_string(record.stats.leaf_beacon_scalar_checks),
+        std::to_string(record.stats.leaf_beacon_simd_batches),
+        std::to_string(record.stats.leaf_beacon_simd_fallbacks),
         std::to_string(record.stats.leaf_exact_distance_call_count),
         std::to_string(record.stats.visited_check_count),
         std::to_string(record.stats.visited_hit_count),
@@ -712,6 +723,8 @@ QueryBenchmarkRunResult run_query_benchmark(
       "avg_mbb_survivors", "avg_mbb_scalar_checks",
       "avg_mbb_simd_batches", "avg_mbb_simd_fallbacks", "avg_qgram_checks",
       "avg_center_exact_distance_calls", "avg_leaf_beacon_checks",
+      "avg_leaf_beacon_scalar_checks", "avg_leaf_beacon_simd_batches",
+      "avg_leaf_beacon_simd_fallbacks",
       "avg_leaf_exact_distance_calls", "avg_visited_checks",
       "avg_visited_hits", "avg_candidate_count",
       "avg_verified_candidate_count"};
@@ -746,6 +759,9 @@ QueryBenchmarkRunResult run_query_benchmark(
         format_double(average_counter(aggregate.search_qgram_checks, sample_count)),
         format_double(average_counter(aggregate.center_exact_distance_call_count, sample_count)),
         format_double(average_counter(aggregate.leaf_beacon_check_count, sample_count)),
+        format_double(average_counter(aggregate.leaf_beacon_scalar_checks, sample_count)),
+        format_double(average_counter(aggregate.leaf_beacon_simd_batches, sample_count)),
+        format_double(average_counter(aggregate.leaf_beacon_simd_fallbacks, sample_count)),
         format_double(average_counter(aggregate.leaf_exact_distance_call_count, sample_count)),
         format_double(average_counter(aggregate.visited_check_count, sample_count)),
         format_double(average_counter(aggregate.visited_hit_count, sample_count)),

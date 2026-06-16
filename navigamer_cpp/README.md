@@ -42,8 +42,8 @@ They also accept `--visited-mode string|epoch` (default `epoch`),
 regression comparisons; `epoch` uses integer node IDs and a reused epoch array.
 `original` traverses the existing `WorldNode` pointer vectors; `flat` traverses
 the generated continuous query view. SIMD mode applies to flat child-MBB
-rectangle filtering only; unsupported modes conservatively fall back to scalar
-and keep the same survivor set. The search q is independent from
+rectangle filtering and flat leaf-beacon filtering; unsupported modes
+conservatively fall back to scalar and keep the same survivor set. The search q is independent from
 construction `--qgram-q`. Enabled search-side filtering runs only on
 MBB-surviving child-world centers before bounded exact center verification;
 unsafe or missing signatures fall back to no pruning.

@@ -107,8 +107,9 @@ or inconsistent. `--min-rect-index-fanout` controls the build threshold and
 defaults to `64`.
 
 Flat adaptive traversal supports `--simd-mode auto|scalar|avx2|avx512`
-(default `auto`) for child MBB rectangle filtering. Unsupported SIMD paths
-fall back to the scalar filter and preserve the same survivor set.
+(default `auto`) for child MBB rectangle filtering and leaf-beacon filtering.
+Unsupported SIMD paths fall back to the scalar filter and preserve the same
+survivor set.
 
 Adaptive child-world traversal also supports the optional
 `--search-qgram-prefilter on` with independent `--search-qgram-q` (default
