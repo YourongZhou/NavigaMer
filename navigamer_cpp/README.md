@@ -38,7 +38,7 @@ They also accept `--visited-mode string|epoch` (default `epoch`),
 `--graph-view original|flat` (default `flat`),
 `--simd-mode auto|scalar|avx2|avx512` (default `auto`),
 `--distance-mode dp|myers|edlib|auto` (default `myers`),
-`--build-distance-mode dp|edlib|auto` (default `dp`),
+`--build-distance-mode dp|edlib|auto` (default `edlib`),
 `--search-qgram-prefilter off|on` (default `off`), and `--search-qgram-q N`
 (default `5`). `string` keeps the legacy per-query string visited set for
 regression comparisons; `epoch` uses integer node IDs and a reused epoch array.
@@ -54,7 +54,7 @@ is the default mode and uses the optional Myers backend through 256bp ACGT
 shorter-input length, falling back to DP otherwise. `edlib` uses the vendored
 Edlib bounded distance backend. `dp` remains the reference mode; `auto` is
 conservative and currently uses DP. Build distance mode is separate and affects
-only index construction exact/bounded distance calls; its default stays `dp`.
+only index construction exact/bounded distance calls; its default is `edlib`.
 
 `query-benchmark` fixes the baseline profile to MBB scan, legacy string
 visited mode, original graph traversal, `dp` distance mode, and search q-gram

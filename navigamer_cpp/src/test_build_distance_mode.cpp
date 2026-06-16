@@ -62,7 +62,7 @@ int main() {
   assert(navigamer::parse_build_distance_mode("auto") ==
          navigamer::BuildDistanceMode::Auto);
   assert(navigamer::BuildRangeConfig{}.distance_mode ==
-         navigamer::BuildDistanceMode::DP);
+         navigamer::BuildDistanceMode::Edlib);
 
   navigamer::BuildRangeConfig dp_config;
   dp_config.min_rect_index_fanout = 1;

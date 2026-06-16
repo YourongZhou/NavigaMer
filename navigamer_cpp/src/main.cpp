@@ -896,7 +896,7 @@ int main(int argc, char** argv) {
   std::string graph_view_mode = "flat";
   std::string simd_mode = "auto";
   std::string distance_mode = "myers";
-  std::string build_distance_mode = "dp";
+  std::string build_distance_mode = "edlib";
   std::string search_qgram_prefilter = "off";
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;

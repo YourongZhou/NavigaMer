@@ -45,7 +45,7 @@ BuildDistanceMode parse_build_distance_mode(const std::string& value);
 struct BuildRangeConfig {
   BuildRangeMode link_mode = BuildRangeMode::Indexed;
   BuildRangeMode leaf_attach_mode = BuildRangeMode::Indexed;
-  BuildDistanceMode distance_mode = BuildDistanceMode::DP;
+  BuildDistanceMode distance_mode = BuildDistanceMode::Edlib;
   RangeJoinConfig range_join;
   size_t min_rect_index_fanout = 64;
 };

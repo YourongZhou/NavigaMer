@@ -27,7 +27,7 @@ Used by all pipelines that build the index:
 | `--auto-pigeonhole-max-candidates` | `4096` | Auto accepts pigeonhole when its candidate count is at most this value |
 | `--auto-pigeonhole-max-ratio` | `0.25` | Auto accepts pigeonhole when candidates / length-compatible targets is at most this ratio |
 | `--auto-hybrid-on-large-candidates` | `true` | Rejected large pigeonhole sets use hybrid when true, direct q-gram when false |
-| `--build-distance-mode` | `dp` | Index construction edit-distance backend: reference `dp`, optional `edlib`, or conservative `auto` (currently DP) |
+| `--build-distance-mode` | `edlib` | Index construction edit-distance backend: default `edlib`, reference `dp`, or conservative `auto` (currently DP) |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 | `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
