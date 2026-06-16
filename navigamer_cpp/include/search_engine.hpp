@@ -67,6 +67,9 @@ struct SearchStats {
   size_t mbb_simd_batches = 0;
   size_t mbb_simd_fallbacks = 0;
   size_t leaf_beacon_check_count = 0;
+  size_t leaf_beacon_scalar_checks = 0;
+  size_t leaf_beacon_simd_batches = 0;
+  size_t leaf_beacon_simd_fallbacks = 0;
   size_t mbb_check_count = 0;
   size_t leaf_exact_distance_call_count = 0;
   size_t center_exact_distance_call_count = 0;

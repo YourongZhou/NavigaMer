@@ -259,6 +259,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates(
       stats.leaf_beacon_check_count++;
       stats.candidate_count_for_prune++;
       stats.bound_check_count++;
+      stats.leaf_beacon_scalar_checks++;
       if (leaf_beacon_prunable_row(node->leaf_beacon_dists[leaf_idx], V_Q, tolerance)) {
         stats.beacon_prune_count++;
         continue;
@@ -303,29 +304,48 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
           view.leaf_beacon_dists.size();
   if (has_leaf_sieve) V_Q = compute_query_beacon_distances(node, query_seq, stats);
 
-  for (size_t leaf_idx = 0; leaf_idx < leaf_count; ++leaf_idx) {
-    stats.node_access_count++;
-    if (has_leaf_sieve && view.leaf_beacon_dim[node_id] == V_Q.size()) {
-      stats.leaf_beacon_check_count++;
-      stats.candidate_count_for_prune++;
-      stats.bound_check_count++;
-      bool prunable = false;
-      const size_t offset = view.leaf_beacon_begin[node_id];
-      for (size_t dim = 0; dim < V_Q.size(); ++dim) {
-        const int leaf_dist =
-            view.leaf_beacon_dists[offset + dim * leaf_count + leaf_idx];
-        if (std::abs(V_Q[dim] - leaf_dist) > tolerance) {
-          prunable = true;
-          break;
-        }
-      }
-      if (prunable) {
-        stats.beacon_prune_count++;
-        continue;
-      }
+  std::vector<uint32_t> survivor_offsets;
+  const bool leaf_sieve_ready =
+      has_leaf_sieve && view.leaf_beacon_dim[node_id] == V_Q.size();
+  if (leaf_sieve_ready) {
+    std::vector<int32_t> query32;
+    query32.reserve(V_Q.size());
+    for (int distance : V_Q) {
+      query32.push_back(static_cast<int32_t>(distance));
     }
 
-    const LeafId leaf_id = view.leaf_ids[leaf_begin + leaf_idx];
+    LeafBeaconFilterSimdStats simd_stats;
+    const uint32_t offset = view.leaf_beacon_begin[node_id];
+    survivor_offsets = filter_leaf_beacon_survivors(
+        view.leaf_beacon_dists.data() + offset,
+        leaf_count,
+        view.leaf_beacon_dim[node_id],
+        query32.data(),
+        static_cast<int32_t>(tolerance),
+        config_.simd_mode,
+        &simd_stats);
+
+    stats.node_access_count += leaf_count;
+    stats.leaf_beacon_check_count += leaf_count;
+    stats.candidate_count_for_prune += leaf_count;
+    stats.bound_check_count += leaf_count;
+    stats.beacon_prune_count += leaf_count - survivor_offsets.size();
+    stats.leaf_beacon_scalar_checks += simd_stats.scalar_checks;
+    stats.leaf_beacon_simd_batches += simd_stats.simd_batches;
+    stats.leaf_beacon_simd_fallbacks += simd_stats.simd_fallbacks;
+  } else {
+    survivor_offsets.reserve(leaf_count);
+    for (size_t leaf_idx = 0; leaf_idx < leaf_count; ++leaf_idx) {
+      survivor_offsets.push_back(static_cast<uint32_t>(leaf_idx));
+    }
+  }
+
+  for (uint32_t leaf_offset : survivor_offsets) {
+    if (leaf_offset >= leaf_count) {
+      throw std::runtime_error("SIMD leaf beacon filter returned offset out of range");
+    }
+    if (!leaf_sieve_ready) stats.node_access_count++;
+    const LeafId leaf_id = view.leaf_ids[leaf_begin + leaf_offset];
     if (leaf_id >= view.leaves.size() || !view.leaves[leaf_id]) {
       throw std::runtime_error("view leaf id has no sequence pointer");
     }
