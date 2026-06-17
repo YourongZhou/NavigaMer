@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -143,6 +144,18 @@ bool qgram_can_prune_edit_distance(
   return qgram_l1_distance(lhs, rhs) > 2 * q * threshold_tau;
 }
 
+void QGramQueryWorkspace::reset(size_t item_count) {
+  if (shared.size() != item_count) shared.assign(item_count, 0);
+  if (seen_epoch.size() != item_count) seen_epoch.assign(item_count, 0);
+  touched.clear();
+  if (epoch == std::numeric_limits<uint32_t>::max()) {
+    std::fill(seen_epoch.begin(), seen_epoch.end(), 0);
+    epoch = 1;
+  } else {
+    epoch++;
+  }
+}
+
 QGramCountIndex::QGramCountIndex(int q) : q_(q) {
   if (q_ <= 0) throw std::invalid_argument("q-gram length must be positive");
 }
@@ -163,20 +176,28 @@ void QGramCountIndex::build(const std::vector<Item>& items) {
 }
 
 std::vector<size_t> QGramCountIndex::query(
-    const std::string& query_sequence, int tau, QueryStats* stats) const {
+    const std::string& query_sequence, int tau, QueryStats* stats,
+    QGramQueryWorkspace* workspace) const {
   if (tau < 0) throw std::invalid_argument("q-gram threshold must be non-negative");
 
   QueryStats local_stats;
   local_stats.total_items = items_.size();
   const size_t query_total = qgram_total(query_sequence, q_);
   const auto query_counts = compute_qgram_counts(query_sequence, q_);
-  std::vector<size_t> shared(items_.size(), 0);
+  QGramQueryWorkspace local_workspace;
+  QGramQueryWorkspace* ws = workspace ? workspace : &local_workspace;
+  ws->reset(items_.size());
 
   for (const auto& query_entry : query_counts) {
     auto posting_it = postings_.find(query_entry.first);
     if (posting_it == postings_.end()) continue;
     for (const auto& posting : posting_it->second) {
-      shared[posting.internal_idx] +=
+      if (ws->seen_epoch[posting.internal_idx] != ws->epoch) {
+        ws->seen_epoch[posting.internal_idx] = ws->epoch;
+        ws->shared[posting.internal_idx] = 0;
+        ws->touched.push_back(posting.internal_idx);
+      }
+      ws->shared[posting.internal_idx] +=
           std::min(query_entry.second, posting.count);
     }
   }
@@ -211,7 +232,11 @@ std::vector<size_t> QGramCountIndex::query(
 
     const size_t required_shared =
         static_cast<size_t>((numerator + 1) / 2);
-    if (shared[internal_idx] >= required_shared) {
+    const size_t shared_count =
+        ws->seen_epoch[internal_idx] == ws->epoch
+            ? ws->shared[internal_idx]
+            : 0;
+    if (shared_count >= required_shared) {
       candidates.push_back(item.item_id);
     } else {
       local_stats.pruned_by_l1++;

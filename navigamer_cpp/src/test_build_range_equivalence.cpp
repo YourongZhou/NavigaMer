@@ -103,6 +103,13 @@ navigamer::BuildRangeConfig selective_auto_config() {
   return config;
 }
 
+navigamer::BuildRangeConfig indexed_leaf_direction_config(
+    navigamer::LeafAttachDirection direction) {
+  auto config = indexed_config(navigamer::RangeCandidateMode::QGramOnly);
+  config.leaf_attach_direction = direction;
+  return config;
+}
+
 void assert_equivalent(
     const navigamer::BioGeometryIndexBuilder& full_builder,
     const navigamer::BioGeometryIndexBuilder& indexed_builder,
@@ -134,14 +141,24 @@ int main() {
       hierarchy, indexed_config(navigamer::RangeCandidateMode::Hybrid));
   navigamer::BioGeometryIndexBuilder auto_builder(
       hierarchy, selective_auto_config());
+  navigamer::BioGeometryIndexBuilder seq_to_world_builder(
+      hierarchy,
+      indexed_leaf_direction_config(navigamer::LeafAttachDirection::SeqToWorld));
+  navigamer::BioGeometryIndexBuilder world_to_seq_builder(
+      hierarchy,
+      indexed_leaf_direction_config(navigamer::LeafAttachDirection::WorldToSeq));
   full_builder.build(sequences);
   qgram_builder.build(sequences);
   hybrid_builder.build(sequences);
   auto_builder.build(sequences);
+  seq_to_world_builder.build(sequences);
+  world_to_seq_builder.build(sequences);
 
   assert_equivalent(full_builder, qgram_builder, sequences);
   assert_equivalent(full_builder, hybrid_builder, sequences);
   assert_equivalent(full_builder, auto_builder, sequences);
+  assert_equivalent(full_builder, seq_to_world_builder, sequences);
+  assert_equivalent(full_builder, world_to_seq_builder, sequences);
 
   auto full_stats = full_builder.get_statistics();
   auto indexed_stats = qgram_builder.get_statistics();
@@ -178,14 +195,28 @@ int main() {
   auto auto_stats = auto_builder.get_statistics();
   assert(auto_stats.phase2_auto_pigeonhole_rejected_large_candidates > 0);
   assert(auto_stats.phase2_auto_qgram_invoked > 0);
-  assert(auto_stats.phase2_auto_hybrid_invoked > 0);
+  assert(auto_stats.phase2_pigeonhole_early_abort_count > 0);
+  assert(auto_stats.phase2_auto_hybrid_invoked == 0);
   assert(auto_stats.phase2_auto_final_candidate_pairs ==
          auto_stats.phase2_candidate_pairs);
   assert(auto_stats.leaf_auto_pigeonhole_rejected_large_candidates > 0);
   assert(auto_stats.leaf_auto_qgram_invoked > 0);
-  assert(auto_stats.leaf_auto_hybrid_invoked > 0);
+  assert(auto_stats.leaf_pigeonhole_early_abort_count > 0);
+  assert(auto_stats.leaf_auto_hybrid_invoked == 0);
   assert(auto_stats.leaf_auto_final_candidate_pairs ==
          auto_stats.leaf_candidate_pairs);
+  assert(auto_stats.leaf_seed_candidate_pairs_before_length_filter > 0);
+  assert(auto_stats.leaf_range_final_candidate_pairs ==
+         auto_stats.leaf_candidate_pairs);
+
+  auto seq_to_world_stats = seq_to_world_builder.get_statistics();
+  auto world_to_seq_stats = world_to_seq_builder.get_statistics();
+  assert(seq_to_world_stats.leaf_attach_direction_used ==
+         navigamer::LeafAttachDirection::SeqToWorld);
+  assert(world_to_seq_stats.leaf_attach_direction_used ==
+         navigamer::LeafAttachDirection::WorldToSeq);
+  assert(seq_to_world_stats.leaf_attachments_added ==
+         world_to_seq_stats.leaf_attachments_added);
 
   auto short_sequences = make_sequences(20);
   navigamer::BioGeometryIndexBuilder fallback_builder(

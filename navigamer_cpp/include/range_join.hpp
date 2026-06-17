@@ -49,12 +49,22 @@ struct RangeJoinQueryResult {
   size_t compatible_item_count = 0;
   size_t pigeonhole_candidate_count = 0;
   double pigeonhole_candidate_ratio = 0.0;
+  size_t seed_candidate_pairs_before_length_filter = 0;
+  size_t seed_length_pruned_candidates = 0;
+  size_t pigeonhole_early_abort_count = 0;
+  size_t final_candidate_pairs = 0;
   size_t auto_pigeonhole_accepted = 0;
   size_t auto_pigeonhole_rejected_large_candidates = 0;
   size_t auto_qgram_invoked = 0;
   size_t auto_hybrid_invoked = 0;
   size_t auto_final_candidate_pairs = 0;
   double auto_candidate_ratio_sum = 0.0;
+  double range_posting_lookup_ms = 0.0;
+  double range_seed_union_ms = 0.0;
+  double range_length_filter_ms = 0.0;
+  double range_qgram_query_ms = 0.0;
+  double range_hybrid_intersection_ms = 0.0;
+  double range_full_scan_ms = 0.0;
 };
 
 class ExactRangeJoinIndex {
@@ -69,16 +79,19 @@ class ExactRangeJoinIndex {
 
   RangeJoinConfig config_;
   std::vector<RangeJoinItem> items_;
+  std::unordered_map<size_t, size_t> item_lengths_by_id_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
   QGramCountIndex qgram_index_;
+  QGramQueryWorkspace qgram_workspace_;
 
   const PostingLists& postings_for_seed_len(int seed_len);
   RangeJoinQueryResult full_scan(
       const std::string& query_sequence, int tau, bool fallback) const;
   RangeJoinQueryResult pigeonhole_query(
-      const std::string& query_sequence, int tau, int block_len, int seed_len);
+      const std::string& query_sequence, int tau, int block_len, int seed_len,
+      size_t early_abort_candidate_limit);
   RangeJoinQueryResult qgram_query(
-      const std::string& query_sequence, int tau) const;
+      const std::string& query_sequence, int tau);
   RangeJoinQueryResult hybrid_result(
       const RangeJoinQueryResult& pigeonhole,
       const RangeJoinQueryResult& qgram) const;

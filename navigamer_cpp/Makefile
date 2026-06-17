@@ -117,6 +117,21 @@ TEST_SIMD_LEAF_OBJ = $(TEST_SIMD_LEAF_SRC:.cpp=.o)
 TEST_SIMD_LEAF_DEP = $(TEST_SIMD_LEAF_OBJ:.o=.d)
 TEST_SIMD_LEAF_TARGET = test_simd_leaf_beacon_filter_bin
 
+TEST_BUILD_TIMING_SRC = src/test_build_timing_stats.cpp
+TEST_BUILD_TIMING_OBJ = $(TEST_BUILD_TIMING_SRC:.cpp=.o)
+TEST_BUILD_TIMING_DEP = $(TEST_BUILD_TIMING_OBJ:.o=.d)
+TEST_BUILD_TIMING_TARGET = test_build_timing_stats
+
+TEST_BUILD_SCALE_SRC = src/test_build_scale_smoke.cpp
+TEST_BUILD_SCALE_OBJ = $(TEST_BUILD_SCALE_SRC:.cpp=.o)
+TEST_BUILD_SCALE_DEP = $(TEST_BUILD_SCALE_OBJ:.o=.d)
+TEST_BUILD_SCALE_TARGET = test_build_scale_smoke
+
+TEST_PHASE1_HYBRID_SRC = src/test_phase1_hybrid.cpp
+TEST_PHASE1_HYBRID_OBJ = $(TEST_PHASE1_HYBRID_SRC:.cpp=.o)
+TEST_PHASE1_HYBRID_DEP = $(TEST_PHASE1_HYBRID_OBJ:.o=.d)
+TEST_PHASE1_HYBRID_TARGET = test_phase1_hybrid_bin
+
 EXP_SRC = src/experiment_utils.cpp
 EXP_OBJ = $(EXP_SRC:.cpp=.o)
 EXP_DEP = $(EXP_OBJ:.cpp=.d)
@@ -124,7 +139,7 @@ EXP_DEP = $(EXP_OBJ:.cpp=.d)
 LIB_SRC += $(EXP_SRC) src/query_benchmark.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
 
-.PHONY: all clean test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_all
+.PHONY: all clean test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_all
 
 all: $(TARGET)
 
@@ -191,6 +206,15 @@ $(TEST_SIMD_MBB_TARGET): src/simd_mbb_filter.o $(TEST_SIMD_MBB_OBJ)
 $(TEST_SIMD_LEAF_TARGET): src/simd_mbb_filter.o $(TEST_SIMD_LEAF_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
+$(TEST_BUILD_TIMING_TARGET): $(LIB_OBJ) $(TEST_BUILD_TIMING_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+$(TEST_BUILD_SCALE_TARGET): $(TEST_BUILD_SCALE_OBJ) $(TARGET)
+	$(CXX) $(CXXFLAGS) -o $@ $(TEST_BUILD_SCALE_OBJ)
+
+$(TEST_PHASE1_HYBRID_TARGET): $(LIB_OBJ) $(TEST_PHASE1_HYBRID_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)
 
@@ -251,12 +275,21 @@ test_simd_mbb_filter: $(TEST_SIMD_MBB_TARGET)
 test_simd_leaf_beacon_filter: $(TEST_SIMD_LEAF_TARGET)
 	./$(TEST_SIMD_LEAF_TARGET)
 
-test_all: test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter
+test_build_timing_stats_check: $(TEST_BUILD_TIMING_TARGET)
+	./$(TEST_BUILD_TIMING_TARGET)
+
+test_build_scale_smoke_check: $(TEST_BUILD_SCALE_TARGET)
+	./$(TEST_BUILD_SCALE_TARGET)
+
+test_phase1_hybrid: $(TEST_PHASE1_HYBRID_TARGET)
+	./$(TEST_PHASE1_HYBRID_TARGET)
+
+test_all: test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJ) $(LIB_OBJ) $(EDLIB_OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TEST_HIER_OBJ) $(TEST_SEARCH_STATS_OBJ) $(TEST_MAP150_OBJ) $(TEST_BOUNDED_OBJ) $(TEST_BOUNDED_MYERS_OBJ) $(TEST_QGRAM_OBJ) $(TEST_RANGE_JOIN_OBJ) $(TEST_BUILD_RANGE_OBJ) $(TEST_BUILD_DISTANCE_OBJ) $(TEST_MBB_RECT_OBJ) $(TEST_MBB_FILTER_OBJ) $(TEST_SEARCH_QGRAM_OBJ) $(TEST_QUERY_BENCHMARK_OBJ) $(TEST_EPOCH_VISITED_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ) $(TEST_SEARCH_DISTANCE_MODE_OBJ) $(TEST_SIMD_MBB_OBJ) $(TEST_SIMD_LEAF_OBJ) $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET) $(TEST_HIER_TARGET) $(TEST_SEARCH_STATS_TARGET) $(TEST_MAP150_TARGET) $(TEST_BOUNDED_TARGET) $(TEST_BOUNDED_MYERS_TARGET) $(TEST_QGRAM_TARGET) $(TEST_RANGE_JOIN_TARGET) $(TEST_BUILD_RANGE_TARGET) $(TEST_BUILD_DISTANCE_TARGET) $(TEST_MBB_RECT_TARGET) $(TEST_MBB_FILTER_TARGET) $(TEST_SEARCH_QGRAM_TARGET) $(TEST_QUERY_BENCHMARK_TARGET) $(TEST_EPOCH_VISITED_TARGET) $(TEST_SEARCH_GRAPH_VIEW_TARGET) $(TEST_SEARCH_DISTANCE_MODE_TARGET) $(TEST_SIMD_MBB_TARGET) $(TEST_SIMD_LEAF_TARGET)
+	rm -f $(OBJ) $(LIB_OBJ) $(EDLIB_OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TEST_HIER_OBJ) $(TEST_SEARCH_STATS_OBJ) $(TEST_MAP150_OBJ) $(TEST_BOUNDED_OBJ) $(TEST_BOUNDED_MYERS_OBJ) $(TEST_QGRAM_OBJ) $(TEST_RANGE_JOIN_OBJ) $(TEST_BUILD_RANGE_OBJ) $(TEST_BUILD_DISTANCE_OBJ) $(TEST_MBB_RECT_OBJ) $(TEST_MBB_FILTER_OBJ) $(TEST_SEARCH_QGRAM_OBJ) $(TEST_QUERY_BENCHMARK_OBJ) $(TEST_EPOCH_VISITED_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ) $(TEST_SEARCH_DISTANCE_MODE_OBJ) $(TEST_SIMD_MBB_OBJ) $(TEST_SIMD_LEAF_OBJ) $(TEST_BUILD_TIMING_OBJ) $(TEST_BUILD_SCALE_OBJ) $(TEST_PHASE1_HYBRID_OBJ) $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET) $(TEST_HIER_TARGET) $(TEST_SEARCH_STATS_TARGET) $(TEST_MAP150_TARGET) $(TEST_BOUNDED_TARGET) $(TEST_BOUNDED_MYERS_TARGET) $(TEST_QGRAM_TARGET) $(TEST_RANGE_JOIN_TARGET) $(TEST_BUILD_RANGE_TARGET) $(TEST_BUILD_DISTANCE_TARGET) $(TEST_MBB_RECT_TARGET) $(TEST_MBB_FILTER_TARGET) $(TEST_SEARCH_QGRAM_TARGET) $(TEST_QUERY_BENCHMARK_TARGET) $(TEST_EPOCH_VISITED_TARGET) $(TEST_SEARCH_GRAPH_VIEW_TARGET) $(TEST_SEARCH_DISTANCE_MODE_TARGET) $(TEST_SIMD_MBB_TARGET) $(TEST_SIMD_LEAF_TARGET) $(TEST_BUILD_TIMING_TARGET) $(TEST_BUILD_SCALE_TARGET) $(TEST_PHASE1_HYBRID_TARGET)
 
--include $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP)
+-include $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP)

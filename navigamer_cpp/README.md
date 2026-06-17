@@ -19,6 +19,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ```bash
 ./navigamer demo   [--size N] [--primary-radii 30,15,5 | --r-sw 5 --r-mw 15 --r-lw 30]
 ./navigamer build  --ref <fasta|sequence> --reads <fastq|sequence>  [same primary-layer flags]
+./navigamer build-scale --ref <fasta|sequence> --window 250 --stride 1 --prefix-lengths 10000,50000 --out build_scale.csv [same primary-layer flags]
 ./navigamer query  --reads <fastq|sequence> --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer run    --ref <fasta|sequence> --reads <fastq|sequence> [--tolerance 2] [--out out.tsv]
 ./navigamer map150 --ref <fasta|sequence> --reads <fastq|sequence> --tolerance <N> --out out.tsv [--locator refpos|seqan]
@@ -93,11 +94,22 @@ no-FN mismatch makes the command return `2`.
 **Note:** Phase-2 rebinding and leaf attachment default to exact indexed range
 joins. Use `--link-mode full` and/or `--leaf-attach-mode full` for the original
 full-pairwise construction. `--range-candidate-mode auto` uses adaptive
-pigeonhole seeds when they are at least 8 bp, then checks actual candidate
-count and candidate ratio. Large candidate sets invoke q-gram and use the safe
-hybrid intersection by default. Forced `qgram` and `hybrid` modes are also
-available. All modes exact verify every surviving candidate before adding a
-link.
+pigeonhole seeds when they are at least 8 bp, accepts them by actual candidate
+count, and early-aborts to the q-gram safe fallback when the seed union exceeds
+the configured candidate threshold. The legacy ratio flag is ignored, so normal
+pigeonhole queries do not full-scan all length-compatible targets just to
+compute a denominator. `--leaf-attach-direction auto` chooses world-to-sequence
+leaf attachment when there are fewer finest worlds than unique sequences;
+explicit `seq-to-world` and `world-to-seq` are also supported. Forced `qgram`
+and `hybrid` modes are still available. All modes exact verify every surviving
+candidate before adding a link.
+
+**Note:** Every build prints an aggregate `Build timing` section to stderr.
+The timing fields are wall-clock milliseconds collected with
+`std::chrono::steady_clock`; high-frequency loops are timed in aggregate to keep
+profiling overhead low. The `build-scale` command rebuilds in memory for each
+requested reference prefix and writes phase timing, substep timing, construction
+counters, range candidate mode, and q-gram length to CSV.
 
 ## Parameter sweeps
 
@@ -115,6 +127,8 @@ For long-sequence boundary studies, `boundary` outputs one aggregated TSV row pe
 | Exact range join | `make test_range_join && ./test_range_join` |
 | Q-gram count filter | `make test_qgram && ./test_qgram_filter` |
 | Full/indexed construction equivalence | `make test_build_range && ./test_build_range_equivalence` |
+| Build timing statistics | `make test_build_timing_stats && ./test_build_timing_stats` |
+| Build-scale CSV smoke | `make test_build_scale_smoke && ./test_build_scale_smoke` |
 | Exact MBB rectangle lookup | `make test_mbb_rect && ./test_mbb_rect_index` |
 | Scan/rect adaptive equivalence and fallback | `make test_mbb_filter && ./test_mbb_filter_equivalence` |
 | Search q-gram on/off and scan/rect equivalence | `make test_search_qgram && ./test_search_qgram_prefilter` |

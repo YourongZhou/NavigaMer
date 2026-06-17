@@ -20,13 +20,14 @@ Used by all pipelines that build the index:
 | `--r-lw` | `30` | Large-world radius |
 | `--link-mode` | `indexed` | Phase-2 rebinding: `full` or exact `indexed` range join |
 | `--leaf-attach-mode` | `indexed` | Leaf attachment: `full` or exact `indexed` range join |
+| `--leaf-attach-direction` | `auto` | Indexed leaf attachment direction: `auto`, `seq-to-world`, or `world-to-seq`; `auto` uses `world-to-seq` when finest worlds are fewer than unique sequences |
 | `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
 | `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full` |
 | `--qgram-q` | `5` | Positive q-gram length used by q-gram and hybrid candidate generation |
 | `--auto-pigeonhole-max-candidates` | `4096` | Auto accepts pigeonhole when its candidate count is at most this value |
-| `--auto-pigeonhole-max-ratio` | `0.25` | Auto accepts pigeonhole when candidates / length-compatible targets is at most this ratio |
-| `--auto-hybrid-on-large-candidates` | `true` | Rejected large pigeonhole sets use hybrid when true, direct q-gram when false |
+| `--auto-pigeonhole-max-ratio` | `0.25` | Compatibility no-op; parsed and validated, but auto no longer computes or uses a candidate ratio |
+| `--auto-hybrid-on-large-candidates` | `true` | Compatibility flag; normal auto early-aborts oversized seed unions and uses q-gram safe fallback |
 | `--build-distance-mode` | `edlib` | Index construction edit-distance backend: default `edlib`, reference `dp`, or conservative `auto` (currently DP) |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
@@ -45,22 +46,26 @@ Indexed construction is exact. Pigeonhole mode uses
 length-compatible full set when the seed is too short. Q-gram mode safely
 prunes only pairs with `qgram_l1(a,b) > 2*q*tau`. Hybrid mode intersects the
 pigeonhole and q-gram safe candidate supersets. Auto runs pigeonhole when its
-seed is long enough, accepting it when candidate count is below the configured
-maximum **or** candidate ratio is below the configured maximum. Otherwise it
-invokes q-gram and returns the safe hybrid intersection by default. Full
-candidate mode returns every length-compatible item.
+seed is long enough, accepting it when candidate count is at most the
+configured maximum. If the seed union grows beyond the maximum, auto stops
+collecting pigeonhole candidates immediately and invokes q-gram as a safe
+fallback. It does not full-scan all length-compatible targets to compute a
+candidate ratio; `--auto-pigeonhole-max-ratio` is retained only so older
+command lines still parse. Full candidate mode returns every
+length-compatible item.
 
-Old seed-length-only auto behavior can be reproduced with permissive thresholds
-such as `--auto-pigeonhole-max-candidates 18446744073709551615
---auto-pigeonhole-max-ratio 1.0`. Because acceptance uses OR semantics, a
-dataset with fewer than the default `4096` length-compatible targets accepts
-pigeonhole regardless of candidate ratio.
+Old seed-length-only auto behavior can be reproduced with a permissive
+candidate-count threshold such as
+`--auto-pigeonhole-max-candidates 18446744073709551615`; the ratio flag no
+longer affects acceptance.
 
 Every returned candidate is still verified with bounded exact edit distance;
 candidate generation never directly adds an edge or leaf attachment. Builder
 summaries distinguish possible pairs, returned candidates, exact calls,
 accepted results, length pruning, q-gram L1 pruning, per-mode query counts,
-fallback counts, and reduction ratios.
+fallback counts, seed candidates before length filtering, seed length-pruned
+candidates, pigeonhole early-abort counts, final range candidates, and
+reduction ratios.
 
 Rectangle filtering is also exact. Rect mode returns a child world if and only
 if its existing MBB row intersects the query rectangle in every beacon
@@ -99,6 +104,31 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 Deduplicates, builds the index, prints layer sizes. **Index is not serialized to disk**; use `run` for an end-to-end path with optional TSV.
 
 **Required:** `--ref`, `--reads`
+
+Every build prints a `Build timing` section to stderr. Timing fields are
+aggregate wall-clock milliseconds and include Phase0 deduplication, Phase1
+sketch construction, Phase2 rebinding, Phase3 MBB computation, Phase4 leaf
+attachment, integer ID assignment, graph-view flattening, and selected
+range-join/MBB/leaf substeps. Existing construction counters remain in the
+summary.
+
+### `build-scale`
+
+Builds one in-memory index per requested reference prefix and writes construction
+timing plus construction counters to CSV. This command is intended for locating
+build bottlenecks; it does not serialize indexes.
+
+**Required:** `--ref`, `--prefix-lengths`, `--out`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--window` | `200` | Reference-window length |
+| `--stride` | `1` | Step between window starts |
+| `--prefix-lengths` | *(required)* | Comma-separated reference prefix lengths; values larger than the reference use the full reference |
+| `--out` | *(required)* | Output CSV path |
+
+After each prefix, stderr prints the top build phases, top substeps, and
+candidate/exact reduction percentages for Phase2 and leaf attachment.
 
 ### `query`
 
@@ -286,6 +316,31 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 **`boundary`:**  
 `length`, `stride_mode`, `num_index_seqs`, `error_rate`, `error_edits`, `tolerance_rate`, `tolerance_edits`, `query_count`, `source_recovery_rate`, `any_hit_rate`, `avg_hit_count`, `avg_dist_calcs`, `avg_leaf_verify_count`, `avg_candidate_count_for_prune`, `avg_beacon_prune_count`, `avg_pruning_rate`, `bf_sample_count`, `bf_source_recovery_rate`, `bf_agreement_rate`, `bf_source_mismatch_count`
 
+**`build-scale`:**
+`prefix_len`, `window_count`, `unique_count`, `world_node_count`,
+`finest_world_count`, `total_build_ms`, `phase0_dedup_ms`,
+`phase1_sketch_ms`, `phase2_rebinding_ms`, `phase2_index_build_ms`,
+`phase2_candidate_query_ms`, `phase2_exact_verify_ms`,
+`phase2_edge_insert_ms`, `phase3_mbb_ms`,
+`phase3_collect_beacons_ms`, `phase3_collapse_children_ms`,
+`phase3_child_mbb_distance_ms`, `phase3_rect_index_build_ms`,
+`phase4_attach_ms`, `leaf_index_build_ms`, `leaf_candidate_query_ms`,
+`leaf_exact_verify_ms`, `leaf_tuple_emit_ms`, `leaf_tuple_merge_sort_ms`,
+`leaf_populate_ms`, `leaf_beacon_distance_ms`, `assign_ids_ms`,
+`graph_view_ms`, `phase2_total_possible_pairs`, `phase2_candidate_pairs`,
+`phase2_exact_distance_calls`, `phase2_edges_added`,
+`leaf_total_possible_pairs`, `leaf_candidate_pairs`,
+`leaf_exact_distance_calls`, `leaf_attachments_added`,
+`phase2_full_scan_fallback_count`, `leaf_full_scan_fallback_count`,
+`phase2_seed_candidate_pairs_before_length_filter`,
+`phase2_seed_length_pruned_candidates`,
+`phase2_pigeonhole_early_abort_count`,
+`phase2_range_final_candidate_pairs`,
+`leaf_seed_candidate_pairs_before_length_filter`,
+`leaf_seed_length_pruned_candidates`, `leaf_pigeonhole_early_abort_count`,
+`leaf_range_final_candidate_pairs`,
+`leaf_attach_direction_used`, `range_candidate_mode`, `qgram_q`
+
 **`layer-radius-experiment`:**  
 `dataset`, `query_id`, `query_length`, `L`, `r_leaf`, `alpha`, `radius_schedule`, `query_time_ms`, `world_access_count`, `node_access_count`, `edge_access_count`, `anchor_distance_count`, `bound_check_count`, `candidate_count`, `candidate_verify_count`
 
@@ -303,6 +358,8 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 | `test_qgram_filter` | Q-gram counts, L1 bound, ambiguous bases, and index no-false-negative checks |
 | `test_range_join` | Pigeonhole/q-gram/hybrid no-false-negative and verified-pair checks |
 | `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
+| `test_build_timing_stats` | Construction timing field and summary smoke checks |
+| `test_build_scale_smoke` | `build-scale` CSV timing smoke check |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
 | `test_search_qgram_prefilter` | Search q-gram on/off, scan/rect, ambiguous-base fallback, containment, and center-call reduction checks |

@@ -38,6 +38,7 @@ void usage(const char* prog) {
   std::cerr << "Usage:\n"
             << "  " << prog << " demo [--size N] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " build-scale --ref <path|seq> --window 250 --stride 1 --prefix-lengths csv --out <csv> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " map150 --ref <path|seq> --reads <path|seq> --tolerance <N> --out <tsv> [--mode adaptive] [--locator refpos|seqan] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
@@ -45,7 +46,7 @@ void usage(const char* prog) {
             << "  " << prog << " query-benchmark --ref <fasta|sequence> --out <detail.tsv> --summary-out <summary.tsv> --json-out <summary.json> [--window 200] [--query-length 200] [--tolerance 2]\n"
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
-            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
+            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--leaf-attach-direction auto|seq-to-world|world-to-seq] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
             << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--distance-mode dp|myers|edlib|auto] [--build-distance-mode dp|edlib|auto] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
 }
 
@@ -87,6 +88,21 @@ std::vector<int> parse_int_csv(const std::string& csv) {
     values.push_back(std::stoi(token));
   }
   if (values.empty()) throw std::runtime_error("primary radii list must not be empty");
+  return values;
+}
+
+size_t parse_positive_size(const std::string& value, const std::string& flag);
+
+std::vector<size_t> parse_size_csv(const std::string& csv,
+                                   const std::string& flag) {
+  std::vector<size_t> values;
+  std::stringstream ss(csv);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    if (token.empty()) continue;
+    values.push_back(parse_positive_size(token, flag));
+  }
+  if (values.empty()) throw std::runtime_error(flag + " must not be empty");
   return values;
 }
 
@@ -151,6 +167,88 @@ std::string format_primary_radii(const navigamer::HierarchyConfig& config) {
     os << config.primary_radii[i];
   }
   return os.str();
+}
+
+std::vector<std::pair<std::string, double>> sorted_descending(
+    std::vector<std::pair<std::string, double>> values) {
+  std::sort(values.begin(), values.end(),
+            [](const auto& left, const auto& right) {
+              return left.second > right.second;
+            });
+  return values;
+}
+
+void print_top_entries(const std::string& title,
+                       std::vector<std::pair<std::string, double>> values,
+                       double total_ms) {
+  values = sorted_descending(std::move(values));
+  std::cerr << title << ":\n";
+  const size_t limit = std::min<size_t>(3, values.size());
+  for (size_t i = 0; i < limit; ++i) {
+    const double pct = total_ms <= 0.0 ? 0.0 : values[i].second * 100.0 / total_ms;
+    std::cerr << "  " << (i + 1) << ". " << values[i].first << ": "
+              << format_double(values[i].second) << " ms ("
+              << format_double(pct) << "%)\n";
+  }
+}
+
+std::string leaf_attach_direction_used(
+    const navigamer::BioGeometryIndexBuilder::Statistics& stats) {
+  return navigamer::leaf_attach_direction_name(stats.leaf_attach_direction_used);
+}
+
+void print_build_scale_bottleneck_summary(
+    size_t prefix_len,
+    const navigamer::BioGeometryIndexBuilder::Statistics& stats) {
+  std::cerr << "Build-scale prefix=" << prefix_len
+            << " total_build_ms=" << format_double(stats.total_build_ms) << "\n";
+  print_top_entries(
+      "Top build phases",
+      {
+          {"phase0_dedup", stats.phase0_dedup_ms},
+          {"phase1_sketch", stats.phase1_sketch_ms},
+          {"phase2_rebinding", stats.phase2_rebinding_ms},
+          {"phase3_mbb", stats.phase3_mbb_ms},
+          {"phase4_attach", stats.phase4_attach_ms},
+          {"assign_ids", stats.assign_ids_ms},
+          {"graph_view", stats.graph_view_ms},
+      },
+      stats.total_build_ms);
+  print_top_entries(
+      "Top substeps",
+      {
+          {"phase2_index_build", stats.phase2_index_build_ms},
+          {"phase2_candidate_query", stats.phase2_candidate_query_ms},
+          {"phase2_exact_verify", stats.phase2_exact_verify_ms},
+          {"phase2_edge_insert", stats.phase2_edge_insert_ms},
+          {"phase3_collect_beacons", stats.phase3_collect_beacons_ms},
+          {"phase3_collapse_children", stats.phase3_collapse_children_ms},
+          {"phase3_child_mbb_distance", stats.phase3_child_mbb_distance_ms},
+          {"phase3_rect_index_build", stats.phase3_rect_index_build_ms},
+          {"leaf_index_build", stats.leaf_index_build_ms},
+          {"leaf_candidate_query", stats.leaf_candidate_query_ms},
+          {"leaf_exact_verify", stats.leaf_exact_verify_ms},
+          {"leaf_tuple_emit", stats.leaf_tuple_emit_ms},
+          {"leaf_tuple_merge_sort", stats.leaf_tuple_merge_sort_ms},
+          {"leaf_populate", stats.leaf_populate_ms},
+          {"leaf_beacon_distance", stats.leaf_beacon_distance_ms},
+          {"range_posting_lookup", stats.range_posting_lookup_ms},
+          {"range_seed_union", stats.range_seed_union_ms},
+          {"range_length_filter", stats.range_length_filter_ms},
+          {"range_qgram_query", stats.range_qgram_query_ms},
+          {"range_hybrid_intersection", stats.range_hybrid_intersection_ms},
+          {"range_full_scan", stats.range_full_scan_ms},
+      },
+      stats.total_build_ms);
+  std::cerr << "  phase2_candidate_reduction="
+            << format_double(stats.phase2_candidate_reduction_ratio * 100.0)
+            << "% phase2_exact_reduction="
+            << format_double(stats.phase2_exact_distance_reduction_ratio * 100.0)
+            << "% leaf_candidate_reduction="
+            << format_double(stats.leaf_candidate_reduction_ratio * 100.0)
+            << "% leaf_exact_reduction="
+            << format_double(stats.leaf_exact_distance_reduction_ratio * 100.0)
+            << "%\n";
 }
 
 std::string mutate_with_exact_substitutions(const std::string& seq, int edit_count,
@@ -317,6 +415,170 @@ void run_build(const std::string& ref_input, const std::string& reads_input,
   BioGeometryIndexBuilder builder(config, range_config);
   builder.build(reads);
   std::cerr << "Build done. (Index serialization not implemented; use run for full pipeline.)\n";
+}
+
+void run_build_scale(const std::string& ref_input,
+                     int window_size,
+                     int stride,
+                     const std::vector<size_t>& prefix_lengths,
+                     const std::string& out_csv,
+                     const navigamer::HierarchyConfig& config,
+                     const navigamer::BuildRangeConfig& range_config,
+                     const std::string& leaf_attach_direction) {
+  using namespace navigamer;
+  if (window_size <= 0) throw std::runtime_error("build-scale --window must be positive");
+  if (stride <= 0) throw std::runtime_error("build-scale --stride must be positive");
+  if (out_csv.empty()) throw std::runtime_error("build-scale requires --out");
+  if (leaf_attach_direction != "auto" &&
+      leaf_attach_direction != "seq-to-world" &&
+      leaf_attach_direction != "seq_to_world" &&
+      leaf_attach_direction != "world-to-seq" &&
+      leaf_attach_direction != "world_to_seq") {
+    throw std::runtime_error(
+        "build-scale --leaf-attach-direction must be auto, seq-to-world, or world-to-seq");
+  }
+
+  auto [ref_id, ref_seq] = load_reference(ref_input);
+  if (ref_seq.empty()) throw std::runtime_error("build-scale reference is empty");
+
+  const std::vector<std::string> columns = {
+      "prefix_len",
+      "window_count",
+      "unique_count",
+      "world_node_count",
+      "finest_world_count",
+      "total_build_ms",
+      "phase0_dedup_ms",
+      "phase1_sketch_ms",
+      "phase2_rebinding_ms",
+      "phase2_index_build_ms",
+      "phase2_candidate_query_ms",
+      "phase2_exact_verify_ms",
+      "phase2_edge_insert_ms",
+      "phase3_mbb_ms",
+      "phase3_collect_beacons_ms",
+      "phase3_collapse_children_ms",
+      "phase3_child_mbb_distance_ms",
+      "phase3_rect_index_build_ms",
+      "phase4_attach_ms",
+      "leaf_index_build_ms",
+      "leaf_candidate_query_ms",
+      "leaf_exact_verify_ms",
+      "leaf_tuple_emit_ms",
+      "leaf_tuple_merge_sort_ms",
+      "leaf_populate_ms",
+      "leaf_beacon_distance_ms",
+      "assign_ids_ms",
+      "graph_view_ms",
+      "phase2_total_possible_pairs",
+      "phase2_candidate_pairs",
+      "phase2_exact_distance_calls",
+      "phase2_edges_added",
+      "leaf_total_possible_pairs",
+      "leaf_candidate_pairs",
+      "leaf_exact_distance_calls",
+      "leaf_attachments_added",
+      "phase2_full_scan_fallback_count",
+      "leaf_full_scan_fallback_count",
+      "phase2_seed_candidate_pairs_before_length_filter",
+      "phase2_seed_length_pruned_candidates",
+      "phase2_pigeonhole_early_abort_count",
+      "phase2_range_final_candidate_pairs",
+      "leaf_seed_candidate_pairs_before_length_filter",
+      "leaf_seed_length_pruned_candidates",
+      "leaf_pigeonhole_early_abort_count",
+      "leaf_range_final_candidate_pairs",
+      "leaf_attach_direction_used",
+      "range_candidate_mode",
+      "qgram_q",
+  };
+
+  std::ofstream out(out_csv);
+  if (!out) throw std::runtime_error("could not open build-scale output CSV");
+  auto write_row = [&](const std::vector<std::string>& row) {
+    for (size_t i = 0; i < row.size(); ++i) {
+      if (i) out << ',';
+      out << csv_escape(row[i]);
+    }
+    out << '\n';
+    out.flush();
+  };
+  write_row(columns);
+  size_t rows_written = 0;
+
+  for (size_t requested_prefix : prefix_lengths) {
+    const size_t actual_prefix = std::min(requested_prefix, ref_seq.size());
+    const std::string prefix_seq = ref_seq.substr(0, actual_prefix);
+    auto windows = build_reference_windows(ref_id, prefix_seq, window_size, stride);
+    std::cerr << "build-scale: prefix_len=" << actual_prefix
+              << " requested=" << requested_prefix
+              << " windows=" << windows.size()
+              << " window=" << window_size
+              << " stride=" << stride << "\n";
+
+    BioGeometryIndexBuilder builder(config, range_config);
+    builder.build(windows);
+    const auto stats = builder.get_statistics();
+    const size_t finest_count =
+        builder.primary_layer(builder.finest_primary_layer_index()).size();
+
+    write_row({
+        std::to_string(actual_prefix),
+        std::to_string(windows.size()),
+        std::to_string(stats.unique_sequences),
+        std::to_string(builder.num_world_nodes()),
+        std::to_string(finest_count),
+        format_double(stats.total_build_ms),
+        format_double(stats.phase0_dedup_ms),
+        format_double(stats.phase1_sketch_ms),
+        format_double(stats.phase2_rebinding_ms),
+        format_double(stats.phase2_index_build_ms),
+        format_double(stats.phase2_candidate_query_ms),
+        format_double(stats.phase2_exact_verify_ms),
+        format_double(stats.phase2_edge_insert_ms),
+        format_double(stats.phase3_mbb_ms),
+        format_double(stats.phase3_collect_beacons_ms),
+        format_double(stats.phase3_collapse_children_ms),
+        format_double(stats.phase3_child_mbb_distance_ms),
+        format_double(stats.phase3_rect_index_build_ms),
+        format_double(stats.phase4_attach_ms),
+        format_double(stats.leaf_index_build_ms),
+        format_double(stats.leaf_candidate_query_ms),
+        format_double(stats.leaf_exact_verify_ms),
+        format_double(stats.leaf_tuple_emit_ms),
+        format_double(stats.leaf_tuple_merge_sort_ms),
+        format_double(stats.leaf_populate_ms),
+        format_double(stats.leaf_beacon_distance_ms),
+        format_double(stats.assign_ids_ms),
+        format_double(stats.graph_view_ms),
+        std::to_string(stats.phase2_total_possible_pairs),
+        std::to_string(stats.phase2_candidate_pairs),
+        std::to_string(stats.phase2_exact_distance_calls),
+        std::to_string(stats.phase2_edges_added),
+        std::to_string(stats.total_possible_leaf_pairs),
+        std::to_string(stats.leaf_candidate_pairs),
+        std::to_string(stats.leaf_exact_distance_calls),
+        std::to_string(stats.leaf_attachments_added),
+        std::to_string(stats.phase2_full_scan_fallback_count),
+        std::to_string(stats.leaf_full_scan_fallback_count),
+        std::to_string(stats.phase2_seed_candidate_pairs_before_length_filter),
+        std::to_string(stats.phase2_seed_length_pruned_candidates),
+        std::to_string(stats.phase2_pigeonhole_early_abort_count),
+        std::to_string(stats.phase2_range_final_candidate_pairs),
+        std::to_string(stats.leaf_seed_candidate_pairs_before_length_filter),
+        std::to_string(stats.leaf_seed_length_pruned_candidates),
+        std::to_string(stats.leaf_pigeonhole_early_abort_count),
+        std::to_string(stats.leaf_range_final_candidate_pairs),
+        leaf_attach_direction_used(stats),
+        range_candidate_mode_name(range_config.range_join.candidate_mode),
+        std::to_string(range_config.range_join.qgram_q),
+    });
+    rows_written++;
+
+    print_build_scale_bottleneck_summary(actual_prefix, stats);
+  }
+
+  std::cerr << "build-scale rows: " << rows_written << "\n";
 }
 
 void run_query(const std::string& /*ref_input*/, const std::string& reads_input,
@@ -884,12 +1146,14 @@ int main(int argc, char** argv) {
   std::string locator_kind = "refpos";
   std::string error_rates_csv = "0,0.01,0.02,0.03,0.05,0.07,0.10,0.15,0.20";
   std::string tolerance_rates_csv = "0,0.01,0.02,0.03,0.05,0.07,0.10,0.15,0.20";
+  std::string prefix_lengths_csv;
   std::string primary_radii_csv;
   std::string layer_values_csv = "2,3,4,5";
   std::string r_leaf_values_csv = "4,8,12";
   std::string alpha_values_csv = "0.5,0.7";
   std::string link_mode = "indexed";
   std::string leaf_attach_mode = "indexed";
+  std::string leaf_attach_direction = "auto";
   std::string range_candidate_mode = "auto";
   std::string mbb_filter_mode = "scan";
   std::string visited_mode = "epoch";
@@ -993,6 +1257,7 @@ int main(int argc, char** argv) {
     if (a == "--alpha-values" && i + 1 < argc) { alpha_values_csv = argv[++i]; continue; }
     if (a == "--error-rates" && i + 1 < argc) { error_rates_csv = argv[++i]; continue; }
     if (a == "--tolerance-rates" && i + 1 < argc) { tolerance_rates_csv = argv[++i]; continue; }
+    if (a == "--prefix-lengths" && i + 1 < argc) { prefix_lengths_csv = argv[++i]; continue; }
     if (a == "--primary-radii" && i + 1 < argc) { primary_radii_csv = argv[++i]; continue; }
     if (a == "--r-sw" && i + 1 < argc) { r_sw = std::atoi(argv[++i]); continue; }
     if (a == "--r-mw" && i + 1 < argc) { r_mw = std::atoi(argv[++i]); continue; }
@@ -1000,6 +1265,10 @@ int main(int argc, char** argv) {
     if (a == "--link-mode" && i + 1 < argc) { link_mode = argv[++i]; continue; }
     if (a == "--leaf-attach-mode" && i + 1 < argc) {
       leaf_attach_mode = argv[++i];
+      continue;
+    }
+    if (a == "--leaf-attach-direction" && i + 1 < argc) {
+      leaf_attach_direction = argv[++i];
       continue;
     }
     if (a == "--range-candidate-mode" && i + 1 < argc) {
@@ -1080,6 +1349,8 @@ int main(int argc, char** argv) {
     range_config.link_mode = navigamer::parse_build_range_mode(link_mode);
     range_config.leaf_attach_mode =
         navigamer::parse_build_range_mode(leaf_attach_mode);
+    range_config.leaf_attach_direction =
+        navigamer::parse_leaf_attach_direction(leaf_attach_direction);
     range_config.distance_mode =
         navigamer::parse_build_distance_mode(build_distance_mode);
     range_config.range_join.min_seed_len = range_min_seed_length;
@@ -1114,6 +1385,17 @@ int main(int argc, char** argv) {
         return 1;
       }
       run_build(ref_input, reads_input, hierarchy, range_config);
+      return 0;
+    }
+    if (cmd == "build-scale") {
+      if (ref_input.empty() || out_tsv.empty() || prefix_lengths_csv.empty()) {
+        std::cerr << "build-scale requires --ref, --prefix-lengths, and --out\n";
+        return 1;
+      }
+      run_build_scale(ref_input, window_size, stride,
+                      parse_size_csv(prefix_lengths_csv, "--prefix-lengths"),
+                      out_tsv, hierarchy, range_config,
+                      leaf_attach_direction);
       return 0;
     }
     if (cmd == "query") {

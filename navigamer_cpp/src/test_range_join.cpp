@@ -104,6 +104,12 @@ int main() {
   assert(adaptive.mode_used == RangeCandidateMode::PigeonholeOnly);
   assert(adaptive.block_len == 33);
   assert(adaptive.seed_len == 20);
+  assert(adaptive.range_full_scan_ms == 0.0);
+  assert(adaptive.seed_candidate_pairs_before_length_filter >=
+         adaptive.candidate_item_ids.size());
+  assert(adaptive.seed_length_pruned_candidates == adaptive.length_filtered_items);
+  assert(adaptive.pigeonhole_early_abort_count == 0);
+  assert(adaptive.final_candidate_pairs == adaptive.candidate_item_ids.size());
   assert(contains(adaptive.candidate_item_ids, items[0].item_id));
   assert(std::adjacent_find(adaptive.candidate_item_ids.begin(),
                             adaptive.candidate_item_ids.end()) ==
@@ -116,6 +122,7 @@ int main() {
   assert(fallback.used_full_scan);
   assert(fallback.block_len == 4);
   assert(fallback.seed_len == 4);
+  assert(fallback.range_full_scan_ms > 0.0);
   assert(fallback.candidate_item_ids.size() == items.size());
 
   auto auto_qgram = index.query(items[0].sequence, 20);
@@ -146,6 +153,15 @@ int main() {
       assert(full.mode_used == RangeCandidateMode::FullScan);
       assert(qgram.mode_used == RangeCandidateMode::QGramOnly);
       assert(hybrid.mode_used == RangeCandidateMode::Hybrid);
+      if (!pigeonhole.used_full_scan) {
+        assert(pigeonhole.range_full_scan_ms == 0.0);
+        assert(pigeonhole.seed_candidate_pairs_before_length_filter >=
+               pigeonhole.candidate_item_ids.size());
+        assert(pigeonhole.seed_length_pruned_candidates ==
+               pigeonhole.length_filtered_items);
+        assert(pigeonhole.final_candidate_pairs ==
+               pigeonhole.candidate_item_ids.size());
+      }
       auto verified_ids = [&](const navigamer::RangeJoinQueryResult& candidates) {
         std::unordered_set<size_t> verified;
         for (size_t item_id : candidates.candidate_item_ids) {
@@ -220,12 +236,28 @@ int main() {
          auto_config.auto_pigeonhole_max_candidates);
   assert(explosion_q.candidate_item_ids.size() <
          explosion_p.candidate_item_ids.size());
-  assert(selected.candidate_item_ids == explosion_h.candidate_item_ids);
-  assert(selected.mode_used == RangeCandidateMode::Hybrid);
+  assert(selected.candidate_item_ids == explosion_q.candidate_item_ids);
+  assert(selected.mode_used == RangeCandidateMode::QGramOnly);
+  assert(selected.pigeonhole_early_abort_count == 1);
   assert(selected.auto_pigeonhole_rejected_large_candidates == 1);
   assert(selected.auto_qgram_invoked == 1);
-  assert(selected.auto_hybrid_invoked == 1);
+  assert(selected.auto_hybrid_invoked == 0);
   assert(selected.auto_final_candidate_pairs == selected.candidate_item_ids.size());
+
+  auto ratio_ignored_config = auto_config;
+  ratio_ignored_config.auto_pigeonhole_max_candidates = 4;
+  ratio_ignored_config.auto_pigeonhole_max_ratio = 1.0;
+  ExactRangeJoinIndex ratio_ignored_auto(ratio_ignored_config);
+  ratio_ignored_auto.build(explosion_items);
+  auto selected_with_permissive_ratio =
+      ratio_ignored_auto.query(explosion_query, 4);
+  assert(selected_with_permissive_ratio.candidate_item_ids ==
+         explosion_q.candidate_item_ids);
+  assert(selected_with_permissive_ratio.mode_used == RangeCandidateMode::QGramOnly);
+  assert(selected_with_permissive_ratio.pigeonhole_early_abort_count == 1);
+  assert(selected_with_permissive_ratio.auto_pigeonhole_rejected_large_candidates == 1);
+  assert(selected_with_permissive_ratio.auto_qgram_invoked == 1);
+  assert(selected_with_permissive_ratio.auto_hybrid_invoked == 0);
 
   auto no_hybrid_config = auto_config;
   no_hybrid_config.auto_hybrid_on_large_candidates = false;
