@@ -2,6 +2,8 @@
 #define NAVIGAMER_SEARCH_ENGINE_HPP
 
 #include "index_builder.hpp"
+#include "qgram_filter.hpp"
+#include "simd_mbb_filter.hpp"
 #include "structure.hpp"
 #include "tools.hpp"
 #include <string>
@@ -16,11 +18,31 @@ enum class MBBFilterMode {
   RectIndex,
 };
 
+enum class VisitedMode {
+  StringSet,
+  Epoch,
+};
+
+enum class GraphViewMode {
+  Original,
+  Flat,
+};
+
 const char* mbb_filter_mode_name(MBBFilterMode mode);
 MBBFilterMode parse_mbb_filter_mode(const std::string& value);
+const char* visited_mode_name(VisitedMode mode);
+VisitedMode parse_visited_mode(const std::string& value);
+const char* graph_view_mode_name(GraphViewMode mode);
+GraphViewMode parse_graph_view_mode(const std::string& value);
 
 struct SearchConfig {
   MBBFilterMode mbb_filter_mode = MBBFilterMode::Scan;
+  VisitedMode visited_mode = VisitedMode::Epoch;
+  GraphViewMode graph_view_mode = GraphViewMode::Flat;
+  SimdMode simd_mode = SimdMode::Auto;
+  DistanceMode distance_mode = DistanceMode::Myers;
+  bool search_qgram_prefilter = false;
+  int search_qgram_q = 5;
 };
 
 struct SearchStats {
@@ -42,7 +64,29 @@ struct SearchStats {
   size_t mbb_rect_fallback_count = 0;
   size_t mbb_filter_parent_count = 0;
   size_t mbb_surviving_child_count = 0;
+  size_t mbb_scalar_checks = 0;
+  size_t mbb_simd_batches = 0;
+  size_t mbb_simd_fallbacks = 0;
+  size_t leaf_beacon_check_count = 0;
+  size_t leaf_beacon_scalar_checks = 0;
+  size_t leaf_beacon_simd_batches = 0;
+  size_t leaf_beacon_simd_fallbacks = 0;
+  size_t mbb_check_count = 0;
+  size_t leaf_exact_distance_call_count = 0;
+  size_t center_exact_distance_call_count = 0;
+  size_t visited_check_count = 0;
+  size_t visited_hit_count = 0;
   size_t center_distance_calls_after_mbb = 0;
+  bool search_qgram_prefilter_enabled = false;
+  int search_qgram_q = 0;
+  size_t search_qgram_signature_build_count = 0;
+  size_t search_qgram_signature_missing_count = 0;
+  size_t search_qgram_checks = 0;
+  size_t search_qgram_pruned_children = 0;
+  size_t search_qgram_passed_children = 0;
+  size_t center_distance_calls_before_qgram = 0;
+  size_t center_distance_calls_after_qgram = 0;
+  size_t result_count = 0;
 
   SearchStats() = default;
   explicit SearchStats(size_t num_layers) : layer_breakdown(num_layers, 0) {}
@@ -51,6 +95,25 @@ struct SearchStats {
     if (candidate_count_for_prune == 0) return 0.0;
     return static_cast<double>(beacon_prune_count) / candidate_count_for_prune;
   }
+
+  double qgram_prune_ratio() const {
+    if (search_qgram_checks == 0) return 0.0;
+    return static_cast<double>(search_qgram_pruned_children) /
+           search_qgram_checks;
+  }
+};
+
+struct SearchScratch {
+  std::vector<uint32_t> visited_epoch;
+  uint32_t current_epoch = 0;
+  std::vector<std::shared_ptr<WorldNode>> frontier;
+  std::vector<std::shared_ptr<WorldNode>> next_frontier;
+  std::vector<std::shared_ptr<WorldNode>> mbb_candidates;
+  std::vector<std::shared_ptr<WorldNode>> verified_children;
+
+  void begin_query(size_t node_count);
+  bool is_visited(NodeId id) const;
+  bool mark_visited(NodeId id);
 };
 
 class BioGeometrySearchEngine {
@@ -75,6 +138,7 @@ class BioGeometrySearchEngine {
  private:
   const BioGeometryIndexBuilder& index_;
   SearchConfig config_;
+  std::unordered_map<std::string, QGramSignature> world_qgram_signatures_;
 
   bool mbb_prunable_row(const std::vector<MBB>& row, const std::vector<int>& V_Q,
                         int tolerance) const;
@@ -101,13 +165,27 @@ class BioGeometrySearchEngine {
       int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       SearchStats& stats) const;
+  void verify_leaf_candidates_view(
+      NodeId node_id,
+      const BioSequence& query_seq,
+      int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      SearchStats& stats) const;
 
   void process_node_adaptive(
       const std::shared_ptr<WorldNode>& node, int current_layer,
       const BioSequence& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       std::unordered_set<std::string>& visited_nodes,
-      SearchStats& stats) const;
+      SearchStats& stats,
+      const QGramSignature* query_qgram_signature) const;
+  void process_node_adaptive_epoch(
+      const std::shared_ptr<WorldNode>& node, int current_layer,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      SearchScratch& scratch,
+      SearchStats& stats,
+      const QGramSignature* query_qgram_signature) const;
 
   void search_layer_adaptive(
       const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
@@ -115,7 +193,47 @@ class BioGeometrySearchEngine {
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       std::unordered_set<std::string>& visited_nodes,
       SearchStats& stats,
-      bool after_mbb_filter = false) const;
+      bool after_mbb_filter,
+      const QGramSignature* query_qgram_signature) const;
+  void search_layer_adaptive_epoch(
+      const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      SearchScratch& scratch,
+      SearchStats& stats,
+      bool after_mbb_filter,
+      const QGramSignature* query_qgram_signature) const;
+
+  bool flat_is_visited(
+      NodeId node_id,
+      const std::unordered_set<std::string>* visited_nodes,
+      const SearchScratch* scratch) const;
+  bool flat_mark_visited(
+      NodeId node_id,
+      std::unordered_set<std::string>* visited_nodes,
+      SearchScratch* scratch) const;
+  std::vector<NodeId> get_mbb_surviving_child_ids_view(
+      NodeId node_id,
+      const std::vector<int>& query_beacon_dists,
+      int tolerance,
+      SearchStats& stats) const;
+  void process_node_adaptive_view(
+      NodeId node_id, int current_layer,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      std::unordered_set<std::string>* visited_nodes,
+      SearchScratch* scratch,
+      SearchStats& stats,
+      const QGramSignature* query_qgram_signature) const;
+  void search_layer_adaptive_view(
+      const std::vector<NodeId>& candidates, int layer_id,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      std::unordered_set<std::string>* visited_nodes,
+      SearchScratch* scratch,
+      SearchStats& stats,
+      bool after_mbb_filter,
+      const QGramSignature* query_qgram_signature) const;
 
   void traverse_exhaustive(
       const std::shared_ptr<WorldNode>& node, int current_layer,

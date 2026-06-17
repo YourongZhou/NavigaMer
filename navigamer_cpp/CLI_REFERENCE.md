@@ -22,19 +22,45 @@ Used by all pipelines that build the index:
 | `--leaf-attach-mode` | `indexed` | Leaf attachment: `full` or exact `indexed` range join |
 | `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
+| `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full` |
+| `--qgram-q` | `5` | Positive q-gram length used by q-gram and hybrid candidate generation |
+| `--auto-pigeonhole-max-candidates` | `4096` | Auto accepts pigeonhole when its candidate count is at most this value |
+| `--auto-pigeonhole-max-ratio` | `0.25` | Auto accepts pigeonhole when candidates / length-compatible targets is at most this ratio |
+| `--auto-hybrid-on-large-candidates` | `true` | Rejected large pigeonhole sets use hybrid when true, direct q-gram when false |
+| `--build-distance-mode` | `dp` | Index construction edit-distance backend: reference `dp`, optional `edlib`, or conservative `auto` (currently DP) |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
+| `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
+| `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
+| `--simd-mode` | `auto` | Flat child-MBB and leaf-beacon filter backend: `auto`, `scalar`, `avx2`, or `avx512`; unsupported SIMD falls back to scalar |
+| `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or conservative `auto` (currently DP) |
+| `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
+| `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
-Indexed construction is exact. For query length `L` and threshold `tau`, it
-uses `block_len = floor(L / (tau + 1))` and
-`seed_len = min(range_max_seed_length, block_len)`. If `seed_len` is below
-`range_min_seed_length`, the range-join call explicitly falls back to a full
-scan. Otherwise, pigeonhole seeds generate a safe candidate superset and every
-candidate is verified with bounded exact edit distance. Builder summaries print
-possible pairs, candidates, exact calls, accepted links, fallback counts, and
-reduction ratios.
+Indexed construction is exact. Pigeonhole mode uses
+`block_len = floor(L / (tau + 1))` and
+`seed_len = min(range_max_seed_length, block_len)`, falling back to the
+length-compatible full set when the seed is too short. Q-gram mode safely
+prunes only pairs with `qgram_l1(a,b) > 2*q*tau`. Hybrid mode intersects the
+pigeonhole and q-gram safe candidate supersets. Auto runs pigeonhole when its
+seed is long enough, accepting it when candidate count is below the configured
+maximum **or** candidate ratio is below the configured maximum. Otherwise it
+invokes q-gram and returns the safe hybrid intersection by default. Full
+candidate mode returns every length-compatible item.
+
+Old seed-length-only auto behavior can be reproduced with permissive thresholds
+such as `--auto-pigeonhole-max-candidates 18446744073709551615
+--auto-pigeonhole-max-ratio 1.0`. Because acceptance uses OR semantics, a
+dataset with fewer than the default `4096` length-compatible targets accepts
+pigeonhole regardless of candidate ratio.
+
+Every returned candidate is still verified with bounded exact edit distance;
+candidate generation never directly adds an edge or leaf attachment. Builder
+summaries distinguish possible pairs, returned candidates, exact calls,
+accepted results, length pruning, q-gram L1 pruning, per-mode query counts,
+fallback counts, and reduction ratios.
 
 Rectangle filtering is also exact. Rect mode returns a child world if and only
 if its existing MBB row intersects the query rectangle in every beacon
@@ -42,6 +68,15 @@ dimension. It changes only survivor enumeration; center-distance verification,
 containment/overlap traversal, and leaf verification remain unchanged. Missing
 or inconsistent indexes, small fanout, dimension mismatches, and query
 exceptions fall back to scan.
+
+Search-side q-gram filtering is also exact and no-false-negative. It runs only
+after child MBB survivor generation and safely prunes when
+`qgram_l1(query, child.center) > 2*q*(child.radius+tolerance)`. Passing children
+still receive bounded exact center edit-distance verification. It does not
+change coarsest-layer search, strict containment, overlap traversal, leaf
+refinement, construction rebinding, or leaf attachment. World-center
+signatures are cached per search engine. Non-ACGT centers/queries, unsupported
+q values, and missing signatures conservatively fall back to no pruning.
 
 ## I/O conventions (`io_utils`)
 
@@ -120,6 +155,46 @@ Slices the reference into windows of length `--window` with stride `--stride`; e
 
 If a query has no hit, a placeholder row is still emitted with stats.
 
+### `query-benchmark`
+
+Builds one shared in-memory index, deterministically generates six query
+classes (`random_region`, `ordinary_region`, `low_complexity_region`,
+`no_hit`, `single_hit`, and `multi_hit`), and compares:
+
+- baseline: fixed `scan` MBB filtering, legacy `string` visited mode,
+  `original` graph traversal, scalar MBB filtering, `dp` distance mode, and
+  search q-gram disabled
+- optimized: `--mbb-filter-mode`, `--visited-mode`, `--graph-view`,
+  `--simd-mode`, `--distance-mode`, `--search-qgram-prefilter`, and
+  `--search-qgram-q`
+- exact brute-force result IDs computed before timing
+
+**Required:** `--ref`, `--out`, `--summary-out`, `--json-out`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--reference-subset-length` | `0` | Reference prefix length; `0` uses the full input |
+| `--window` | `200` | Indexed reference-window length |
+| `--stride` | `1` | Indexed window stride |
+| `--query-length` | `200` | Generated query length |
+| `--tolerance` | `2` | Exact edit-distance threshold |
+| `--seed` | `42` | Deterministic generation seed |
+| `--threads` | `1` | Recorded/applied OpenMP thread count; Step 0 query execution remains serial |
+| `--queries-per-class` | `1` | Queries generated for each class |
+| `--warmup-iterations` | `2` | Untimed warmups per query/profile |
+| `--measured-iterations` | `10` | Timed warm samples per query/profile |
+| `--cold-cache-bytes` | `268435456` | Best-effort eviction buffer touched before each cold sample; `0` disables it |
+| `--out` | required | Detailed per-sample TSV |
+| `--summary-out` | required | Per-class/profile plus `all` aggregate TSV |
+| `--json-out` | required | Configuration, build, memory, aggregate, mismatch, and gate JSON |
+
+The timed region contains only `search_adaptive`. Results must be stable across
+repeated executions and exactly match between profiles and brute force. The
+command writes all outputs before returning and exits `0` when the gate passes,
+`2` on a result/no-FN mismatch, and `1` on configuration or runtime errors.
+Current/peak RSS telemetry is best effort. Candidate-set comparison and
+per-query allocation counting are explicitly reported as `unavailable`.
+
 ### `boundary`
 
 Builds one in-memory index from reference windows of fixed length `--length` and sweeps a full `error_rate × tolerance_rate` grid without rebuilding the index for each cell. This command is intended for capability-boundary exploration on long reference slices such as `chr1_subset`.
@@ -169,8 +244,37 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`,
 `mbb_filter_mode`, `mbb_scan_child_checks`, `mbb_rect_index_queries`,
 `mbb_rect_candidate_children`, `mbb_rect_fallback_count`,
-`center_distance_calls_after_mbb`, `avg_mbb_candidates_per_parent`,
+`mbb_surviving_child_count`, `mbb_scalar_checks`, `mbb_simd_batches`,
+`mbb_simd_fallbacks`, `center_distance_calls_after_mbb`,
+`leaf_beacon_scalar_checks`, `leaf_beacon_simd_batches`,
+`leaf_beacon_simd_fallbacks`,
+`search_qgram_prefilter_enabled`, `search_qgram_q`,
+`search_qgram_signature_build_count`, `search_qgram_signature_missing_count`,
+`search_qgram_checks`, `search_qgram_pruned_children`,
+`search_qgram_passed_children`, `center_distance_calls_before_qgram`,
+`center_distance_calls_after_qgram`, `qgram_prune_ratio`, `result_count`,
+`avg_mbb_candidates_per_parent`,
 `avg_center_distance_calls_per_query`, `query_time_ms`
+
+**`query-benchmark` detail:**  
+`query_id`, `query_class`, `profile`, `sample_kind`, `iteration`,
+`first_profile`, `latency_ms`, `result_count`, `brute_force_result_count`,
+`result_equal`, `no_fn`, `world_access_count`, `node_access_count`,
+`edge_access_count`, `mbb_checks`, `mbb_survivors`, `mbb_scalar_checks`,
+`mbb_simd_batches`, `mbb_simd_fallbacks`, `qgram_checks`,
+`center_exact_distance_calls`, `leaf_beacon_checks`,
+`leaf_beacon_scalar_checks`, `leaf_beacon_simd_batches`,
+`leaf_beacon_simd_fallbacks`,
+`leaf_exact_distance_calls`, `visited_checks`, `visited_hits`,
+`candidate_count`, `verified_candidate_count`
+
+The summary TSV reports cold/warm average, p50, p95, and p99 latency; query,
+sample, result, equality-failure, and false-negative totals; and average
+logical counters for each query-class/profile pair plus `all`.
+
+`center_distance_calls_after_mbb` is retained as a compatibility alias for
+`center_distance_calls_before_qgram`. The actual bounded center edit-distance
+calls are reported by `center_distance_calls_after_qgram`.
 
 `candidate_count_for_prune` and `beacon_prune_count` include both hierarchy-level MBB pruning and finest-layer leaf-beacon refinement.
 
@@ -195,9 +299,14 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 | `test_search_stats_bin` | Radius-schedule and search-cost instrumentation checks |
 | `test_map150_recall` | Fixed-150bp mapper recall, strand, duplicate, and verifier checks |
 | `test_bounded_edit_distance` | Banded thresholded distance vs full Levenshtein |
-| `test_range_join` | Adaptive pigeonhole no-false-negative and verified-pair checks |
-| `test_build_range_equivalence` | Full vs indexed construction and search-result equivalence |
+| `test_bounded_myers_bin` | Optional bounded Myers backend vs full Levenshtein and DP fallback |
+| `test_qgram_filter` | Q-gram counts, L1 bound, ambiguous bases, and index no-false-negative checks |
+| `test_range_join` | Pigeonhole/q-gram/hybrid no-false-negative and verified-pair checks |
+| `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
+| `test_search_qgram_prefilter` | Search q-gram on/off, scan/rect, ambiguous-base fallback, containment, and center-call reduction checks |
+| `test_search_distance_mode_bin` | Adaptive `dp` vs `myers` bounded center-distance equivalence |
+| `test_query_benchmark_gate` | Deterministic query classes, dual-profile output, exact result equality, and no-FN gate |
 
 Build with `make test_recall` / `make test_distance_bound`.

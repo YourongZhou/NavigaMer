@@ -45,8 +45,11 @@ pip install -r reproducibility/requirements.txt
 cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mbb-filter-mode rect --min-rect-index-fanout 2
+./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
+./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
+./navigamer query-benchmark --ref ACGTGCACTGATTGCATAGCTACGAAAAAAAAAAAACCCCGGGGCCCCCCCCCGGGCCCC --window 12 --stride 12 --query-length 12 --tolerance 1 --primary-radii 12,6,2 --min-rect-index-fanout 1 --mbb-filter-mode rect --search-qgram-prefilter on --search-qgram-q 3 --warmup-iterations 1 --measured-iterations 2 --cold-cache-bytes 0 --out /tmp/query_detail.tsv --summary-out /tmp/query_summary.tsv --json-out /tmp/query_summary.json
 ```
 
 Fixed-length 150 bp mapper path with final gap-aware verification:
@@ -86,11 +89,49 @@ Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFEREN
 
 The current C++ index is in-memory only: `build`, `query`, `run`, `benchmark`, `map150`, and `boundary` rebuild the index for each process invocation. The `boundary` command is intended for long-sequence capability sweeps and reuses a single in-memory index across the full `error_rate × tolerance_rate` grid inside one run.
 
+Indexed construction supports exact `auto`, `pigeonhole`, `qgram`, `hybrid`,
+and `full` candidate modes. Q-gram filtering uses the necessary condition
+`qgram_l1(a,b) <= 2*q*tau`; hybrid intersects the pigeonhole and q-gram safe
+candidate supersets. Every surviving pair is still verified by bounded exact
+edit distance before an edge or leaf attachment is added.
+
+Auto construction is selectivity-aware: it accepts pigeonhole candidates when
+their count is at most `4096` or their ratio among length-compatible targets is
+at most `0.25`; otherwise it invokes q-gram and returns the safe hybrid
+intersection by default.
+
 Adaptive search supports `--mbb-filter-mode scan|rect` (default `scan`). The
 `rect` mode uses an exact in-memory rectangle index over the existing per-child
 MBB rows and falls back to the original scan whenever the index is unavailable
 or inconsistent. `--min-rect-index-fanout` controls the build threshold and
 defaults to `64`.
+
+Flat adaptive traversal supports `--simd-mode auto|scalar|avx2|avx512`
+(default `auto`) for child MBB rectangle filtering and leaf-beacon filtering.
+Unsupported SIMD paths fall back to the scalar filter and preserve the same
+survivor set.
+
+Adaptive bounded child-center distance supports `--distance-mode dp|myers|edlib|auto`
+(default `myers`). Myers supports ACGT inputs through 256bp shorter input
+length and falls back to DP for unsupported inputs. `edlib` uses the vendored
+Edlib bounded distance backend. `dp` remains the reference mode; `auto`
+currently remains DP. Index construction separately supports
+`--build-distance-mode dp|edlib|auto` and defaults to `dp`.
+
+Adaptive child-world traversal also supports the optional
+`--search-qgram-prefilter on` with independent `--search-qgram-q` (default
+`5`). After MBB filtering, it safely rejects a child center only when
+`qgram_l1(query, center) > 2*q*(child.radius+tolerance)`. Every passing child
+still receives bounded exact edit-distance verification. The default is
+`off`; unsupported q values or non-ACGT sequences conservatively fall back to
+no pruning.
+
+`query-benchmark` is a deterministic correctness and latency gate for adaptive
+search. It compares a fixed baseline (`scan`, scalar MBB filtering, search
+q-gram off, `dp` distance mode), the optimized profile selected by
+adaptive-search flags, and exact brute-force IDs across six query classes. It writes detailed TSV, aggregate
+TSV, and JSON output and returns exit status `2` on any result mismatch or
+false negative.
 
 The default CLI path still uses the legacy three primary layers (`LW/MW/SW`) via `--r-lw`, `--r-mw`, and `--r-sw`, but the C++ implementation now also supports any number of primary layers `K >= 2` through `--primary-radii coarse,...,fine`. One auxiliary tier is inserted automatically between each adjacent pair of primary layers during index construction and collapsed away before query-time navigation.
 

@@ -3,6 +3,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <stdexcept>
 
 namespace navigamer {
 
@@ -71,8 +72,10 @@ std::vector<std::shared_ptr<BioSequence>> load_reads(
 void write_tsv(const std::string& output_path,
                const std::vector<std::string>& columns,
                const std::vector<std::vector<std::string>>& rows) {
-  if (rows.empty()) return;
   std::ofstream out(output_path);
+  if (!out) {
+    throw std::runtime_error("unable to open TSV output: " + output_path);
+  }
   for (size_t i = 0; i < columns.size(); ++i) {
     if (i) out << '\t';
     out << columns[i];
@@ -84,6 +87,10 @@ void write_tsv(const std::string& output_path,
       out << row[i];
     }
     out << '\n';
+  }
+  out.close();
+  if (!out) {
+    throw std::runtime_error("failed to write TSV output: " + output_path);
   }
 }
 
