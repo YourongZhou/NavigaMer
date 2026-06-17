@@ -33,6 +33,15 @@ enum class BuildRangeMode {
 const char* build_range_mode_name(BuildRangeMode mode);
 BuildRangeMode parse_build_range_mode(const std::string& value);
 
+enum class LeafAttachDirection {
+  SeqToWorld,
+  WorldToSeq,
+  Auto,
+};
+
+const char* leaf_attach_direction_name(LeafAttachDirection direction);
+LeafAttachDirection parse_leaf_attach_direction(const std::string& value);
+
 enum class BuildDistanceMode {
   DP,
   Edlib,
@@ -42,12 +51,25 @@ enum class BuildDistanceMode {
 const char* build_distance_mode_name(BuildDistanceMode mode);
 BuildDistanceMode parse_build_distance_mode(const std::string& value);
 
+enum class Phase1CandidateMode {
+  Scan,
+  Hybrid,
+};
+
+const char* phase1_candidate_mode_name(Phase1CandidateMode mode);
+Phase1CandidateMode parse_phase1_candidate_mode(const std::string& value);
+
 struct BuildRangeConfig {
   BuildRangeMode link_mode = BuildRangeMode::Indexed;
   BuildRangeMode leaf_attach_mode = BuildRangeMode::Indexed;
-  BuildDistanceMode distance_mode = BuildDistanceMode::DP;
+  LeafAttachDirection leaf_attach_direction = LeafAttachDirection::Auto;
+  BuildDistanceMode distance_mode = BuildDistanceMode::Edlib;
+  Phase1CandidateMode phase1_candidate_mode = Phase1CandidateMode::Hybrid;
   RangeJoinConfig range_join;
   size_t min_rect_index_fanout = 64;
+  size_t phase1_metric_min_fanout = 64;
+  size_t phase1_qgram_min_fanout = 2048;
+  size_t phase1_qgram_max_touched = 250000;
 };
 
 struct SearchGraphView {
@@ -106,6 +128,10 @@ class BioGeometryIndexBuilder {
     size_t phase2_qgram_candidate_pairs = 0;
     size_t phase2_qgram_pruned_by_l1 = 0;
     size_t phase2_length_pruned_pairs = 0;
+    size_t phase2_seed_candidate_pairs_before_length_filter = 0;
+    size_t phase2_seed_length_pruned_candidates = 0;
+    size_t phase2_pigeonhole_early_abort_count = 0;
+    size_t phase2_range_final_candidate_pairs = 0;
     size_t phase2_required_shared_nonpositive_count = 0;
     size_t phase2_auto_pigeonhole_accepted = 0;
     size_t phase2_auto_pigeonhole_rejected_large_candidates = 0;
@@ -127,6 +153,10 @@ class BioGeometryIndexBuilder {
     size_t leaf_qgram_candidate_pairs = 0;
     size_t leaf_qgram_pruned_by_l1 = 0;
     size_t leaf_length_pruned_pairs = 0;
+    size_t leaf_seed_candidate_pairs_before_length_filter = 0;
+    size_t leaf_seed_length_pruned_candidates = 0;
+    size_t leaf_pigeonhole_early_abort_count = 0;
+    size_t leaf_range_final_candidate_pairs = 0;
     size_t leaf_required_shared_nonpositive_count = 0;
     size_t leaf_auto_pigeonhole_accepted = 0;
     size_t leaf_auto_pigeonhole_rejected_large_candidates = 0;
@@ -137,6 +167,52 @@ class BioGeometryIndexBuilder {
     double leaf_auto_candidate_ratio_avg = 0.0;
     double leaf_candidate_reduction_ratio = 0.0;
     double leaf_exact_distance_reduction_ratio = 0.0;
+    double total_build_ms = 0.0;
+    double phase0_dedup_ms = 0.0;
+    double phase1_sketch_ms = 0.0;
+    size_t phase1_total_possible_pairs = 0;
+    size_t phase1_candidate_pairs = 0;
+    size_t phase1_cover_candidate_scans = 0;
+    size_t phase1_length_pruned_candidates = 0;
+    size_t phase1_exact_distance_calls = 0;
+    size_t phase1_best_cover_hits = 0;
+    size_t phase1_cover_misses = 0;
+    size_t phase1_scan_queries = 0;
+    size_t phase1_metric_index_queries = 0;
+    size_t phase1_qgram_index_queries = 0;
+    size_t phase1_fallback_scan_queries = 0;
+    size_t phase1_metric_distance_calls = 0;
+    size_t phase1_metric_build_distance_calls = 0;
+    size_t phase1_qgram_touched_candidates = 0;
+    size_t phase1_qgram_pruned_candidates = 0;
+    double phase2_rebinding_ms = 0.0;
+    double phase3_mbb_ms = 0.0;
+    double phase4_attach_ms = 0.0;
+    double assign_ids_ms = 0.0;
+    double graph_view_ms = 0.0;
+    double print_summary_ms = 0.0;
+    double phase2_index_build_ms = 0.0;
+    double phase2_candidate_query_ms = 0.0;
+    double phase2_exact_verify_ms = 0.0;
+    double phase2_edge_insert_ms = 0.0;
+    double leaf_index_build_ms = 0.0;
+    double leaf_candidate_query_ms = 0.0;
+    double leaf_exact_verify_ms = 0.0;
+    double leaf_tuple_emit_ms = 0.0;
+    double leaf_tuple_merge_sort_ms = 0.0;
+    double leaf_populate_ms = 0.0;
+    double leaf_beacon_distance_ms = 0.0;
+    double phase3_collect_beacons_ms = 0.0;
+    double phase3_collapse_children_ms = 0.0;
+    double phase3_child_mbb_distance_ms = 0.0;
+    double phase3_rect_index_build_ms = 0.0;
+    double range_posting_lookup_ms = 0.0;
+    double range_seed_union_ms = 0.0;
+    double range_length_filter_ms = 0.0;
+    double range_qgram_query_ms = 0.0;
+    double range_hybrid_intersection_ms = 0.0;
+    double range_full_scan_ms = 0.0;
+    LeafAttachDirection leaf_attach_direction_used = LeafAttachDirection::Auto;
   };
   Statistics get_statistics() const;
   const HierarchyConfig& hierarchy_config() const { return hierarchy_; }

@@ -35,6 +35,15 @@ size_t qgram_l1_distance(
 bool qgram_can_prune_edit_distance(
     const QGramSignature& lhs, const QGramSignature& rhs, int tau);
 
+struct QGramQueryWorkspace {
+  std::vector<size_t> shared;
+  std::vector<uint32_t> seen_epoch;
+  std::vector<size_t> touched;
+  uint32_t epoch = 1;
+
+  void reset(size_t item_count);
+};
+
 class QGramCountIndex {
  public:
   struct Item {
@@ -56,7 +65,8 @@ class QGramCountIndex {
   void build(const std::vector<Item>& items);
   std::vector<size_t> query(
       const std::string& query_sequence, int tau,
-      QueryStats* stats = nullptr) const;
+      QueryStats* stats = nullptr,
+      QGramQueryWorkspace* workspace = nullptr) const;
 
   int q() const { return q_; }
   size_t size() const { return items_.size(); }

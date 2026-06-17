@@ -166,6 +166,47 @@ void test_qgram_index_no_false_negative() {
   assert(contains(short_candidates, 81));
 }
 
+void test_qgram_index_reuses_sparse_workspace() {
+  std::mt19937 gen(2026);
+  std::vector<navigamer::QGramCountIndex::Item> items;
+  for (size_t i = 0; i < 128; ++i) {
+    items.push_back({i, random_dna(60 + i % 5, gen)});
+  }
+  items.push_back({128, "A"});
+
+  navigamer::QGramCountIndex index(5);
+  index.build(items);
+  navigamer::QGramQueryWorkspace workspace;
+
+  navigamer::QGramCountIndex::QueryStats first_stats;
+  auto first = index.query(items[0].sequence, 2, &first_stats, &workspace);
+  assert(contains(first, 0));
+  assert(workspace.shared.size() == items.size());
+  assert(workspace.seen_epoch.size() == items.size());
+  const auto* shared_storage = workspace.shared.data();
+  const auto* seen_storage = workspace.seen_epoch.data();
+  assert(!workspace.touched.empty());
+
+  navigamer::QGramCountIndex::QueryStats second_stats;
+  auto second = index.query(items[1].sequence, 2, &second_stats, &workspace);
+  assert(contains(second, 1));
+  assert(workspace.shared.data() == shared_storage);
+  assert(workspace.seen_epoch.data() == seen_storage);
+  assert(workspace.shared.size() == items.size());
+  assert(workspace.seen_epoch.size() == items.size());
+
+  navigamer::QGramCountIndex::QueryStats short_stats;
+  auto short_candidates = index.query("A", 0, &short_stats, &workspace);
+  assert(short_stats.full_scan_fallbacks == 1);
+  assert(contains(short_candidates, 128));
+
+  auto without_workspace = index.query(items[2].sequence, 3);
+  navigamer::QGramCountIndex::QueryStats with_workspace_stats;
+  auto with_workspace =
+      index.query(items[2].sequence, 3, &with_workspace_stats, &workspace);
+  assert(with_workspace == without_workspace);
+}
+
 }  // namespace
 
 int main() {
@@ -175,6 +216,7 @@ int main() {
   test_qgram_signature_safe_fallbacks();
   test_qgram_l1_bound_no_false_negative();
   test_qgram_index_no_false_negative();
+  test_qgram_index_reuses_sparse_workspace();
   std::cout << "qgram filter tests passed\n";
   return 0;
 }

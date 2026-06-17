@@ -1,12 +1,57 @@
 #include "range_join.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 
 namespace navigamer {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+double elapsed_ms_since(Clock::time_point start) {
+  return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+}
+
+class ScopedTimer {
+ public:
+  explicit ScopedTimer(double* target_ms)
+      : target_ms_(target_ms), start_(Clock::now()) {}
+
+  ~ScopedTimer() {
+    if (target_ms_) *target_ms_ += elapsed_ms_since(start_);
+  }
+
+ private:
+  double* target_ms_;
+  Clock::time_point start_;
+};
+
+void merge_range_timing(RangeJoinQueryResult& target,
+                        const RangeJoinQueryResult& source) {
+  target.range_posting_lookup_ms += source.range_posting_lookup_ms;
+  target.range_seed_union_ms += source.range_seed_union_ms;
+  target.range_length_filter_ms += source.range_length_filter_ms;
+  target.range_qgram_query_ms += source.range_qgram_query_ms;
+  target.range_hybrid_intersection_ms += source.range_hybrid_intersection_ms;
+  target.range_full_scan_ms += source.range_full_scan_ms;
+}
+
+void copy_seed_counters(RangeJoinQueryResult& target,
+                        const RangeJoinQueryResult& source) {
+  target.seed_candidate_pairs_before_length_filter =
+      source.seed_candidate_pairs_before_length_filter;
+  target.seed_length_pruned_candidates = source.seed_length_pruned_candidates;
+  target.pigeonhole_early_abort_count = source.pigeonhole_early_abort_count;
+  target.pigeonhole_candidate_count = source.pigeonhole_candidate_count;
+}
+
+}  // namespace
 
 const char* range_candidate_mode_name(RangeCandidateMode mode) {
   switch (mode) {
@@ -48,10 +93,13 @@ ExactRangeJoinIndex::ExactRangeJoinIndex(RangeJoinConfig config)
 
 void ExactRangeJoinIndex::build(const std::vector<RangeJoinItem>& items) {
   items_ = items;
+  item_lengths_by_id_.clear();
+  item_lengths_by_id_.reserve(items.size());
   postings_by_seed_len_.clear();
   std::vector<QGramCountIndex::Item> qgram_items;
   qgram_items.reserve(items.size());
   for (const auto& item : items) {
+    item_lengths_by_id_[item.item_id] = item.sequence.size();
     qgram_items.push_back({item.item_id, item.sequence});
   }
   qgram_index_.build(qgram_items);
@@ -99,12 +147,14 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
   }
 
   if (config_.candidate_mode == RangeCandidateMode::PigeonholeOnly) {
-    return pigeonhole_query(query_sequence, tau, block_len, seed_len);
+    return pigeonhole_query(query_sequence, tau, block_len, seed_len,
+                            std::numeric_limits<size_t>::max());
   }
 
   if (config_.candidate_mode == RangeCandidateMode::Hybrid) {
     auto pigeonhole =
-        pigeonhole_query(query_sequence, tau, block_len, seed_len);
+        pigeonhole_query(query_sequence, tau, block_len, seed_len,
+                         std::numeric_limits<size_t>::max());
     auto qgram = qgram_query(query_sequence, tau);
     return hybrid_result(pigeonhole, qgram);
   }
@@ -119,22 +169,24 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
   }
 
   auto pigeonhole =
-      pigeonhole_query(query_sequence, tau, block_len, seed_len);
-  pigeonhole.compatible_item_count =
-      items_.size() - pigeonhole.length_filtered_items;
+      pigeonhole_query(query_sequence, tau, block_len, seed_len,
+                       config_.auto_pigeonhole_max_candidates);
+  if (pigeonhole.pigeonhole_early_abort_count > 0) {
+    auto qgram = qgram_query(query_sequence, tau);
+    merge_range_timing(qgram, pigeonhole);
+    qgram.block_len = block_len;
+    qgram.seed_len = seed_len;
+    copy_seed_counters(qgram, pigeonhole);
+    qgram.auto_pigeonhole_rejected_large_candidates = 1;
+    qgram.auto_qgram_invoked = 1;
+    qgram.auto_final_candidate_pairs = qgram.candidate_item_ids.size();
+    qgram.final_candidate_pairs = qgram.candidate_item_ids.size();
+    return qgram;
+  }
   pigeonhole.pigeonhole_candidate_count =
       pigeonhole.candidate_item_ids.size();
-  pigeonhole.pigeonhole_candidate_ratio =
-      pigeonhole.compatible_item_count == 0
-          ? 0.0
-          : static_cast<double>(pigeonhole.pigeonhole_candidate_count) /
-                static_cast<double>(pigeonhole.compatible_item_count);
-  pigeonhole.auto_candidate_ratio_sum =
-      pigeonhole.pigeonhole_candidate_ratio;
   if (pigeonhole.pigeonhole_candidate_count <=
-          config_.auto_pigeonhole_max_candidates ||
-      pigeonhole.pigeonhole_candidate_ratio <=
-          config_.auto_pigeonhole_max_ratio) {
+          config_.auto_pigeonhole_max_candidates) {
     pigeonhole.auto_pigeonhole_accepted = 1;
     pigeonhole.auto_final_candidate_pairs =
         pigeonhole.candidate_item_ids.size();
@@ -143,41 +195,42 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
 
   auto qgram = qgram_query(query_sequence, tau);
   if (!config_.auto_hybrid_on_large_candidates) {
+    merge_range_timing(qgram, pigeonhole);
     qgram.block_len = block_len;
     qgram.seed_len = seed_len;
-    qgram.compatible_item_count = pigeonhole.compatible_item_count;
-    qgram.pigeonhole_candidate_count = pigeonhole.pigeonhole_candidate_count;
-    qgram.pigeonhole_candidate_ratio = pigeonhole.pigeonhole_candidate_ratio;
-    qgram.auto_candidate_ratio_sum = pigeonhole.pigeonhole_candidate_ratio;
+    copy_seed_counters(qgram, pigeonhole);
     qgram.auto_pigeonhole_rejected_large_candidates = 1;
     qgram.auto_qgram_invoked = 1;
     qgram.auto_final_candidate_pairs = qgram.candidate_item_ids.size();
+    qgram.final_candidate_pairs = qgram.candidate_item_ids.size();
     return qgram;
   }
 
   auto result = hybrid_result(pigeonhole, qgram);
-  result.compatible_item_count = pigeonhole.compatible_item_count;
-  result.pigeonhole_candidate_count = pigeonhole.pigeonhole_candidate_count;
-  result.pigeonhole_candidate_ratio = pigeonhole.pigeonhole_candidate_ratio;
-  result.auto_candidate_ratio_sum = pigeonhole.pigeonhole_candidate_ratio;
+  copy_seed_counters(result, pigeonhole);
   result.auto_pigeonhole_rejected_large_candidates = 1;
   result.auto_qgram_invoked = 1;
   result.auto_hybrid_invoked = 1;
   result.auto_final_candidate_pairs = result.candidate_item_ids.size();
+  result.final_candidate_pairs = result.candidate_item_ids.size();
   return result;
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
     const std::string& query_sequence, int tau, bool fallback) const {
   RangeJoinQueryResult result;
+  ScopedTimer full_timer(&result.range_full_scan_ms);
   result.mode_used = RangeCandidateMode::FullScan;
   result.used_full_scan = fallback;
-  for (const auto& item : items_) {
-    if (std::abs(static_cast<long long>(query_sequence.size()) -
-                 static_cast<long long>(item.sequence.size())) <= tau) {
-      result.candidate_item_ids.push_back(item.item_id);
-    } else {
-      result.length_filtered_items++;
+  {
+    ScopedTimer length_timer(&result.range_length_filter_ms);
+    for (const auto& item : items_) {
+      if (std::abs(static_cast<long long>(query_sequence.size()) -
+                   static_cast<long long>(item.sequence.size())) <= tau) {
+        result.candidate_item_ids.push_back(item.item_id);
+      } else {
+        result.length_filtered_items++;
+      }
     }
   }
   std::sort(result.candidate_item_ids.begin(), result.candidate_item_ids.end());
@@ -186,11 +239,13 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
                   result.candidate_item_ids.end()),
       result.candidate_item_ids.end());
   result.compatible_item_count = result.candidate_item_ids.size();
+  result.final_candidate_pairs = result.candidate_item_ids.size();
   return result;
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
-    const std::string& query_sequence, int tau, int block_len, int seed_len) {
+    const std::string& query_sequence, int tau, int block_len, int seed_len,
+    size_t early_abort_candidate_limit) {
   if (seed_len < config_.min_seed_len) {
     auto result = full_scan(query_sequence, tau, true);
     result.block_len = block_len;
@@ -202,11 +257,12 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   result.mode_used = RangeCandidateMode::PigeonholeOnly;
   result.block_len = block_len;
   result.seed_len = seed_len;
-  const auto compatible = full_scan(query_sequence, tau, false);
-  result.length_filtered_items = compatible.length_filtered_items;
-  std::unordered_set<size_t> compatible_ids(
-      compatible.candidate_item_ids.begin(), compatible.candidate_item_ids.end());
-  const auto& postings = postings_for_seed_len(result.seed_len);
+  const PostingLists* postings_ptr = nullptr;
+  {
+    ScopedTimer timer(&result.range_posting_lookup_ms);
+    postings_ptr = &postings_for_seed_len(result.seed_len);
+  }
+  const auto& postings = *postings_ptr;
   std::unordered_set<size_t> candidates;
   const int block_count = tau + 1;
   for (int block_idx = 0; block_idx < block_count; ++block_idx) {
@@ -214,15 +270,52 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
         static_cast<size_t>(block_idx) * static_cast<size_t>(result.block_len);
     std::string seed =
         query_sequence.substr(block_start, static_cast<size_t>(result.seed_len));
-    auto posting = postings.find(seed);
+    PostingLists::const_iterator posting;
+    {
+      ScopedTimer timer(&result.range_posting_lookup_ms);
+      posting = postings.find(seed);
+    }
     if (posting == postings.end()) continue;
-    for (size_t item_id : posting->second) {
-      if (compatible_ids.count(item_id) != 0) candidates.insert(item_id);
+    {
+      ScopedTimer timer(&result.range_seed_union_ms);
+      for (size_t item_id : posting->second) {
+        candidates.insert(item_id);
+        if (candidates.size() > early_abort_candidate_limit) {
+          result.seed_candidate_pairs_before_length_filter = candidates.size();
+          result.pigeonhole_candidate_count = candidates.size();
+          result.pigeonhole_early_abort_count = 1;
+          result.final_candidate_pairs = 0;
+          return result;
+        }
+      }
     }
   }
 
-  result.candidate_item_ids.assign(candidates.begin(), candidates.end());
+  result.seed_candidate_pairs_before_length_filter = candidates.size();
+  {
+    ScopedTimer timer(&result.range_length_filter_ms);
+    for (size_t item_id : candidates) {
+      auto length_it = item_lengths_by_id_.find(item_id);
+      if (length_it == item_lengths_by_id_.end()) {
+        auto fallback = full_scan(query_sequence, tau, true);
+        merge_range_timing(fallback, result);
+        fallback.block_len = block_len;
+        fallback.seed_len = seed_len;
+        return fallback;
+      }
+      if (std::abs(static_cast<long long>(query_sequence.size()) -
+                   static_cast<long long>(length_it->second)) <= tau) {
+        result.candidate_item_ids.push_back(item_id);
+      } else {
+        result.length_filtered_items++;
+        result.seed_length_pruned_candidates++;
+      }
+    }
+  }
+
   std::sort(result.candidate_item_ids.begin(), result.candidate_item_ids.end());
+  result.pigeonhole_candidate_count = result.candidate_item_ids.size();
+  result.final_candidate_pairs = result.candidate_item_ids.size();
   return result;
 }
 
@@ -230,6 +323,8 @@ RangeJoinQueryResult ExactRangeJoinIndex::hybrid_result(
     const RangeJoinQueryResult& pigeonhole,
     const RangeJoinQueryResult& qgram) const {
   RangeJoinQueryResult result;
+  merge_range_timing(result, pigeonhole);
+  merge_range_timing(result, qgram);
   result.mode_used = RangeCandidateMode::Hybrid;
   result.used_full_scan = pigeonhole.used_full_scan || qgram.used_full_scan;
   result.block_len = pigeonhole.block_len;
@@ -238,28 +333,38 @@ RangeJoinQueryResult ExactRangeJoinIndex::hybrid_result(
       std::max(pigeonhole.length_filtered_items, qgram.length_filtered_items);
   result.compatible_item_count =
       std::max(pigeonhole.compatible_item_count, qgram.compatible_item_count);
+  copy_seed_counters(result, pigeonhole);
   result.qgram_candidate_count = qgram.candidate_item_ids.size();
   result.qgram_pruned_by_l1 = qgram.qgram_pruned_by_l1;
   result.required_shared_nonpositive = qgram.required_shared_nonpositive;
-  std::set_intersection(
-      pigeonhole.candidate_item_ids.begin(), pigeonhole.candidate_item_ids.end(),
-      qgram.candidate_item_ids.begin(), qgram.candidate_item_ids.end(),
-      std::back_inserter(result.candidate_item_ids));
+  {
+    ScopedTimer timer(&result.range_hybrid_intersection_ms);
+    std::set_intersection(
+        pigeonhole.candidate_item_ids.begin(), pigeonhole.candidate_item_ids.end(),
+        qgram.candidate_item_ids.begin(), qgram.candidate_item_ids.end(),
+        std::back_inserter(result.candidate_item_ids));
+  }
+  result.final_candidate_pairs = result.candidate_item_ids.size();
   return result;
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
-    const std::string& query_sequence, int tau) const {
+    const std::string& query_sequence, int tau) {
   QGramCountIndex::QueryStats stats;
   RangeJoinQueryResult result;
   result.mode_used = RangeCandidateMode::QGramOnly;
-  result.candidate_item_ids = qgram_index_.query(query_sequence, tau, &stats);
+  {
+    ScopedTimer timer(&result.range_qgram_query_ms);
+    result.candidate_item_ids =
+        qgram_index_.query(query_sequence, tau, &stats, &qgram_workspace_);
+  }
   result.used_full_scan = stats.full_scan_fallbacks > 0;
   result.length_filtered_items = stats.length_filtered_items;
   result.qgram_candidate_count = stats.qgram_candidates;
   result.qgram_pruned_by_l1 = stats.pruned_by_l1;
   result.required_shared_nonpositive = stats.required_shared_nonpositive;
   result.compatible_item_count = stats.total_items - stats.length_filtered_items;
+  result.final_candidate_pairs = result.candidate_item_ids.size();
   return result;
 }
 

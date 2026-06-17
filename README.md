@@ -49,6 +49,7 @@ cd navigamer_cpp
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
+./navigamer build-scale --ref ../data/human/chr1_subset --window 250 --stride 1 --prefix-lengths 10000,50000 --out /tmp/build_scale.csv
 ./navigamer query-benchmark --ref ACGTGCACTGATTGCATAGCTACGAAAAAAAAAAAACCCCGGGGCCCCCCCCCGGGCCCC --window 12 --stride 12 --query-length 12 --tolerance 1 --primary-radii 12,6,2 --min-rect-index-fanout 1 --mbb-filter-mode rect --search-qgram-prefilter on --search-qgram-q 3 --warmup-iterations 1 --measured-iterations 2 --cold-cache-bytes 0 --out /tmp/query_detail.tsv --summary-out /tmp/query_summary.tsv --json-out /tmp/query_summary.json
 ```
 
@@ -95,10 +96,19 @@ and `full` candidate modes. Q-gram filtering uses the necessary condition
 candidate supersets. Every surviving pair is still verified by bounded exact
 edit distance before an edge or leaf attachment is added.
 
-Auto construction is selectivity-aware: it accepts pigeonhole candidates when
-their count is at most `4096` or their ratio among length-compatible targets is
-at most `0.25`; otherwise it invokes q-gram and returns the safe hybrid
-intersection by default.
+Auto construction accepts pigeonhole candidates when their count is at most
+`4096`; if the seed union grows beyond that threshold, it early-aborts the
+pigeonhole collection and invokes the q-gram safe fallback. The legacy
+`--auto-pigeonhole-max-ratio` flag is parsed for command compatibility but no
+longer drives auto selection, so normal pigeonhole queries do not full-scan all
+length-compatible targets just to compute a ratio.
+
+Index construction now reports aggregate build timing to stderr. The timing
+breakdown covers Phase0 deduplication, Phase1 sketch construction, Phase2
+rebinding, Phase3 MBB computation, Phase4 leaf attachment, ID assignment,
+graph-view flattening, and selected range-join, MBB, and leaf-attachment
+substeps. The `build-scale` command writes the same timing breakdown and
+construction counters to CSV for multiple reference prefix lengths.
 
 Adaptive search supports `--mbb-filter-mode scan|rect` (default `scan`). The
 `rect` mode uses an exact in-memory rectangle index over the existing per-child
@@ -116,7 +126,7 @@ Adaptive bounded child-center distance supports `--distance-mode dp|myers|edlib|
 length and falls back to DP for unsupported inputs. `edlib` uses the vendored
 Edlib bounded distance backend. `dp` remains the reference mode; `auto`
 currently remains DP. Index construction separately supports
-`--build-distance-mode dp|edlib|auto` and defaults to `dp`.
+`--build-distance-mode dp|edlib|auto` and defaults to `edlib`.
 
 Adaptive child-world traversal also supports the optional
 `--search-qgram-prefilter on` with independent `--search-qgram-q` (default
@@ -142,6 +152,9 @@ cd navigamer_cpp
 make test_recall test_distance_bound
 ./test_recall
 ./test_distance_bound
+make test_build_timing_stats test_build_scale_smoke
+./test_build_timing_stats
+./test_build_scale_smoke
 ```
 
 ## Repository layout
