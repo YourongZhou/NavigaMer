@@ -15,6 +15,7 @@
 #include "experiment_utils.hpp"
 #include "map150.hpp"
 #include "query_benchmark.hpp"
+#include "index_persistence.hpp"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -26,6 +27,7 @@
 #include <cstring>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -38,15 +40,16 @@ void usage(const char* prog) {
   std::cerr << "Usage:\n"
             << "  " << prog << " demo [--size N] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
-            << "  " << prog << " build-scale --ref <path|seq> --window 250 --stride 1 --prefix-lengths csv --out <csv> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
-            << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " build-scale --ref <path|seq> --window 250 --stride 1 --prefix-lengths csv --out <csv> [--index <file>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--index <file>] [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " query-index --index <file> --query <seq> [--tolerance 2] [--mode adaptive]\n"
             << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " map150 --ref <path|seq> --reads <path|seq> --tolerance <N> --out <tsv> [--mode adaptive] [--locator refpos|seqan] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query-benchmark --ref <fasta|sequence> --out <detail.tsv> --summary-out <summary.tsv> --json-out <summary.json> [--window 200] [--query-length 200] [--tolerance 2]\n"
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
-            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--leaf-attach-direction auto|seq-to-world|world-to-seq] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64]\n"
+            << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--leaf-attach-direction auto|seq-to-world|world-to-seq] [--phase2-qgram-postfilter on|off] [--leaf-qgram-postfilter on|off] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64] [--phase1-metric-min-fanout 64] [--phase1-qgram-min-fanout 64] [--phase1-qgram-max-touched 250000] [--progress-interval-seconds 600]\n"
             << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--distance-mode dp|myers|edlib|auto] [--build-distance-mode dp|edlib|auto] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
 }
 
@@ -220,6 +223,9 @@ void print_build_scale_bottleneck_summary(
           {"phase2_index_build", stats.phase2_index_build_ms},
           {"phase2_candidate_query", stats.phase2_candidate_query_ms},
           {"phase2_exact_verify", stats.phase2_exact_verify_ms},
+          {"phase2_candidate_query_worker",
+           stats.phase2_candidate_query_worker_ms},
+          {"phase2_exact_verify_worker", stats.phase2_exact_verify_worker_ms},
           {"phase2_edge_insert", stats.phase2_edge_insert_ms},
           {"phase3_collect_beacons", stats.phase3_collect_beacons_ms},
           {"phase3_collapse_children", stats.phase3_collapse_children_ms},
@@ -405,7 +411,8 @@ void run_demo(int size, const navigamer::HierarchyConfig& config,
 
 void run_build(const std::string& ref_input, const std::string& reads_input,
                const navigamer::HierarchyConfig& config,
-               const navigamer::BuildRangeConfig& range_config) {
+               const navigamer::BuildRangeConfig& range_config,
+               const std::string& index_path) {
   using namespace navigamer;
   auto [ref_id, ref_seq] = load_reference(ref_input);
   std::cerr << "Reference: " << ref_id << " length=" << ref_seq.size() << "\n";
@@ -414,7 +421,20 @@ void run_build(const std::string& ref_input, const std::string& reads_input,
 
   BioGeometryIndexBuilder builder(config, range_config);
   builder.build(reads);
-  std::cerr << "Build done. (Index serialization not implemented; use run for full pipeline.)\n";
+  if (!index_path.empty()) {
+    IndexBuildManifest manifest =
+        make_index_manifest(ref_input, reads_input, config, range_config);
+    save_index(index_path, builder, manifest);
+    IndexBuildManifest stored = read_index_manifest(index_path);
+    std::cerr << "Index saved: " << index_path
+              << " signature=" << stored.signature
+              << " sequences=" << stored.sequence_count
+              << " world_nodes=" << stored.world_node_count
+              << " edges=" << stored.edge_count
+              << " leaf_links=" << stored.leaf_link_count << "\n";
+  } else {
+    std::cerr << "Build done. Use --index <file> to persist the index.\n";
+  }
 }
 
 void run_build_scale(const std::string& ref_input,
@@ -424,11 +444,16 @@ void run_build_scale(const std::string& ref_input,
                      const std::string& out_csv,
                      const navigamer::HierarchyConfig& config,
                      const navigamer::BuildRangeConfig& range_config,
-                     const std::string& leaf_attach_direction) {
+                     const std::string& leaf_attach_direction,
+                     const std::string& index_path) {
   using namespace navigamer;
   if (window_size <= 0) throw std::runtime_error("build-scale --window must be positive");
   if (stride <= 0) throw std::runtime_error("build-scale --stride must be positive");
   if (out_csv.empty()) throw std::runtime_error("build-scale requires --out");
+  if (!index_path.empty() && prefix_lengths.size() != 1) {
+    throw std::runtime_error(
+        "build-scale --index requires exactly one prefix length");
+  }
   if (leaf_attach_direction != "auto" &&
       leaf_attach_direction != "seq-to-world" &&
       leaf_attach_direction != "seq_to_world" &&
@@ -454,6 +479,7 @@ void run_build_scale(const std::string& ref_input,
       "phase2_index_build_ms",
       "phase2_candidate_query_ms",
       "phase2_exact_verify_ms",
+      "phase2_distance_batches",
       "phase2_edge_insert_ms",
       "phase3_mbb_ms",
       "phase3_collect_beacons_ms",
@@ -491,6 +517,8 @@ void run_build_scale(const std::string& ref_input,
       "leaf_attach_direction_used",
       "range_candidate_mode",
       "qgram_q",
+      "phase2_candidate_query_worker_ms",
+      "phase2_exact_verify_worker_ms",
   };
 
   std::ofstream out(out_csv);
@@ -518,6 +546,19 @@ void run_build_scale(const std::string& ref_input,
 
     BioGeometryIndexBuilder builder(config, range_config);
     builder.build(windows);
+    if (!index_path.empty()) {
+      IndexBuildManifest manifest = make_reference_window_index_manifest(
+          ref_input, actual_prefix, window_size, stride, config, range_config);
+      std::cerr << "Saving index: " << index_path << "\n";
+      save_index(index_path, builder, manifest);
+      const IndexBuildManifest stored = read_index_manifest(index_path);
+      std::cerr << "Index saved: " << index_path
+                << " signature=" << stored.signature
+                << " sequences=" << stored.sequence_count
+                << " world_nodes=" << stored.world_node_count
+                << " edges=" << stored.edge_count
+                << " leaf_links=" << stored.leaf_link_count << "\n";
+    }
     const auto stats = builder.get_statistics();
     const size_t finest_count =
         builder.primary_layer(builder.finest_primary_layer_index()).size();
@@ -535,6 +576,7 @@ void run_build_scale(const std::string& ref_input,
         format_double(stats.phase2_index_build_ms),
         format_double(stats.phase2_candidate_query_ms),
         format_double(stats.phase2_exact_verify_ms),
+        std::to_string(stats.phase2_distance_batches),
         format_double(stats.phase2_edge_insert_ms),
         format_double(stats.phase3_mbb_ms),
         format_double(stats.phase3_collect_beacons_ms),
@@ -572,6 +614,8 @@ void run_build_scale(const std::string& ref_input,
         leaf_attach_direction_used(stats),
         range_candidate_mode_name(range_config.range_join.candidate_mode),
         std::to_string(range_config.range_join.qgram_q),
+        format_double(stats.phase2_candidate_query_worker_ms),
+        format_double(stats.phase2_exact_verify_worker_ms),
     });
     rows_written++;
 
@@ -581,20 +625,11 @@ void run_build_scale(const std::string& ref_input,
   std::cerr << "build-scale rows: " << rows_written << "\n";
 }
 
-void run_query(const std::string& /*ref_input*/, const std::string& reads_input,
-               const std::string& query_seq, int tolerance, const std::string& mode,
-               const navigamer::HierarchyConfig& config,
-               const navigamer::BuildRangeConfig& range_config,
-               const navigamer::SearchConfig& search_config) {
+void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
+                          const std::string& query_seq, int tolerance,
+                          const std::string& mode,
+                          const navigamer::SearchConfig& search_config) {
   using namespace navigamer;
-  auto reads = load_reads(reads_input, "ref");
-  if (reads.empty()) {
-    std::cerr << "No reads loaded.\n";
-    return;
-  }
-  BioGeometryIndexBuilder builder(config, range_config);
-  builder.build(reads);
-
   BioGeometrySearchEngine engine(builder, search_config);
   BioSequence q("query", query_seq);
 
@@ -637,6 +672,80 @@ void run_query(const std::string& /*ref_input*/, const std::string& reads_input,
               << " result_count=" << st.result_count << ")\n";
     for (const auto& h : res) std::cout << "  " << h->id << " dist=" << compute_distance(query_seq, h->seq) << "\n";
   }
+}
+
+void run_query(const std::string& ref_input, const std::string& reads_input,
+               const std::string& query_seq, int tolerance, const std::string& mode,
+               const navigamer::HierarchyConfig& config,
+               const navigamer::BuildRangeConfig& range_config,
+               const navigamer::SearchConfig& search_config,
+               const std::string& index_path) {
+  using namespace navigamer;
+  if (!index_path.empty() && reads_input.empty()) {
+    LoadedIndex loaded = load_index(index_path);
+    std::cerr << "Loaded index: " << index_path
+              << " signature=" << loaded.manifest.signature
+              << " sequences=" << loaded.manifest.sequence_count
+              << " world_nodes=" << loaded.manifest.world_node_count << "\n";
+    run_query_on_builder(loaded.builder, query_seq, tolerance, mode, search_config);
+    return;
+  }
+
+  if (reads_input.empty()) {
+    std::cerr << "No reads loaded.\n";
+    return;
+  }
+
+  if (!index_path.empty()) {
+    IndexBuildManifest stored;
+    bool have_stored = false;
+    try {
+      stored = read_index_manifest(index_path);
+      have_stored = true;
+    } catch (...) {
+      have_stored = false;
+    }
+    const std::string manifest_ref_input =
+        !ref_input.empty() ? ref_input : (have_stored ? stored.ref_input : "ref");
+    IndexBuildManifest expected =
+        make_index_manifest(manifest_ref_input, reads_input, config, range_config);
+    std::string reason;
+    if (index_matches_manifest(index_path, expected, &stored, &reason)) {
+      LoadedIndex loaded = load_index(index_path);
+      std::cerr << "Reusing persisted index: " << index_path
+                << " signature=" << loaded.manifest.signature
+                << " sequences=" << loaded.manifest.sequence_count
+                << " world_nodes=" << loaded.manifest.world_node_count << "\n";
+      run_query_on_builder(loaded.builder, query_seq, tolerance, mode, search_config);
+      return;
+    }
+    std::cerr << "Persisted index not reused: " << reason << "\n";
+
+    auto reads = load_reads(reads_input, "ref");
+    if (reads.empty()) {
+      std::cerr << "No reads loaded.\n";
+      return;
+    }
+    BioGeometryIndexBuilder builder(config, range_config);
+    builder.build(reads);
+    save_index(index_path, builder, expected);
+    IndexBuildManifest written = read_index_manifest(index_path);
+    std::cerr << "Rebuilt and saved index: " << index_path
+              << " signature=" << written.signature
+              << " sequences=" << written.sequence_count
+              << " world_nodes=" << written.world_node_count << "\n";
+    run_query_on_builder(builder, query_seq, tolerance, mode, search_config);
+    return;
+  }
+
+  auto reads = load_reads(reads_input, "ref");
+  if (reads.empty()) {
+    std::cerr << "No reads loaded.\n";
+    return;
+  }
+  BioGeometryIndexBuilder builder(config, range_config);
+  builder.build(reads);
+  run_query_on_builder(builder, query_seq, tolerance, mode, search_config);
 }
 
 void run_full(const std::string& ref_input, const std::string& reads_input,
@@ -1134,6 +1243,7 @@ int main(int argc, char** argv) {
   }
   std::string cmd = argv[1];
   std::string ref_input, reads_input, query_seq, mode = "adaptive", out_tsv;
+  std::string index_path;
   int tolerance = 2;
   int demo_size = 500;
   int window_size = 200;
@@ -1154,6 +1264,8 @@ int main(int argc, char** argv) {
   std::string link_mode = "indexed";
   std::string leaf_attach_mode = "indexed";
   std::string leaf_attach_direction = "auto";
+  std::string phase2_qgram_postfilter = "off";
+  std::string leaf_qgram_postfilter = "on";
   std::string range_candidate_mode = "auto";
   std::string mbb_filter_mode = "scan";
   std::string visited_mode = "epoch";
@@ -1170,6 +1282,10 @@ int main(int argc, char** argv) {
   double auto_pigeonhole_max_ratio = 0.25;
   bool auto_hybrid_on_large_candidates = true;
   size_t min_rect_index_fanout = 64;
+  size_t phase1_metric_min_fanout = 64;
+  size_t phase1_qgram_min_fanout = 64;
+  size_t phase1_qgram_max_touched = 250000;
+  int progress_interval_seconds = 600;
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
   int r_lw = navigamer::R_LW;
@@ -1192,6 +1308,7 @@ int main(int argc, char** argv) {
     if (a == "--tolerance" && i + 1 < argc) { tolerance = std::atoi(argv[++i]); continue; }
     if (a == "--mode" && i + 1 < argc) { mode = argv[++i]; continue; }
     if (a == "--out" && i + 1 < argc) { out_tsv = argv[++i]; continue; }
+    if (a == "--index" && i + 1 < argc) { index_path = argv[++i]; continue; }
     if (a == "--size" && i + 1 < argc) { demo_size = std::atoi(argv[++i]); continue; }
     if (a == "--window" && i + 1 < argc) { window_size = std::atoi(argv[++i]); continue; }
     if (a == "--stride" && i + 1 < argc) {
@@ -1271,6 +1388,14 @@ int main(int argc, char** argv) {
       leaf_attach_direction = argv[++i];
       continue;
     }
+    if (a == "--phase2-qgram-postfilter" && i + 1 < argc) {
+      phase2_qgram_postfilter = argv[++i];
+      continue;
+    }
+    if (a == "--leaf-qgram-postfilter" && i + 1 < argc) {
+      leaf_qgram_postfilter = argv[++i];
+      continue;
+    }
     if (a == "--range-candidate-mode" && i + 1 < argc) {
       range_candidate_mode = argv[++i];
       continue;
@@ -1317,6 +1442,10 @@ int main(int argc, char** argv) {
       build_distance_mode = argv[++i];
       continue;
     }
+    if (a == "--phase2-distance-backend") {
+      throw std::runtime_error(
+          "--phase2-distance-backend was removed; Phase2 uses CPU");
+    }
     if (a == "--search-qgram-prefilter" && i + 1 < argc) {
       search_qgram_prefilter = argv[++i];
       continue;
@@ -1328,6 +1457,31 @@ int main(int argc, char** argv) {
     if (a == "--min-rect-index-fanout" && i + 1 < argc) {
       min_rect_index_fanout =
           parse_positive_size(argv[++i], "--min-rect-index-fanout");
+      continue;
+    }
+    if (a == "--phase1-metric-min-fanout" && i + 1 < argc) {
+      phase1_metric_min_fanout =
+          parse_positive_size(argv[++i], "--phase1-metric-min-fanout");
+      continue;
+    }
+    if (a == "--phase1-qgram-min-fanout" && i + 1 < argc) {
+      phase1_qgram_min_fanout =
+          parse_positive_size(argv[++i], "--phase1-qgram-min-fanout");
+      continue;
+    }
+    if (a == "--phase1-qgram-max-touched" && i + 1 < argc) {
+      phase1_qgram_max_touched =
+          parse_positive_size(argv[++i], "--phase1-qgram-max-touched");
+      continue;
+    }
+    if (a == "--progress-interval-seconds" && i + 1 < argc) {
+      const size_t value =
+          parse_nonnegative_size(argv[++i], "--progress-interval-seconds");
+      if (value > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "--progress-interval-seconds is too large");
+      }
+      progress_interval_seconds = static_cast<int>(value);
       continue;
     }
     if (a == "--range-min-seed-length" && i + 1 < argc) {
@@ -1351,6 +1505,11 @@ int main(int argc, char** argv) {
         navigamer::parse_build_range_mode(leaf_attach_mode);
     range_config.leaf_attach_direction =
         navigamer::parse_leaf_attach_direction(leaf_attach_direction);
+    range_config.phase2_qgram_postfilter =
+        parse_on_off(phase2_qgram_postfilter,
+                     "--phase2-qgram-postfilter");
+    range_config.leaf_qgram_postfilter =
+        parse_on_off(leaf_qgram_postfilter, "--leaf-qgram-postfilter");
     range_config.distance_mode =
         navigamer::parse_build_distance_mode(build_distance_mode);
     range_config.range_join.min_seed_len = range_min_seed_length;
@@ -1365,6 +1524,10 @@ int main(int argc, char** argv) {
     range_config.range_join.auto_hybrid_on_large_candidates =
         auto_hybrid_on_large_candidates;
     range_config.min_rect_index_fanout = min_rect_index_fanout;
+    range_config.phase1_metric_min_fanout = phase1_metric_min_fanout;
+    range_config.phase1_qgram_min_fanout = phase1_qgram_min_fanout;
+    range_config.phase1_qgram_max_touched = phase1_qgram_max_touched;
+    range_config.progress_interval_seconds = progress_interval_seconds;
     navigamer::SearchConfig search_config;
     search_config.mbb_filter_mode = navigamer::parse_mbb_filter_mode(mbb_filter_mode);
     search_config.visited_mode = navigamer::parse_visited_mode(visited_mode);
@@ -1384,7 +1547,7 @@ int main(int argc, char** argv) {
         std::cerr << "build requires --ref and --reads\n";
         return 1;
       }
-      run_build(ref_input, reads_input, hierarchy, range_config);
+      run_build(ref_input, reads_input, hierarchy, range_config, index_path);
       return 0;
     }
     if (cmd == "build-scale") {
@@ -1392,19 +1555,29 @@ int main(int argc, char** argv) {
         std::cerr << "build-scale requires --ref, --prefix-lengths, and --out\n";
         return 1;
       }
-      run_build_scale(ref_input, window_size, stride,
-                      parse_size_csv(prefix_lengths_csv, "--prefix-lengths"),
+      const auto prefix_lengths =
+          parse_size_csv(prefix_lengths_csv, "--prefix-lengths");
+      run_build_scale(ref_input, window_size, stride, prefix_lengths,
                       out_tsv, hierarchy, range_config,
-                      leaf_attach_direction);
+                      leaf_attach_direction, index_path);
       return 0;
     }
     if (cmd == "query") {
-      if (reads_input.empty() || query_seq.empty()) {
-        std::cerr << "query requires --reads and --query\n";
+      if ((reads_input.empty() && index_path.empty()) || query_seq.empty()) {
+        std::cerr << "query requires --query and either --reads or --index\n";
         return 1;
       }
-      run_query(ref_input.empty() ? "ref" : ref_input, reads_input, query_seq,
-                tolerance, mode, hierarchy, range_config, search_config);
+      run_query(ref_input, reads_input, query_seq, tolerance, mode, hierarchy,
+                range_config, search_config, index_path);
+      return 0;
+    }
+    if (cmd == "query-index") {
+      if (index_path.empty() || query_seq.empty()) {
+        std::cerr << "query-index requires --index and --query\n";
+        return 1;
+      }
+      run_query(ref_input, "", query_seq, tolerance, mode, hierarchy,
+                range_config, search_config, index_path);
       return 0;
     }
     if (cmd == "run") {

@@ -7,8 +7,10 @@
 #include <memory>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
+#include <omp.h>
 
 namespace {
 
@@ -46,7 +48,22 @@ std::vector<SequencePtr> make_sequences(size_t length) {
   return sequences;
 }
 
+std::vector<SequencePtr> make_mutated_window_dataset() {
+  std::mt19937 gen(5678);
+  std::vector<SequencePtr> sequences;
+  for (int cluster = 0; cluster < 18; ++cluster) {
+    std::string center = random_dna(90, gen);
+    for (int member = 0; member < 9; ++member) {
+      sequences.push_back(std::make_shared<navigamer::BioSequence>(
+          "w_" + std::to_string(cluster) + "_" + std::to_string(member),
+          mutate(center, member % 7, gen)));
+    }
+  }
+  return sequences;
+}
+
 using LinkMap = std::map<std::string, std::set<std::string>>;
+using OrderedLinkMap = std::map<std::string, std::vector<std::string>>;
 
 LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
   LinkMap edges;
@@ -55,6 +72,23 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
       auto& children = edges[parent->get_center_sequence()];
       for (const auto& child : parent->child_nodes) {
         children.insert(child->get_center_sequence());
+      }
+    }
+  }
+  return edges;
+}
+
+OrderedLinkMap ordered_primary_edges(
+    const navigamer::BioGeometryIndexBuilder& builder) {
+  OrderedLinkMap edges;
+  for (int layer_idx = 0; layer_idx + 1 < builder.num_primary_layers();
+       ++layer_idx) {
+    for (const auto& parent : builder.primary_layer(layer_idx)) {
+      std::string key =
+          std::to_string(layer_idx) + ":" + parent->get_center_sequence();
+      auto& children = edges[key];
+      for (const auto& child : parent->child_nodes) {
+        children.push_back(child->get_center_sequence());
       }
     }
   }
@@ -97,7 +131,7 @@ navigamer::BuildRangeConfig indexed_config(navigamer::RangeCandidateMode mode) {
 
 navigamer::BuildRangeConfig selective_auto_config() {
   auto config = indexed_config(navigamer::RangeCandidateMode::Auto);
-  config.range_join.auto_pigeonhole_max_candidates = 4;
+  config.range_join.auto_pigeonhole_max_candidates = 0;
   config.range_join.auto_pigeonhole_max_ratio = 0.0;
   config.range_join.auto_hybrid_on_large_candidates = true;
   return config;
@@ -126,9 +160,154 @@ void assert_equivalent(
   }
 }
 
+OrderedLinkMap build_and_collect_edges(
+    const std::vector<SequencePtr>& sequences,
+    const navigamer::BuildRangeConfig& config) {
+  navigamer::HierarchyConfig hierarchy({24, 12, 5});
+  navigamer::BioGeometryIndexBuilder builder(hierarchy, config);
+  builder.build(sequences);
+  return ordered_primary_edges(builder);
+}
+
+struct Phase3BuildResult {
+  std::vector<std::string> signature;
+  navigamer::BioGeometryIndexBuilder::Statistics stats;
+};
+
+Phase3BuildResult build_and_collect_phase3(
+    const std::vector<SequencePtr>& sequences,
+    const navigamer::BuildRangeConfig& config) {
+  navigamer::BioGeometryIndexBuilder builder(
+      navigamer::HierarchyConfig({24, 12, 5}), config);
+  builder.build(sequences);
+
+  Phase3BuildResult result;
+  result.stats = builder.get_statistics();
+  for (int layer_idx = 0; layer_idx < builder.num_primary_layers();
+       ++layer_idx) {
+    for (const auto& parent : builder.primary_layer(layer_idx)) {
+      std::ostringstream row;
+      row << layer_idx << ':' << parent->get_center_sequence() << "|b=";
+      for (const auto& beacon : parent->beacons) {
+        row << (beacon ? beacon->seq : std::string("<null>")) << ';';
+      }
+      row << "|c=";
+      for (const auto& child : parent->child_nodes) {
+        row << (child ? child->get_center_sequence() : std::string("<null>"))
+            << ';';
+      }
+      row << "|m=";
+      for (const auto& mbb_row : parent->child_beacon_mbbs) {
+        for (const auto& mbb : mbb_row) {
+          row << mbb.min_dist << ',' << mbb.max_dist << ';';
+        }
+        row << '/';
+      }
+      row << "|r=" << (parent->mbb_rect_index ? 1 : 0);
+      result.signature.push_back(row.str());
+    }
+  }
+  return result;
+}
+
+void test_indexed_parallel_phase2_matches_single_thread() {
+  auto sequences = make_mutated_window_dataset();
+
+  navigamer::BuildRangeConfig config;
+  config.link_mode = navigamer::BuildRangeMode::Indexed;
+  config.leaf_attach_mode = navigamer::BuildRangeMode::Indexed;
+  config.leaf_attach_direction = navigamer::LeafAttachDirection::WorldToSeq;
+  config.range_join.candidate_mode = navigamer::RangeCandidateMode::Auto;
+
+  const int original_threads = omp_get_max_threads();
+  omp_set_num_threads(1);
+  auto single = build_and_collect_edges(sequences, config);
+
+  omp_set_num_threads(4);
+  auto parallel = build_and_collect_edges(sequences, config);
+
+  omp_set_num_threads(original_threads);
+  assert(single == parallel);
+}
+
+void test_parallel_phase3_matches_single_thread() {
+  auto sequences = make_mutated_window_dataset();
+
+  navigamer::BuildRangeConfig config;
+  config.min_rect_index_fanout = 1;
+
+  const int original_threads = omp_get_max_threads();
+  omp_set_num_threads(1);
+  auto single = build_and_collect_phase3(sequences, config);
+
+  omp_set_num_threads(4);
+  auto parallel = build_and_collect_phase3(sequences, config);
+
+  omp_set_num_threads(original_threads);
+  assert(single.signature == parallel.signature);
+  assert(single.stats.phase3_parallel_threads == 1);
+  assert(parallel.stats.phase3_parallel_threads >= 2);
+}
+
+void test_phase2_qgram_postfilter_matches_full_construction() {
+  auto sequences = make_sequences(100);
+  navigamer::HierarchyConfig hierarchy({20, 10, 4});
+
+  navigamer::BuildRangeConfig config;
+  config.link_mode = navigamer::BuildRangeMode::Indexed;
+  config.leaf_attach_mode = navigamer::BuildRangeMode::Full;
+  config.range_join.candidate_mode = navigamer::RangeCandidateMode::FullScan;
+  config.range_join.qgram_q = 3;
+  config.phase2_qgram_postfilter = true;
+
+  navigamer::BioGeometryIndexBuilder full_builder(hierarchy, full_config());
+  navigamer::BioGeometryIndexBuilder filtered_builder(hierarchy, config);
+  full_builder.build(sequences);
+  filtered_builder.build(sequences);
+
+  assert_equivalent(full_builder, filtered_builder, sequences);
+  assert(filtered_builder.get_statistics().phase2_qgram_pruned_by_l1 > 0);
+}
+
+void test_leaf_qgram_postfilter_matches_unfiltered_construction() {
+  auto sequences = make_mutated_window_dataset();
+  navigamer::HierarchyConfig hierarchy({24, 12, 5});
+
+  navigamer::BuildRangeConfig unfiltered;
+  unfiltered.link_mode = navigamer::BuildRangeMode::Indexed;
+  unfiltered.leaf_attach_mode = navigamer::BuildRangeMode::Indexed;
+  unfiltered.leaf_attach_direction = navigamer::LeafAttachDirection::WorldToSeq;
+  unfiltered.range_join.candidate_mode = navigamer::RangeCandidateMode::Auto;
+  unfiltered.range_join.qgram_q = 5;
+  unfiltered.leaf_qgram_postfilter = false;
+
+  auto filtered = unfiltered;
+  filtered.leaf_qgram_postfilter = true;
+
+  navigamer::BioGeometryIndexBuilder unfiltered_builder(
+      hierarchy, unfiltered);
+  navigamer::BioGeometryIndexBuilder filtered_builder(
+      hierarchy, filtered);
+  unfiltered_builder.build(sequences);
+  filtered_builder.build(sequences);
+
+  assert(primary_edges(unfiltered_builder) == primary_edges(filtered_builder));
+  assert(leaf_links(unfiltered_builder) == leaf_links(filtered_builder));
+  assert(filtered_builder.get_statistics().leaf_attachments_added ==
+         unfiltered_builder.get_statistics().leaf_attachments_added);
+  assert(filtered_builder.get_statistics().leaf_qgram_pruned_by_l1 > 0);
+  assert(filtered_builder.get_statistics().leaf_exact_distance_calls <
+         unfiltered_builder.get_statistics().leaf_exact_distance_calls);
+}
+
 }  // namespace
 
 int main() {
+  test_indexed_parallel_phase2_matches_single_thread();
+  test_parallel_phase3_matches_single_thread();
+  test_phase2_qgram_postfilter_matches_full_construction();
+  test_leaf_qgram_postfilter_matches_unfiltered_construction();
+
   auto sequences = make_sequences(100);
   sequences.push_back(
       std::make_shared<navigamer::BioSequence>("ambiguous", "AACNNGTACN"));

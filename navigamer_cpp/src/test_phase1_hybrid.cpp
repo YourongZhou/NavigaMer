@@ -55,6 +55,17 @@ std::vector<SequencePtr> make_sequences() {
   return sequences;
 }
 
+std::vector<SequencePtr> make_sliding_sequences() {
+  std::mt19937 gen(7731);
+  const std::string reference = random_dna(420, gen);
+  std::vector<SequencePtr> sequences;
+  for (size_t start = 0; start + 90 <= reference.size(); ++start) {
+    sequences.push_back(std::make_shared<navigamer::BioSequence>(
+        "window_" + std::to_string(start), reference.substr(start, 90)));
+  }
+  return sequences;
+}
+
 LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
   LinkMap edges;
   for (int layer_idx = 0; layer_idx + 1 < builder.num_primary_layers();
@@ -136,7 +147,9 @@ int main() {
 
   assert(hybrid_stats.phase1_scan_queries > 0);
   assert(hybrid_stats.phase1_metric_index_queries > 0);
-  assert(hybrid_stats.phase1_qgram_index_queries > 0);
+  assert(hybrid_stats.phase1_pigeonhole_queries > 0);
+  assert(hybrid_stats.phase1_seed_posting_entries_visited > 0);
+  assert(hybrid_stats.phase1_pigeonhole_candidates > 0);
   assert(hybrid_stats.phase1_total_possible_pairs >
          hybrid_stats.phase1_candidate_pairs);
   assert(hybrid_stats.phase1_candidate_pairs ==
@@ -147,6 +160,28 @@ int main() {
          scan_stats.phase1_cover_misses);
   assert(hybrid_stats.phase1_best_cover_hits ==
          scan_stats.phase1_best_cover_hits);
+
+  const auto sliding_sequences = make_sliding_sequences();
+  const navigamer::HierarchyConfig sliding_hierarchy({20, 10, 4});
+  navigamer::BioGeometryIndexBuilder sliding_scan_builder(
+      sliding_hierarchy, phase1_scan_config());
+  navigamer::BioGeometryIndexBuilder sliding_hybrid_builder(
+      sliding_hierarchy, phase1_hybrid_config());
+  sliding_scan_builder.build(sliding_sequences);
+  sliding_hybrid_builder.build(sliding_sequences);
+
+  assert(sliding_scan_builder.primary_layer(0).front()->get_center_sequence() ==
+         sliding_sequences.front()->seq);
+  assert(primary_edges(sliding_scan_builder) ==
+         primary_edges(sliding_hybrid_builder));
+  assert(leaf_links(sliding_scan_builder) ==
+         leaf_links(sliding_hybrid_builder));
+  const auto sliding_scan_stats = sliding_scan_builder.get_statistics();
+  const auto sliding_hybrid_stats = sliding_hybrid_builder.get_statistics();
+  assert(sliding_hybrid_stats.phase1_hint_checks > 0);
+  assert(sliding_hybrid_stats.phase1_hint_hits > 0);
+  assert(sliding_hybrid_stats.phase1_exact_distance_calls <
+         sliding_scan_stats.phase1_exact_distance_calls);
 
   std::cout << "phase1 hybrid tests passed\n";
   return 0;

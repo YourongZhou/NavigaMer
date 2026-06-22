@@ -123,9 +123,59 @@ ExactRangeJoinIndex::postings_for_seed_len(int seed_len) {
   return postings_by_seed_len_.emplace(seed_len, std::move(postings)).first->second;
 }
 
+const ExactRangeJoinIndex::PostingLists*
+ExactRangeJoinIndex::find_postings_for_seed_len(int seed_len) const {
+  auto existing = postings_by_seed_len_.find(seed_len);
+  if (existing == postings_by_seed_len_.end()) return nullptr;
+  return &existing->second;
+}
+
+void ExactRangeJoinIndex::prepare_seed_lengths(
+    const std::vector<int>& seed_lengths) {
+  for (int seed_len : seed_lengths) {
+    if (seed_len >= config_.min_seed_len) {
+      (void)postings_for_seed_len(seed_len);
+    }
+  }
+}
+
+bool ExactRangeJoinIndex::query_needs_seed_postings(int seed_len) const {
+  if (seed_len < config_.min_seed_len) return false;
+  switch (config_.candidate_mode) {
+    case RangeCandidateMode::Auto:
+    case RangeCandidateMode::PigeonholeOnly:
+    case RangeCandidateMode::Hybrid:
+      return true;
+    case RangeCandidateMode::QGramOnly:
+    case RangeCandidateMode::FullScan:
+      return false;
+  }
+  return false;
+}
+
 RangeJoinQueryResult ExactRangeJoinIndex::query(
     const std::string& query_sequence, int tau) {
   if (tau < 0) throw std::invalid_argument("range-join threshold must be non-negative");
+
+  const int block_count = tau + 1;
+  const int block_len =
+      static_cast<int>(query_sequence.size() / static_cast<size_t>(block_count));
+  const int seed_len = std::min(config_.max_seed_len, block_len);
+  if (query_needs_seed_postings(seed_len)) {
+    prepare_seed_lengths({seed_len});
+  }
+
+  RangeJoinQueryWorkspace workspace;
+  return static_cast<const ExactRangeJoinIndex&>(*this).query(
+      query_sequence, tau, &workspace);
+}
+
+RangeJoinQueryResult ExactRangeJoinIndex::query(
+    const std::string& query_sequence, int tau,
+    RangeJoinQueryWorkspace* workspace) const {
+  if (tau < 0) throw std::invalid_argument("range-join threshold must be non-negative");
+  RangeJoinQueryWorkspace local_workspace;
+  if (!workspace) workspace = &local_workspace;
 
   const int block_count = tau + 1;
   const int block_len =
@@ -140,7 +190,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
   }
 
   if (config_.candidate_mode == RangeCandidateMode::QGramOnly) {
-    auto result = qgram_query(query_sequence, tau);
+    auto result = qgram_query(query_sequence, tau, workspace);
     result.block_len = block_len;
     result.seed_len = seed_len;
     return result;
@@ -155,12 +205,12 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
     auto pigeonhole =
         pigeonhole_query(query_sequence, tau, block_len, seed_len,
                          std::numeric_limits<size_t>::max());
-    auto qgram = qgram_query(query_sequence, tau);
+    auto qgram = qgram_query(query_sequence, tau, workspace);
     return hybrid_result(pigeonhole, qgram);
   }
 
   if (seed_len < config_.min_seed_len) {
-    auto qgram = qgram_query(query_sequence, tau);
+    auto qgram = qgram_query(query_sequence, tau, workspace);
     qgram.block_len = block_len;
     qgram.seed_len = seed_len;
     qgram.auto_qgram_invoked = 1;
@@ -172,7 +222,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
       pigeonhole_query(query_sequence, tau, block_len, seed_len,
                        config_.auto_pigeonhole_max_candidates);
   if (pigeonhole.pigeonhole_early_abort_count > 0) {
-    auto qgram = qgram_query(query_sequence, tau);
+    auto qgram = qgram_query(query_sequence, tau, workspace);
     merge_range_timing(qgram, pigeonhole);
     qgram.block_len = block_len;
     qgram.seed_len = seed_len;
@@ -193,7 +243,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
     return pigeonhole;
   }
 
-  auto qgram = qgram_query(query_sequence, tau);
+  auto qgram = qgram_query(query_sequence, tau, workspace);
   if (!config_.auto_hybrid_on_large_candidates) {
     merge_range_timing(qgram, pigeonhole);
     qgram.block_len = block_len;
@@ -245,7 +295,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
 
 RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
     const std::string& query_sequence, int tau, int block_len, int seed_len,
-    size_t early_abort_candidate_limit) {
+    size_t early_abort_candidate_limit) const {
   if (seed_len < config_.min_seed_len) {
     auto result = full_scan(query_sequence, tau, true);
     result.block_len = block_len;
@@ -260,7 +310,14 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   const PostingLists* postings_ptr = nullptr;
   {
     ScopedTimer timer(&result.range_posting_lookup_ms);
-    postings_ptr = &postings_for_seed_len(result.seed_len);
+    postings_ptr = find_postings_for_seed_len(result.seed_len);
+  }
+  if (!postings_ptr) {
+    auto fallback = full_scan(query_sequence, tau, true);
+    merge_range_timing(fallback, result);
+    fallback.block_len = block_len;
+    fallback.seed_len = seed_len;
+    return fallback;
   }
   const auto& postings = *postings_ptr;
   std::unordered_set<size_t> candidates;
@@ -349,14 +406,16 @@ RangeJoinQueryResult ExactRangeJoinIndex::hybrid_result(
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
-    const std::string& query_sequence, int tau) {
+    const std::string& query_sequence, int tau,
+    RangeJoinQueryWorkspace* workspace) const {
   QGramCountIndex::QueryStats stats;
   RangeJoinQueryResult result;
   result.mode_used = RangeCandidateMode::QGramOnly;
   {
     ScopedTimer timer(&result.range_qgram_query_ms);
     result.candidate_item_ids =
-        qgram_index_.query(query_sequence, tau, &stats, &qgram_workspace_);
+        qgram_index_.query(query_sequence, tau, &stats,
+                           workspace ? &workspace->qgram : nullptr);
   }
   result.used_full_scan = stats.full_scan_fallbacks > 0;
   result.length_filtered_items = stats.length_filtered_items;

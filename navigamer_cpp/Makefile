@@ -7,15 +7,16 @@ CXXSTD = c++23
 SEQAN3_FLAGS = -DNAVIGAMER_WITH_SEQAN3
 endif
 CXXFLAGS = -std=$(CXXSTD) -O2 -I include -I third_party/edlib/include -Wall -Wextra -fopenmp -MMD -MP $(SEQAN3_FLAGS)
+LDLIBS =
 EDLIB_SRC = third_party/edlib/src/edlib.cpp
 EDLIB_OBJ = $(EDLIB_SRC:.cpp=.o)
 EDLIB_DEP = $(EDLIB_OBJ:.o=.d)
-SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp $(EDLIB_SRC) src/main.cpp
+SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp src/index_persistence.cpp $(EDLIB_SRC) src/main.cpp
 OBJ = $(SRC:.cpp=.o)
 DEP = $(OBJ:.o=.d)
 TARGET = navigamer
 
-LIB_SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/map150.cpp $(EDLIB_SRC)
+LIB_SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/map150.cpp $(EDLIB_SRC)
 LIB_OBJ = $(LIB_SRC:.cpp=.o)
 TEST_SRC = src/test_recall.cpp
 TEST_OBJ = $(TEST_SRC:.cpp=.o)
@@ -132,88 +133,120 @@ TEST_PHASE1_HYBRID_OBJ = $(TEST_PHASE1_HYBRID_SRC:.cpp=.o)
 TEST_PHASE1_HYBRID_DEP = $(TEST_PHASE1_HYBRID_OBJ:.o=.d)
 TEST_PHASE1_HYBRID_TARGET = test_phase1_hybrid_bin
 
+TEST_PHASE1_SEED_SRC = src/test_phase1_seed_index.cpp
+TEST_PHASE1_SEED_OBJ = $(TEST_PHASE1_SEED_SRC:.cpp=.o)
+TEST_PHASE1_SEED_DEP = $(TEST_PHASE1_SEED_OBJ:.o=.d)
+TEST_PHASE1_SEED_TARGET = test_phase1_seed_index
+
+TEST_INDEX_PERSISTENCE_SRC = src/test_index_persistence.cpp
+TEST_INDEX_PERSISTENCE_OBJ = $(TEST_INDEX_PERSISTENCE_SRC:.cpp=.o)
+TEST_INDEX_PERSISTENCE_DEP = $(TEST_INDEX_PERSISTENCE_OBJ:.o=.d)
+TEST_INDEX_PERSISTENCE_TARGET = test_index_persistence_bin
+
+TEST_PHASE2_DISTANCE_SRC = src/test_phase2_distance_verifier.cpp
+TEST_PHASE2_DISTANCE_OBJ = $(TEST_PHASE2_DISTANCE_SRC:.cpp=.o)
+TEST_PHASE2_DISTANCE_DEP = $(TEST_PHASE2_DISTANCE_OBJ:.o=.d)
+TEST_PHASE2_DISTANCE_TARGET = test_phase2_distance_verifier_bin
+
+TEST_BUILD_PROGRESS_SRC = src/test_build_progress.cpp
+TEST_BUILD_PROGRESS_OBJ = $(TEST_BUILD_PROGRESS_SRC:.cpp=.o)
+TEST_BUILD_PROGRESS_DEP = $(TEST_BUILD_PROGRESS_OBJ:.o=.d)
+TEST_BUILD_PROGRESS_TARGET = test_build_progress_bin
+
 EXP_SRC = src/experiment_utils.cpp
 EXP_OBJ = $(EXP_SRC:.cpp=.o)
 EXP_DEP = $(EXP_OBJ:.cpp=.d)
 
-LIB_SRC += $(EXP_SRC) src/query_benchmark.cpp
+LIB_SRC += $(EXP_SRC) src/query_benchmark.cpp src/index_persistence.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
 
-.PHONY: all clean test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_all
+.PHONY: all clean test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_phase1_seed_index_check test_index_persistence test_phase2_distance_verifier test_build_progress test_all
 
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_TARGET): $(LIB_OBJ) $(TEST_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_DIST_TARGET): $(LIB_OBJ) $(TEST_DIST_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_HIER_TARGET): $(LIB_OBJ) $(TEST_HIER_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_SEARCH_STATS_TARGET): $(LIB_OBJ) $(TEST_SEARCH_STATS_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_MAP150_TARGET): $(LIB_OBJ) $(TEST_MAP150_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_BOUNDED_TARGET): $(LIB_OBJ) $(TEST_BOUNDED_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_BOUNDED_MYERS_TARGET): src/structure.o src/tools.o $(EDLIB_OBJ) $(TEST_BOUNDED_MYERS_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_RANGE_JOIN_TARGET): $(LIB_OBJ) $(TEST_RANGE_JOIN_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_QGRAM_TARGET): src/structure.o src/tools.o src/qgram_filter.o $(EDLIB_OBJ) $(TEST_QGRAM_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_BUILD_RANGE_TARGET): $(LIB_OBJ) $(TEST_BUILD_RANGE_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_BUILD_DISTANCE_TARGET): $(LIB_OBJ) $(TEST_BUILD_DISTANCE_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_MBB_RECT_TARGET): src/mbb_rect_index.o $(TEST_MBB_RECT_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_MBB_FILTER_TARGET): $(LIB_OBJ) $(TEST_MBB_FILTER_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_SEARCH_QGRAM_TARGET): $(LIB_OBJ) $(TEST_SEARCH_QGRAM_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_QUERY_BENCHMARK_TARGET): $(LIB_OBJ) $(TEST_QUERY_BENCHMARK_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_EPOCH_VISITED_TARGET): $(LIB_OBJ) $(TEST_EPOCH_VISITED_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_SEARCH_GRAPH_VIEW_TARGET): $(LIB_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_SEARCH_DISTANCE_MODE_TARGET): $(LIB_OBJ) $(TEST_SEARCH_DISTANCE_MODE_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_SIMD_MBB_TARGET): src/simd_mbb_filter.o $(TEST_SIMD_MBB_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_SIMD_LEAF_TARGET): src/simd_mbb_filter.o $(TEST_SIMD_LEAF_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_BUILD_TIMING_TARGET): $(LIB_OBJ) $(TEST_BUILD_TIMING_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_BUILD_SCALE_TARGET): $(TEST_BUILD_SCALE_OBJ) $(TARGET)
 	$(CXX) $(CXXFLAGS) -o $@ $(TEST_BUILD_SCALE_OBJ)
 
 $(TEST_PHASE1_HYBRID_TARGET): $(LIB_OBJ) $(TEST_PHASE1_HYBRID_OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_PHASE1_SEED_TARGET): $(TEST_PHASE1_SEED_OBJ) src/phase1_seed_index.o src/tools.o src/structure.o $(EDLIB_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_INDEX_PERSISTENCE_TARGET): $(LIB_OBJ) $(TEST_INDEX_PERSISTENCE_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_PHASE2_DISTANCE_TARGET): $(TEST_PHASE2_DISTANCE_OBJ) src/phase2_distance_verifier.o src/tools.o src/structure.o $(EDLIB_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_BUILD_PROGRESS_TARGET): $(TEST_BUILD_PROGRESS_OBJ) src/build_progress.o
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)
@@ -284,12 +317,24 @@ test_build_scale_smoke_check: $(TEST_BUILD_SCALE_TARGET)
 test_phase1_hybrid: $(TEST_PHASE1_HYBRID_TARGET)
 	./$(TEST_PHASE1_HYBRID_TARGET)
 
-test_all: test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid
+test_phase1_seed_index_check: $(TEST_PHASE1_SEED_TARGET)
+	./$(TEST_PHASE1_SEED_TARGET)
+
+test_index_persistence: $(TEST_INDEX_PERSISTENCE_TARGET)
+	./$(TEST_INDEX_PERSISTENCE_TARGET)
+
+test_phase2_distance_verifier: $(TEST_PHASE2_DISTANCE_TARGET)
+	./$(TEST_PHASE2_DISTANCE_TARGET)
+
+test_build_progress: $(TEST_BUILD_PROGRESS_TARGET)
+	./$(TEST_BUILD_PROGRESS_TARGET)
+
+test_all: test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_phase1_seed_index_check test_index_persistence test_phase2_distance_verifier test_build_progress
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJ) $(LIB_OBJ) $(EDLIB_OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TEST_HIER_OBJ) $(TEST_SEARCH_STATS_OBJ) $(TEST_MAP150_OBJ) $(TEST_BOUNDED_OBJ) $(TEST_BOUNDED_MYERS_OBJ) $(TEST_QGRAM_OBJ) $(TEST_RANGE_JOIN_OBJ) $(TEST_BUILD_RANGE_OBJ) $(TEST_BUILD_DISTANCE_OBJ) $(TEST_MBB_RECT_OBJ) $(TEST_MBB_FILTER_OBJ) $(TEST_SEARCH_QGRAM_OBJ) $(TEST_QUERY_BENCHMARK_OBJ) $(TEST_EPOCH_VISITED_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ) $(TEST_SEARCH_DISTANCE_MODE_OBJ) $(TEST_SIMD_MBB_OBJ) $(TEST_SIMD_LEAF_OBJ) $(TEST_BUILD_TIMING_OBJ) $(TEST_BUILD_SCALE_OBJ) $(TEST_PHASE1_HYBRID_OBJ) $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET) $(TEST_HIER_TARGET) $(TEST_SEARCH_STATS_TARGET) $(TEST_MAP150_TARGET) $(TEST_BOUNDED_TARGET) $(TEST_BOUNDED_MYERS_TARGET) $(TEST_QGRAM_TARGET) $(TEST_RANGE_JOIN_TARGET) $(TEST_BUILD_RANGE_TARGET) $(TEST_BUILD_DISTANCE_TARGET) $(TEST_MBB_RECT_TARGET) $(TEST_MBB_FILTER_TARGET) $(TEST_SEARCH_QGRAM_TARGET) $(TEST_QUERY_BENCHMARK_TARGET) $(TEST_EPOCH_VISITED_TARGET) $(TEST_SEARCH_GRAPH_VIEW_TARGET) $(TEST_SEARCH_DISTANCE_MODE_TARGET) $(TEST_SIMD_MBB_TARGET) $(TEST_SIMD_LEAF_TARGET) $(TEST_BUILD_TIMING_TARGET) $(TEST_BUILD_SCALE_TARGET) $(TEST_PHASE1_HYBRID_TARGET)
+	rm -f $(OBJ) $(LIB_OBJ) $(EDLIB_OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TEST_HIER_OBJ) $(TEST_SEARCH_STATS_OBJ) $(TEST_MAP150_OBJ) $(TEST_BOUNDED_OBJ) $(TEST_BOUNDED_MYERS_OBJ) $(TEST_QGRAM_OBJ) $(TEST_RANGE_JOIN_OBJ) $(TEST_BUILD_RANGE_OBJ) $(TEST_BUILD_DISTANCE_OBJ) $(TEST_MBB_RECT_OBJ) $(TEST_MBB_FILTER_OBJ) $(TEST_SEARCH_QGRAM_OBJ) $(TEST_QUERY_BENCHMARK_OBJ) $(TEST_EPOCH_VISITED_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ) $(TEST_SEARCH_DISTANCE_MODE_OBJ) $(TEST_SIMD_MBB_OBJ) $(TEST_SIMD_LEAF_OBJ) $(TEST_BUILD_TIMING_OBJ) $(TEST_BUILD_SCALE_OBJ) $(TEST_PHASE1_HYBRID_OBJ) $(TEST_PHASE1_SEED_OBJ) $(TEST_INDEX_PERSISTENCE_OBJ) $(TEST_PHASE2_DISTANCE_OBJ) $(TEST_BUILD_PROGRESS_OBJ) $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP) $(TEST_PHASE1_SEED_DEP) $(TEST_INDEX_PERSISTENCE_DEP) $(TEST_PHASE2_DISTANCE_DEP) $(TEST_BUILD_PROGRESS_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET) $(TEST_HIER_TARGET) $(TEST_SEARCH_STATS_TARGET) $(TEST_MAP150_TARGET) $(TEST_BOUNDED_TARGET) $(TEST_BOUNDED_MYERS_TARGET) $(TEST_QGRAM_TARGET) $(TEST_RANGE_JOIN_TARGET) $(TEST_BUILD_RANGE_TARGET) $(TEST_BUILD_DISTANCE_TARGET) $(TEST_MBB_RECT_TARGET) $(TEST_MBB_FILTER_TARGET) $(TEST_SEARCH_QGRAM_TARGET) $(TEST_QUERY_BENCHMARK_TARGET) $(TEST_EPOCH_VISITED_TARGET) $(TEST_SEARCH_GRAPH_VIEW_TARGET) $(TEST_SEARCH_DISTANCE_MODE_TARGET) $(TEST_SIMD_MBB_TARGET) $(TEST_SIMD_LEAF_TARGET) $(TEST_BUILD_TIMING_TARGET) $(TEST_BUILD_SCALE_TARGET) $(TEST_PHASE1_HYBRID_TARGET) $(TEST_PHASE1_SEED_TARGET) $(TEST_INDEX_PERSISTENCE_TARGET) $(TEST_PHASE2_DISTANCE_TARGET) $(TEST_BUILD_PROGRESS_TARGET)
 
--include $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP)
+-include $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP) $(TEST_PHASE1_SEED_DEP) $(TEST_INDEX_PERSISTENCE_DEP) $(TEST_PHASE2_DISTANCE_DEP) $(TEST_BUILD_PROGRESS_DEP)

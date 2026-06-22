@@ -22,7 +22,7 @@ Data structures (`WorldNode`, `MBB`, `BioSequence`) are in `navigamer_cpp/includ
 
 ## Installation
 
-**Requirements:** Linux, **C++17**, **OpenMP**, optional **CMake ≥ 3.14**.
+**Requirements:** Linux, **C++17**, **OpenMP**, optional **CMake >= 3.14**.
 
 ```bash
 cd navigamer_cpp
@@ -46,10 +46,13 @@ cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mode adaptive
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --mbb-filter-mode rect --min-rect-index-fanout 2
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
+./navigamer build --ref ref --reads ACGTACGTACGTACGT --index /tmp/navigamer.navidx
+./navigamer query-index --index /tmp/navigamer.navidx --query ACGTACGTACGTACGT --tolerance 2
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
 ./navigamer build-scale --ref ../data/human/chr1_subset --window 250 --stride 1 --prefix-lengths 10000,50000 --out /tmp/build_scale.csv
+./navigamer build-scale --ref ../data/human/chr1_subset --window 250 --stride 1 --prefix-lengths 50000 --index /tmp/reference.navidx --out /tmp/build_scale.csv
 ./navigamer query-benchmark --ref ACGTGCACTGATTGCATAGCTACGAAAAAAAAAAAACCCCGGGGCCCCCCCCCGGGCCCC --window 12 --stride 12 --query-length 12 --tolerance 1 --primary-radii 12,6,2 --min-rect-index-fanout 1 --mbb-filter-mode rect --search-qgram-prefilter on --search-qgram-q 3 --warmup-iterations 1 --measured-iterations 2 --cold-cache-bytes 0 --out /tmp/query_detail.tsv --summary-out /tmp/query_summary.tsv --json-out /tmp/query_summary.json
 ```
 
@@ -88,13 +91,44 @@ cd navigamer_cpp
 
 Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFERENCE.md). C++ layout and tests: [`navigamer_cpp/README.md`](navigamer_cpp/README.md).
 
-The current C++ index is in-memory only: `build`, `query`, `run`, `benchmark`, `map150`, and `boundary` rebuild the index for each process invocation. The `boundary` command is intended for long-sequence capability sweeps and reuses a single in-memory index across the full `error_rate × tolerance_rate` grid inside one run.
+The C++ `build` and `query` commands support explicit persisted indexes with
+`--index <file>`. The index file stores a manifest with input fingerprints and
+construction parameters plus the collapsed primary DAG, unique sequences,
+reference positions, optional BWT/SA intervals, beacons, MBB rows, leaf links,
+and leaf-beacon distances. `query --index <file> --query <seq>` and
+`query-index --index <file> --query <seq>` load the index directly. When
+`query` is given both `--reads` and `--index`, it compares the requested build
+manifest with the stored manifest and reuses the file only on an exact
+signature match; otherwise it rebuilds and overwrites the index. Experiment
+commands such as `run`, `benchmark`, `map150`, and `boundary` still build
+in-memory indexes for their current workflows. The `boundary` command reuses a
+single in-memory index across the full `error_rate × tolerance_rate` grid
+inside one run.
+
+`build-scale` can also persist its reference-window index with `--index <file>`
+when exactly one prefix length is requested. Multiple prefixes with one index
+path are rejected instead of overwriting the file. Builds emit timestamped
+phase progress to stderr every 600 seconds by default; use
+`--progress-interval-seconds N` to change the interval or `0` to disable
+periodic heartbeats while retaining phase-boundary reports.
 
 Indexed construction supports exact `auto`, `pigeonhole`, `qgram`, `hybrid`,
 and `full` candidate modes. Q-gram filtering uses the necessary condition
 `qgram_l1(a,b) <= 2*q*tau`; hybrid intersects the pigeonhole and q-gram safe
 candidate supersets. Every surviving pair is still verified by bounded exact
 edit distance before an edge or leaf attachment is added.
+
+Phase1 sketch construction has separate helper thresholds for experiments:
+`--phase1-metric-min-fanout` switches parent-local candidate groups from direct
+scan to the metric helper, `--phase1-qgram-min-fanout` switches larger groups to
+the q-gram helper, and `--phase1-qgram-max-touched` controls conservative
+fallback when q-gram candidate expansion is too broad. These knobs do not skip
+bounded exact verification.
+
+Indexed leaf attachment also uses `--leaf-qgram-postfilter on` by default. It
+runs a safe q-gram L1 postfilter after range candidate generation and before
+bounded exact verification, reducing leaf exact distance calls without changing
+accepted links.
 
 Auto construction accepts pigeonhole candidates when their count is at most
 `4096`; if the seed union grows beyond that threshold, it early-aborts the
@@ -107,8 +141,11 @@ Index construction now reports aggregate build timing to stderr. The timing
 breakdown covers Phase0 deduplication, Phase1 sketch construction, Phase2
 rebinding, Phase3 MBB computation, Phase4 leaf attachment, ID assignment,
 graph-view flattening, and selected range-join, MBB, and leaf-attachment
-substeps. The `build-scale` command writes the same timing breakdown and
-construction counters to CSV for multiple reference prefix lengths.
+substeps. Phase2 rebinding, index build, and edge insert timings are wall-clock
+milliseconds; Phase2 candidate-query and exact-verify worker fields are
+accumulated per-thread time. The `build-scale` command writes the same timing
+breakdown and construction counters to CSV for multiple reference prefix
+lengths.
 
 Adaptive search supports `--mbb-filter-mode scan|rect` (default `scan`). The
 `rect` mode uses an exact in-memory rectangle index over the existing per-child
