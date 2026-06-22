@@ -38,6 +38,7 @@ navigamer_cpp/build/
 AGENTS.md
 ARCHITECTURE.md
 .codex
+.worktrees/
 
 # paper related
 Appendix.tex
