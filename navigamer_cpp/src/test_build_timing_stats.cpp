@@ -37,6 +37,8 @@ void assert_nonnegative(double value) {
 
 int main() {
   navigamer::BuildRangeConfig config;
+  assert(!config.phase2_qgram_postfilter);
+  assert(config.progress_interval_seconds == 600);
   config.min_rect_index_fanout = 1;
   config.range_join.candidate_mode = navigamer::RangeCandidateMode::Auto;
   config.range_join.qgram_q = 3;
@@ -58,6 +60,12 @@ int main() {
   assert(stats.phase1_cover_misses > 0);
   assert(stats.phase1_length_pruned_candidates <=
          stats.phase1_cover_candidate_scans);
+  assert(stats.phase1_pigeonhole_candidates <=
+         stats.phase1_total_possible_pairs);
+  assert(stats.phase1_hint_hits <= stats.phase1_hint_checks);
+  assert(stats.phase1_pigeonhole_queries == 0 ||
+         stats.phase1_seed_posting_entries_visited > 0 ||
+         stats.phase1_pigeonhole_fallbacks > 0);
   assert_nonnegative(stats.phase2_rebinding_ms);
   assert_nonnegative(stats.phase3_mbb_ms);
   assert_nonnegative(stats.phase4_attach_ms);
@@ -74,7 +82,10 @@ int main() {
   assert_nonnegative(stats.phase2_index_build_ms);
   assert_nonnegative(stats.phase2_candidate_query_ms);
   assert_nonnegative(stats.phase2_exact_verify_ms);
+  assert_nonnegative(stats.phase2_candidate_query_worker_ms);
+  assert_nonnegative(stats.phase2_exact_verify_worker_ms);
   assert_nonnegative(stats.phase2_edge_insert_ms);
+  assert(stats.phase2_distance_batches > 0);
 
   assert_nonnegative(stats.phase3_collect_beacons_ms);
   assert_nonnegative(stats.phase3_collapse_children_ms);

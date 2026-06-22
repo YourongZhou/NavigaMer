@@ -84,6 +84,45 @@ std::vector<navigamer::RangeJoinItem> posting_explosion_items() {
   return items;
 }
 
+void test_parallel_range_join_queries_are_deterministic() {
+  std::vector<navigamer::RangeJoinItem> items;
+  const std::vector<std::string> bases = {
+      "ACGTACGTACGTACGTACGTACGTACGTACGT",
+      "ACGTACGTACGTACGTACGTACGTACGTTCGT",
+      "TTTTACGTACGTACGTACGTACGTACGTACGA",
+      "GGGGACGTACGTACGTACGTACGTACGTACCC",
+  };
+  for (size_t i = 0; i < bases.size(); ++i) items.push_back({i, bases[i]});
+
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode = navigamer::RangeCandidateMode::Auto;
+  config.min_seed_len = 4;
+  config.max_seed_len = 12;
+  config.qgram_q = 4;
+
+  navigamer::ExactRangeJoinIndex index(config);
+  index.build(items);
+  index.prepare_seed_lengths({8, 10, 12});
+
+  std::vector<std::string> queries = bases;
+  queries.push_back("ACGTACGTACGTACGTACGTACGTACGTAAAA");
+
+  std::vector<std::vector<size_t>> serial;
+  for (const auto& query : queries) {
+    navigamer::RangeJoinQueryWorkspace workspace;
+    serial.push_back(index.query(query, 3, &workspace).candidate_item_ids);
+  }
+
+  std::vector<std::vector<size_t>> parallel(queries.size());
+#pragma omp parallel for schedule(dynamic, 1)
+  for (size_t i = 0; i < queries.size(); ++i) {
+    navigamer::RangeJoinQueryWorkspace workspace;
+    parallel[i] = index.query(queries[i], 3, &workspace).candidate_item_ids;
+  }
+
+  assert(serial == parallel);
+}
+
 }  // namespace
 
 int main() {
@@ -91,6 +130,8 @@ int main() {
   using navigamer::RangeCandidateMode;
   using navigamer::RangeJoinConfig;
   using navigamer::RangeJoinItem;
+
+  test_parallel_range_join_queries_are_deterministic();
 
   std::mt19937 gen(42);
   std::vector<RangeJoinItem> items;

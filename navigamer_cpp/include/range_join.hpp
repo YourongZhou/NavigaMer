@@ -67,12 +67,20 @@ struct RangeJoinQueryResult {
   double range_full_scan_ms = 0.0;
 };
 
+struct RangeJoinQueryWorkspace {
+  QGramQueryWorkspace qgram;
+};
+
 class ExactRangeJoinIndex {
  public:
   explicit ExactRangeJoinIndex(RangeJoinConfig config = {});
 
   void build(const std::vector<RangeJoinItem>& items);
+  void prepare_seed_lengths(const std::vector<int>& seed_lengths);
   RangeJoinQueryResult query(const std::string& query_sequence, int tau);
+  RangeJoinQueryResult query(
+      const std::string& query_sequence, int tau,
+      RangeJoinQueryWorkspace* workspace) const;
 
  private:
   using PostingLists = std::unordered_map<std::string, std::vector<size_t>>;
@@ -82,16 +90,18 @@ class ExactRangeJoinIndex {
   std::unordered_map<size_t, size_t> item_lengths_by_id_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
   QGramCountIndex qgram_index_;
-  QGramQueryWorkspace qgram_workspace_;
 
   const PostingLists& postings_for_seed_len(int seed_len);
+  const PostingLists* find_postings_for_seed_len(int seed_len) const;
+  bool query_needs_seed_postings(int seed_len) const;
   RangeJoinQueryResult full_scan(
       const std::string& query_sequence, int tau, bool fallback) const;
   RangeJoinQueryResult pigeonhole_query(
       const std::string& query_sequence, int tau, int block_len, int seed_len,
-      size_t early_abort_candidate_limit);
+      size_t early_abort_candidate_limit) const;
   RangeJoinQueryResult qgram_query(
-      const std::string& query_sequence, int tau);
+      const std::string& query_sequence, int tau,
+      RangeJoinQueryWorkspace* workspace) const;
   RangeJoinQueryResult hybrid_result(
       const RangeJoinQueryResult& pigeonhole,
       const RangeJoinQueryResult& qgram) const;

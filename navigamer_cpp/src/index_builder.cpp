@@ -1,4 +1,7 @@
 #include "index_builder.hpp"
+#include "build_progress.hpp"
+#include "phase1_seed_index.hpp"
+#include "phase2_distance_verifier.hpp"
 #include <algorithm>
 #include <chrono>
 #include <climits>
@@ -10,6 +13,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <omp.h>
@@ -42,8 +46,10 @@ int build_distance_bounded(const std::string& a, const std::string& b, int tau,
                            BuildDistanceMode mode);
 int build_distance(const std::string& a, const std::string& b,
                    BuildDistanceMode mode);
+DistanceMode to_distance_mode(BuildDistanceMode mode);
 
 constexpr size_t kPhase1ParallelScanMinFanout = 512;
+constexpr size_t kPhase2DistanceBatchFlushPairs = 65536;
 
 struct Phase1CoverScanResult {
   std::shared_ptr<WorldNode> best;
@@ -186,6 +192,7 @@ Phase1CoverScanResult find_best_phase1_cover_by_indices(
 enum class Phase1CoverSource {
   Scan,
   Metric,
+  Pigeonhole,
   QGram,
   FallbackScan,
 };
@@ -197,6 +204,10 @@ struct Phase1CandidateQueryResult {
   size_t total_possible = 0;
   size_t metric_distance_calls = 0;
   size_t metric_build_distance_calls = 0;
+  size_t pigeonhole_queries = 0;
+  size_t seed_posting_entries_visited = 0;
+  size_t pigeonhole_candidates = 0;
+  size_t pigeonhole_fallbacks = 0;
   size_t qgram_touched_candidates = 0;
   size_t qgram_pruned_candidates = 0;
 };
@@ -228,8 +239,17 @@ class Phase1CoverGroupIndex {
         metric_build_distance_calls_ - build_calls_before;
 
     if (candidates.size() >= config.phase1_qgram_min_fanout) {
+      auto seed = query_pigeonhole(candidates, sequence, radius, config);
+      seed.metric_build_distance_calls = result.metric_build_distance_calls;
+      if (seed.source == Phase1CoverSource::Pigeonhole) return seed;
+
       auto qgram = query_qgram(candidates, sequence, radius, config);
       qgram.metric_build_distance_calls = result.metric_build_distance_calls;
+      qgram.pigeonhole_queries = seed.pigeonhole_queries;
+      qgram.seed_posting_entries_visited =
+          seed.seed_posting_entries_visited;
+      qgram.pigeonhole_candidates = seed.pigeonhole_candidates;
+      qgram.pigeonhole_fallbacks = seed.pigeonhole_fallbacks;
       return qgram;
     }
 
@@ -389,6 +409,48 @@ class Phase1CoverGroupIndex {
     for (size_t idx = 0; idx < items_.size(); ++idx) {
       add_qgram_item(candidates, idx, q);
     }
+  }
+
+  Phase1CandidateQueryResult query_pigeonhole(
+      const std::vector<std::shared_ptr<WorldNode>>& candidates,
+      const std::shared_ptr<BioSequence>& sequence,
+      int radius,
+      const BuildRangeConfig& config) {
+    Phase1CandidateQueryResult result;
+    result.total_possible = candidates.size();
+    result.pigeonhole_queries = 1;
+
+    const int min_seed_len = config.range_join.min_seed_len;
+    const int max_seed_len = config.range_join.max_seed_len;
+    if (!seed_index_ || seed_min_len_ != min_seed_len ||
+        seed_max_len_ != max_seed_len) {
+      seed_index_ = std::make_unique<IncrementalPigeonholeIndex>(
+          Phase1SeedIndexConfig{min_seed_len, max_seed_len});
+      seed_min_len_ = min_seed_len;
+      seed_max_len_ = max_seed_len;
+      seed_synced_items_ = 0;
+    }
+    while (seed_synced_items_ < candidates.size()) {
+      seed_index_->append(
+          seed_synced_items_,
+          center_sequence(candidates, seed_synced_items_));
+      seed_synced_items_++;
+    }
+
+    auto seed_result = seed_index_->query(sequence->seq, radius);
+    result.seed_posting_entries_visited =
+        seed_result.posting_entries_visited;
+    result.pigeonhole_candidates = seed_result.candidate_indices.size();
+    if (!seed_result.safe) {
+      result.source = Phase1CoverSource::FallbackScan;
+      result.fallback_scan = true;
+      result.pigeonhole_fallbacks = 1;
+      return result;
+    }
+
+    result.source = Phase1CoverSource::Pigeonhole;
+    result.candidate_indices = std::move(seed_result.candidate_indices);
+    return result;
   }
 
   void add_qgram_item(
@@ -553,6 +615,11 @@ class Phase1CoverGroupIndex {
   std::vector<uint32_t> qgram_seen_epoch_;
   std::vector<size_t> qgram_touched_;
   uint32_t qgram_epoch_ = 1;
+
+  std::unique_ptr<IncrementalPigeonholeIndex> seed_index_;
+  int seed_min_len_ = 0;
+  int seed_max_len_ = 0;
+  size_t seed_synced_items_ = 0;
 };
 
 std::vector<int> make_auxiliary_radii(const std::vector<int>& primary_radii) {
@@ -597,6 +664,18 @@ int build_distance_bounded(const std::string& a, const std::string& b, int tau,
   return mode == BuildDistanceMode::Edlib
              ? compute_distance_bounded_edlib(a, b, tau)
              : compute_distance_bounded_dp(a, b, tau);
+}
+
+DistanceMode to_distance_mode(BuildDistanceMode mode) {
+  switch (mode) {
+    case BuildDistanceMode::DP:
+      return DistanceMode::DP;
+    case BuildDistanceMode::Edlib:
+      return DistanceMode::Edlib;
+    case BuildDistanceMode::Auto:
+      return DistanceMode::Auto;
+  }
+  return DistanceMode::DP;
 }
 
 std::vector<int> build_expanded_radii(const HierarchyConfig& config) {
@@ -647,6 +726,84 @@ void accumulate_range_timing(BioGeometryIndexBuilder::Statistics& stats,
   stats.range_qgram_query_ms += result.range_qgram_query_ms;
   stats.range_hybrid_intersection_ms += result.range_hybrid_intersection_ms;
   stats.range_full_scan_ms += result.range_full_scan_ms;
+}
+
+void accumulate_phase2_candidate_stats(
+    BioGeometryIndexBuilder::Statistics& stats,
+    const RangeJoinQueryResult& candidates) {
+  accumulate_range_timing(stats, candidates);
+  stats.phase2_candidate_pairs += candidates.candidate_item_ids.size();
+  if (candidates.used_full_scan) stats.phase2_full_scan_fallback_count++;
+  if (candidates.mode_used == RangeCandidateMode::PigeonholeOnly) {
+    stats.phase2_pigeonhole_queries++;
+  } else if (candidates.mode_used == RangeCandidateMode::QGramOnly) {
+    stats.phase2_qgram_queries++;
+  } else if (candidates.mode_used == RangeCandidateMode::Hybrid) {
+    stats.phase2_hybrid_queries++;
+  }
+  stats.phase2_qgram_candidate_pairs += candidates.qgram_candidate_count;
+  stats.phase2_qgram_pruned_by_l1 += candidates.qgram_pruned_by_l1;
+  stats.phase2_length_pruned_pairs += candidates.length_filtered_items;
+  stats.phase2_seed_candidate_pairs_before_length_filter +=
+      candidates.seed_candidate_pairs_before_length_filter;
+  stats.phase2_seed_length_pruned_candidates +=
+      candidates.seed_length_pruned_candidates;
+  stats.phase2_pigeonhole_early_abort_count +=
+      candidates.pigeonhole_early_abort_count;
+  stats.phase2_range_final_candidate_pairs += candidates.final_candidate_pairs;
+  stats.phase2_required_shared_nonpositive_count +=
+      candidates.required_shared_nonpositive;
+  stats.phase2_auto_pigeonhole_accepted +=
+      candidates.auto_pigeonhole_accepted;
+  stats.phase2_auto_pigeonhole_rejected_large_candidates +=
+      candidates.auto_pigeonhole_rejected_large_candidates;
+  stats.phase2_auto_qgram_invoked += candidates.auto_qgram_invoked;
+  stats.phase2_auto_hybrid_invoked += candidates.auto_hybrid_invoked;
+  stats.phase2_auto_final_candidate_pairs +=
+      candidates.auto_final_candidate_pairs;
+  stats.phase2_auto_candidate_ratio_sum +=
+      candidates.auto_candidate_ratio_sum;
+}
+
+void merge_phase2_local_stats(BioGeometryIndexBuilder::Statistics& target,
+                              const BioGeometryIndexBuilder::Statistics& local) {
+  target.phase2_candidate_pairs += local.phase2_candidate_pairs;
+  target.phase2_exact_distance_calls += local.phase2_exact_distance_calls;
+  target.phase2_edges_added += local.phase2_edges_added;
+  target.phase2_full_scan_fallback_count += local.phase2_full_scan_fallback_count;
+  target.phase2_pigeonhole_queries += local.phase2_pigeonhole_queries;
+  target.phase2_qgram_queries += local.phase2_qgram_queries;
+  target.phase2_hybrid_queries += local.phase2_hybrid_queries;
+  target.phase2_qgram_candidate_pairs += local.phase2_qgram_candidate_pairs;
+  target.phase2_qgram_pruned_by_l1 += local.phase2_qgram_pruned_by_l1;
+  target.phase2_length_pruned_pairs += local.phase2_length_pruned_pairs;
+  target.phase2_seed_candidate_pairs_before_length_filter +=
+      local.phase2_seed_candidate_pairs_before_length_filter;
+  target.phase2_seed_length_pruned_candidates +=
+      local.phase2_seed_length_pruned_candidates;
+  target.phase2_pigeonhole_early_abort_count +=
+      local.phase2_pigeonhole_early_abort_count;
+  target.phase2_range_final_candidate_pairs +=
+      local.phase2_range_final_candidate_pairs;
+  target.phase2_required_shared_nonpositive_count +=
+      local.phase2_required_shared_nonpositive_count;
+  target.phase2_auto_pigeonhole_accepted +=
+      local.phase2_auto_pigeonhole_accepted;
+  target.phase2_auto_pigeonhole_rejected_large_candidates +=
+      local.phase2_auto_pigeonhole_rejected_large_candidates;
+  target.phase2_auto_qgram_invoked += local.phase2_auto_qgram_invoked;
+  target.phase2_auto_hybrid_invoked += local.phase2_auto_hybrid_invoked;
+  target.phase2_auto_final_candidate_pairs +=
+      local.phase2_auto_final_candidate_pairs;
+  target.phase2_auto_candidate_ratio_sum +=
+      local.phase2_auto_candidate_ratio_sum;
+  target.range_posting_lookup_ms += local.range_posting_lookup_ms;
+  target.range_seed_union_ms += local.range_seed_union_ms;
+  target.range_length_filter_ms += local.range_length_filter_ms;
+  target.range_qgram_query_ms += local.range_qgram_query_ms;
+  target.range_hybrid_intersection_ms += local.range_hybrid_intersection_ms;
+  target.range_full_scan_ms += local.range_full_scan_ms;
+  target.phase2_distance_batches += local.phase2_distance_batches;
 }
 
 std::vector<int> leaf_beacon_distances_timed(
@@ -1021,41 +1178,89 @@ std::vector<std::shared_ptr<WorldNode>> BioGeometryIndexBuilder::find_neighbors(
 
 std::vector<std::shared_ptr<BioSequence>> BioGeometryIndexBuilder::deduplicate(
     const std::vector<std::shared_ptr<BioSequence>>& raw) {
-  std::unordered_map<std::string, std::shared_ptr<BioSequence>> seq_map;
+  if (!range_config_.phase1_preserve_input_order) {
+    std::unordered_map<std::string, std::shared_ptr<BioSequence>> sequence_map;
+    for (const auto& sequence : raw) {
+      stats_.added_sequences++;
+      auto it = sequence_map.find(sequence->seq);
+      if (it == sequence_map.end()) {
+        sequence_map.emplace(sequence->seq, sequence);
+        continue;
+      }
+      auto& existing = it->second;
+      for (const auto& occurrence : sequence->ref_positions) {
+        existing->add_occurrence(occurrence.ref_id, occurrence.start,
+                                 occurrence.end, occurrence.strand);
+      }
+      if (sequence->ref_positions.empty() && existing->ref_positions.empty()) {
+        existing->add_occurrence(sequence->id, 0,
+                                 static_cast<int>(sequence->seq.size()), "+");
+      }
+      if (!existing->bwt_interval.valid() && sequence->bwt_interval.valid()) {
+        existing->set_bwt_interval(sequence->bwt_interval.start,
+                                   sequence->bwt_interval.end);
+      }
+      stats_.deduplicated++;
+    }
+
+    std::vector<std::shared_ptr<BioSequence>> unordered;
+    unordered.reserve(sequence_map.size());
+    unique_sequences.clear();
+    for (const auto& entry : sequence_map) {
+      unordered.push_back(entry.second);
+      unique_sequences[entry.second->id] = entry.second;
+    }
+    stats_.unique_sequences = unordered.size();
+    return unordered;
+  }
+
+  std::unordered_map<std::string, size_t> sequence_indices;
+  std::vector<std::shared_ptr<BioSequence>> out;
+  out.reserve(raw.size());
   for (const auto& seq : raw) {
     stats_.added_sequences++;
-    auto it = seq_map.find(seq->seq);
-    if (it != seq_map.end()) {
+    auto it = sequence_indices.find(seq->seq);
+    if (it != sequence_indices.end()) {
+      auto& existing = out[it->second];
       for (const auto& occ : seq->ref_positions) {
-        it->second->add_occurrence(occ.ref_id, occ.start, occ.end, occ.strand);
+        existing->add_occurrence(occ.ref_id, occ.start, occ.end, occ.strand);
       }
-      if (seq->ref_positions.empty() && it->second->ref_positions.empty()) {
-        it->second->add_occurrence(seq->id, 0, static_cast<int>(seq->seq.size()), "+");
+      if (seq->ref_positions.empty() && existing->ref_positions.empty()) {
+        existing->add_occurrence(
+            seq->id, 0, static_cast<int>(seq->seq.size()), "+");
       }
-      if (!it->second->bwt_interval.valid() && seq->bwt_interval.valid()) {
-        it->second->set_bwt_interval(seq->bwt_interval.start, seq->bwt_interval.end);
+      if (!existing->bwt_interval.valid() && seq->bwt_interval.valid()) {
+        existing->set_bwt_interval(
+            seq->bwt_interval.start, seq->bwt_interval.end);
       }
       stats_.deduplicated++;
     } else {
-      seq_map[seq->seq] = seq;
+      sequence_indices.emplace(seq->seq, out.size());
+      out.push_back(seq);
     }
   }
 
   unique_sequences.clear();
-  for (const auto& entry : seq_map) unique_sequences[entry.second->id] = entry.second;
-  stats_.unique_sequences = seq_map.size();
-
-  std::vector<std::shared_ptr<BioSequence>> out;
-  out.reserve(seq_map.size());
-  for (const auto& entry : seq_map) out.push_back(entry.second);
+  for (const auto& sequence : out) unique_sequences[sequence->id] = sequence;
+  stats_.unique_sequences = out.size();
   return out;
 }
 
 void BioGeometryIndexBuilder::phase1_build_extended_sketch(
-    const std::vector<std::shared_ptr<BioSequence>>& unique_seqs) {
+    const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
+    BuildProgressReporter* progress) {
+  if (progress) progress->begin_phase("phase1_sketch", unique_seqs.size());
   extended_layers_.assign(static_cast<size_t>(hierarchy_.num_expanded_layers()),
                           std::vector<std::shared_ptr<WorldNode>>());
   std::unordered_map<const void*, Phase1CoverGroupIndex> cover_group_indexes;
+  struct CoverHint {
+    const void* candidate_group = nullptr;
+    std::shared_ptr<WorldNode> node;
+    size_t candidate_idx = std::numeric_limits<size_t>::max();
+  };
+  std::vector<CoverHint> hints(
+      static_cast<size_t>(hierarchy_.num_expanded_layers()));
+  const auto phase1_start = Clock::now();
 
   auto add_phase1_scan_stats = [&](const Phase1CoverScanResult& scan) {
     stats_.phase1_cover_candidate_scans += scan.candidate_scans;
@@ -1064,7 +1269,9 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
     stats_.phase1_candidate_pairs += scan.exact_distance_calls;
   };
 
-  for (const auto& sequence : unique_seqs) {
+  for (size_t sequence_idx = 0; sequence_idx < unique_seqs.size();
+       ++sequence_idx) {
+    const auto& sequence = unique_seqs[sequence_idx];
     std::shared_ptr<WorldNode> parent;
     for (int layer_idx = 0; layer_idx < hierarchy_.num_expanded_layers(); ++layer_idx) {
       const int radius = expanded_radii_[static_cast<size_t>(layer_idx)];
@@ -1078,6 +1285,26 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
       Phase1CoverScanResult scan;
       if (candidates && !candidates->empty()) {
         stats_.phase1_total_possible_pairs += candidates->size();
+        int candidate_radius = radius;
+        if (range_config_.phase1_candidate_mode != Phase1CandidateMode::Scan) {
+          const CoverHint& hint = hints[static_cast<size_t>(layer_idx)];
+          if (hint.candidate_group == static_cast<const void*>(candidates) &&
+              hint.node && hint.candidate_idx < candidates->size() &&
+              (*candidates)[hint.candidate_idx] == hint.node &&
+              hint.node->center_ptr &&
+              phase1_length_compatible(sequence->seq.size(),
+                                       hint.node->center_ptr->seq.size(),
+                                       radius)) {
+            stats_.phase1_hint_checks++;
+            const int hint_distance = build_distance_bounded(
+                sequence->seq, hint.node->center_ptr->seq, radius,
+                range_config_.distance_mode);
+            if (hint_distance <= radius) {
+              stats_.phase1_hint_hits++;
+              candidate_radius = hint_distance;
+            }
+          }
+        }
         auto use_scan = [&]() {
           stats_.phase1_scan_queries++;
           scan = find_best_phase1_cover(*candidates, sequence, radius,
@@ -1091,9 +1318,17 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
           auto& group_index =
               cover_group_indexes[static_cast<const void*>(candidates)];
           auto candidate_query = group_index.query(
-              *candidates, sequence, radius, range_config_);
+              *candidates, sequence, candidate_radius, range_config_);
           stats_.phase1_metric_build_distance_calls +=
               candidate_query.metric_build_distance_calls;
+          stats_.phase1_pigeonhole_queries +=
+              candidate_query.pigeonhole_queries;
+          stats_.phase1_seed_posting_entries_visited +=
+              candidate_query.seed_posting_entries_visited;
+          stats_.phase1_pigeonhole_candidates +=
+              candidate_query.pigeonhole_candidates;
+          stats_.phase1_pigeonhole_fallbacks +=
+              candidate_query.pigeonhole_fallbacks;
           switch (candidate_query.source) {
             case Phase1CoverSource::Scan:
               use_scan();
@@ -1108,6 +1343,12 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               stats_.phase1_metric_index_queries++;
               stats_.phase1_metric_distance_calls +=
                   candidate_query.metric_distance_calls;
+              scan = find_best_phase1_cover_by_indices(
+                  *candidates, candidate_query.candidate_indices, sequence,
+                  radius, range_config_.distance_mode);
+              add_phase1_scan_stats(scan);
+              break;
+            case Phase1CoverSource::Pigeonhole:
               scan = find_best_phase1_cover_by_indices(
                   *candidates, candidate_query.candidate_indices, sequence,
                   radius, range_config_.distance_mode);
@@ -1129,6 +1370,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
       }
 
       if (!scan.best) {
+        const size_t new_candidate_idx = candidates ? candidates->size() : 0;
         auto new_node = std::make_shared<WorldNode>(
             sequence, radius, layer_idx);
         const bool is_primary = expanded_layer_is_primary(layer_idx);
@@ -1143,43 +1385,144 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
         }
         stats_.phase1_cover_misses++;
         parent = new_node;
+        hints[static_cast<size_t>(layer_idx)] = {
+            static_cast<const void*>(candidates), parent, new_candidate_idx};
       } else {
         stats_.phase1_best_cover_hits++;
         parent = scan.best;
+        hints[static_cast<size_t>(layer_idx)] = {
+            static_cast<const void*>(candidates), parent, scan.best_idx};
       }
       if (!parent) break;
     }
+
+    const size_t processed = sequence_idx + 1;
+    if (progress &&
+        (processed % 1024 == 0 || processed == unique_seqs.size())) {
+      progress->set_completed(processed);
+    }
+    if (unique_seqs.size() >= 100000 && processed % 100000 == 0) {
+      const double percent =
+          100.0 * static_cast<double>(processed) /
+          static_cast<double>(unique_seqs.size());
+      std::cerr << "    Phase1 progress: processed=" << processed << "/"
+                << unique_seqs.size() << " (" << std::fixed
+                << std::setprecision(1) << percent << "%)"
+                << " elapsed_s=" << std::setprecision(1)
+                << elapsed_ms_since(phase1_start) / 1000.0
+                << " misses=" << stats_.phase1_cover_misses
+                << " hint_hits=" << stats_.phase1_hint_hits
+                << " seed_queries=" << stats_.phase1_pigeonhole_queries
+                << " seed_postings="
+                << stats_.phase1_seed_posting_entries_visited << "\n"
+                << std::defaultfloat << std::setprecision(6);
+    }
   }
+  if (progress) progress->finish_phase();
 }
 
-void BioGeometryIndexBuilder::phase2_inter_tier_rebinding() {
+void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
+    BuildProgressReporter* progress) {
+  struct Phase2EdgeTuple {
+    size_t parent_idx = 0;
+    size_t child_idx = 0;
+  };
+
+  struct Phase2LocalStats {
+    BioGeometryIndexBuilder::Statistics stats;
+    double candidate_query_worker_ms = 0.0;
+    double exact_verify_worker_ms = 0.0;
+  };
+
+  uint64_t phase_total = 0;
+  for (int layer_idx = 0;
+       layer_idx + 1 < hierarchy_.num_expanded_layers(); ++layer_idx) {
+    const auto& parents = extended_layers_[static_cast<size_t>(layer_idx)];
+    const auto& children =
+        extended_layers_[static_cast<size_t>(layer_idx + 1)];
+    phase_total += range_config_.link_mode == BuildRangeMode::Full
+                       ? parents.size()
+                       : children.size();
+  }
+  if (progress) progress->begin_phase("phase2_rebinding", phase_total);
+  uint64_t phase_completed = 0;
+
   for (int layer_idx = 0; layer_idx + 1 < hierarchy_.num_expanded_layers(); ++layer_idx) {
+    const auto layer_start = Clock::now();
+    const size_t candidate_pairs_before = stats_.phase2_candidate_pairs;
+    const size_t exact_calls_before = stats_.phase2_exact_distance_calls;
+    const size_t qgram_pruned_before = stats_.phase2_qgram_pruned_by_l1;
+    const size_t edges_before = stats_.phase2_edges_added;
     auto& parents = extended_layers_[static_cast<size_t>(layer_idx)];
     auto& children = extended_layers_[static_cast<size_t>(layer_idx + 1)];
     stats_.phase2_total_possible_pairs += parents.size() * children.size();
     for (auto& parent : parents) parent->child_nodes.clear();
 
+    std::vector<std::string> parent_sequences(parents.size());
+    std::vector<std::string> child_sequences(children.size());
+    for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
+      if (parents[parent_idx]->center_ptr) {
+        parent_sequences[parent_idx] = parents[parent_idx]->center_ptr->seq;
+      }
+    }
+    for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
+      if (children[child_idx]->center_ptr) {
+        child_sequences[child_idx] = children[child_idx]->center_ptr->seq;
+      }
+    }
+    const DistanceMode verifier_distance_mode =
+        to_distance_mode(range_config_.distance_mode);
+
     if (range_config_.link_mode == BuildRangeMode::Full) {
+      auto verifier = make_phase2_distance_verifier(verifier_distance_mode);
       for (auto& parent : parents) {
         if (!parent->center_ptr) continue;
+        const size_t parent_idx =
+            static_cast<size_t>(&parent - parents.data());
+        std::vector<Phase2DistancePair> verify_pairs;
+        verify_pairs.reserve(children.size());
+        for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
+          const auto& child = children[child_idx];
+          if (!child->center_ptr) continue;
+          stats_.phase2_candidate_pairs++;
+          stats_.phase2_exact_distance_calls++;
+          verify_pairs.push_back(
+              {parent_idx, child_idx, parent->radius + child->radius});
+        }
+        if (verify_pairs.empty()) continue;
+        Phase2DistanceBatchResult result;
         {
           ScopedTimer verify_timer(&stats_.phase2_exact_verify_ms);
-          for (auto& child : children) {
-            if (!child->center_ptr) continue;
-            stats_.phase2_candidate_pairs++;
-            stats_.phase2_exact_distance_calls++;
-            int dist = build_distance(parent->center_ptr->seq,
-                                      child->center_ptr->seq,
-                                      range_config_.distance_mode);
-            if (dist <= parent->radius + child->radius) {
-              {
-                ScopedTimer timer(&stats_.phase2_edge_insert_ms);
-                parent->child_nodes.push_back(child);
-              }
-              stats_.phase2_edges_added++;
-            }
-          }
+          result = verifier->verify(parent_sequences, child_sequences,
+                                    verify_pairs);
         }
+        stats_.phase2_distance_batches++;
+        for (size_t accepted_idx : result.accepted_pair_indices) {
+          const auto& pair = verify_pairs[accepted_idx];
+          {
+            ScopedTimer timer(&stats_.phase2_edge_insert_ms);
+            parent->child_nodes.push_back(children[pair.child_idx]);
+          }
+          stats_.phase2_edges_added++;
+        }
+        if (progress) progress->advance(1);
+      }
+      phase_completed += parents.size();
+      if (progress) progress->set_completed(phase_completed);
+      if (stats_.unique_sequences >= 100000) {
+        std::cerr << "    Phase2 layer " << layer_idx << "->"
+                  << layer_idx + 1 << ": parents=" << parents.size()
+                  << " children=" << children.size()
+                  << " candidates="
+                  << stats_.phase2_candidate_pairs - candidate_pairs_before
+                  << " exact="
+                  << stats_.phase2_exact_distance_calls - exact_calls_before
+                  << " qgram_pruned="
+                  << stats_.phase2_qgram_pruned_by_l1 - qgram_pruned_before
+                  << " edges=" << stats_.phase2_edges_added - edges_before
+                  << " elapsed_s=" << std::fixed << std::setprecision(1)
+                  << elapsed_ms_since(layer_start) / 1000.0 << "\n"
+                  << std::defaultfloat << std::setprecision(6);
       }
       continue;
     }
@@ -1193,81 +1536,185 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding() {
       max_parent_radius = std::max(max_parent_radius, parents[parent_idx]->radius);
     }
     ExactRangeJoinIndex parent_index(range_config_.range_join);
+    std::vector<int> seed_lengths;
+    seed_lengths.reserve(children.size());
+    for (const auto& child : children) {
+      if (!child->center_ptr) continue;
+      const int query_tau = max_parent_radius + child->radius;
+      const int block_count = query_tau + 1;
+      const int block_len = static_cast<int>(
+          child->center_ptr->seq.size() / static_cast<size_t>(block_count));
+      seed_lengths.push_back(std::min(
+          range_config_.range_join.max_seed_len, block_len));
+    }
+    std::sort(seed_lengths.begin(), seed_lengths.end());
+    seed_lengths.erase(std::unique(seed_lengths.begin(), seed_lengths.end()),
+                       seed_lengths.end());
     {
       ScopedTimer timer(&stats_.phase2_index_build_ms);
       parent_index.build(items);
+      parent_index.prepare_seed_lengths(seed_lengths);
     }
 
-    for (auto& child : children) {
-      if (!child->center_ptr) continue;
-      RangeJoinQueryResult candidates;
-      {
-        ScopedTimer timer(&stats_.phase2_candidate_query_ms);
-        candidates =
-            parent_index.query(child->center_ptr->seq, max_parent_radius + child->radius);
+    std::vector<QGramSignature> parent_qgram_signatures;
+    std::vector<QGramSignature> child_qgram_signatures;
+    if (range_config_.phase2_qgram_postfilter) {
+      const int q = range_config_.range_join.qgram_q;
+      parent_qgram_signatures.resize(parents.size());
+      child_qgram_signatures.resize(children.size());
+      for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
+        if (!parents[parent_idx]->center_ptr) continue;
+        parent_qgram_signatures[parent_idx] =
+            compute_qgram_signature(parents[parent_idx]->center_ptr->seq, q);
       }
-      accumulate_range_timing(stats_, candidates);
-      stats_.phase2_candidate_pairs += candidates.candidate_item_ids.size();
-      if (candidates.used_full_scan) stats_.phase2_full_scan_fallback_count++;
-      if (candidates.mode_used == RangeCandidateMode::PigeonholeOnly) {
-        stats_.phase2_pigeonhole_queries++;
-      } else if (candidates.mode_used == RangeCandidateMode::QGramOnly) {
-        stats_.phase2_qgram_queries++;
-      } else if (candidates.mode_used == RangeCandidateMode::Hybrid) {
-        stats_.phase2_hybrid_queries++;
+      for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
+        if (!children[child_idx]->center_ptr) continue;
+        child_qgram_signatures[child_idx] =
+            compute_qgram_signature(children[child_idx]->center_ptr->seq, q);
       }
-      stats_.phase2_qgram_candidate_pairs += candidates.qgram_candidate_count;
-      stats_.phase2_qgram_pruned_by_l1 += candidates.qgram_pruned_by_l1;
-      stats_.phase2_length_pruned_pairs += candidates.length_filtered_items;
-      stats_.phase2_seed_candidate_pairs_before_length_filter +=
-          candidates.seed_candidate_pairs_before_length_filter;
-      stats_.phase2_seed_length_pruned_candidates +=
-          candidates.seed_length_pruned_candidates;
-      stats_.phase2_pigeonhole_early_abort_count +=
-          candidates.pigeonhole_early_abort_count;
-      stats_.phase2_range_final_candidate_pairs +=
-          candidates.final_candidate_pairs;
-      stats_.phase2_required_shared_nonpositive_count +=
-          candidates.required_shared_nonpositive;
-      stats_.phase2_auto_pigeonhole_accepted +=
-          candidates.auto_pigeonhole_accepted;
-      stats_.phase2_auto_pigeonhole_rejected_large_candidates +=
-          candidates.auto_pigeonhole_rejected_large_candidates;
-      stats_.phase2_auto_qgram_invoked += candidates.auto_qgram_invoked;
-      stats_.phase2_auto_hybrid_invoked += candidates.auto_hybrid_invoked;
-      stats_.phase2_auto_final_candidate_pairs +=
-          candidates.auto_final_candidate_pairs;
-      stats_.phase2_auto_candidate_ratio_sum +=
-          candidates.auto_candidate_ratio_sum;
-      {
-        ScopedTimer verify_timer(&stats_.phase2_exact_verify_ms);
+    }
+
+    const int thread_count = std::max(1, omp_get_max_threads());
+    std::vector<std::vector<Phase2EdgeTuple>> thread_edges(
+        static_cast<size_t>(thread_count));
+    std::vector<Phase2LocalStats> thread_stats(
+        static_cast<size_t>(thread_count));
+    (void)make_phase2_distance_verifier(verifier_distance_mode);
+
+#pragma omp parallel
+    {
+      const int tid = omp_get_thread_num();
+      RangeJoinQueryWorkspace workspace;
+      auto verifier = make_phase2_distance_verifier(verifier_distance_mode);
+      auto& local_edges = thread_edges[static_cast<size_t>(tid)];
+      auto& local = thread_stats[static_cast<size_t>(tid)];
+      std::vector<Phase2DistancePair> verify_batch;
+      verify_batch.reserve(kPhase2DistanceBatchFlushPairs);
+      auto flush_verify_batch = [&]() {
+        if (verify_batch.empty()) return;
+        const auto verify_start = Clock::now();
+        const Phase2DistanceBatchResult result =
+            verifier->verify(parent_sequences, child_sequences, verify_batch);
+        local.exact_verify_worker_ms += elapsed_ms_since(verify_start);
+        local.stats.phase2_distance_batches++;
+        for (size_t accepted_idx : result.accepted_pair_indices) {
+          const auto& pair = verify_batch[accepted_idx];
+          local_edges.push_back({pair.parent_idx, pair.child_idx});
+          local.stats.phase2_edges_added++;
+        }
+        verify_batch.clear();
+      };
+
+#pragma omp for schedule(dynamic, 8)
+      for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
+        auto& child = children[child_idx];
+        if (!child->center_ptr) {
+          if (progress && child_idx % 256 == 255) progress->advance(256);
+          continue;
+        }
+
+        const int query_tau = max_parent_radius + child->radius;
+        const auto query_start = Clock::now();
+        RangeJoinQueryResult candidates =
+            parent_index.query(child->center_ptr->seq, query_tau, &workspace);
+        local.candidate_query_worker_ms += elapsed_ms_since(query_start);
+
+        accumulate_phase2_candidate_stats(local.stats, candidates);
+
         for (size_t parent_idx : candidates.candidate_item_ids) {
           auto& parent = parents[parent_idx];
-          int tau = parent->radius + child->radius;
+          const int tau = parent->radius + child->radius;
           if (std::llabs(
                   static_cast<long long>(parent->center_ptr->seq.size()) -
                   static_cast<long long>(child->center_ptr->seq.size())) > tau) {
-            stats_.phase2_length_pruned_pairs++;
+            local.stats.phase2_length_pruned_pairs++;
             continue;
           }
-          stats_.phase2_exact_distance_calls++;
-          int dist = build_distance_bounded(
-              parent->center_ptr->seq, child->center_ptr->seq, tau,
-              range_config_.distance_mode);
-          if (dist <= tau) {
-            {
-              ScopedTimer timer(&stats_.phase2_edge_insert_ms);
-              parent->child_nodes.push_back(child);
-            }
-            stats_.phase2_edges_added++;
+          if (range_config_.phase2_qgram_postfilter &&
+              qgram_can_prune_edit_distance(
+                  child_qgram_signatures[child_idx],
+                  parent_qgram_signatures[parent_idx], tau)) {
+            local.stats.phase2_qgram_pruned_by_l1++;
+            continue;
+          }
+          local.stats.phase2_exact_distance_calls++;
+          verify_batch.push_back({parent_idx, child_idx, tau});
+          if (verify_batch.size() >= kPhase2DistanceBatchFlushPairs) {
+            flush_verify_batch();
           }
         }
+        if (progress && child_idx % 256 == 255) progress->advance(256);
+      }
+      flush_verify_batch();
+    }
+
+    phase_completed += children.size();
+    if (progress) progress->set_completed(phase_completed);
+
+    std::vector<Phase2EdgeTuple> edges;
+    for (auto& local_edges : thread_edges) {
+      edges.insert(edges.end(), local_edges.begin(), local_edges.end());
+    }
+    std::sort(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
+      return std::tie(a.parent_idx, a.child_idx) <
+             std::tie(b.parent_idx, b.child_idx);
+    });
+    edges.erase(std::unique(edges.begin(), edges.end(),
+                            [](const auto& a, const auto& b) {
+                              return a.parent_idx == b.parent_idx &&
+                                     a.child_idx == b.child_idx;
+                            }),
+                edges.end());
+
+    for (const auto& local : thread_stats) {
+      merge_phase2_local_stats(stats_, local.stats);
+      stats_.phase2_candidate_query_ms += local.candidate_query_worker_ms;
+      stats_.phase2_exact_verify_ms += local.exact_verify_worker_ms;
+      stats_.phase2_candidate_query_worker_ms +=
+          local.candidate_query_worker_ms;
+      stats_.phase2_exact_verify_worker_ms +=
+          local.exact_verify_worker_ms;
+    }
+
+    {
+      ScopedTimer timer(&stats_.phase2_edge_insert_ms);
+      for (const auto& edge : edges) {
+        parents[edge.parent_idx]->child_nodes.push_back(
+            children[edge.child_idx]);
       }
     }
+
+    if (stats_.unique_sequences >= 100000) {
+      const int child_radius =
+          children.empty() ? 0 : children.front()->radius;
+      std::cerr << "    Phase2 layer " << layer_idx << "->"
+                << layer_idx + 1 << ": parents=" << parents.size()
+                << " children=" << children.size()
+                << " query_tau=" << max_parent_radius + child_radius
+                << " candidates="
+                << stats_.phase2_candidate_pairs - candidate_pairs_before
+                << " exact="
+                << stats_.phase2_exact_distance_calls - exact_calls_before
+                << " qgram_pruned="
+                << stats_.phase2_qgram_pruned_by_l1 - qgram_pruned_before
+                << " edges=" << stats_.phase2_edges_added - edges_before
+                << " elapsed_s=" << std::fixed << std::setprecision(1)
+                << elapsed_ms_since(layer_start) / 1000.0 << "\n"
+                << std::defaultfloat << std::setprecision(6);
+    }
   }
+  if (progress) progress->finish_phase();
 }
 
-void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb() {
+void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
+    BuildProgressReporter* progress) {
+  uint64_t phase_total = 0;
+  for (int primary_idx = 0;
+       primary_idx + 1 < hierarchy_.num_primary_layers(); ++primary_idx) {
+    phase_total += extended_layers_[static_cast<size_t>(primary_idx * 2)].size();
+  }
+  if (progress) progress->begin_phase("phase3_mbb", phase_total);
+  uint64_t phase_completed = 0;
   primary_layers_.assign(static_cast<size_t>(hierarchy_.num_primary_layers()),
                          std::vector<std::shared_ptr<WorldNode>>());
 
@@ -1283,101 +1730,144 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb() {
     }
   }
 
-  for (int primary_idx = 0; primary_idx < hierarchy_.num_primary_layers(); ++primary_idx) {
+  for (int primary_idx = 0; primary_idx < hierarchy_.num_primary_layers();
+       ++primary_idx) {
     auto& current_layer = primary_layers_[static_cast<size_t>(primary_idx)];
     const bool is_finest = (primary_idx == finest_primary_layer_index());
-    for (auto& node : current_layer) {
-      if (is_finest) {
-        node->child_nodes.clear();
-        continue;
-      }
+    if (is_finest) {
+      for (auto& node : current_layer) node->child_nodes.clear();
+      continue;
+    }
 
-      std::vector<std::shared_ptr<WorldNode>> auxiliary_nodes = node->child_nodes;
-      {
-        ScopedTimer timer(&stats_.phase3_collect_beacons_ms);
-        node->beacons.reserve(auxiliary_nodes.size());
-        for (const auto& aux : auxiliary_nodes) {
-          if (aux && aux->center_ptr) node->beacons.push_back(aux->center_ptr);
+    const int thread_capacity = std::max(
+        1, std::min(omp_get_max_threads(),
+                    static_cast<int>(std::min<size_t>(
+                        current_layer.size(),
+                        static_cast<size_t>(std::numeric_limits<int>::max())))));
+    std::vector<double> collect_ms(static_cast<size_t>(thread_capacity), 0.0);
+    std::vector<double> collapse_ms(static_cast<size_t>(thread_capacity), 0.0);
+    std::vector<double> distance_ms(static_cast<size_t>(thread_capacity), 0.0);
+    std::vector<double> rect_ms(static_cast<size_t>(thread_capacity), 0.0);
+    int actual_threads = 1;
+
+#pragma omp parallel if(thread_capacity > 1) num_threads(thread_capacity)
+    {
+      const int tid = omp_get_thread_num();
+
+#pragma omp single
+      actual_threads = omp_get_num_threads();
+
+#pragma omp for schedule(dynamic, 1)
+      for (size_t node_idx = 0; node_idx < current_layer.size(); ++node_idx) {
+        auto& node = current_layer[node_idx];
+        std::vector<std::shared_ptr<WorldNode>> auxiliary_nodes =
+            node->child_nodes;
+        {
+          ScopedTimer timer(&collect_ms[static_cast<size_t>(tid)]);
+          node->beacons.reserve(auxiliary_nodes.size());
+          for (const auto& aux : auxiliary_nodes) {
+            if (aux && aux->center_ptr) node->beacons.push_back(aux->center_ptr);
+          }
         }
-      }
 
-      std::vector<std::shared_ptr<WorldNode>> direct_children;
-      {
-        ScopedTimer timer(&stats_.phase3_collapse_children_ms);
-        for (const auto& aux : auxiliary_nodes) {
-          if (!aux) continue;
-          for (const auto& child : aux->child_nodes) {
-            if (std::find(direct_children.begin(), direct_children.end(), child) ==
-                direct_children.end()) {
-              direct_children.push_back(child);
+        std::vector<std::shared_ptr<WorldNode>> direct_children;
+        {
+          ScopedTimer timer(&collapse_ms[static_cast<size_t>(tid)]);
+          for (const auto& aux : auxiliary_nodes) {
+            if (!aux) continue;
+            for (const auto& child : aux->child_nodes) {
+              if (std::find(direct_children.begin(), direct_children.end(),
+                            child) == direct_children.end()) {
+                direct_children.push_back(child);
+              }
+            }
+          }
+          node->child_nodes = std::move(direct_children);
+        }
+
+        {
+          ScopedTimer timer(&distance_ms[static_cast<size_t>(tid)]);
+          node->child_beacon_mbbs.assign(node->child_nodes.size(), {});
+          for (size_t child_idx = 0; child_idx < node->child_nodes.size();
+               ++child_idx) {
+            auto& child = node->child_nodes[child_idx];
+            if (!child->center_ptr) continue;
+            node->child_beacon_mbbs[child_idx].reserve(node->beacons.size());
+            for (const auto& beacon : node->beacons) {
+              if (!beacon) continue;
+              int dist = build_distance(child->center_ptr->seq, beacon->seq,
+                                        range_config_.distance_mode);
+              MBB mbb;
+              mbb.min_dist = std::max(0, dist - child->radius);
+              mbb.max_dist = dist + child->radius;
+              node->child_beacon_mbbs[child_idx].push_back(mbb);
             }
           }
         }
-        node->child_nodes = std::move(direct_children);
-      }
 
-      {
-        ScopedTimer timer(&stats_.phase3_child_mbb_distance_ms);
-        node->child_beacon_mbbs.assign(node->child_nodes.size(), {});
-        for (size_t child_idx = 0; child_idx < node->child_nodes.size(); ++child_idx) {
-          auto& child = node->child_nodes[child_idx];
-          if (!child->center_ptr) continue;
-          node->child_beacon_mbbs[child_idx].reserve(node->beacons.size());
-          for (const auto& beacon : node->beacons) {
-            if (!beacon) continue;
-            int dist = build_distance(child->center_ptr->seq, beacon->seq,
-                                      range_config_.distance_mode);
-            MBB mbb;
-            mbb.min_dist = std::max(0, dist - child->radius);
-            mbb.max_dist = dist + child->radius;
-            node->child_beacon_mbbs[child_idx].push_back(mbb);
+        if (node->child_nodes.size() >=
+                range_config_.min_rect_index_fanout &&
+            node->child_nodes.size() <=
+                std::numeric_limits<uint32_t>::max() &&
+            !node->beacons.empty() &&
+            node->child_beacon_mbbs.size() == node->child_nodes.size()) {
+          try {
+            ScopedTimer timer(&rect_ms[static_cast<size_t>(tid)]);
+            std::vector<MBBRectIndex::Rect> rects;
+            rects.reserve(node->child_nodes.size());
+            bool valid = true;
+            for (size_t child_idx = 0; child_idx < node->child_nodes.size();
+                 ++child_idx) {
+              const auto& row = node->child_beacon_mbbs[child_idx];
+              if (row.size() != node->beacons.size()) {
+                valid = false;
+                break;
+              }
+              MBBRectIndex::Rect rect;
+              rect.child_id = static_cast<uint32_t>(child_idx);
+              rect.lo.reserve(row.size());
+              rect.hi.reserve(row.size());
+              for (const auto& mbb : row) {
+                rect.lo.push_back(mbb.min_dist);
+                rect.hi.push_back(mbb.max_dist);
+              }
+              rects.push_back(std::move(rect));
+            }
+            if (valid) {
+              auto rect_index = std::make_shared<MBBRectIndex>();
+              rect_index->build(rects);
+              if (rect_index->size() == node->child_nodes.size() &&
+                  rect_index->dim() == node->beacons.size()) {
+                node->mbb_rect_index = std::move(rect_index);
+              }
+            }
+          } catch (...) {
+            node->mbb_rect_index.reset();
           }
         }
-      }
-
-      if (node->child_nodes.size() >= range_config_.min_rect_index_fanout &&
-          node->child_nodes.size() <= std::numeric_limits<uint32_t>::max() &&
-          !node->beacons.empty() &&
-          node->child_beacon_mbbs.size() == node->child_nodes.size()) {
-        try {
-          ScopedTimer timer(&stats_.phase3_rect_index_build_ms);
-          std::vector<MBBRectIndex::Rect> rects;
-          rects.reserve(node->child_nodes.size());
-          bool valid = true;
-          for (size_t child_idx = 0; child_idx < node->child_nodes.size(); ++child_idx) {
-            const auto& row = node->child_beacon_mbbs[child_idx];
-            if (row.size() != node->beacons.size()) {
-              valid = false;
-              break;
-            }
-            MBBRectIndex::Rect rect;
-            rect.child_id = static_cast<uint32_t>(child_idx);
-            rect.lo.reserve(row.size());
-            rect.hi.reserve(row.size());
-            for (const auto& mbb : row) {
-              rect.lo.push_back(mbb.min_dist);
-              rect.hi.push_back(mbb.max_dist);
-            }
-            rects.push_back(std::move(rect));
-          }
-          if (valid) {
-            auto rect_index = std::make_shared<MBBRectIndex>();
-            rect_index->build(rects);
-            if (rect_index->size() == node->child_nodes.size() &&
-                rect_index->dim() == node->beacons.size()) {
-              node->mbb_rect_index = std::move(rect_index);
-            }
-          }
-        } catch (...) {
-          node->mbb_rect_index.reset();
-        }
+        if (progress && node_idx % 64 == 63) progress->advance(64);
       }
     }
+
+    phase_completed += current_layer.size();
+    if (progress) progress->set_completed(phase_completed);
+
+    stats_.phase3_parallel_threads = std::max(
+        stats_.phase3_parallel_threads, static_cast<size_t>(actual_threads));
+    for (int tid = 0; tid < actual_threads; ++tid) {
+      const size_t idx = static_cast<size_t>(tid);
+      stats_.phase3_collect_beacons_ms += collect_ms[idx];
+      stats_.phase3_collapse_children_ms += collapse_ms[idx];
+      stats_.phase3_child_mbb_distance_ms += distance_ms[idx];
+      stats_.phase3_rect_index_build_ms += rect_ms[idx];
+    }
   }
+  if (progress) progress->finish_phase();
 }
 
 void BioGeometryIndexBuilder::attach_leaves(
-    const std::vector<std::shared_ptr<BioSequence>>& unique_seqs) {
+    const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
+    BuildProgressReporter* progress) {
   auto& finest_layer = primary_layers_[static_cast<size_t>(finest_primary_layer_index())];
   stats_.total_possible_leaf_pairs = finest_layer.size() * unique_seqs.size();
   for (auto& node : finest_layer) {
@@ -1397,6 +1887,11 @@ void BioGeometryIndexBuilder::attach_leaves(
             : LeafAttachDirection::SeqToWorld;
   }
   stats_.leaf_attach_direction_used = actual_direction;
+  const uint64_t progress_total =
+      actual_direction == LeafAttachDirection::SeqToWorld
+          ? unique_seqs.size()
+          : finest_layer.size();
+  if (progress) progress->begin_phase("phase4_attach", progress_total);
 
   if (range_config_.leaf_attach_mode == BuildRangeMode::Full) {
     const int thread_count = std::max(1, omp_get_max_threads());
@@ -1431,7 +1926,9 @@ void BioGeometryIndexBuilder::attach_leaves(
         ScopedTimer timer(&thread_populate_ms[timer_idx]);
         node->data_count = static_cast<int>(node->child_leaves.size());
       }
+      if (progress && layer_idx % 256 == 255) progress->advance(256);
     }
+    if (progress) progress->set_completed(finest_layer.size());
     for (double value : thread_exact_ms) stats_.leaf_exact_verify_ms += value;
     for (double value : thread_beacon_ms) stats_.leaf_beacon_distance_ms += value;
     for (double value : thread_tuple_ms) stats_.leaf_tuple_emit_ms += value;
@@ -1439,6 +1936,27 @@ void BioGeometryIndexBuilder::attach_leaves(
     stats_.leaf_candidate_pairs = stats_.total_possible_leaf_pairs;
     stats_.leaf_exact_distance_calls = stats_.total_possible_leaf_pairs;
   } else {
+    std::vector<QGramSignature> leaf_qgram_signatures;
+    std::vector<QGramSignature> world_qgram_signatures;
+    if (range_config_.leaf_qgram_postfilter) {
+      const int q = range_config_.range_join.qgram_q;
+      leaf_qgram_signatures.resize(unique_seqs.size());
+      for (size_t seq_idx = 0; seq_idx < unique_seqs.size(); ++seq_idx) {
+        if (unique_seqs[seq_idx]) {
+          leaf_qgram_signatures[seq_idx] =
+              compute_qgram_signature(unique_seqs[seq_idx]->seq, q);
+        }
+      }
+      world_qgram_signatures.resize(finest_layer.size());
+      for (size_t world_idx = 0; world_idx < finest_layer.size(); ++world_idx) {
+        const auto& world = finest_layer[world_idx];
+        if (world && world->center_ptr) {
+          world_qgram_signatures[world_idx] =
+              compute_qgram_signature(world->center_ptr->seq, q);
+        }
+      }
+    }
+
     auto record_leaf_candidates = [&](const RangeJoinQueryResult& candidates) {
       stats_.leaf_candidate_pairs += candidates.candidate_item_ids.size();
       if (candidates.used_full_scan) stats_.leaf_full_scan_fallback_count++;
@@ -1489,7 +2007,8 @@ void BioGeometryIndexBuilder::attach_leaves(
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         world_index.build(items);
       }
-      for (const auto& seq : unique_seqs) {
+      for (size_t seq_idx = 0; seq_idx < unique_seqs.size(); ++seq_idx) {
+        const auto& seq = unique_seqs[seq_idx];
         RangeJoinQueryResult candidates;
         {
           ScopedTimer timer(&stats_.leaf_candidate_query_ms);
@@ -1505,6 +2024,13 @@ void BioGeometryIndexBuilder::attach_leaves(
                            static_cast<long long>(world->center_ptr->seq.size())) >
                 world->radius) {
               stats_.leaf_length_pruned_pairs++;
+              continue;
+            }
+            if (range_config_.leaf_qgram_postfilter &&
+                qgram_can_prune_edit_distance(
+                    leaf_qgram_signatures[seq_idx],
+                    world_qgram_signatures[world_idx], world->radius)) {
+              stats_.leaf_qgram_pruned_by_l1++;
               continue;
             }
             stats_.leaf_exact_distance_calls++;
@@ -1523,7 +2049,9 @@ void BioGeometryIndexBuilder::attach_leaves(
             }
           }
         }
+        if (progress && seq_idx % 256 == 255) progress->advance(256);
       }
+      if (progress) progress->set_completed(unique_seqs.size());
       {
         ScopedTimer timer(&stats_.leaf_tuple_merge_sort_ms);
       }
@@ -1572,6 +2100,13 @@ void BioGeometryIndexBuilder::attach_leaves(
               stats_.leaf_length_pruned_pairs++;
               continue;
             }
+            if (range_config_.leaf_qgram_postfilter &&
+                qgram_can_prune_edit_distance(
+                    world_qgram_signatures[world_idx],
+                    leaf_qgram_signatures[seq_idx], world->radius)) {
+              stats_.leaf_qgram_pruned_by_l1++;
+              continue;
+            }
             stats_.leaf_exact_distance_calls++;
             int dist = build_distance_bounded(world->center_ptr->seq, seq->seq,
                                               world->radius,
@@ -1588,7 +2123,9 @@ void BioGeometryIndexBuilder::attach_leaves(
             }
           }
         }
+        if (progress && world_idx % 256 == 255) progress->advance(256);
       }
+      if (progress) progress->set_completed(finest_layer.size());
 
       {
         ScopedTimer timer(&stats_.leaf_tuple_merge_sort_ms);
@@ -1622,6 +2159,7 @@ void BioGeometryIndexBuilder::attach_leaves(
       finest_layer.empty() ? 0.0 : static_cast<double>(total_links) / finest_layer.size();
   std::cerr << "    Attached " << total_links << " leaf links to finest primary layer"
             << " (avg " << avg_links << " per node)\n";
+  if (progress) progress->finish_phase();
 }
 
 void BioGeometryIndexBuilder::assign_integer_ids() {
@@ -1805,6 +2343,15 @@ void BioGeometryIndexBuilder::print_summary() const {
             << " metric_dist_calls=" << stats.phase1_metric_distance_calls
             << " metric_build_dist_calls="
             << stats.phase1_metric_build_distance_calls
+            << " pigeonhole_queries=" << stats.phase1_pigeonhole_queries
+            << " seed_postings="
+            << stats.phase1_seed_posting_entries_visited
+            << " pigeonhole_candidates="
+            << stats.phase1_pigeonhole_candidates
+            << " pigeonhole_fallbacks="
+            << stats.phase1_pigeonhole_fallbacks
+            << " hint_checks=" << stats.phase1_hint_checks
+            << " hint_hits=" << stats.phase1_hint_hits
             << " qgram_touched=" << stats.phase1_qgram_touched_candidates
             << " qgram_pruned=" << stats.phase1_qgram_pruned_candidates
             << "\n"
@@ -1812,8 +2359,13 @@ void BioGeometryIndexBuilder::print_summary() const {
             << "      index_build=" << format_ms(stats.phase2_index_build_ms) << " ms\n"
             << "      candidate_query=" << format_ms(stats.phase2_candidate_query_ms) << " ms\n"
             << "      exact_verify=" << format_ms(stats.phase2_exact_verify_ms) << " ms\n"
+            << "      candidate_query_worker="
+            << format_ms(stats.phase2_candidate_query_worker_ms) << " ms\n"
+            << "      exact_verify_worker="
+            << format_ms(stats.phase2_exact_verify_worker_ms) << " ms\n"
             << "      edge_insert=" << format_ms(stats.phase2_edge_insert_ms) << " ms\n"
             << "    phase3_mbb=" << format_ms(stats.phase3_mbb_ms) << " ms\n"
+            << "      parallel_threads=" << stats.phase3_parallel_threads << "\n"
             << "      collect_beacons=" << format_ms(stats.phase3_collect_beacons_ms) << " ms\n"
             << "      collapse_children=" << format_ms(stats.phase3_collapse_children_ms) << " ms\n"
             << "      child_mbb_distance=" << format_ms(stats.phase3_child_mbb_distance_ms) << " ms\n"
@@ -1841,6 +2393,10 @@ void BioGeometryIndexBuilder::print_summary() const {
             << " leaves=" << build_range_mode_name(range_config_.leaf_attach_mode)
             << " phase1=" << phase1_candidate_mode_name(
                    range_config_.phase1_candidate_mode)
+            << " phase2_qgram_postfilter="
+            << (range_config_.phase2_qgram_postfilter ? "on" : "off")
+            << " leaf_qgram_postfilter="
+            << (range_config_.leaf_qgram_postfilter ? "on" : "off")
             << " seeds=" << range_config_.range_join.min_seed_len
             << ".." << range_config_.range_join.max_seed_len
             << " candidates="
@@ -1861,6 +2417,7 @@ void BioGeometryIndexBuilder::print_summary() const {
             << " candidates=" << stats.phase2_candidate_pairs
             << " exact_calls=" << stats.phase2_exact_distance_calls
             << " edges=" << stats.phase2_edges_added
+            << " distance_batches=" << stats.phase2_distance_batches
             << " fallbacks=" << stats.phase2_full_scan_fallback_count
             << " pigeonhole_queries=" << stats.phase2_pigeonhole_queries
             << " qgram_queries=" << stats.phase2_qgram_queries
@@ -1953,6 +2510,7 @@ void BioGeometryIndexBuilder::print_summary() const {
 void BioGeometryIndexBuilder::build(
     const std::vector<std::shared_ptr<BioSequence>>& raw_sequences) {
   const auto build_start = Clock::now();
+  BuildProgressReporter progress(range_config_.progress_interval_seconds);
   stats_ = Statistics{};
   stats_.created_primary_nodes.assign(static_cast<size_t>(num_primary_layers()), 0);
   unique_sequences.clear();
@@ -1966,11 +2524,13 @@ void BioGeometryIndexBuilder::build(
   std::cerr << "[Build generalized hierarchy] Starting for " << raw_sequences.size()
             << " sequences...\n";
   std::cerr << "  Phase 0: Deduplicating sequences...\n";
+  progress.begin_phase("phase0_dedup", raw_sequences.size());
   std::vector<std::shared_ptr<BioSequence>> unique_seqs;
   {
     ScopedTimer timer(&stats_.phase0_dedup_ms);
     unique_seqs = deduplicate(raw_sequences);
   }
+  progress.finish_phase();
   std::cerr << "    " << raw_sequences.size() << " -> " << unique_seqs.size() << " unique ("
             << stats_.deduplicated << " merged)\n";
 
@@ -1989,7 +2549,7 @@ void BioGeometryIndexBuilder::build(
   std::cerr << "\n";
   {
     ScopedTimer timer(&stats_.phase1_sketch_ms);
-    phase1_build_extended_sketch(unique_seqs);
+    phase1_build_extended_sketch(unique_seqs, &progress);
   }
 
   std::cerr << "    Expanded layers:";
@@ -2001,19 +2561,19 @@ void BioGeometryIndexBuilder::build(
   std::cerr << "  Phase 2: Inter-tier rebinding (DAG)...\n";
   {
     ScopedTimer timer(&stats_.phase2_rebinding_ms);
-    phase2_inter_tier_rebinding();
+    phase2_inter_tier_rebinding(&progress);
   }
 
   std::cerr << "  Phase 3: Collapse auxiliary tiers + MBB...\n";
   {
     ScopedTimer timer(&stats_.phase3_mbb_ms);
-    phase3_collapse_and_compute_mbb();
+    phase3_collapse_and_compute_mbb(&progress);
   }
 
   std::cerr << "  Phase 4: Leaf attachment...\n";
   {
     ScopedTimer timer(&stats_.phase4_attach_ms);
-    attach_leaves(unique_seqs);
+    attach_leaves(unique_seqs, &progress);
   }
   {
     ScopedTimer timer(&stats_.assign_ids_ms);

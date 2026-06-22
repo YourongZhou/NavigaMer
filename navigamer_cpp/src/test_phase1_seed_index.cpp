@@ -1,0 +1,148 @@
+#include "phase1_seed_index.hpp"
+#include "tools.hpp"
+
+#include <algorithm>
+#include <cassert>
+#include <iostream>
+#include <random>
+#include <string>
+#include <vector>
+
+namespace {
+
+std::string random_dna(size_t length, std::mt19937& gen) {
+  static const char bases[] = "ACGT";
+  std::uniform_int_distribution<int> pick(0, 3);
+  std::string sequence;
+  sequence.reserve(length);
+  for (size_t i = 0; i < length; ++i) sequence.push_back(bases[pick(gen)]);
+  return sequence;
+}
+
+std::string mutate_with_indels(std::string sequence, int edits,
+                               std::mt19937& gen) {
+  static const char bases[] = "ACGT";
+  std::uniform_int_distribution<int> operation(0, 2);
+  std::uniform_int_distribution<int> base(0, 3);
+  for (int edit = 0; edit < edits; ++edit) {
+    const int op = operation(gen);
+    if (op == 0 && !sequence.empty()) {
+      std::uniform_int_distribution<size_t> pos(0, sequence.size() - 1);
+      sequence[pos(gen)] = bases[base(gen)];
+    } else if (op == 1 && !sequence.empty()) {
+      std::uniform_int_distribution<size_t> pos(0, sequence.size() - 1);
+      sequence.erase(pos(gen), 1);
+    } else {
+      std::uniform_int_distribution<size_t> pos(0, sequence.size());
+      sequence.insert(pos(gen), 1, bases[base(gen)]);
+    }
+  }
+  return sequence;
+}
+
+void assert_contains_all_matches(
+    navigamer::IncrementalPigeonholeIndex& index,
+    const std::vector<std::string>& candidates,
+    const std::string& query, int tau) {
+  const auto result = index.query(query, tau);
+  assert(result.safe);
+  assert(std::is_sorted(result.candidate_indices.begin(),
+                        result.candidate_indices.end()));
+  assert(std::adjacent_find(result.candidate_indices.begin(),
+                            result.candidate_indices.end()) ==
+         result.candidate_indices.end());
+  for (size_t idx = 0; idx < candidates.size(); ++idx) {
+    if (navigamer::compute_distance(query, candidates[idx]) <= tau) {
+      assert(std::binary_search(result.candidate_indices.begin(),
+                                result.candidate_indices.end(), idx));
+    }
+  }
+}
+
+void test_incremental_queries_are_recall_safe() {
+  std::mt19937 gen(99173);
+  std::vector<std::string> candidates;
+  for (size_t idx = 0; idx < 180; ++idx) {
+    candidates.push_back(random_dna(80 + idx % 21, gen));
+  }
+
+  navigamer::IncrementalPigeonholeIndex index({8, 20});
+  for (size_t idx = 0; idx < 90; ++idx) index.append(idx, candidates[idx]);
+
+  for (int tau : {1, 2, 4, 6}) {
+    const std::string query =
+        mutate_with_indels(candidates[static_cast<size_t>(tau * 7)], tau, gen);
+    assert(navigamer::compute_distance(
+               query, candidates[static_cast<size_t>(tau * 7)]) <= tau);
+    assert_contains_all_matches(index,
+                                std::vector<std::string>(candidates.begin(),
+                                                         candidates.begin() + 90),
+                                query, tau);
+  }
+
+  // Append after seed-length postings have already been materialized.
+  for (size_t idx = 90; idx < candidates.size(); ++idx) {
+    index.append(idx, candidates[idx]);
+  }
+  assert(index.size() == candidates.size());
+
+  for (int tau : {1, 2, 4, 6}) {
+    const size_t source_idx = 120 + static_cast<size_t>(tau);
+    const std::string query =
+        mutate_with_indels(candidates[source_idx], tau, gen);
+    assert(navigamer::compute_distance(query, candidates[source_idx]) <= tau);
+    assert_contains_all_matches(index, candidates, query, tau);
+  }
+}
+
+void test_unindexable_candidates_are_not_dropped() {
+  navigamer::IncrementalPigeonholeIndex index({4, 12});
+  const std::vector<std::string> candidates = {
+      "ACGTACGTACGTACGT",
+      "ACGTACGTNCGTACGT",
+      "TTTTTTTTTTTTTTTT",
+  };
+  for (size_t idx = 0; idx < candidates.size(); ++idx) {
+    index.append(idx, candidates[idx]);
+  }
+
+  const auto result = index.query("ACGTACGTACGTACGT", 1);
+  assert(result.safe);
+  assert(std::binary_search(result.candidate_indices.begin(),
+                            result.candidate_indices.end(), size_t{0}));
+  assert(std::binary_search(result.candidate_indices.begin(),
+                            result.candidate_indices.end(), size_t{1}));
+}
+
+void test_unsafe_queries_request_fallback() {
+  navigamer::IncrementalPigeonholeIndex index({8, 20});
+  index.append(0, std::string(80, 'A'));
+
+  assert(!index.query("ACGTNNNNACGT", 1).safe);
+  assert(!index.query(std::string(40, 'A'), 20).safe);
+}
+
+void test_far_seed_occurrences_are_filtered_by_position() {
+  navigamer::IncrementalPigeonholeIndex index({4, 12});
+  const std::string query = "AAAACCCCGGGGTTTTACGTACGT";
+  index.append(0, query);
+  index.append(1, "TTTTACGTACGTAAAACCCCGGGG");
+
+  const auto result = index.query(query, 1);
+  assert(result.safe);
+  assert(std::binary_search(result.candidate_indices.begin(),
+                            result.candidate_indices.end(), size_t{0}));
+  assert(!std::binary_search(result.candidate_indices.begin(),
+                             result.candidate_indices.end(), size_t{1}));
+}
+
+}  // namespace
+
+int main() {
+  test_incremental_queries_are_recall_safe();
+  test_unindexable_candidates_are_not_dropped();
+  test_unsafe_queries_request_fallback();
+  test_far_seed_occurrences_are_filtered_by_position();
+  std::cout << "phase1 seed index tests passed\n";
+  return 0;
+}

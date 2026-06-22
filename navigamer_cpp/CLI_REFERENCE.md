@@ -21,6 +21,7 @@ Used by all pipelines that build the index:
 | `--link-mode` | `indexed` | Phase-2 rebinding: `full` or exact `indexed` range join |
 | `--leaf-attach-mode` | `indexed` | Leaf attachment: `full` or exact `indexed` range join |
 | `--leaf-attach-direction` | `auto` | Indexed leaf attachment direction: `auto`, `seq-to-world`, or `world-to-seq`; `auto` uses `world-to-seq` when finest worlds are fewer than unique sequences |
+| `--leaf-qgram-postfilter` | `on` | Safe q-gram L1 postfilter for indexed leaf attachment candidates before bounded exact verification |
 | `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
 | `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full` |
@@ -30,6 +31,10 @@ Used by all pipelines that build the index:
 | `--auto-hybrid-on-large-candidates` | `true` | Compatibility flag; normal auto early-aborts oversized seed unions and uses q-gram safe fallback |
 | `--build-distance-mode` | `edlib` | Index construction edit-distance backend: default `edlib`, reference `dp`, or conservative `auto` (currently DP) |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
+| `--phase1-metric-min-fanout` | `64` | Minimum Phase1 parent-local candidate fanout before building/querying the metric helper instead of scanning |
+| `--phase1-qgram-min-fanout` | `64` | Minimum Phase1 parent-local candidate fanout before using the q-gram helper instead of the metric helper |
+| `--phase1-qgram-max-touched` | `250000` | Maximum Phase1 q-gram touched/candidate set size before conservatively falling back |
+| `--progress-interval-seconds` | `600` | Timestamped build heartbeat interval on stderr; `0` disables periodic heartbeats but keeps phase-boundary reports |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 | `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
 | `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
@@ -37,6 +42,7 @@ Used by all pipelines that build the index:
 | `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or conservative `auto` (currently DP) |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
+| `--index` | *(none)* | Persisted NavigaMer index path for `build`, single-prefix `build-scale`, `query`, and `query-index` |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
@@ -54,6 +60,13 @@ candidate ratio; `--auto-pigeonhole-max-ratio` is retained only so older
 command lines still parse. Full candidate mode returns every
 length-compatible item.
 
+Indexed leaf attachment additionally applies `--leaf-qgram-postfilter on` by
+default after range candidate generation and before bounded exact verification.
+It uses the same no-false-negative q-gram L1 condition and only reduces exact
+distance calls; accepted leaf links are still determined by bounded edit
+distance. Use `--leaf-qgram-postfilter off` to reproduce the earlier direct
+verify-after-candidate behavior.
+
 Old seed-length-only auto behavior can be reproduced with a permissive
 candidate-count threshold such as
 `--auto-pigeonhole-max-candidates 18446744073709551615`; the ratio flag no
@@ -66,6 +79,13 @@ accepted results, length pruning, q-gram L1 pruning, per-mode query counts,
 fallback counts, seed candidates before length filtering, seed length-pruned
 candidates, pigeonhole early-abort counts, final range candidates, and
 reduction ratios.
+
+Phase1 sketch construction uses the same bounded exact verifier after any
+helper path. For each parent-local candidate group, fanout below
+`--phase1-metric-min-fanout` scans directly; fanout between
+`--phase1-metric-min-fanout` and `--phase1-qgram-min-fanout` uses the metric
+helper; larger fanout uses the q-gram helper unless it exceeds
+`--phase1-qgram-max-touched` and falls back conservatively.
 
 Rectangle filtering is also exact. Rect mode returns a child world if and only
 if its existing MBB row intersects the query rectangle in every beacon
@@ -101,9 +121,17 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 
 ### `build`
 
-Deduplicates, builds the index, prints layer sizes. **Index is not serialized to disk**; use `run` for an end-to-end path with optional TSV.
+Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
+provided, writes a persisted binary index with a manifest signature, build
+parameters, input fingerprints, unique sequences, `ref_positions`, optional
+BWT/SA intervals, collapsed DAG links, beacons, MBB rows, leaf links, and
+leaf-beacon distance rows.
 
 **Required:** `--ref`, `--reads`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--index` | *(none)* | Output path for the persisted index |
 
 Every build prints a `Build timing` section to stderr. Timing fields are
 aggregate wall-clock milliseconds and include Phase0 deduplication, Phase1
@@ -114,9 +142,9 @@ summary.
 
 ### `build-scale`
 
-Builds one in-memory index per requested reference prefix and writes construction
-timing plus construction counters to CSV. This command is intended for locating
-build bottlenecks; it does not serialize indexes.
+Builds one index per requested reference prefix and writes construction timing
+plus construction counters to CSV. With `--index <file>`, exactly one prefix
+must be requested and the resulting reference-window index is serialized.
 
 **Required:** `--ref`, `--prefix-lengths`, `--out`
 
@@ -126,21 +154,45 @@ build bottlenecks; it does not serialize indexes.
 | `--stride` | `1` | Step between window starts |
 | `--prefix-lengths` | *(required)* | Comma-separated reference prefix lengths; values larger than the reference use the full reference |
 | `--out` | *(required)* | Output CSV path |
+| `--index` | *(none)* | Persist the single requested prefix as a loadable binary index |
+| `--progress-interval-seconds` | `600` | Periodic progress interval; `0` keeps only phase start/finish reports |
 
 After each prefix, stderr prints the top build phases, top substeps, and
 candidate/exact reduction percentages for Phase2 and leaf attachment.
+Heartbeat lines include timestamp, phase, completed/total work items,
+percentage, elapsed time, observed rate, and ETA. Progress output never changes
+the CSV shape or persisted-index signature.
 
 ### `query`
 
-Builds an index from `--reads`, then searches for `--query`.
+Builds an index from `--reads`, then searches for `--query`. With
+`--index <file>`, `query` first compares the requested build manifest with the
+stored manifest. If the signatures match, it loads the persisted index and skips
+construction. If the file is missing, unreadable, or has different inputs or
+construction parameters, it rebuilds from `--reads` and writes the new index to
+that path. With `--index` and no `--reads`, `query` loads the index directly.
 
-**Required:** `--reads`, `--query`
+**Required:** `--query` plus either `--reads` or `--index`
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--tolerance` | `2` | Max edit distance |
 | `--mode` | `adaptive` | `adaptive` \| `greedy` \| `exhaustive`; all modes exactly verify returned leaves |
 | `--ref` | optional | Placeholder in current flow |
+| `--index` | *(none)* | Persisted index to reuse, create, or load directly |
+
+### `query-index`
+
+Loads a persisted index and searches `--query`. This command never rebuilds and
+does not accept `--reads`; use `query --reads ... --index ...` for automatic
+reuse-or-rebuild behavior.
+
+**Required:** `--index`, `--query`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--tolerance` | `2` | Max edit distance |
+| `--mode` | `adaptive` | `adaptive` \| `greedy` \| `exhaustive` |
 
 ### `run`
 
@@ -241,7 +293,10 @@ Builds one in-memory index from reference windows of fixed length `--length` and
 | `--seed` | `42` | Random seed used for query sampling and mutation |
 | `--out` | *(none)* | Output TSV path for the aggregated boundary table |
 
-`boundary` currently uses substitution-only mutations and, for each cell, additionally samples up to 50 queries for `brute_force` agreement checks. Like the other C++ commands, the index is built in memory only and is not serialized to disk.
+`boundary` currently uses substitution-only mutations and, for each cell,
+additionally samples up to 50 queries for `brute_force` agreement checks. This
+experiment command builds and reuses an in-memory index within the run; it does
+not use the persisted-index path.
 
 ### `layer-radius-experiment`
 
@@ -321,6 +376,7 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 `finest_world_count`, `total_build_ms`, `phase0_dedup_ms`,
 `phase1_sketch_ms`, `phase2_rebinding_ms`, `phase2_index_build_ms`,
 `phase2_candidate_query_ms`, `phase2_exact_verify_ms`,
+`phase2_distance_batches`,
 `phase2_edge_insert_ms`, `phase3_mbb_ms`,
 `phase3_collect_beacons_ms`, `phase3_collapse_children_ms`,
 `phase3_child_mbb_distance_ms`, `phase3_rect_index_build_ms`,
@@ -339,7 +395,13 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 `leaf_seed_candidate_pairs_before_length_filter`,
 `leaf_seed_length_pruned_candidates`, `leaf_pigeonhole_early_abort_count`,
 `leaf_range_final_candidate_pairs`,
-`leaf_attach_direction_used`, `range_candidate_mode`, `qgram_q`
+`leaf_attach_direction_used`, `range_candidate_mode`, `qgram_q`,
+`phase2_candidate_query_worker_ms`, `phase2_exact_verify_worker_ms`
+
+`phase2_rebinding_ms`, `phase2_index_build_ms`, and
+`phase2_edge_insert_ms` are wall-clock timings. The Phase 2 worker fields are
+per-thread accumulated query and exact-verification time for parallel indexed
+rebinding.
 
 **`layer-radius-experiment`:**  
 `dataset`, `query_id`, `query_length`, `L`, `r_leaf`, `alpha`, `radius_schedule`, `query_time_ms`, `world_access_count`, `node_access_count`, `edge_access_count`, `anchor_distance_count`, `bound_check_count`, `candidate_count`, `candidate_verify_count`
@@ -360,10 +422,12 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 | `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_build_timing_stats` | Construction timing field and summary smoke checks |
 | `test_build_scale_smoke` | `build-scale` CSV timing smoke check |
+| `test_build_progress_bin` | Timestamped build progress formatting, forced boundaries, and periodic heartbeat |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |
 | `test_search_qgram_prefilter` | Search q-gram on/off, scan/rect, ambiguous-base fallback, containment, and center-call reduction checks |
 | `test_search_distance_mode_bin` | Adaptive `dp` vs `myers` bounded center-distance equivalence |
 | `test_query_benchmark_gate` | Deterministic query classes, dual-profile output, exact result equality, and no-FN gate |
+| `test_phase2_distance_verifier_bin` | CPU Phase2 exact verifier batch equivalence |
 
 Build with `make test_recall` / `make test_distance_bound`.

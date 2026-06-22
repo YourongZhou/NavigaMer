@@ -357,18 +357,7 @@ rm -f /tmp/navigamer_reference_windows.navidx
 Expected: `Index saved:` appears, index file is non-empty, and query-index
 loads it successfully.
 
-- [ ] **Step 4: Run CUDA compatibility verification**
-
-```bash
-cd navigamer_cpp
-make NAVIGAMER_WITH_CUDA=1 NVCC=nvcc test_phase2_distance_verifier \
-     test_build_scale_smoke_check
-```
-
-Expected: CUDA verifier and build-scale persistence tests pass; progress
-interval remains absent from the manifest signature.
-
-- [ ] **Step 5: Commit documentation**
+- [ ] **Step 4: Commit documentation**
 
 ```bash
 git add README.md navigamer_cpp/README.md navigamer_cpp/CLI_REFERENCE.md

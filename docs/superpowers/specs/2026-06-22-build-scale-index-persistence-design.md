@@ -51,8 +51,6 @@ is populated with a deterministic reference-window descriptor containing:
 The descriptor participates in the existing manifest signature through its
 fingerprint. Changing reference content, prefix length, window length, stride,
 hierarchy radii, or construction parameters therefore changes the signature.
-The execution-only CPU/CUDA Phase2 backend remains excluded, as it does for
-other persisted indexes.
 
 ## Implementation
 

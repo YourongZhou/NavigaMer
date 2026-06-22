@@ -4,12 +4,16 @@
 #include "structure.hpp"
 #include "tools.hpp"
 #include "range_join.hpp"
+#include "phase2_distance_verifier.hpp"
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace navigamer {
+
+class BuildProgressReporter;
+class IndexPersistenceAccess;
 
 struct HierarchyConfig {
   std::vector<int> primary_radii;
@@ -68,8 +72,12 @@ struct BuildRangeConfig {
   RangeJoinConfig range_join;
   size_t min_rect_index_fanout = 64;
   size_t phase1_metric_min_fanout = 64;
-  size_t phase1_qgram_min_fanout = 2048;
+  size_t phase1_qgram_min_fanout = 64;
   size_t phase1_qgram_max_touched = 250000;
+  bool phase1_preserve_input_order = true;
+  bool phase2_qgram_postfilter = false;
+  bool leaf_qgram_postfilter = true;
+  int progress_interval_seconds = 600;
 };
 
 struct SearchGraphView {
@@ -98,6 +106,8 @@ struct SearchGraphView {
 };
 
 class BioGeometryIndexBuilder {
+  friend class IndexPersistenceAccess;
+
  public:
   BioGeometryIndexBuilder();
   BioGeometryIndexBuilder(int r_sw, int r_mw, int r_lw);
@@ -183,6 +193,12 @@ class BioGeometryIndexBuilder {
     size_t phase1_fallback_scan_queries = 0;
     size_t phase1_metric_distance_calls = 0;
     size_t phase1_metric_build_distance_calls = 0;
+    size_t phase1_pigeonhole_queries = 0;
+    size_t phase1_seed_posting_entries_visited = 0;
+    size_t phase1_pigeonhole_candidates = 0;
+    size_t phase1_pigeonhole_fallbacks = 0;
+    size_t phase1_hint_checks = 0;
+    size_t phase1_hint_hits = 0;
     size_t phase1_qgram_touched_candidates = 0;
     size_t phase1_qgram_pruned_candidates = 0;
     double phase2_rebinding_ms = 0.0;
@@ -194,7 +210,10 @@ class BioGeometryIndexBuilder {
     double phase2_index_build_ms = 0.0;
     double phase2_candidate_query_ms = 0.0;
     double phase2_exact_verify_ms = 0.0;
+    double phase2_candidate_query_worker_ms = 0.0;
+    double phase2_exact_verify_worker_ms = 0.0;
     double phase2_edge_insert_ms = 0.0;
+    size_t phase2_distance_batches = 0;
     double leaf_index_build_ms = 0.0;
     double leaf_candidate_query_ms = 0.0;
     double leaf_exact_verify_ms = 0.0;
@@ -206,6 +225,7 @@ class BioGeometryIndexBuilder {
     double phase3_collapse_children_ms = 0.0;
     double phase3_child_mbb_distance_ms = 0.0;
     double phase3_rect_index_build_ms = 0.0;
+    size_t phase3_parallel_threads = 1;
     double range_posting_lookup_ms = 0.0;
     double range_seed_union_ms = 0.0;
     double range_length_filter_ms = 0.0;
@@ -250,11 +270,15 @@ class BioGeometryIndexBuilder {
   std::vector<std::shared_ptr<BioSequence>> deduplicate(
       const std::vector<std::shared_ptr<BioSequence>>& raw);
 
-  void phase1_build_extended_sketch(const std::vector<std::shared_ptr<BioSequence>>& unique_seqs);
-  void phase2_inter_tier_rebinding();
-  void phase3_collapse_and_compute_mbb();
+  void phase1_build_extended_sketch(
+      const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
+      BuildProgressReporter* progress);
+  void phase2_inter_tier_rebinding(BuildProgressReporter* progress);
+  void phase3_collapse_and_compute_mbb(BuildProgressReporter* progress);
 
-  void attach_leaves(const std::vector<std::shared_ptr<BioSequence>>& unique_seqs);
+  void attach_leaves(
+      const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
+      BuildProgressReporter* progress);
   void assign_integer_ids();
   void build_search_graph_view();
 
