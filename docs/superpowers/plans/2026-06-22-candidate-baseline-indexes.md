@@ -338,12 +338,15 @@ git commit -m "feat: add conservative pigeonhole index"
 - Modify: `experiments/ecoli_1p1m/src/candidate_tool.cpp`
 - Modify: `experiments/ecoli_1p1m/Makefile`
 
-- [ ] **Step 1: Write the conditional save-load test**
+- [ ] **Step 1: Write the conditional save-load and sliding-equivalence tests**
 
 With `TENSOR_SKETCH_ROOT` present, build dimensions 16 and 32 on a tiny
 reference, save HNSW and exact vectors, reload, and assert identical topK labels
 and distances within float tolerance. Assert exact L2 results are sorted by
-`(distance,window_id)`.
+`(distance,window_id)`. For stride 1, compare every vector produced by
+`ts::TensorSlide<int>` with an independent `ts::Tensor<int>::compute()` call on
+the corresponding window using the same seed; require component-wise agreement
+within `1e-9`.
 
 - [ ] **Step 2: Add dependency detection and verify test failure**
 
@@ -352,7 +355,7 @@ directory, define `NAVIGAMER_HAVE_TENSOR_SKETCH`, and provide a clear strict-mod
 error. Run `make -C experiments/ecoli_1p1m test_tensor_index` and expect missing
 adapter symbols.
 
-- [ ] **Step 3: Implement Tensor conversion and exact vectors**
+- [ ] **Step 3: Implement Tensor conversion and sliding index construction**
 
 Map A/C/G/T to 0/1/2/3 and use:
 
@@ -363,6 +366,13 @@ std::vector<float> sketch(raw.begin(), raw.end());
 ```
 
 Persist row-major float vectors when exact mode is requested.
+
+For stride 1, construct reference vectors in one pass with
+`ts::TensorSlide<int>(4, dimension, 5, window_length, 1, seed)`. Verify its
+returned row count equals the reference-window count before inserting labels.
+Use ordinary `ts::Tensor<int>` for query reads. For non-unit stride, use the
+independently tested per-window `Tensor::compute()` path unless a future test
+proves the third-party sliding output has the same window-start convention.
 
 - [ ] **Step 4: Build, save, and load HNSW once**
 
@@ -439,4 +449,3 @@ Expected: all tests pass.
 git add experiments/ecoli_1p1m/src experiments/ecoli_1p1m/Makefile
 git commit -m "feat: add shared candidate evaluator"
 ```
-
