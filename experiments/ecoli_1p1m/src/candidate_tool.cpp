@@ -3,6 +3,7 @@
 #include "tensor_index.hpp"
 
 #include <cstdint>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -96,6 +97,21 @@ std::string trim_read_id(std::string_view header) {
   return std::string(header.substr(0, end));
 }
 
+void strip_trailing_carriage_return(std::string& line) {
+  if (!line.empty() && line.back() == '\r') {
+    line.pop_back();
+  }
+}
+
+bool contains_whitespace(std::string_view line) {
+  for (unsigned char ch : line) {
+    if (std::isspace(ch) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
   std::ifstream input(path);
   if (!input) {
@@ -105,6 +121,7 @@ std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
   std::vector<ReadRecord> records;
   std::string first_line;
   while (std::getline(input, first_line)) {
+    strip_trailing_carriage_return(first_line);
     if (!first_line.empty()) {
       break;
     }
@@ -123,13 +140,33 @@ std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
           !std::getline(input, quality)) {
         throw std::runtime_error("truncated FASTQ record in reads file");
       }
+      strip_trailing_carriage_return(sequence);
+      strip_trailing_carriage_return(plus_line);
+      strip_trailing_carriage_return(quality);
       if (header.empty() || header.front() != '@') {
         throw std::runtime_error("invalid FASTQ header in reads file");
       }
-      records.push_back({trim_read_id(header.substr(1)), sequence});
-      while (std::getline(input, header) && header.empty()) {
+      if (plus_line.empty() || plus_line.front() != '+') {
+        throw std::runtime_error("invalid FASTQ separator line in reads file");
       }
-      if (!input) {
+      if (contains_whitespace(sequence)) {
+        throw std::runtime_error(
+            "FASTQ sequence line contains embedded whitespace in reads file");
+      }
+      if (sequence.size() != quality.size()) {
+        throw std::runtime_error(
+            "FASTQ sequence and quality lengths differ in reads file");
+      }
+      records.push_back({trim_read_id(header.substr(1)), sequence});
+      bool found_next_header = false;
+      while (std::getline(input, header)) {
+        strip_trailing_carriage_return(header);
+        if (!header.empty()) {
+          found_next_header = true;
+          break;
+        }
+      }
+      if (!found_next_header) {
         break;
       }
       if (header.front() != '@') {
@@ -140,12 +177,12 @@ std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
     std::string header = first_line;
     std::string sequence;
     while (true) {
-      std::streampos position = input.tellg();
       std::string line;
       if (!std::getline(input, line)) {
         records.push_back({trim_read_id(header.substr(1)), sequence});
         break;
       }
+      strip_trailing_carriage_return(line);
       if (line.empty()) {
         continue;
       }
@@ -154,10 +191,12 @@ std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
         header = line;
         sequence.clear();
       } else {
+        if (contains_whitespace(line)) {
+          throw std::runtime_error(
+              "FASTA sequence line contains embedded whitespace in reads file");
+        }
         sequence += line;
       }
-      position = input.tellg();
-      (void)position;
     }
   } else {
     throw std::runtime_error("reads file must be FASTA or FASTQ");
