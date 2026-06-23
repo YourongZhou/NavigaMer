@@ -112,6 +112,27 @@ bool contains_whitespace(std::string_view line) {
   return false;
 }
 
+bool is_valid_dna_sequence_line(std::string_view line) {
+  for (char base : line) {
+    switch (base) {
+      case 'A':
+      case 'a':
+      case 'C':
+      case 'c':
+      case 'G':
+      case 'g':
+      case 'T':
+      case 't':
+      case 'N':
+      case 'n':
+        break;
+      default:
+        return false;
+    }
+  }
+  return true;
+}
+
 std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
   std::ifstream input(path);
   if (!input) {
@@ -134,28 +155,50 @@ std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
     std::string header = first_line;
     while (true) {
       std::string sequence;
-      std::string plus_line;
-      std::string quality;
-      if (!std::getline(input, sequence) || !std::getline(input, plus_line) ||
-          !std::getline(input, quality)) {
+      std::string line;
+      bool found_separator = false;
+      while (std::getline(input, line)) {
+        strip_trailing_carriage_return(line);
+        if (line.empty()) {
+          throw std::runtime_error("truncated FASTQ record in reads file");
+        }
+        if (line.front() == '+') {
+          found_separator = true;
+          break;
+        }
+        if (contains_whitespace(line)) {
+          throw std::runtime_error(
+              "FASTQ sequence line contains embedded whitespace in reads file");
+        }
+        if (!is_valid_dna_sequence_line(line)) {
+          throw std::runtime_error(
+              "FASTQ sequence line contains invalid DNA base in reads file");
+        }
+        sequence += line;
+      }
+      if (!found_separator) {
         throw std::runtime_error("truncated FASTQ record in reads file");
       }
-      strip_trailing_carriage_return(sequence);
-      strip_trailing_carriage_return(plus_line);
-      strip_trailing_carriage_return(quality);
+
+      std::string quality;
       if (header.empty() || header.front() != '@') {
         throw std::runtime_error("invalid FASTQ header in reads file");
       }
-      if (plus_line.empty() || plus_line.front() != '+') {
-        throw std::runtime_error("invalid FASTQ separator line in reads file");
-      }
-      if (contains_whitespace(sequence)) {
-        throw std::runtime_error(
-            "FASTQ sequence line contains embedded whitespace in reads file");
-      }
-      if (sequence.size() != quality.size()) {
-        throw std::runtime_error(
-            "FASTQ sequence and quality lengths differ in reads file");
+      while (quality.size() < sequence.size()) {
+        if (!std::getline(input, line)) {
+          throw std::runtime_error(
+              "FASTQ sequence and quality lengths differ in reads file");
+        }
+        strip_trailing_carriage_return(line);
+        if (line.empty()) {
+          throw std::runtime_error(
+              "FASTQ sequence and quality lengths differ in reads file");
+        }
+        quality += line;
+        if (quality.size() > sequence.size()) {
+          throw std::runtime_error(
+              "FASTQ sequence and quality lengths differ in reads file");
+        }
       }
       records.push_back({trim_read_id(header.substr(1)), sequence});
       bool found_next_header = false;
@@ -194,6 +237,10 @@ std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
         if (contains_whitespace(line)) {
           throw std::runtime_error(
               "FASTA sequence line contains embedded whitespace in reads file");
+        }
+        if (!is_valid_dna_sequence_line(line)) {
+          throw std::runtime_error(
+              "FASTA sequence line contains invalid DNA base in reads file");
         }
         sequence += line;
       }
