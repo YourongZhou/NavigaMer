@@ -186,6 +186,30 @@ std::string read_file(const std::filesystem::path& path) {
   return content.str();
 }
 
+std::vector<tensor_index::QueryHit> parse_query_output(std::string_view text) {
+  std::istringstream input{std::string(text)};
+  std::string line;
+  if (!std::getline(input, line) || line != "label\tdistance") {
+    throw std::runtime_error("unexpected query output header");
+  }
+
+  std::vector<tensor_index::QueryHit> hits;
+  while (std::getline(input, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    const std::size_t tab = line.find('\t');
+    if (tab == std::string::npos) {
+      throw std::runtime_error("malformed query output row");
+    }
+    tensor_index::QueryHit hit;
+    hit.label = static_cast<uint32_t>(std::stoul(line.substr(0, tab)));
+    hit.distance = std::stof(line.substr(tab + 1));
+    hits.push_back(hit);
+  }
+  return hits;
+}
+
 void test_slide_matches_independent_windows_when_stride_is_one() {
   const std::string sequence = "ACGTACGTAC";
   const uint32_t dimension = 16;
@@ -311,6 +335,7 @@ void test_candidate_tool_tensor_commands_without_exact_vectors() {
   config.hnsw_ef_construction = 200;
   config.hnsw_ef_search = 50;
   config.exact_vectors = false;
+  tensor_index::TensorIndex built = tensor_index::build_tensor_index(config);
 
   const std::string build_command =
       "./candidate_tool tensor-build --ref " + shell_quote(reference) +
@@ -326,7 +351,13 @@ void test_candidate_tool_tensor_commands_without_exact_vectors() {
   assert(reloaded.snapshot.labels.size() ==
          reloaded.snapshot.manifest.number_of_windows);
   assert(reloaded.snapshot.manifest.git_commit ==
-         tensor_index::build_tensor_index(config).snapshot.manifest.git_commit);
+         built.snapshot.manifest.git_commit);
+
+  std::vector<tensor_index::QueryHit> built_hits =
+      tensor_index::query_tensor_index(built, encode_sequence("ACGTAC"), 10000);
+  std::vector<tensor_index::QueryHit> reloaded_hits =
+      tensor_index::query_tensor_index(reloaded, encode_sequence("ACGTAC"), 10000);
+  compare_hits(built_hits, reloaded_hits);
 
   const std::string query_command =
       "./candidate_tool tensor-query --index-dir " + shell_quote(out_dir) +
@@ -337,6 +368,9 @@ void test_candidate_tool_tensor_commands_without_exact_vectors() {
   assert(output.find("label\tdistance\n") == 0);
   assert(output.find('\n', std::string("label\tdistance\n").size()) !=
          std::string::npos);
+  compare_hits(parse_query_output(output),
+               std::vector<tensor_index::QueryHit>(reloaded_hits.begin(),
+                                                   reloaded_hits.begin() + 3));
 }
 
 }  // namespace
