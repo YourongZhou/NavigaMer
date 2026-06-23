@@ -48,7 +48,7 @@ assert_exact() {
 
 run_command "$tool" --help
 assert_status 0
-assert_exact "$stdout_file" $'Usage:\n  candidate_tool --help\n  candidate_tool inspect-reference --ref PATH --window N --stride N'
+assert_exact "$stdout_file" $'Usage:\n  candidate_tool --help\n  candidate_tool inspect-reference --ref PATH --window N --stride N\n  candidate_tool tensor-build --ref PATH --window N --stride N --dimension N --seed N --hnsw-m N --hnsw-ef-construction N --hnsw-ef-search N --out-dir PATH [--exact-vectors 0|1]\n  candidate_tool tensor-query --index-dir PATH --query DNA [--top-k N]'
 assert_empty "$stderr_file"
 
 run_command "$tool" inspect-reference --ref "$reference" --window 4 --stride 1

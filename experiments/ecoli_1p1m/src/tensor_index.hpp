@@ -53,7 +53,7 @@ TensorIndex build_tensor_index(const TensorIndexConfig& config);
 void save_tensor_index(const TensorIndex& index,
                        const std::filesystem::path& directory);
 TensorIndex load_tensor_index(const std::filesystem::path& directory);
-std::vector<QueryHit> query_tensor_index(const TensorIndex& index,
+std::vector<QueryHit> query_tensor_index(TensorIndex& index,
                                         const std::vector<int>& query,
                                         std::size_t top_k);
 

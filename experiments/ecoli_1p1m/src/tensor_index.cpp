@@ -30,10 +30,6 @@ constexpr std::array<char, 8> kExactMagic = {'T', 'I', 'D', 'X', 'E', 'X', 'A', 
 constexpr uint32_t kExactPayloadVersion = 1;
 constexpr uint32_t kTensorSubsequenceLength = 5;
 constexpr uint32_t kTopKSearchCap = 10000;
-constexpr char kDependencySourcePath[] =
-    "/home/luting/projects/AnchorMapping/NavigaMer/methods/tensor-sketch-alignment";
-constexpr char kDependencyGitPath[] =
-    "/home/luting/projects/AnchorMapping/NavigaMer/methods/tensor-sketch-alignment";
 constexpr char kWorktreeGitPath[] =
     "/home/luting/projects/AnchorMapping/NavigaMer/.worktrees/ecoli-comparison";
 
@@ -117,6 +113,10 @@ std::string git_commit_for_root(const std::filesystem::path& root) {
     output.pop_back();
   }
   return output;
+}
+
+std::filesystem::path tensor_sketch_root() {
+  return std::filesystem::path(NAVIGAMER_TENSOR_SKETCH_ROOT);
 }
 
 std::vector<int> encode_dna(std::string_view sequence) {
@@ -245,9 +245,8 @@ IndexManifest manifest_from_snapshot(const TensorIndexSnapshot& snapshot) {
       {"hnsw_M", std::to_string(snapshot.hnsw_M)},
       {"hnsw_ef_construction", std::to_string(snapshot.hnsw_ef_construction)},
       {"hnsw_ef_search", std::to_string(snapshot.hnsw_ef_search)},
-      {"dependency_source_path", kDependencySourcePath},
-      {"dependency_git_commit",
-       git_commit_for_root(kDependencyGitPath)},
+      {"dependency_source_path", tensor_sketch_root().string()},
+      {"dependency_git_commit", git_commit_for_root(tensor_sketch_root())},
   };
   manifest.window_length = snapshot.manifest.window_length;
   manifest.stride = snapshot.manifest.stride;
@@ -396,7 +395,7 @@ TensorIndex build_tensor_index(const TensorIndexConfig& config) {
   index.snapshot.manifest.window_length = config.window_length;
   index.snapshot.manifest.stride = config.stride;
   index.snapshot.manifest.number_of_windows = reference.size();
-  index.snapshot.manifest.build_command = "candidate_tool tensor-index";
+  index.snapshot.manifest.build_command = "candidate_tool tensor-build";
   index.snapshot.manifest.build_seconds = 0.0;
   index.snapshot.manifest.index_bytes = 0;
   index.snapshot.manifest.created_at = current_utc_timestamp();
@@ -443,7 +442,6 @@ TensorIndex build_tensor_index(const TensorIndexConfig& config) {
   index.hnsw = std::make_unique<hnswlib::HierarchicalNSW<float>>(
       index.space.get(), reference.size(), config.hnsw_M,
       config.hnsw_ef_construction);
-  index.hnsw->setEf(config.hnsw_ef_search);
   for (uint32_t window_id = 0; window_id < reference.size(); ++window_id) {
     const float* vector = index.snapshot.exact_vectors.data() +
                           static_cast<std::size_t>(window_id) * config.dimension;
@@ -529,18 +527,18 @@ TensorIndex load_tensor_index(const std::filesystem::path& directory) {
   index.hnsw = std::make_unique<hnswlib::HierarchicalNSW<float>>(
       index.space.get(), hnsw_path.string(), false,
       static_cast<size_t>(persisted.manifest.number_of_windows));
-  index.hnsw->setEf(meta.hnsw_ef_search);
   index.hnsw_path = hnsw_path;
   index.exact_path = exact_path;
   return index;
 }
 
-std::vector<QueryHit> query_tensor_index(const TensorIndex& index,
+std::vector<QueryHit> query_tensor_index(TensorIndex& index,
                                         const std::vector<int>& query,
                                         std::size_t top_k) {
   if (!index.hnsw) {
     throw std::runtime_error("tensor index is not loaded");
   }
+  index.hnsw->setEf(index.snapshot.hnsw_ef_search);
   ts::Tensor<int> tensor(4, index.snapshot.dimension, kTensorSubsequenceLength,
                          index.snapshot.seed);
   const std::vector<float> query_vector =

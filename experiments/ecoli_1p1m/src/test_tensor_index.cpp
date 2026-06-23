@@ -11,6 +11,7 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -146,6 +147,45 @@ void compare_hits(const std::vector<tensor_index::QueryHit>& lhs,
   }
 }
 
+std::vector<std::string> parameter_values(
+    const IndexManifest& manifest,
+    std::string_view key) {
+  std::vector<std::string> values;
+  for (const auto& parameter : manifest.parameters) {
+    if (parameter.first == key) {
+      values.push_back(parameter.second);
+    }
+  }
+  return values;
+}
+
+std::string shell_quote(const std::filesystem::path& path) {
+  std::string quoted = "'";
+  for (char byte : path.string()) {
+    if (byte == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted += byte;
+    }
+  }
+  quoted += "'";
+  return quoted;
+}
+
+int run_command(const std::string& command) {
+  return std::system(command.c_str());
+}
+
+std::string read_file(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("unable to open file: " + path.string());
+  }
+  std::ostringstream content;
+  content << input.rdbuf();
+  return content.str();
+}
+
 void test_slide_matches_independent_windows_when_stride_is_one() {
   const std::string sequence = "ACGTACGTAC";
   const uint32_t dimension = 16;
@@ -186,14 +226,14 @@ void test_tensor_index_round_trip_for_dimension(uint32_t dimension) {
   config.hnsw_ef_search = 50;
   config.exact_vectors = true;
 
-  const tensor_index::TensorIndex built = tensor_index::build_tensor_index(config);
+  tensor_index::TensorIndex built = tensor_index::build_tensor_index(config);
   assert(built.snapshot.dimension == dimension);
   assert(built.snapshot.labels.size() == 7);
   assert(built.snapshot.exact_vectors.size() ==
          built.snapshot.labels.size() * static_cast<std::size_t>(dimension));
 
   tensor_index::save_tensor_index(built, temp.path());
-  const tensor_index::TensorIndex reloaded = tensor_index::load_tensor_index(temp.path());
+  tensor_index::TensorIndex reloaded = tensor_index::load_tensor_index(temp.path());
 
   assert(reloaded.snapshot.dimension == dimension);
   assert(reloaded.snapshot.seed == config.seed);
@@ -206,9 +246,15 @@ void test_tensor_index_round_trip_for_dimension(uint32_t dimension) {
   }
 
   const std::vector<float> query_vector = sketch_query("ACGTAC", dimension, config.seed);
-  const std::vector<tensor_index::QueryHit> built_hits =
+  const std::vector<std::string> dependency_root_values =
+      parameter_values(reloaded.snapshot.manifest, "dependency_source_path");
+  assert(dependency_root_values.size() == 1);
+  assert(dependency_root_values[0] == NAVIGAMER_TENSOR_SKETCH_ROOT);
+  assert(parameter_values(reloaded.snapshot.manifest, "dependency_git_commit").size() == 1);
+
+  std::vector<tensor_index::QueryHit> built_hits =
       tensor_index::query_tensor_index(built, encode_sequence("ACGTAC"), 10000);
-  const std::vector<tensor_index::QueryHit> reloaded_hits =
+  std::vector<tensor_index::QueryHit> reloaded_hits =
       tensor_index::query_tensor_index(reloaded, encode_sequence("ACGTAC"), 10000);
   compare_hits(built_hits, reloaded_hits);
 
@@ -223,12 +269,38 @@ void test_tensor_index_round_trip_for_dimension(uint32_t dimension) {
   }
 }
 
+void test_candidate_tool_tensor_commands() {
+  TempDirectory temp;
+  const auto reference = temp.file("reference.fa");
+  const auto out_dir = temp.file("tensor-index");
+  const auto query_out = temp.file("query.tsv");
+  write_text_file(reference, ">tiny\nACGTACGTACGT\n");
+
+  const std::string build_command =
+      "./candidate_tool tensor-build --ref " + shell_quote(reference) +
+      " --window 6 --stride 1 --dimension 16 --seed 17 --hnsw-m 16"
+      " --hnsw-ef-construction 200 --hnsw-ef-search 50 --out-dir " +
+      shell_quote(out_dir);
+  assert(run_command(build_command.c_str()) == 0);
+
+  const std::string query_command =
+      "./candidate_tool tensor-query --index-dir " + shell_quote(out_dir) +
+      " --query ACGTAC --top-k 3 > " + shell_quote(query_out);
+  assert(run_command(query_command.c_str()) == 0);
+
+  const std::string output = read_file(query_out);
+  assert(output.find("label\tdistance\n") == 0);
+  assert(output.find('\n', std::string("label\tdistance\n").size()) !=
+         std::string::npos);
+}
+
 }  // namespace
 
 int main() {
   test_slide_matches_independent_windows_when_stride_is_one();
   test_tensor_index_round_trip_for_dimension(16);
   test_tensor_index_round_trip_for_dimension(32);
+  test_candidate_tool_tensor_commands();
   std::cout << "tensor index tests passed\n";
   return 0;
 }
