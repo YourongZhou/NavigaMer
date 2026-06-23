@@ -48,6 +48,20 @@ class TempDirectory {
   std::filesystem::path path_;
 };
 
+class ScopedBeforePublishHook {
+ public:
+  explicit ScopedBeforePublishHook(WriteIndexAtomicBeforePublishHook hook) {
+    set_write_index_atomic_before_publish_hook_for_testing(hook);
+  }
+
+  ~ScopedBeforePublishHook() {
+    set_write_index_atomic_before_publish_hook_for_testing(nullptr);
+  }
+
+  ScopedBeforePublishHook(const ScopedBeforePublishHook&) = delete;
+  ScopedBeforePublishHook& operator=(const ScopedBeforePublishHook&) = delete;
+};
+
 template <typename Function>
 void assert_throws(Function&& function, std::string_view message_substring) {
   try {
@@ -78,6 +92,19 @@ IndexManifest sample_manifest() {
       1,
       "candidate-tool/1",
   };
+}
+
+const std::filesystem::path* g_race_target_path = nullptr;
+const IndexManifest* g_race_manifest = nullptr;
+const std::vector<uint8_t>* g_race_payload = nullptr;
+
+void publish_competing_index_in_race_window() {
+  if (g_race_target_path == nullptr || g_race_manifest == nullptr ||
+      g_race_payload == nullptr) {
+    throw std::runtime_error("race hook not configured");
+  }
+  set_write_index_atomic_before_publish_hook_for_testing(nullptr);
+  write_index_atomic(*g_race_target_path, *g_race_manifest, *g_race_payload);
 }
 
 void test_sha256_known_vectors() {
@@ -182,6 +209,17 @@ std::size_t count_temp_files_for(const std::filesystem::path& final_path) {
   return count;
 }
 
+std::size_t count_occurrences(std::string_view haystack,
+                              std::string_view needle) {
+  std::size_t count = 0;
+  std::size_t position = 0;
+  while ((position = haystack.find(needle, position)) != std::string::npos) {
+    ++count;
+    position += needle.size();
+  }
+  return count;
+}
+
 void test_atomic_write_cleanup_and_existing_index_protection() {
   TempDirectory temp;
   const auto path = temp.file("index.bin");
@@ -204,6 +242,30 @@ void test_atomic_write_cleanup_and_existing_index_protection() {
          std::vector<uint8_t>({1, 2, 3, 4, 5, 6}));
 }
 
+void test_atomic_write_refuses_publish_if_final_index_appears_after_check() {
+  TempDirectory temp;
+  const auto path = temp.file("index.bin");
+  const IndexManifest manifest = sample_manifest();
+  const std::vector<uint8_t> first_payload = {1, 2, 3};
+  const std::vector<uint8_t> second_payload = {9, 8, 7, 6};
+
+  g_race_target_path = &path;
+  g_race_manifest = &manifest;
+  g_race_payload = &second_payload;
+  {
+    const ScopedBeforePublishHook hook(&publish_competing_index_in_race_window);
+    assert_throws([&] { write_index_atomic(path, manifest, first_payload); },
+                  "refusing to overwrite");
+  }
+  g_race_target_path = nullptr;
+  g_race_manifest = nullptr;
+  g_race_payload = nullptr;
+
+  const PersistedIndex loaded = read_index(path, manifest);
+  assert(loaded.payload == second_payload);
+  assert(count_temp_files_for(path) == 0);
+}
+
 std::string shell_quote(const std::filesystem::path& path) {
   std::string quoted = "'";
   for (char byte : path.string()) {
@@ -220,15 +282,29 @@ void test_manifest_json_is_escaped_and_structured() {
   TempDirectory temp;
   const auto path = temp.file("manifest.json");
   IndexManifest manifest = sample_manifest();
-  manifest.parameters = {{"quoted\"key", "line1\nline2\\tail"}};
+  manifest.parameters = {{"dup", "first"},
+                         {"quoted\"key", "line1\nline2\\tail"},
+                         {"dup", "third"}};
   write_manifest_json(path, manifest);
 
   std::ifstream input(path);
   const std::string json((std::istreambuf_iterator<char>(input)),
                          std::istreambuf_iterator<char>());
-  assert(json.find("\"parameters\": {") != std::string::npos);
-  assert(json.find("\"quoted\\\"key\": \"line1\\nline2\\\\tail\"") !=
+  assert(json.find("\"parameters\": [") != std::string::npos);
+  assert(count_occurrences(json, "\"key\": \"dup\"") == 2);
+  assert(json.find("\"value\": \"line1\\nline2\\\\tail\"") !=
          std::string::npos);
+  const std::size_t first_dup =
+      json.find("{\"key\": \"dup\", \"value\": \"first\"}");
+  const std::size_t quoted =
+      json.find("{\"key\": \"quoted\\\"key\", \"value\": \"line1\\nline2\\\\tail\"}");
+  const std::size_t second_dup =
+      json.find("{\"key\": \"dup\", \"value\": \"third\"}");
+  assert(first_dup != std::string::npos);
+  assert(quoted != std::string::npos);
+  assert(second_dup != std::string::npos);
+  assert(first_dup < quoted);
+  assert(quoted < second_dup);
 
   const std::string command =
       "python3 -m json.tool " + shell_quote(path) + " >/dev/null";
@@ -244,6 +320,7 @@ int main() {
   test_incompatible_expected_manifest_is_rejected();
   test_truncated_and_malformed_lengths_are_rejected_before_allocation();
   test_atomic_write_cleanup_and_existing_index_protection();
+  test_atomic_write_refuses_publish_if_final_index_appears_after_check();
   test_manifest_json_is_escaped_and_structured();
   std::cout << "candidate persistence tests passed\n";
   return 0;

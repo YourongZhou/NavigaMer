@@ -31,6 +31,8 @@ struct PersistedIndex {
   std::vector<uint8_t> payload;
 };
 
+using WriteIndexAtomicBeforePublishHook = void (*)();
+
 // Compares only index semantics. Paths, commands, timings, byte counts,
 // timestamps, and source-control provenance are intentionally excluded.
 bool semantically_compatible(const IndexManifest& stored,
@@ -43,3 +45,5 @@ PersistedIndex read_index(const std::filesystem::path& path,
                           const IndexManifest& expected_semantics);
 void write_manifest_json(const std::filesystem::path& path,
                          const IndexManifest& manifest);
+void set_write_index_atomic_before_publish_hook_for_testing(
+    WriteIndexAtomicBeforePublishHook hook);

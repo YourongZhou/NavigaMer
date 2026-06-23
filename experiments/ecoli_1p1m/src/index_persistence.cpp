@@ -25,6 +25,7 @@ constexpr std::array<char, 8> kMagic = {'E', 'C', 'O', 'L', 'I', 'B', 'L', '1'};
 constexpr uint32_t kFormatVersion = 1;
 constexpr uint64_t kMaximumStringLength = 16U * 1024U * 1024U;
 constexpr uint64_t kMaximumParameterCount = 1U * 1024U * 1024U;
+std::atomic<WriteIndexAtomicBeforePublishHook> g_before_publish_hook{nullptr};
 
 void validate_digest(const std::string& digest) {
   if (digest.size() != 64) {
@@ -274,6 +275,32 @@ std::filesystem::path temporary_path_for(const std::filesystem::path& path) {
   return path.parent_path() / (path.filename().string() + ".tmp." + suffix);
 }
 
+void run_before_publish_hook_for_testing() {
+  if (const auto hook = g_before_publish_hook.load(std::memory_order_acquire)) {
+    hook();
+  }
+}
+
+void publish_without_overwrite(const std::filesystem::path& temporary,
+                               const std::filesystem::path& final_path) {
+  std::error_code error;
+  std::filesystem::create_hard_link(temporary, final_path, error);
+  if (error) {
+    if (error == std::errc::file_exists) {
+      throw std::runtime_error(
+          "final index appeared during write; refusing to overwrite it");
+    }
+    throw std::runtime_error("unable to publish index atomically: " +
+                             error.message());
+  }
+
+  std::filesystem::remove(temporary, error);
+  if (error) {
+    throw std::runtime_error("published index but failed to remove temporary file: " +
+                             error.message());
+  }
+}
+
 }  // namespace
 
 bool IndexManifest::operator==(const IndexManifest& other) const {
@@ -351,11 +378,8 @@ void write_index_atomic(const std::filesystem::path& path,
     if (checked.payload != payload) {
       throw std::runtime_error("temporary index validation payload mismatch");
     }
-    if (std::filesystem::exists(path)) {
-      throw std::runtime_error(
-          "final index appeared during write; refusing to overwrite it");
-    }
-    std::filesystem::rename(temporary, path);
+    run_before_publish_hook_for_testing();
+    publish_without_overwrite(temporary, path);
   } catch (...) {
     std::error_code cleanup_error;
     std::filesystem::remove(temporary, cleanup_error);
@@ -420,17 +444,19 @@ void write_manifest_json(const std::filesystem::path& path,
   }
   output << "{\n  \"method\": ";
   write_json_string(output, manifest.method);
-  output << ",\n  \"parameters\": {";
+  output << ",\n  \"parameters\": [";
   for (std::size_t index = 0; index < manifest.parameters.size(); ++index) {
-    output << (index == 0 ? "\n    " : ",\n    ");
+    output << (index == 0 ? "\n    {" : ",\n    {");
+    output << "\"key\": ";
     write_json_string(output, manifest.parameters[index].first);
-    output << ": ";
+    output << ", \"value\": ";
     write_json_string(output, manifest.parameters[index].second);
+    output << "}";
   }
   if (!manifest.parameters.empty()) {
     output << '\n';
   }
-  output << "  },\n  \"reference_path\": ";
+  output << "  ],\n  \"reference_path\": ";
   write_json_string(output, manifest.reference_path);
   output << ",\n  \"reference_sha256\": ";
   write_json_string(output, manifest.reference_sha256);
@@ -454,4 +480,9 @@ void write_manifest_json(const std::filesystem::path& path,
   if (!output) {
     throw std::runtime_error("unable to write manifest JSON: " + path.string());
   }
+}
+
+void set_write_index_atomic_before_publish_hook_for_testing(
+    WriteIndexAtomicBeforePublishHook hook) {
+  g_before_publish_hook.store(hook, std::memory_order_release);
 }
