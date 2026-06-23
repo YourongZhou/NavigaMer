@@ -1,6 +1,8 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic -fopenmp
-TENSOR_SKETCH_ROOT ?= /home/luting/projects/AnchorMapping/NavigaMer/methods/tensor-sketch-alignment
+GIT_COMMON_DIR := $(shell git -C $(CURDIR) rev-parse --git-common-dir 2>/dev/null)
+COMMON_REPO_ROOT := $(abspath $(GIT_COMMON_DIR)/..)
+TENSOR_SKETCH_ROOT ?= $(COMMON_REPO_ROOT)/methods/tensor-sketch-alignment
 TENSOR_SKETCH_SRC := $(TENSOR_SKETCH_ROOT)/metagraph/src
 TENSOR_SKETCH_TENSOR := $(TENSOR_SKETCH_SRC)/sketch/tensor.hpp
 TENSOR_SKETCH_HNSW := $(if $(wildcard $(TENSOR_SKETCH_SRC)/hnswlib/hnswlib.h),$(TENSOR_SKETCH_SRC)/hnswlib,$(TENSOR_SKETCH_ROOT)/metagraph/third_party/hnswlib/hnswlib)
