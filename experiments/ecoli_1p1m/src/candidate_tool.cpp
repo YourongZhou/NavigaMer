@@ -1,13 +1,17 @@
+#include "candidate_indexes.hpp"
 #include "reference_windows.hpp"
 #include "tensor_index.hpp"
 
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -16,6 +20,9 @@ void print_help() {
   std::cout
       << "Usage:\n"
       << "  candidate_tool --help\n"
+      << "  candidate_tool build --method contig --k N --ref PATH --window N"
+         " --stride N --out-dir PATH\n"
+      << "  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n"
       << "  candidate_tool inspect-reference --ref PATH --window N --stride N\n"
       << "  candidate_tool tensor-build --ref PATH --window N --stride N"
          " --dimension N --seed N --hnsw-m N --hnsw-ef-construction N"
@@ -74,6 +81,207 @@ std::vector<int> encode_query(std::string_view sequence) {
     }
   }
   return encoded;
+}
+
+struct ReadRecord {
+  std::string read_id;
+  std::string sequence;
+};
+
+std::string trim_read_id(std::string_view header) {
+  const std::size_t end = header.find_first_of(" \t\r\n");
+  if (end == std::string_view::npos) {
+    return std::string(header);
+  }
+  return std::string(header.substr(0, end));
+}
+
+std::vector<ReadRecord> read_reads(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("unable to open reads file: " + path.string());
+  }
+
+  std::vector<ReadRecord> records;
+  std::string first_line;
+  while (std::getline(input, first_line)) {
+    if (!first_line.empty()) {
+      break;
+    }
+  }
+  if (first_line.empty() && input.eof()) {
+    return records;
+  }
+
+  if (first_line.front() == '@') {
+    std::string header = first_line;
+    while (true) {
+      std::string sequence;
+      std::string plus_line;
+      std::string quality;
+      if (!std::getline(input, sequence) || !std::getline(input, plus_line) ||
+          !std::getline(input, quality)) {
+        throw std::runtime_error("truncated FASTQ record in reads file");
+      }
+      if (header.empty() || header.front() != '@') {
+        throw std::runtime_error("invalid FASTQ header in reads file");
+      }
+      records.push_back({trim_read_id(header.substr(1)), sequence});
+      while (std::getline(input, header) && header.empty()) {
+      }
+      if (!input) {
+        break;
+      }
+      if (header.front() != '@') {
+        throw std::runtime_error("invalid FASTQ header in reads file");
+      }
+    }
+  } else if (first_line.front() == '>') {
+    std::string header = first_line;
+    std::string sequence;
+    while (true) {
+      std::streampos position = input.tellg();
+      std::string line;
+      if (!std::getline(input, line)) {
+        records.push_back({trim_read_id(header.substr(1)), sequence});
+        break;
+      }
+      if (line.empty()) {
+        continue;
+      }
+      if (line.front() == '>') {
+        records.push_back({trim_read_id(header.substr(1)), sequence});
+        header = line;
+        sequence.clear();
+      } else {
+        sequence += line;
+      }
+      position = input.tellg();
+      (void)position;
+    }
+  } else {
+    throw std::runtime_error("reads file must be FASTA or FASTQ");
+  }
+
+  return records;
+}
+
+std::string join_window_ids(const std::vector<uint32_t>& window_ids) {
+  std::string joined;
+  for (std::size_t index = 0; index < window_ids.size(); ++index) {
+    if (index > 0) {
+      joined.push_back(',');
+    }
+    joined += std::to_string(window_ids[index]);
+  }
+  return joined;
+}
+
+int build_contiguous(int argc, char** argv) {
+  ContiguousIndexConfig config;
+  std::filesystem::path out_dir;
+  std::string method;
+  bool saw_method = false;
+  bool saw_k = false;
+  bool saw_ref = false;
+  bool saw_window = false;
+  bool saw_stride = false;
+  bool saw_out_dir = false;
+
+  for (int index = 2; index < argc; index += 2) {
+    const std::string flag = argv[index];
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: " + flag);
+    }
+    const std::string value = argv[index + 1];
+    if (flag == "--method") {
+      method = value;
+      saw_method = true;
+    } else if (flag == "--k") {
+      config.k = parse_uint32(value, flag);
+      saw_k = true;
+    } else if (flag == "--ref") {
+      config.reference_path = value;
+      saw_ref = true;
+    } else if (flag == "--window") {
+      config.window_length = parse_uint32(value, flag);
+      saw_window = true;
+    } else if (flag == "--stride") {
+      config.stride = parse_uint32(value, flag);
+      saw_stride = true;
+    } else if (flag == "--out-dir") {
+      out_dir = value;
+      saw_out_dir = true;
+    } else {
+      throw std::invalid_argument("unknown flag: " + flag);
+    }
+  }
+
+  if (!saw_method || method != "contig") {
+    throw std::invalid_argument("missing required flag: --method contig");
+  }
+  if (!saw_k || !saw_ref || !saw_window || !saw_stride || !saw_out_dir) {
+    throw std::invalid_argument("missing required build flag");
+  }
+
+  const ContiguousIndex index = ContiguousIndex::build(config);
+  index.save(out_dir);
+  return 0;
+}
+
+int query_contiguous(int argc, char** argv) {
+  std::filesystem::path index_path;
+  std::filesystem::path reads_path;
+  std::filesystem::path out_path;
+  uint32_t tau = 0;
+  bool saw_index = false;
+  bool saw_reads = false;
+  bool saw_tau = false;
+  bool saw_out = false;
+
+  for (int index = 2; index < argc; index += 2) {
+    const std::string flag = argv[index];
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: " + flag);
+    }
+    const std::string value = argv[index + 1];
+    if (flag == "--index") {
+      index_path = value;
+      saw_index = true;
+    } else if (flag == "--reads") {
+      reads_path = value;
+      saw_reads = true;
+    } else if (flag == "--tau") {
+      tau = parse_uint32(value, flag);
+      saw_tau = true;
+    } else if (flag == "--out") {
+      out_path = value;
+      saw_out = true;
+    } else {
+      throw std::invalid_argument("unknown flag: " + flag);
+    }
+  }
+
+  if (!saw_index || !saw_reads || !saw_tau || !saw_out) {
+    throw std::invalid_argument("missing required query flag");
+  }
+
+  const ContiguousIndex index = ContiguousIndex::load(index_path);
+  const std::vector<ReadRecord> reads = read_reads(reads_path);
+  if (out_path.has_parent_path()) {
+    std::filesystem::create_directories(out_path.parent_path());
+  }
+  std::ofstream output(out_path);
+  if (!output) {
+    throw std::runtime_error("unable to create output file: " + out_path.string());
+  }
+  output << "read_id\ttau\traw_candidate_count\tcandidate_window_ids\n";
+  for (const ReadRecord& read : reads) {
+    const std::vector<uint32_t> candidate_window_ids = index.query(read.sequence);
+    output << read.read_id << '\t' << tau << '\t' << candidate_window_ids.size()
+           << '\t' << join_window_ids(candidate_window_ids) << '\n';
+  }
+  return 0;
 }
 
 int inspect_reference(int argc, char** argv) {
@@ -246,6 +454,12 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && std::string(argv[1]) == "inspect-reference") {
       return inspect_reference(argc, argv);
+    }
+    if (argc >= 2 && std::string(argv[1]) == "build") {
+      return build_contiguous(argc, argv);
+    }
+    if (argc >= 2 && std::string(argv[1]) == "query") {
+      return query_contiguous(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]) == "tensor-build") {
       return tensor_build(argc, argv);

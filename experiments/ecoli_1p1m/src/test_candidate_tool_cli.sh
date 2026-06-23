@@ -48,8 +48,20 @@ assert_exact() {
 
 run_command "$tool" --help
 assert_status 0
-assert_exact "$stdout_file" $'Usage:\n  candidate_tool --help\n  candidate_tool inspect-reference --ref PATH --window N --stride N\n  candidate_tool tensor-build --ref PATH --window N --stride N --dimension N --seed N --hnsw-m N --hnsw-ef-construction N --hnsw-ef-search N --out-dir PATH [--exact-vectors 0|1]\n  candidate_tool tensor-query --index-dir PATH --query DNA [--top-k N]'
+assert_exact "$stdout_file" $'Usage:\n  candidate_tool --help\n  candidate_tool build --method contig --k N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n  candidate_tool inspect-reference --ref PATH --window N --stride N\n  candidate_tool tensor-build --ref PATH --window N --stride N --dimension N --seed N --hnsw-m N --hnsw-ef-construction N --hnsw-ef-search N --out-dir PATH [--exact-vectors 0|1]\n  candidate_tool tensor-query --index-dir PATH --query DNA [--top-k N]'
 assert_empty "$stderr_file"
+
+reads="$test_dir/reads.fq"
+index_dir="$test_dir/index"
+output_tsv="$test_dir/candidates.tsv"
+printf '@read1\nACGT\n+\nIIII\n' >"$reads"
+run_command "$tool" build --method contig --k 3 --ref "$reference" --window 4 --stride 1 --out-dir "$index_dir"
+assert_status 0
+assert_empty "$stderr_file"
+run_command "$tool" query --index "$index_dir/index.bin" --reads "$reads" --tau 2 --out "$output_tsv"
+assert_status 0
+assert_empty "$stderr_file"
+assert_exact "$output_tsv" $'read_id\ttau\traw_candidate_count\tcandidate_window_ids\nread1\t2\t4\t0,1,3,4'
 
 run_command "$tool" inspect-reference --ref "$reference" --window 4 --stride 1
 assert_status 0
