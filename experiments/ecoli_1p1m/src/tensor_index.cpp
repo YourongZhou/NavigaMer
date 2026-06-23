@@ -13,6 +13,7 @@
 #include <iterator>
 #include <memory>
 #include <limits>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,8 +31,6 @@ constexpr std::array<char, 8> kExactMagic = {'T', 'I', 'D', 'X', 'E', 'X', 'A', 
 constexpr uint32_t kExactPayloadVersion = 1;
 constexpr uint32_t kTensorSubsequenceLength = 5;
 constexpr uint32_t kTopKSearchCap = 10000;
-constexpr char kWorktreeGitPath[] =
-    "/home/luting/projects/AnchorMapping/NavigaMer/.worktrees/ecoli-comparison";
 
 struct ParsedMeta {
   std::filesystem::path reference_path;
@@ -117,6 +116,10 @@ std::string git_commit_for_root(const std::filesystem::path& root) {
 
 std::filesystem::path tensor_sketch_root() {
   return std::filesystem::path(NAVIGAMER_TENSOR_SKETCH_ROOT);
+}
+
+std::filesystem::path navigamer_repo_root() {
+  return std::filesystem::path(NAVIGAMER_REPO_ROOT);
 }
 
 std::vector<int> encode_dna(std::string_view sequence) {
@@ -273,6 +276,11 @@ void write_meta_file(const std::filesystem::path& path,
   output << "number_of_windows\t" << manifest.number_of_windows << '\n';
   output << "format_version\t" << manifest.format_version << '\n';
   output << "tool_version\t" << manifest.tool_version << '\n';
+  output << "build_command\t" << manifest.build_command << '\n';
+  output << "build_seconds\t" << manifest.build_seconds << '\n';
+  output << "index_bytes\t" << manifest.index_bytes << '\n';
+  output << "created_at\t" << manifest.created_at << '\n';
+  output << "git_commit\t" << manifest.git_commit << '\n';
   output << "dimension\t" << snapshot.dimension << '\n';
   output << "seed\t" << snapshot.seed << '\n';
   output << "hnsw_M\t" << snapshot.hnsw_M << '\n';
@@ -328,6 +336,16 @@ ParsedMeta parse_meta_file(const std::filesystem::path& path) {
       parsed.manifest.format_version = std::stoul(value);
     } else if (key == "tool_version") {
       parsed.manifest.tool_version = value;
+    } else if (key == "build_command") {
+      parsed.manifest.build_command = value;
+    } else if (key == "build_seconds") {
+      parsed.manifest.build_seconds = std::stod(value);
+    } else if (key == "index_bytes") {
+      parsed.manifest.index_bytes = std::stoull(value);
+    } else if (key == "created_at") {
+      parsed.manifest.created_at = value;
+    } else if (key == "git_commit") {
+      parsed.manifest.git_commit = value;
     } else if (key == "dimension") {
       parsed.dimension = std::stoul(value);
     } else if (key == "seed") {
@@ -399,7 +417,7 @@ TensorIndex build_tensor_index(const TensorIndexConfig& config) {
   index.snapshot.manifest.build_seconds = 0.0;
   index.snapshot.manifest.index_bytes = 0;
   index.snapshot.manifest.created_at = current_utc_timestamp();
-  index.snapshot.manifest.git_commit = git_commit_for_root(kWorktreeGitPath);
+  index.snapshot.manifest.git_commit = git_commit_for_root(navigamer_repo_root());
 
   index.snapshot.labels.reserve(reference.size());
   index.snapshot.exact_vectors.reserve(
@@ -477,56 +495,69 @@ TensorIndex load_tensor_index(const std::filesystem::path& directory) {
   const std::filesystem::path meta_path = directory / "manifest.meta";
 
   const ParsedMeta meta = parse_meta_file(meta_path);
-  const PersistedIndex persisted = read_index(exact_path, meta.manifest);
-
-  if (persisted.payload.size() < kExactMagic.size() + sizeof(uint32_t) +
-                                   sizeof(uint64_t) + sizeof(uint32_t)) {
-    throw std::runtime_error("exact payload is truncated");
-  }
-  std::size_t offset = 0;
-  for (char magic_byte : kExactMagic) {
-    if (persisted.payload[offset++] != static_cast<uint8_t>(magic_byte)) {
-      throw std::runtime_error("invalid exact payload magic");
-    }
-  }
-  if (read_u32(persisted.payload, offset) != kExactPayloadVersion) {
-    throw std::runtime_error("unsupported exact payload version");
-  }
-  const uint64_t row_count = read_u64(persisted.payload, offset);
-  const uint32_t dimension = read_u32(persisted.payload, offset);
-  if (dimension != meta.dimension) {
-    throw std::runtime_error("exact payload dimension mismatch");
-  }
-  if (row_count != persisted.manifest.number_of_windows) {
-    throw std::runtime_error("exact payload row count mismatch");
-  }
 
   TensorIndex index;
-  index.snapshot.manifest = persisted.manifest;
-  index.snapshot.dimension = dimension;
+  index.snapshot.manifest = meta.manifest;
+  index.snapshot.dimension = meta.dimension;
   index.snapshot.seed = meta.seed;
   index.snapshot.hnsw_M = meta.hnsw_M;
   index.snapshot.hnsw_ef_construction = meta.hnsw_ef_construction;
   index.snapshot.hnsw_ef_search = meta.hnsw_ef_search;
   index.snapshot.persist_exact_vectors = meta.exact_vectors;
-  index.snapshot.labels.reserve(static_cast<std::size_t>(row_count));
-  index.snapshot.exact_vectors.reserve(static_cast<std::size_t>(row_count) *
-                                       dimension);
-  for (uint64_t row = 0; row < row_count; ++row) {
-    const uint32_t label = read_u32(persisted.payload, offset);
-    index.snapshot.labels.push_back(label);
-    for (uint32_t column = 0; column < dimension; ++column) {
-      index.snapshot.exact_vectors.push_back(read_float(persisted.payload, offset));
+  const uint64_t row_count = meta.manifest.number_of_windows;
+  const uint32_t dimension = meta.dimension;
+
+  if (meta.exact_vectors) {
+    const PersistedIndex persisted = read_index(exact_path, meta.manifest);
+    if (persisted.payload.size() < kExactMagic.size() + sizeof(uint32_t) +
+                                     sizeof(uint64_t) + sizeof(uint32_t)) {
+      throw std::runtime_error("exact payload is truncated");
     }
-  }
-  if (offset != persisted.payload.size()) {
-    throw std::runtime_error("unexpected trailing bytes in exact payload");
+    std::size_t offset = 0;
+    for (char magic_byte : kExactMagic) {
+      if (persisted.payload[offset++] != static_cast<uint8_t>(magic_byte)) {
+        throw std::runtime_error("invalid exact payload magic");
+      }
+    }
+    if (read_u32(persisted.payload, offset) != kExactPayloadVersion) {
+      throw std::runtime_error("unsupported exact payload version");
+    }
+    const uint64_t exact_row_count = read_u64(persisted.payload, offset);
+    const uint32_t exact_dimension = read_u32(persisted.payload, offset);
+    if (exact_dimension != dimension) {
+      throw std::runtime_error("exact payload dimension mismatch");
+    }
+    if (exact_row_count != persisted.manifest.number_of_windows) {
+      throw std::runtime_error("exact payload row count mismatch");
+    }
+
+    index.snapshot.manifest = persisted.manifest;
+    index.snapshot.dimension = exact_dimension;
+    index.snapshot.labels.reserve(static_cast<std::size_t>(exact_row_count));
+    index.snapshot.exact_vectors.reserve(static_cast<std::size_t>(exact_row_count) *
+                                         exact_dimension);
+    for (uint64_t row = 0; row < exact_row_count; ++row) {
+      const uint32_t label = read_u32(persisted.payload, offset);
+      index.snapshot.labels.push_back(label);
+      for (uint32_t column = 0; column < exact_dimension; ++column) {
+        index.snapshot.exact_vectors.push_back(
+            read_float(persisted.payload, offset));
+      }
+    }
+    if (offset != persisted.payload.size()) {
+      throw std::runtime_error("unexpected trailing bytes in exact payload");
+    }
+  } else {
+    index.snapshot.labels.reserve(static_cast<std::size_t>(row_count));
+    for (uint64_t row = 0; row < row_count; ++row) {
+      index.snapshot.labels.push_back(static_cast<uint32_t>(row));
+    }
   }
 
   index.space = std::make_shared<hnswlib::L2Space>(dimension);
   index.hnsw = std::make_unique<hnswlib::HierarchicalNSW<float>>(
       index.space.get(), hnsw_path.string(), false,
-      static_cast<size_t>(persisted.manifest.number_of_windows));
+      static_cast<size_t>(row_count));
   index.hnsw_path = hnsw_path;
   index.exact_path = exact_path;
   return index;

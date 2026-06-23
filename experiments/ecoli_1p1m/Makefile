@@ -2,6 +2,7 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic -fopenmp
 GIT_COMMON_DIR := $(shell git -C $(CURDIR) rev-parse --git-common-dir 2>/dev/null)
 COMMON_REPO_ROOT := $(abspath $(GIT_COMMON_DIR)/..)
+NAVIGAMER_REPO_ROOT := $(abspath $(CURDIR)/../..)
 TENSOR_SKETCH_ROOT ?= $(COMMON_REPO_ROOT)/methods/tensor-sketch-alignment
 TENSOR_SKETCH_SRC := $(TENSOR_SKETCH_ROOT)/metagraph/src
 TENSOR_SKETCH_TENSOR := $(TENSOR_SKETCH_SRC)/sketch/tensor.hpp
@@ -27,6 +28,7 @@ endif
 CPPFLAGS := -Isrc -I../../navigamer_cpp/include -I../../navigamer_cpp/third_party/edlib/include \
             -I$(TENSOR_SKETCH_SRC) -I$(TENSOR_SKETCH_HNSW) \
             -DNAVIGAMER_HAVE_TENSOR_SKETCH=$(NAVIGAMER_HAVE_TENSOR_SKETCH) \
+            -DNAVIGAMER_REPO_ROOT=\"$(NAVIGAMER_REPO_ROOT)\" \
             -DNAVIGAMER_TENSOR_SKETCH_ROOT=\"$(TENSOR_SKETCH_ROOT)\"
 EDLIB_SRC := ../../navigamer_cpp/third_party/edlib/src/edlib.cpp
 

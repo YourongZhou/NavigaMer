@@ -294,6 +294,51 @@ void test_candidate_tool_tensor_commands() {
          std::string::npos);
 }
 
+void test_candidate_tool_tensor_commands_without_exact_vectors() {
+  TempDirectory temp;
+  const auto reference = temp.file("reference.fa");
+  const auto out_dir = temp.file("tensor-index-no-exact");
+  const auto query_out = temp.file("query-no-exact.tsv");
+  write_text_file(reference, ">tiny\nACGTACGTACGT\n");
+
+  tensor_index::TensorIndexConfig config;
+  config.reference_path = reference;
+  config.window_length = 6;
+  config.stride = 1;
+  config.dimension = 16;
+  config.seed = 17;
+  config.hnsw_M = 16;
+  config.hnsw_ef_construction = 200;
+  config.hnsw_ef_search = 50;
+  config.exact_vectors = false;
+
+  const std::string build_command =
+      "./candidate_tool tensor-build --ref " + shell_quote(reference) +
+      " --window 6 --stride 1 --dimension 16 --seed 17 --hnsw-m 16"
+      " --hnsw-ef-construction 200 --hnsw-ef-search 50 --exact-vectors 0"
+      " --out-dir " + shell_quote(out_dir);
+  assert(run_command(build_command.c_str()) == 0);
+  assert(!std::filesystem::exists(out_dir / "exact.bin"));
+
+  tensor_index::TensorIndex reloaded = tensor_index::load_tensor_index(out_dir);
+  assert(!reloaded.snapshot.persist_exact_vectors);
+  assert(reloaded.snapshot.exact_vectors.empty());
+  assert(reloaded.snapshot.labels.size() ==
+         reloaded.snapshot.manifest.number_of_windows);
+  assert(reloaded.snapshot.manifest.git_commit ==
+         tensor_index::build_tensor_index(config).snapshot.manifest.git_commit);
+
+  const std::string query_command =
+      "./candidate_tool tensor-query --index-dir " + shell_quote(out_dir) +
+      " --query ACGTAC --top-k 3 > " + shell_quote(query_out);
+  assert(run_command(query_command.c_str()) == 0);
+
+  const std::string output = read_file(query_out);
+  assert(output.find("label\tdistance\n") == 0);
+  assert(output.find('\n', std::string("label\tdistance\n").size()) !=
+         std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -301,6 +346,7 @@ int main() {
   test_tensor_index_round_trip_for_dimension(16);
   test_tensor_index_round_trip_for_dimension(32);
   test_candidate_tool_tensor_commands();
+  test_candidate_tool_tensor_commands_without_exact_vectors();
   std::cout << "tensor index tests passed\n";
   return 0;
 }
