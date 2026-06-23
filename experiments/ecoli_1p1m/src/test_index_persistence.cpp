@@ -246,23 +246,48 @@ void test_atomic_write_refuses_publish_if_final_index_appears_after_check() {
   TempDirectory temp;
   const auto path = temp.file("index.bin");
   const IndexManifest manifest = sample_manifest();
+  IndexManifest competing_manifest = manifest;
+  competing_manifest.stride = 2;
   const std::vector<uint8_t> first_payload = {1, 2, 3};
   const std::vector<uint8_t> second_payload = {9, 8, 7, 6};
 
   g_race_target_path = &path;
-  g_race_manifest = &manifest;
+  g_race_manifest = &competing_manifest;
   g_race_payload = &second_payload;
   {
     const ScopedBeforePublishHook hook(&publish_competing_index_in_race_window);
-    assert_throws([&] { write_index_atomic(path, manifest, first_payload); },
-                  "refusing to overwrite");
+    assert_throws(
+        [&] { write_index_atomic(path, manifest, first_payload); },
+        "incompatible existing index");
+  }
+  g_race_target_path = nullptr;
+  g_race_manifest = nullptr;
+  g_race_payload = nullptr;
+
+  const PersistedIndex loaded = read_index(path, competing_manifest);
+  assert(loaded.payload == second_payload);
+  assert(count_temp_files_for(path) == 0);
+}
+
+void test_atomic_write_reuses_matching_index_if_final_appears_during_publish() {
+  TempDirectory temp;
+  const auto path = temp.file("index.bin");
+  const IndexManifest manifest = sample_manifest();
+  const std::vector<uint8_t> payload = {4, 5, 6, 7};
+
+  g_race_target_path = &path;
+  g_race_manifest = &manifest;
+  g_race_payload = &payload;
+  {
+    const ScopedBeforePublishHook hook(&publish_competing_index_in_race_window);
+    write_index_atomic(path, manifest, payload);
   }
   g_race_target_path = nullptr;
   g_race_manifest = nullptr;
   g_race_payload = nullptr;
 
   const PersistedIndex loaded = read_index(path, manifest);
-  assert(loaded.payload == second_payload);
+  assert(loaded.payload == payload);
   assert(count_temp_files_for(path) == 0);
 }
 
@@ -321,6 +346,7 @@ int main() {
   test_truncated_and_malformed_lengths_are_rejected_before_allocation();
   test_atomic_write_cleanup_and_existing_index_protection();
   test_atomic_write_refuses_publish_if_final_index_appears_after_check();
+  test_atomic_write_reuses_matching_index_if_final_appears_during_publish();
   test_manifest_json_is_escaped_and_structured();
   std::cout << "candidate persistence tests passed\n";
   return 0;

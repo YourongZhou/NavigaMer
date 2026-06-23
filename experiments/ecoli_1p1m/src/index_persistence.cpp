@@ -281,14 +281,13 @@ void run_before_publish_hook_for_testing() {
   }
 }
 
-void publish_without_overwrite(const std::filesystem::path& temporary,
+bool publish_without_overwrite(const std::filesystem::path& temporary,
                                const std::filesystem::path& final_path) {
   std::error_code error;
   std::filesystem::create_hard_link(temporary, final_path, error);
   if (error) {
     if (error == std::errc::file_exists) {
-      throw std::runtime_error(
-          "final index appeared during write; refusing to overwrite it");
+      return false;
     }
     throw std::runtime_error("unable to publish index atomically: " +
                              error.message());
@@ -299,6 +298,7 @@ void publish_without_overwrite(const std::filesystem::path& temporary,
     throw std::runtime_error("published index but failed to remove temporary file: " +
                              error.message());
   }
+  return true;
 }
 
 }  // namespace
@@ -379,7 +379,21 @@ void write_index_atomic(const std::filesystem::path& path,
       throw std::runtime_error("temporary index validation payload mismatch");
     }
     run_before_publish_hook_for_testing();
-    publish_without_overwrite(temporary, path);
+    if (!publish_without_overwrite(temporary, path)) {
+      try {
+        read_index(path, manifest);
+      } catch (const std::exception& error) {
+        throw std::runtime_error("incompatible existing index; remove or rebuild " +
+                                 path.string() + ": " + error.what());
+      }
+
+      std::error_code cleanup_error;
+      std::filesystem::remove(temporary, cleanup_error);
+      if (cleanup_error) {
+        throw std::runtime_error("reused existing index but failed to remove temporary file: " +
+                                 cleanup_error.message());
+      }
+    }
   } catch (...) {
     std::error_code cleanup_error;
     std::filesystem::remove(temporary, cleanup_error);
