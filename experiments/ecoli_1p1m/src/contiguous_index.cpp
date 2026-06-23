@@ -156,6 +156,52 @@ std::vector<uint64_t> query_kmer_keys(std::string_view sequence, uint32_t k) {
   return keys;
 }
 
+std::vector<uint32_t> covering_window_ids_from_manifest(
+    const IndexManifest& manifest, uint32_t occurrence_start, uint32_t span) {
+  if (span == 0) {
+    throw std::invalid_argument("occurrence span must be greater than zero");
+  }
+  if (manifest.window_length == 0 || manifest.stride == 0 ||
+      manifest.number_of_windows == 0 || manifest.reference_length == 0) {
+    throw std::runtime_error("contiguous index manifest is incomplete");
+  }
+  if (span > manifest.window_length) {
+    throw std::invalid_argument(
+        "occurrence span must not exceed the window length");
+  }
+
+  const uint64_t occurrence_end = static_cast<uint64_t>(occurrence_start) + span;
+  if (occurrence_start >= manifest.reference_length ||
+      occurrence_end > manifest.reference_length) {
+    return {};
+  }
+
+  const uint64_t minimum_start =
+      occurrence_end > manifest.window_length
+          ? occurrence_end - manifest.window_length
+          : 0;
+  const uint64_t maximum_window_start =
+      static_cast<uint64_t>(manifest.number_of_windows - 1) * manifest.stride;
+  const uint64_t maximum_start =
+      std::min<uint64_t>(occurrence_start, maximum_window_start);
+  if (minimum_start > maximum_start) {
+    return {};
+  }
+
+  const uint64_t first_id = (minimum_start + manifest.stride - 1) / manifest.stride;
+  const uint64_t last_id = maximum_start / manifest.stride;
+  if (first_id > last_id) {
+    return {};
+  }
+
+  std::vector<uint32_t> ids;
+  ids.reserve(static_cast<std::size_t>(last_id - first_id + 1));
+  for (uint64_t id = first_id; id <= last_id; ++id) {
+    ids.push_back(static_cast<uint32_t>(id));
+  }
+  return ids;
+}
+
 void read_exact(std::istream& input, void* destination, std::size_t size) {
   input.read(static_cast<char*>(destination), static_cast<std::streamsize>(size));
   if (!input) {
@@ -337,19 +383,19 @@ std::vector<uint32_t> ContiguousIndex::query(
   if (k == 0) {
     return {};
   }
-  const ReferenceWindows reference = ReferenceWindows::from_fasta(
-      manifest_.reference_path, manifest_.window_length, manifest_.stride);
   const std::vector<uint64_t> query_keys = query_kmer_keys(query_sequence, k);
   if (query_keys.empty()) {
     return {};
   }
 
-  std::vector<uint8_t> marked(reference.size(), 0);
+  std::vector<uint8_t> marked(
+      static_cast<std::size_t>(manifest_.number_of_windows), 0);
   for (uint64_t key : query_keys) {
-    const std::vector<uint32_t> occurrences = occurrence_index_.positions_for_key(key);
+    const std::vector<uint32_t> occurrences =
+        occurrence_index_.positions_for_key(key);
     for (uint32_t occurrence_start : occurrences) {
       const std::vector<uint32_t> window_ids =
-          reference.covering_window_ids(occurrence_start, k);
+          covering_window_ids_from_manifest(manifest_, occurrence_start, k);
       for (uint32_t window_id : window_ids) {
         marked[window_id] = 1;
       }

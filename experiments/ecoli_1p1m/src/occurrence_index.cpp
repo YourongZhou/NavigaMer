@@ -1,16 +1,12 @@
 #include "occurrence_index.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
 namespace {
-
-constexpr std::array<char, 8> kMagic = {'O', 'C', 'C', 'I', 'N', 'D', 'X', '1'};
-constexpr uint32_t kFormatVersion = 1;
 
 uint8_t encode_base(char base) {
   switch (base) {
@@ -63,16 +59,6 @@ uint64_t read_u64(const std::vector<uint8_t>& bytes, std::size_t& offset) {
     value |= static_cast<uint64_t>(bytes[offset++]) << shift;
   }
   return value;
-}
-
-void read_magic(const std::vector<uint8_t>& bytes, std::size_t& offset) {
-  if (bytes.size() < kMagic.size()) {
-    throw std::runtime_error("truncated occurrence index payload");
-  }
-  if (!std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) {
-    throw std::runtime_error("invalid occurrence index magic");
-  }
-  offset = kMagic.size();
 }
 
 }  // namespace
@@ -145,12 +131,6 @@ OccurrenceIndex OccurrenceIndex::build(std::string_view sequence, uint32_t k) {
 OccurrenceIndex OccurrenceIndex::deserialize(const std::vector<uint8_t>& payload) {
   OccurrenceIndex index;
   std::size_t offset = 0;
-  read_magic(payload, offset);
-  const uint32_t format_version = read_u32(payload, offset);
-  if (format_version != kFormatVersion) {
-    throw std::runtime_error("unsupported occurrence index format version");
-  }
-
   index.k_ = read_u32(payload, offset);
   if (index.k_ == 0 || index.k_ > 32) {
     throw std::runtime_error("invalid occurrence index k");
@@ -216,10 +196,8 @@ std::vector<uint32_t> OccurrenceIndex::positions_for_key(uint64_t key) const {
 
 std::vector<uint8_t> OccurrenceIndex::serialize() const {
   std::vector<uint8_t> bytes;
-  bytes.reserve(8 + 4 + 4 + 8 + postings_.size() * (8 + 4) +
+  bytes.reserve(4 + 8 + postings_.size() * (8 + 4) +
                 8 + directory_.size() * (8 + 4 + 4));
-  bytes.insert(bytes.end(), kMagic.begin(), kMagic.end());
-  append_u32(bytes, kFormatVersion);
   append_u32(bytes, k_);
   append_u64(bytes, postings_.size());
   for (const Posting& posting : postings_) {

@@ -103,4 +103,10 @@ assert_status 1
 assert_empty "$stdout_file"
 assert_exact "$stderr_file" 'error: invalid value for --window: 4294967296'
 
+rm -f "$reference"
+run_command "$tool" query --index "$index_dir/index.bin" --reads "$reads" --tau 2 --out "$output_tsv"
+assert_status 0
+assert_empty "$stderr_file"
+assert_exact "$output_tsv" $'read_id\ttau\traw_candidate_count\tcandidate_window_ids\nread1\t2\t4\t0,1,3,4'
+
 printf 'candidate tool CLI tests passed\n'

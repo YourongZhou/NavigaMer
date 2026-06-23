@@ -153,18 +153,21 @@ void test_round_trip_preserves_candidate_ids() {
   TempFasta fasta("roundtrip",
                   ">ref\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n");
   TempDirectory temp;
-  const ContiguousIndexConfig config{fasta.path(), 20, 1, 5};
-  const ContiguousIndex index = ContiguousIndex::build(config);
   const std::string query_sequence = "ACGTACGTACGTACGTACGT";
-  const std::vector<uint32_t> before = index.query(query_sequence);
 
-  const std::filesystem::path out_dir = temp.file("index");
-  std::filesystem::create_directory(out_dir);
-  index.save(out_dir);
-  const ContiguousIndex loaded = ContiguousIndex::load(out_dir / "index.bin");
-  const std::vector<uint32_t> after = loaded.query(query_sequence);
+  for (uint32_t k : {5U, 7U}) {
+    const std::filesystem::path out_dir = temp.file("index_" + std::to_string(k));
+    std::filesystem::create_directory(out_dir);
+    const ContiguousIndexConfig config{fasta.path(), 20, 1, k};
+    const ContiguousIndex index = ContiguousIndex::build(config);
+    const std::vector<uint32_t> before = index.query(query_sequence);
 
-  expect_equal(before, after);
+    index.save(out_dir);
+    const ContiguousIndex loaded = ContiguousIndex::load(out_dir / "index.bin");
+    const std::vector<uint32_t> after = loaded.query(query_sequence);
+
+    expect_equal(before, after);
+  }
 }
 
 }  // namespace
