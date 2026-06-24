@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -29,6 +30,8 @@ void print_help() {
       << "  candidate_tool build --method randstrobe --strobe-len 15"
          " --w-min 20 --w-max 50 --seed N --ref PATH --window N --stride N"
          " --out-dir PATH\n"
+      << "  candidate_tool build --method qgram-safe --q N --ref PATH"
+         " --window N --stride N --out-dir PATH\n"
       << "  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n"
       << "  candidate_tool inspect-reference --ref PATH --window N --stride N\n"
       << "  candidate_tool tensor-build --ref PATH --window N --stride N"
@@ -284,7 +287,7 @@ std::string join_window_ids(const std::vector<uint32_t>& window_ids) {
 }
 
 using CandidateIndex = std::variant<ContiguousIndex, SpacedSeedIndex,
-                                    RandstrobeIndex>;
+                                    RandstrobeIndex, QgramSafeIndex>;
 
 CandidateIndex load_candidate_index(const std::filesystem::path& index_path) {
   const PersistedIndex loaded = read_index_file(index_path);
@@ -297,15 +300,25 @@ CandidateIndex load_candidate_index(const std::filesystem::path& index_path) {
   if (loaded.manifest.method == "randstrobe") {
     return RandstrobeIndex::load(loaded);
   }
+  if (loaded.manifest.method == "qgram-safe") {
+    return QgramSafeIndex::load(loaded);
+  }
   throw std::runtime_error("unsupported candidate index method: " +
                            loaded.manifest.method);
 }
 
 std::vector<uint32_t> query_candidate_index(const CandidateIndex& index,
-                                            std::string_view query_sequence) {
+                                            std::string_view query_sequence,
+                                            uint32_t tau) {
   return std::visit(
       [&](const auto& loaded_index) {
-        return loaded_index.query(query_sequence);
+        if constexpr (std::is_same_v<std::decay_t<decltype(loaded_index)>,
+                                     QgramSafeIndex>) {
+          return loaded_index.query(query_sequence, tau);
+        } else {
+          (void)tau;
+          return loaded_index.query(query_sequence);
+        }
       },
       index);
 }
@@ -479,6 +492,58 @@ int build_randstrobe(int argc, char** argv) {
   return 0;
 }
 
+int build_qgram_safe(int argc, char** argv) {
+  QgramSafeIndexConfig config;
+  std::filesystem::path out_dir;
+  std::string method;
+  bool saw_method = false;
+  bool saw_q = false;
+  bool saw_ref = false;
+  bool saw_window = false;
+  bool saw_stride = false;
+  bool saw_out_dir = false;
+
+  for (int index = 2; index < argc; index += 2) {
+    const std::string flag = argv[index];
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: " + flag);
+    }
+    const std::string value = argv[index + 1];
+    if (flag == "--method") {
+      method = value;
+      saw_method = true;
+    } else if (flag == "--q") {
+      config.q = parse_uint32(value, flag);
+      saw_q = true;
+    } else if (flag == "--ref") {
+      config.reference_path = value;
+      saw_ref = true;
+    } else if (flag == "--window") {
+      config.window_length = parse_uint32(value, flag);
+      saw_window = true;
+    } else if (flag == "--stride") {
+      config.stride = parse_uint32(value, flag);
+      saw_stride = true;
+    } else if (flag == "--out-dir") {
+      out_dir = value;
+      saw_out_dir = true;
+    } else {
+      throw std::invalid_argument("unknown flag: " + flag);
+    }
+  }
+
+  if (!saw_method || method != "qgram-safe") {
+    throw std::invalid_argument("missing required flag: --method qgram-safe");
+  }
+  if (!saw_q || !saw_ref || !saw_window || !saw_stride || !saw_out_dir) {
+    throw std::invalid_argument("missing required build flag");
+  }
+
+  const QgramSafeIndex index = QgramSafeIndex::build(config);
+  index.save(out_dir);
+  return 0;
+}
+
 std::string build_method_from_argv(int argc, char** argv) {
   for (int index = 2; index < argc; ++index) {
     if (std::string(argv[index]) != "--method") {
@@ -541,7 +606,7 @@ int query_contiguous(int argc, char** argv) {
   output << "read_id\ttau\traw_candidate_count\tcandidate_window_ids\n";
   for (const ReadRecord& read : reads) {
     const std::vector<uint32_t> candidate_window_ids =
-        query_candidate_index(candidate_index, read.sequence);
+        query_candidate_index(candidate_index, read.sequence, tau);
     output << read.read_id << '\t' << tau << '\t' << candidate_window_ids.size()
            << '\t' << join_window_ids(candidate_window_ids) << '\n';
   }
@@ -729,6 +794,9 @@ int main(int argc, char** argv) {
       }
       if (method == "randstrobe") {
         return build_randstrobe(argc, argv);
+      }
+      if (method == "qgram-safe") {
+        return build_qgram_safe(argc, argv);
       }
       throw std::invalid_argument("unknown build method: " + method);
     }

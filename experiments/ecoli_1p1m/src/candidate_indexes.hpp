@@ -41,6 +41,14 @@ class RandstrobeIndexConfig {
   uint64_t seed = 0;
 };
 
+class QgramSafeIndexConfig {
+ public:
+  std::filesystem::path reference_path;
+  uint32_t window_length = 0;
+  uint32_t stride = 0;
+  uint32_t q = 0;
+};
+
 std::vector<SpacedMask> make_spaced_masks(uint32_t weight);
 std::vector<uint64_t> randstrobe_composite_keys(std::string_view sequence,
                                                 uint32_t strobe_length,
@@ -93,5 +101,27 @@ class RandstrobeIndex {
   uint32_t w_min_ = 20;
   uint32_t w_max_ = 50;
   uint64_t seed_ = 0;
+  std::vector<uint8_t> payload_;
+};
+
+class QgramSafeIndex {
+ public:
+  static QgramSafeIndex build(const QgramSafeIndexConfig& config);
+  static QgramSafeIndex load(const std::filesystem::path& index_path);
+  static QgramSafeIndex load(const PersistedIndex& loaded_index);
+
+  void save(const std::filesystem::path& out_dir) const;
+  std::vector<uint32_t> query(std::string_view query_sequence,
+                              uint32_t tau) const;
+
+ private:
+  IndexManifest manifest_;
+  uint32_t q_ = 0;
+  uint32_t window_length_ = 0;
+  uint32_t stride_ = 0;
+  std::string reference_sequence_;
+  std::vector<uint32_t> reference_codes_;
+  std::vector<uint32_t> first_window_counts_;
+  std::vector<uint32_t> invalid_prefix_;
   std::vector<uint8_t> payload_;
 };
