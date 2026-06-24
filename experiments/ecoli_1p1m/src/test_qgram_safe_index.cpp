@@ -256,10 +256,26 @@ void test_mutated_windows_keep_all_tau_neighbors() {
   }
 }
 
+void test_qgram_safe_rejects_q_that_exceeds_uint32_code_width() {
+  TempFasta fasta("reject_width", ">ref\nACGTACGTACGTACGT\n");
+  const QgramSafeIndexConfig config{fasta.path(), 8, 1, 16};
+  bool threw = false;
+  try {
+    (void)QgramSafeIndex::build(config);
+  } catch (const std::invalid_argument& error) {
+    threw = true;
+    assert(std::string(error.what()).find(
+               "uint32_t packed-code stream and dense q-gram vector") !=
+           std::string::npos);
+  }
+  assert(threw);
+}
+
 }  // namespace
 
 int main() {
   test_naive_candidate_sets_match_for_q_3_and_q_4();
   test_mutated_windows_keep_all_tau_neighbors();
+  test_qgram_safe_rejects_q_that_exceeds_uint32_code_width();
   return 0;
 }

@@ -25,7 +25,6 @@
 
 namespace {
 
-constexpr uint32_t kMaxSupportedDenseQ = 12;
 constexpr uint32_t kInvalidCode = std::numeric_limits<uint32_t>::max();
 
 void append_u32(std::vector<uint8_t>& bytes, uint32_t value) {
@@ -156,10 +155,42 @@ bool is_supported_sequence(std::string_view sequence) {
   return true;
 }
 
+uint32_t max_q_for_uint32_codes() {
+  uint64_t max_valid_code = 0;
+  uint32_t q = 0;
+  const uint64_t max_allowed_code =
+      static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - 1U;
+  while (max_valid_code <= max_allowed_code) {
+    if (max_valid_code > (max_allowed_code - 3U) / 4U) {
+      break;
+    }
+    max_valid_code = max_valid_code * 4U + 3U;
+    ++q;
+  }
+  return q;
+}
+
+uint32_t max_q_for_dense_counts() {
+  const std::size_t max_elements = std::vector<uint32_t>().max_size();
+  std::size_t cells = 1;
+  uint32_t q = 0;
+  while (cells <= max_elements / 4U) {
+    cells *= 4U;
+    ++q;
+  }
+  return q;
+}
+
+uint32_t max_supported_q() {
+  return std::min(max_q_for_uint32_codes(), max_q_for_dense_counts());
+}
+
 uint64_t dense_cell_count_for_q(uint32_t q) {
-  if (q == 0 || q > kMaxSupportedDenseQ) {
+  const uint32_t limit = max_supported_q();
+  if (q == 0 || q > limit) {
     throw std::invalid_argument(
-        "q must be between 1 and 12 for the dense q-gram vector");
+        "q must be between 1 and " + std::to_string(limit) +
+        " for the uint32_t packed-code stream and dense q-gram vector");
   }
   uint64_t count = 1;
   for (uint32_t index = 0; index < q; ++index) {
@@ -483,7 +514,7 @@ QgramSafeIndex QgramSafeIndex::load(const PersistedIndex& loaded_index) {
   index.payload_ = loaded_index.payload;
 
   const ParsedQgramPayload parsed = parse_qgram_payload(index.payload_);
-  if (parsed.q == 0 || parsed.q > kMaxSupportedDenseQ) {
+  if (parsed.q == 0 || parsed.q > max_supported_q()) {
     throw std::runtime_error("unsupported qgram-safe q value in payload");
   }
   const uint64_t dense_cell_count = dense_cell_count_for_q(parsed.q);
