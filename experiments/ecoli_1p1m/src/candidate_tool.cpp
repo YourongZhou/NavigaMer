@@ -1,4 +1,5 @@
 #include "candidate_indexes.hpp"
+#include "evaluation.hpp"
 #include "reference_windows.hpp"
 #include "tensor_index.hpp"
 
@@ -35,6 +36,8 @@ void print_help() {
       << "  candidate_tool build --method pigeonhole --tau N"
          " --nominal-read-length N --ref PATH --window N --stride N"
          " --out-dir PATH\n"
+      << "  candidate_tool build-matrix --ref PATH --window N --stride N"
+         " --out-dir PATH [--rebuild]\n"
       << "  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n"
       << "  candidate_tool inspect-reference --ref PATH --window N --stride N\n"
       << "  candidate_tool tensor-build --ref PATH --window N --stride N"
@@ -625,6 +628,49 @@ std::string build_method_from_argv(int argc, char** argv) {
   throw std::invalid_argument("missing required flag: --method");
 }
 
+int build_matrix(int argc, char** argv) {
+  BuildMatrixRequest request;
+  bool saw_ref = false;
+  bool saw_window = false;
+  bool saw_stride = false;
+  bool saw_out_dir = false;
+
+  for (int index = 2; index < argc; ++index) {
+    const std::string flag = argv[index];
+    if (flag == "--rebuild") {
+      request.rebuild = true;
+      continue;
+    }
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: " + flag);
+    }
+    const std::string value = argv[++index];
+    if (flag == "--ref") {
+      request.reference_path = value;
+      saw_ref = true;
+    } else if (flag == "--window") {
+      request.window_length = parse_uint32(value, flag);
+      saw_window = true;
+    } else if (flag == "--stride") {
+      request.stride = parse_uint32(value, flag);
+      saw_stride = true;
+    } else if (flag == "--out-dir") {
+      request.out_dir = value;
+      saw_out_dir = true;
+    } else {
+      throw std::invalid_argument("unknown flag: " + flag);
+    }
+  }
+
+  if (!saw_ref || !saw_window || !saw_stride || !saw_out_dir) {
+    throw std::invalid_argument("missing required build-matrix flag");
+  }
+
+  const std::vector<BuildSummaryRow> rows = build_candidate_matrix(request);
+  (void)rows;
+  return 0;
+}
+
 int query_contiguous(int argc, char** argv) {
   std::filesystem::path index_path;
   std::filesystem::path reads_path;
@@ -851,6 +897,9 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && std::string(argv[1]) == "inspect-reference") {
       return inspect_reference(argc, argv);
+    }
+    if (argc >= 2 && std::string(argv[1]) == "build-matrix") {
+      return build_matrix(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]) == "build") {
       const std::string method = build_method_from_argv(argc, argv);

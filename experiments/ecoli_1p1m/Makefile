@@ -32,14 +32,14 @@ CPPFLAGS := -Isrc -I../../navigamer_cpp/include -I../../navigamer_cpp/third_part
             -DNAVIGAMER_TENSOR_SKETCH_ROOT=\"$(TENSOR_SKETCH_ROOT)\"
 EDLIB_SRC := ../../navigamer_cpp/third_party/edlib/src/edlib.cpp
 
-.PHONY: all clean test test_candidate_tool_cli test_reference_windows test_index_persistence test_seed_indexes test_qgram_safe_index test_pigeonhole_index test_tensor_index
+.PHONY: all clean test test_candidate_tool_cli test_reference_windows test_index_persistence test_seed_indexes test_qgram_safe_index test_pigeonhole_index test_tensor_index test_evaluation
 
 all: candidate_tool
 
-test: test_reference_windows test_candidate_tool_cli test_index_persistence test_seed_indexes test_qgram_safe_index test_pigeonhole_index test_tensor_index
+test: test_reference_windows test_candidate_tool_cli test_index_persistence test_seed_indexes test_qgram_safe_index test_pigeonhole_index test_tensor_index test_evaluation
 
-candidate_tool: src/candidate_tool.cpp src/reference_windows.cpp src/reference_windows.hpp src/candidate_indexes.hpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/qgram_safe_index.cpp src/pigeonhole_index.cpp src/occurrence_index.cpp src/occurrence_index.hpp src/tensor_index.cpp src/tensor_index.hpp src/index_persistence.cpp src/index_persistence.hpp src/sha256.cpp src/sha256.hpp $(EDLIB_SRC)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ src/candidate_tool.cpp src/reference_windows.cpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/qgram_safe_index.cpp src/pigeonhole_index.cpp src/occurrence_index.cpp src/tensor_index.cpp src/index_persistence.cpp src/sha256.cpp $(EDLIB_SRC) $(TENSOR_SKETCH_TIMER)
+candidate_tool: src/candidate_tool.cpp src/evaluation.cpp src/evaluation.hpp src/reference_windows.cpp src/reference_windows.hpp src/candidate_indexes.hpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/qgram_safe_index.cpp src/pigeonhole_index.cpp src/occurrence_index.cpp src/occurrence_index.hpp src/tensor_index.cpp src/tensor_index.hpp src/index_persistence.cpp src/index_persistence.hpp src/sha256.cpp src/sha256.hpp ../../navigamer_cpp/src/tools.cpp $(EDLIB_SRC)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ src/candidate_tool.cpp src/evaluation.cpp src/reference_windows.cpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/qgram_safe_index.cpp src/pigeonhole_index.cpp src/occurrence_index.cpp src/tensor_index.cpp src/index_persistence.cpp src/sha256.cpp ../../navigamer_cpp/src/tools.cpp $(EDLIB_SRC) $(TENSOR_SKETCH_TIMER)
 
 test_reference_windows: test_reference_windows_bin
 	./test_reference_windows_bin
@@ -70,5 +70,9 @@ test_tensor_index: candidate_tool src/test_tensor_index.cpp src/tensor_index.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o test_tensor_index_bin src/test_tensor_index.cpp src/tensor_index.cpp src/reference_windows.cpp src/index_persistence.cpp src/sha256.cpp $(TENSOR_SKETCH_TIMER)
 	./test_tensor_index_bin
 
+test_evaluation: src/test_evaluation.cpp src/evaluation.cpp src/evaluation.hpp src/reference_windows.cpp src/reference_windows.hpp src/candidate_indexes.hpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/qgram_safe_index.cpp src/pigeonhole_index.cpp src/occurrence_index.cpp src/occurrence_index.hpp src/tensor_index.cpp src/tensor_index.hpp src/index_persistence.cpp src/index_persistence.hpp src/sha256.cpp src/sha256.hpp ../../navigamer_cpp/src/tools.cpp $(EDLIB_SRC)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o test_evaluation_bin src/test_evaluation.cpp src/evaluation.cpp src/reference_windows.cpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/qgram_safe_index.cpp src/pigeonhole_index.cpp src/occurrence_index.cpp src/tensor_index.cpp src/index_persistence.cpp src/sha256.cpp ../../navigamer_cpp/src/tools.cpp $(EDLIB_SRC) $(TENSOR_SKETCH_TIMER)
+	./test_evaluation_bin
+
 clean:
-	$(RM) candidate_tool test_reference_windows test_reference_windows_bin test_index_persistence_bin test_seed_indexes_bin test_qgram_safe_index_bin test_pigeonhole_index_bin test_tensor_index_bin
+	$(RM) candidate_tool test_reference_windows test_reference_windows_bin test_index_persistence_bin test_seed_indexes_bin test_qgram_safe_index_bin test_pigeonhole_index_bin test_tensor_index_bin test_evaluation_bin
