@@ -308,6 +308,30 @@ void test_randstrobe_rejects_unsupported_strobe_length() {
   assert(threw);
 }
 
+void test_randstrobe_rejects_overflowing_window_bounds() {
+  TempFasta fasta("randstrobe_overflow",
+                  ">ref\n"
+                  "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+                  "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n");
+  const RandstrobeIndexConfig config{
+      fasta.path(), 80, 1, 15, 20, std::numeric_limits<uint32_t>::max(), 1234};
+  bool threw = false;
+  try {
+    (void)RandstrobeIndex::build(config);
+  } catch (const std::exception&) {
+    threw = true;
+  }
+  assert(threw);
+
+  const std::string sequence =
+      "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+  const std::vector<uint64_t> keys = randstrobe_composite_keys(
+      sequence, 15, std::numeric_limits<uint32_t>::max() - 1,
+      std::numeric_limits<uint32_t>::max(), 1234);
+  assert(keys.empty());
+}
+
 void test_random_queries_match_naive_for_k_5_and_7() {
   std::mt19937_64 rng(0x5eed1234ull);
   for (uint32_t k : {5U, 7U}) {
@@ -357,6 +381,7 @@ int main() {
   test_spaced_seed_round_trip_matches_naive_extraction();
   test_randstrobe_seed_stability_changes_with_seed();
   test_randstrobe_rejects_unsupported_strobe_length();
+  test_randstrobe_rejects_overflowing_window_bounds();
   std::cout << "seed index tests passed\n";
   return 0;
 }

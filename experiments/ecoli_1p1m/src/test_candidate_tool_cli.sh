@@ -59,6 +59,8 @@ reads="$test_dir/reads.fq"
 index_dir="$test_dir/index"
 output_tsv="$test_dir/candidates.tsv"
 printf '@read1\nACGT\n+\nIIII\n' >"$reads"
+reads_two="$test_dir/reads_two.fq"
+printf '@read1\nACGT\n+\nIIII\n@read2\nACGT\n+\nIIII\n' >"$reads_two"
 run_command "$tool" build --method contig --k 3 --ref "$reference" --window 4 --stride 1 --out-dir "$index_dir"
 assert_status 0
 assert_empty "$stderr_file"
@@ -66,6 +68,16 @@ run_command "$tool" query --index "$index_dir/index.bin" --reads "$reads" --tau 
 assert_status 0
 assert_empty "$stderr_file"
 assert_exact "$output_tsv" $'read_id\ttau\traw_candidate_count\tcandidate_window_ids\nread1\t2\t4\t0,1,3,4'
+
+fifo_index="$test_dir/index_fifo.bin"
+mkfifo "$fifo_index"
+cat "$index_dir/index.bin" >"$fifo_index" &
+writer_pid=$!
+run_command timeout 5s "$tool" query --index "$fifo_index" --reads "$reads_two" --tau 2 --out "$output_tsv"
+assert_status 0
+assert_empty "$stderr_file"
+assert_exact "$output_tsv" $'read_id\ttau\traw_candidate_count\tcandidate_window_ids\nread1\t2\t4\t0,1,3,4\nread2\t2\t4\t0,1,3,4'
+wait "$writer_pid"
 
 spaced_dir="$test_dir/spaced_index"
 run_command "$tool" build --method spaced --weight 15 --ref "$long_reference" --window 80 --stride 1 --out-dir "$spaced_dir"

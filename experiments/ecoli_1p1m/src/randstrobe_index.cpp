@@ -221,21 +221,23 @@ std::vector<RandstrobeHit> enumerate_randstrobes(std::string_view sequence,
       continue;
     }
 
-    const uint32_t second_start_min = first_start + w_min;
+    const uint64_t second_start_min = static_cast<uint64_t>(first_start) + w_min;
     if (second_start_min > last_first_start) {
       continue;
     }
-    const uint32_t second_start_max =
-        std::min<uint32_t>(first_start + w_max, last_first_start);
+    const uint64_t second_start_max =
+        std::min<uint64_t>(static_cast<uint64_t>(first_start) + w_max,
+                           last_first_start);
 
     bool found = false;
-    uint32_t best_second_start = 0;
+    uint64_t best_second_start = 0;
     uint32_t best_second_code = 0;
     uint64_t best_hash = std::numeric_limits<uint64_t>::max();
-    for (uint32_t second_start = second_start_min; second_start <= second_start_max;
-         ++second_start) {
+    for (uint64_t second_start = second_start_min;
+         second_start <= second_start_max; ++second_start) {
       uint32_t second_code = 0;
-      if (!encode_strobe(sequence, second_start, strobe_length, second_code)) {
+      if (!encode_strobe(sequence, static_cast<uint32_t>(second_start),
+                         strobe_length, second_code)) {
         continue;
       }
       const uint64_t candidate_hash =
@@ -253,10 +255,15 @@ std::vector<RandstrobeHit> enumerate_randstrobes(std::string_view sequence,
       continue;
     }
 
+    const uint64_t span = best_second_start + strobe_length - first_start;
+    if (span > std::numeric_limits<uint32_t>::max()) {
+      throw std::runtime_error("randstrobe span exceeds supported range");
+    }
+
     hits.push_back(RandstrobeHit{
         pack_composite_key(first_code, best_second_code),
         first_start,
-        best_second_start + strobe_length - first_start,
+        static_cast<uint32_t>(span),
     });
   }
   return hits;
@@ -577,7 +584,9 @@ RandstrobeIndex RandstrobeIndex::build(const RandstrobeIndexConfig& config) {
   if (config.reference_path.empty()) {
     throw std::invalid_argument("reference path must not be empty");
   }
-  if (config.window_length < config.strobe_length + config.w_max) {
+  const uint64_t required_window_span =
+      static_cast<uint64_t>(config.strobe_length) + config.w_max;
+  if (required_window_span > config.window_length) {
     throw std::invalid_argument(
         "window length must cover the full randstrobe span");
   }

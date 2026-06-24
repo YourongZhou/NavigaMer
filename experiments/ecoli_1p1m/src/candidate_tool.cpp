@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -282,6 +283,35 @@ std::string join_window_ids(const std::vector<uint32_t>& window_ids) {
   return joined;
 }
 
+using CandidateIndex = std::variant<ContiguousIndex, SpacedSeedIndex,
+                                    RandstrobeIndex>;
+
+CandidateIndex load_candidate_index(const std::filesystem::path& index_path) {
+  try {
+    return ContiguousIndex::load(index_path);
+  } catch (const std::exception&) {
+  }
+  try {
+    return SpacedSeedIndex::load(index_path);
+  } catch (const std::exception&) {
+  }
+  try {
+    return RandstrobeIndex::load(index_path);
+  } catch (const std::exception& error) {
+    throw std::runtime_error(error.what());
+  }
+  throw std::runtime_error("unable to load candidate index");
+}
+
+std::vector<uint32_t> query_candidate_index(const CandidateIndex& index,
+                                            std::string_view query_sequence) {
+  return std::visit(
+      [&](const auto& loaded_index) {
+        return loaded_index.query(query_sequence);
+      },
+      index);
+}
+
 int build_contiguous(int argc, char** argv) {
   ContiguousIndexConfig config;
   std::filesystem::path out_dir;
@@ -451,24 +481,6 @@ int build_randstrobe(int argc, char** argv) {
   return 0;
 }
 
-std::vector<uint32_t> query_candidate_index(
-    const std::filesystem::path& index_path, std::string_view query_sequence) {
-  try {
-    return ContiguousIndex::load(index_path).query(query_sequence);
-  } catch (const std::exception&) {
-  }
-  try {
-    return SpacedSeedIndex::load(index_path).query(query_sequence);
-  } catch (const std::exception&) {
-  }
-  try {
-    return RandstrobeIndex::load(index_path).query(query_sequence);
-  } catch (const std::exception& error) {
-    throw std::runtime_error(error.what());
-  }
-  throw std::runtime_error("unable to load candidate index");
-}
-
 std::string build_method_from_argv(int argc, char** argv) {
   for (int index = 2; index < argc; ++index) {
     if (std::string(argv[index]) != "--method") {
@@ -520,6 +532,7 @@ int query_contiguous(int argc, char** argv) {
   }
 
   const std::vector<ReadRecord> reads = read_reads(reads_path);
+  const CandidateIndex candidate_index = load_candidate_index(index_path);
   if (out_path.has_parent_path()) {
     std::filesystem::create_directories(out_path.parent_path());
   }
@@ -530,7 +543,7 @@ int query_contiguous(int argc, char** argv) {
   output << "read_id\ttau\traw_candidate_count\tcandidate_window_ids\n";
   for (const ReadRecord& read : reads) {
     const std::vector<uint32_t> candidate_window_ids =
-        query_candidate_index(index_path, read.sequence);
+        query_candidate_index(candidate_index, read.sequence);
     output << read.read_id << '\t' << tau << '\t' << candidate_window_ids.size()
            << '\t' << join_window_ids(candidate_window_ids) << '\n';
   }
