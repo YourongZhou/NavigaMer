@@ -52,7 +52,7 @@ assert_exact() {
 
 run_command "$tool" --help
 assert_status 0
-assert_exact "$stdout_file" $'Usage:\n  candidate_tool --help\n  candidate_tool build --method contig --k N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method spaced --weight W --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method randstrobe --strobe-len 15 --w-min 20 --w-max 50 --seed N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method qgram-safe --q N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n  candidate_tool inspect-reference --ref PATH --window N --stride N\n  candidate_tool tensor-build --ref PATH --window N --stride N --dimension N --seed N --hnsw-m N --hnsw-ef-construction N --hnsw-ef-search N --out-dir PATH [--exact-vectors 0|1]\n  candidate_tool tensor-query --index-dir PATH --query DNA [--top-k N]'
+assert_exact "$stdout_file" $'Usage:\n  candidate_tool --help\n  candidate_tool build --method contig --k N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method spaced --weight W --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method randstrobe --strobe-len 15 --w-min 20 --w-max 50 --seed N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method qgram-safe --q N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method pigeonhole --tau N --nominal-read-length N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n  candidate_tool inspect-reference --ref PATH --window N --stride N\n  candidate_tool tensor-build --ref PATH --window N --stride N --dimension N --seed N --hnsw-m N --hnsw-ef-construction N --hnsw-ef-search N --out-dir PATH [--exact-vectors 0|1]\n  candidate_tool tensor-query --index-dir PATH --query DNA [--top-k N]'
 assert_empty "$stderr_file"
 
 reads="$test_dir/reads.fq"
@@ -150,6 +150,20 @@ run_command "$tool" query --index "$qgram_safe_dir/index.bin" --reads "$reads" -
 assert_status 0
 assert_empty "$stderr_file"
 assert_exact "$output_tsv" $'read_id\ttau\traw_candidate_count\tcandidate_window_ids\nread1\t1\t5\t0,1,2,3,4'
+
+pigeonhole_dir="$test_dir/pigeonhole_index"
+run_command "$tool" build --method pigeonhole --tau 1 --nominal-read-length 4 --ref "$reference" --window 4 --stride 1 --out-dir "$pigeonhole_dir"
+assert_status 0
+assert_empty "$stderr_file"
+run_command "$tool" query --index "$pigeonhole_dir/index.bin" --reads "$reads" --tau 1 --out "$output_tsv"
+assert_status 0
+assert_empty "$stderr_file"
+first_line=$(head -n 1 "$output_tsv")
+if [[ "$first_line" != $'read_id\ttau\traw_candidate_count\tcandidate_window_ids' ]]; then
+  printf 'unexpected pigeonhole query header:\n' >&2
+  cat "$output_tsv" >&2
+  exit 1
+fi
 
 reordered_randstrobe_dir="$test_dir/randstrobe_index_reordered"
 run_command "$tool" build --seed 1234 --w-max 50 --ref "$long_reference" --window 80 --stride 1 --out-dir "$reordered_randstrobe_dir" --method randstrobe --strobe-len 15 --w-min 20

@@ -32,6 +32,9 @@ void print_help() {
          " --out-dir PATH\n"
       << "  candidate_tool build --method qgram-safe --q N --ref PATH"
          " --window N --stride N --out-dir PATH\n"
+      << "  candidate_tool build --method pigeonhole --tau N"
+         " --nominal-read-length N --ref PATH --window N --stride N"
+         " --out-dir PATH\n"
       << "  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n"
       << "  candidate_tool inspect-reference --ref PATH --window N --stride N\n"
       << "  candidate_tool tensor-build --ref PATH --window N --stride N"
@@ -287,7 +290,8 @@ std::string join_window_ids(const std::vector<uint32_t>& window_ids) {
 }
 
 using CandidateIndex = std::variant<ContiguousIndex, SpacedSeedIndex,
-                                    RandstrobeIndex, QgramSafeIndex>;
+                                    RandstrobeIndex, QgramSafeIndex,
+                                    PigeonholeIndex>;
 
 CandidateIndex load_candidate_index(const std::filesystem::path& index_path) {
   const PersistedIndex loaded = read_index_file(index_path);
@@ -303,6 +307,9 @@ CandidateIndex load_candidate_index(const std::filesystem::path& index_path) {
   if (loaded.manifest.method == "qgram-safe") {
     return QgramSafeIndex::load(loaded);
   }
+  if (loaded.manifest.method == "pigeonhole") {
+    return PigeonholeIndex::load(loaded);
+  }
   throw std::runtime_error("unsupported candidate index method: " +
                            loaded.manifest.method);
 }
@@ -314,6 +321,9 @@ std::vector<uint32_t> query_candidate_index(const CandidateIndex& index,
       [&](const auto& loaded_index) {
         if constexpr (std::is_same_v<std::decay_t<decltype(loaded_index)>,
                                      QgramSafeIndex>) {
+          return loaded_index.query(query_sequence, tau);
+        } else if constexpr (std::is_same_v<std::decay_t<decltype(loaded_index)>,
+                                            PigeonholeIndex>) {
           return loaded_index.query(query_sequence, tau);
         } else {
           (void)tau;
@@ -540,6 +550,64 @@ int build_qgram_safe(int argc, char** argv) {
   }
 
   const QgramSafeIndex index = QgramSafeIndex::build(config);
+  index.save(out_dir);
+  return 0;
+}
+
+int build_pigeonhole(int argc, char** argv) {
+  PigeonholeIndexConfig config;
+  std::filesystem::path out_dir;
+  std::string method;
+  bool saw_method = false;
+  bool saw_tau = false;
+  bool saw_nominal_read_length = false;
+  bool saw_ref = false;
+  bool saw_window = false;
+  bool saw_stride = false;
+  bool saw_out_dir = false;
+
+  for (int index = 2; index < argc; index += 2) {
+    const std::string flag = argv[index];
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: " + flag);
+    }
+    const std::string value = argv[index + 1];
+    if (flag == "--method") {
+      method = value;
+      saw_method = true;
+    } else if (flag == "--tau") {
+      config.tau = parse_uint32(value, flag);
+      saw_tau = true;
+    } else if (flag == "--nominal-read-length") {
+      config.nominal_read_length = parse_uint32(value, flag);
+      saw_nominal_read_length = true;
+    } else if (flag == "--ref") {
+      config.reference_path = value;
+      saw_ref = true;
+    } else if (flag == "--window") {
+      config.window_length = parse_uint32(value, flag);
+      saw_window = true;
+    } else if (flag == "--stride") {
+      config.stride = parse_uint32(value, flag);
+      saw_stride = true;
+    } else if (flag == "--out-dir") {
+      out_dir = value;
+      saw_out_dir = true;
+    } else {
+      throw std::invalid_argument("unknown flag: " + flag);
+    }
+  }
+
+  if (!saw_method || method != "pigeonhole") {
+    throw std::invalid_argument(
+        "missing required flag: --method pigeonhole");
+  }
+  if (!saw_tau || !saw_nominal_read_length || !saw_ref || !saw_window ||
+      !saw_stride || !saw_out_dir) {
+    throw std::invalid_argument("missing required build flag");
+  }
+
+  const PigeonholeIndex index = PigeonholeIndex::build(config);
   index.save(out_dir);
   return 0;
 }
@@ -797,6 +865,9 @@ int main(int argc, char** argv) {
       }
       if (method == "qgram-safe") {
         return build_qgram_safe(argc, argv);
+      }
+      if (method == "pigeonhole") {
+        return build_pigeonhole(argc, argv);
       }
       throw std::invalid_argument("unknown build method: " + method);
     }
