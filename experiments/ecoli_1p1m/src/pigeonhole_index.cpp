@@ -359,8 +359,8 @@ PigeonholeIndex PigeonholeIndex::build(const PigeonholeIndexConfig& config) {
   index.tau_ = config.tau;
   index.nominal_read_length_ = config.nominal_read_length;
   index.minimum_block_length_ = minimum_block_length;
-  index.supported_min_query_length_ = config.nominal_read_length - config.tau;
-  index.supported_max_query_length_ = config.nominal_read_length + config.tau;
+  index.supported_min_query_length_ = config.window_length - config.tau;
+  index.supported_max_query_length_ = config.window_length + config.tau;
   index.reference_sequence_ = reference.sequence();
   index.postings_ = build_postings(index.reference_sequence_, minimum_block_length);
 

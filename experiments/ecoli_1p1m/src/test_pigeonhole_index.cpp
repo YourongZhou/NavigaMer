@@ -178,9 +178,38 @@ void expect_superset(const std::vector<uint32_t>& actual,
   }
 }
 
+void test_nominal_read_length_can_differ_from_window_length() {
+  TempFasta fasta(
+      "nominal_mismatch",
+      ">ref\n"
+      "ACGTACGTGTCAGTACGTACGTGTCAGTACGTACGTGTCAGTACGTACGT\n");
+  const ReferenceWindows reference =
+      ReferenceWindows::from_fasta(fasta.path(), 12, 1);
+
+  PigeonholeIndexConfig config;
+  config.reference_path = fasta.path();
+  config.window_length = 12;
+  config.stride = 1;
+  config.tau = 1;
+  config.nominal_read_length = 8;
+
+  const PigeonholeIndex index = PigeonholeIndex::build(config);
+  const std::string query = std::string(reference.window(0)).substr(0, 11);
+  const std::vector<uint32_t> actual = index.query(query, 1);
+  std::vector<uint32_t> expected;
+  for (uint32_t window_id = 0; window_id < reference.size(); ++window_id) {
+    const int distance = edlib_distance(query, reference.window(window_id));
+    if (distance <= 1) {
+      expected.push_back(window_id);
+    }
+  }
+  expect_superset(actual, expected);
+}
+
 }  // namespace
 
 int main() {
+  test_nominal_read_length_can_differ_from_window_length();
   TempFasta fasta(
       "reference",
       ">ref\n"
