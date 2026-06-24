@@ -38,8 +38,8 @@ all: candidate_tool
 
 test: test_reference_windows test_candidate_tool_cli test_index_persistence test_seed_indexes test_tensor_index
 
-candidate_tool: src/candidate_tool.cpp src/reference_windows.cpp src/reference_windows.hpp src/candidate_indexes.hpp src/contiguous_index.cpp src/occurrence_index.cpp src/occurrence_index.hpp src/tensor_index.cpp src/tensor_index.hpp src/index_persistence.cpp src/index_persistence.hpp src/sha256.cpp src/sha256.hpp $(EDLIB_SRC)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ src/candidate_tool.cpp src/reference_windows.cpp src/contiguous_index.cpp src/occurrence_index.cpp src/tensor_index.cpp src/index_persistence.cpp src/sha256.cpp $(EDLIB_SRC) $(TENSOR_SKETCH_TIMER)
+candidate_tool: src/candidate_tool.cpp src/reference_windows.cpp src/reference_windows.hpp src/candidate_indexes.hpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/occurrence_index.cpp src/occurrence_index.hpp src/tensor_index.cpp src/tensor_index.hpp src/index_persistence.cpp src/index_persistence.hpp src/sha256.cpp src/sha256.hpp $(EDLIB_SRC)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ src/candidate_tool.cpp src/reference_windows.cpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/occurrence_index.cpp src/tensor_index.cpp src/index_persistence.cpp src/sha256.cpp $(EDLIB_SRC) $(TENSOR_SKETCH_TIMER)
 
 test_reference_windows: test_reference_windows_bin
 	./test_reference_windows_bin
@@ -54,8 +54,8 @@ test_index_persistence: src/test_index_persistence.cpp src/index_persistence.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o test_index_persistence_bin src/test_index_persistence.cpp src/index_persistence.cpp src/sha256.cpp
 	./test_index_persistence_bin
 
-test_seed_indexes: src/test_seed_indexes.cpp src/contiguous_index.cpp src/candidate_indexes.hpp src/occurrence_index.cpp src/occurrence_index.hpp src/reference_windows.cpp src/reference_windows.hpp src/index_persistence.cpp src/index_persistence.hpp src/sha256.cpp src/sha256.hpp
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o test_seed_indexes_bin src/test_seed_indexes.cpp src/contiguous_index.cpp src/occurrence_index.cpp src/reference_windows.cpp src/index_persistence.cpp src/sha256.cpp
+test_seed_indexes: src/test_seed_indexes.cpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/candidate_indexes.hpp src/occurrence_index.cpp src/occurrence_index.hpp src/reference_windows.cpp src/reference_windows.hpp src/index_persistence.cpp src/index_persistence.hpp src/sha256.cpp src/sha256.hpp
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o test_seed_indexes_bin src/test_seed_indexes.cpp src/contiguous_index.cpp src/spaced_seed_index.cpp src/randstrobe_index.cpp src/occurrence_index.cpp src/reference_windows.cpp src/index_persistence.cpp src/sha256.cpp
 	./test_seed_indexes_bin
 
 test_tensor_index: candidate_tool src/test_tensor_index.cpp src/tensor_index.cpp src/tensor_index.hpp src/index_persistence.cpp src/index_persistence.hpp src/sha256.cpp src/sha256.hpp

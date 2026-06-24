@@ -23,6 +23,11 @@ void print_help() {
       << "  candidate_tool --help\n"
       << "  candidate_tool build --method contig --k N --ref PATH --window N"
          " --stride N --out-dir PATH\n"
+      << "  candidate_tool build --method spaced --weight W --ref PATH"
+         " --window N --stride N --out-dir PATH\n"
+      << "  candidate_tool build --method randstrobe --strobe-len 15"
+         " --w-min 20 --w-max 50 --seed N --ref PATH --window N --stride N"
+         " --out-dir PATH\n"
       << "  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n"
       << "  candidate_tool inspect-reference --ref PATH --window N --stride N\n"
       << "  candidate_tool tensor-build --ref PATH --window N --stride N"
@@ -44,6 +49,20 @@ uint32_t parse_uint32(const std::string& value, const std::string& flag) {
     throw std::invalid_argument("invalid value for " + flag + ": " + value);
   }
   return static_cast<uint32_t>(number);
+}
+
+uint64_t parse_uint64(const std::string& value, const std::string& flag) {
+  std::size_t parsed = 0;
+  unsigned long long number = 0;
+  try {
+    number = std::stoull(value, &parsed);
+  } catch (const std::exception&) {
+    throw std::invalid_argument("invalid value for " + flag + ": " + value);
+  }
+  if (parsed != value.size()) {
+    throw std::invalid_argument("invalid value for " + flag + ": " + value);
+  }
+  return static_cast<uint64_t>(number);
 }
 
 bool parse_bool_flag(const std::string& value, const std::string& flag) {
@@ -315,6 +334,141 @@ int build_contiguous(int argc, char** argv) {
   return 0;
 }
 
+int build_spaced(int argc, char** argv) {
+  SpacedSeedIndexConfig config;
+  std::filesystem::path out_dir;
+  std::string method;
+  bool saw_method = false;
+  bool saw_weight = false;
+  bool saw_ref = false;
+  bool saw_window = false;
+  bool saw_stride = false;
+  bool saw_out_dir = false;
+
+  for (int index = 2; index < argc; index += 2) {
+    const std::string flag = argv[index];
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: " + flag);
+    }
+    const std::string value = argv[index + 1];
+    if (flag == "--method") {
+      method = value;
+      saw_method = true;
+    } else if (flag == "--weight") {
+      config.weight = parse_uint32(value, flag);
+      saw_weight = true;
+    } else if (flag == "--ref") {
+      config.reference_path = value;
+      saw_ref = true;
+    } else if (flag == "--window") {
+      config.window_length = parse_uint32(value, flag);
+      saw_window = true;
+    } else if (flag == "--stride") {
+      config.stride = parse_uint32(value, flag);
+      saw_stride = true;
+    } else if (flag == "--out-dir") {
+      out_dir = value;
+      saw_out_dir = true;
+    } else {
+      throw std::invalid_argument("unknown flag: " + flag);
+    }
+  }
+
+  if (!saw_method || method != "spaced") {
+    throw std::invalid_argument("missing required flag: --method spaced");
+  }
+  if (!saw_weight || !saw_ref || !saw_window || !saw_stride || !saw_out_dir) {
+    throw std::invalid_argument("missing required build flag");
+  }
+
+  const SpacedSeedIndex index = SpacedSeedIndex::build(config);
+  index.save(out_dir);
+  return 0;
+}
+
+int build_randstrobe(int argc, char** argv) {
+  RandstrobeIndexConfig config;
+  std::filesystem::path out_dir;
+  std::string method;
+  bool saw_method = false;
+  bool saw_strobe_len = false;
+  bool saw_w_min = false;
+  bool saw_w_max = false;
+  bool saw_seed = false;
+  bool saw_ref = false;
+  bool saw_window = false;
+  bool saw_stride = false;
+  bool saw_out_dir = false;
+
+  for (int index = 2; index < argc; index += 2) {
+    const std::string flag = argv[index];
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: " + flag);
+    }
+    const std::string value = argv[index + 1];
+    if (flag == "--method") {
+      method = value;
+      saw_method = true;
+    } else if (flag == "--strobe-len") {
+      config.strobe_length = parse_uint32(value, flag);
+      saw_strobe_len = true;
+    } else if (flag == "--w-min") {
+      config.w_min = parse_uint32(value, flag);
+      saw_w_min = true;
+    } else if (flag == "--w-max") {
+      config.w_max = parse_uint32(value, flag);
+      saw_w_max = true;
+    } else if (flag == "--seed") {
+      config.seed = parse_uint64(value, flag);
+      saw_seed = true;
+    } else if (flag == "--ref") {
+      config.reference_path = value;
+      saw_ref = true;
+    } else if (flag == "--window") {
+      config.window_length = parse_uint32(value, flag);
+      saw_window = true;
+    } else if (flag == "--stride") {
+      config.stride = parse_uint32(value, flag);
+      saw_stride = true;
+    } else if (flag == "--out-dir") {
+      out_dir = value;
+      saw_out_dir = true;
+    } else {
+      throw std::invalid_argument("unknown flag: " + flag);
+    }
+  }
+
+  if (!saw_method || method != "randstrobe") {
+    throw std::invalid_argument("missing required flag: --method randstrobe");
+  }
+  if (!saw_strobe_len || !saw_w_min || !saw_w_max || !saw_seed || !saw_ref ||
+      !saw_window || !saw_stride || !saw_out_dir) {
+    throw std::invalid_argument("missing required build flag");
+  }
+
+  const RandstrobeIndex index = RandstrobeIndex::build(config);
+  index.save(out_dir);
+  return 0;
+}
+
+std::vector<uint32_t> query_candidate_index(
+    const std::filesystem::path& index_path, std::string_view query_sequence) {
+  try {
+    return ContiguousIndex::load(index_path).query(query_sequence);
+  } catch (const std::exception&) {
+  }
+  try {
+    return SpacedSeedIndex::load(index_path).query(query_sequence);
+  } catch (const std::exception&) {
+  }
+  try {
+    return RandstrobeIndex::load(index_path).query(query_sequence);
+  } catch (const std::exception& error) {
+    throw std::runtime_error(error.what());
+  }
+  throw std::runtime_error("unable to load candidate index");
+}
+
 int query_contiguous(int argc, char** argv) {
   std::filesystem::path index_path;
   std::filesystem::path reads_path;
@@ -352,7 +506,6 @@ int query_contiguous(int argc, char** argv) {
     throw std::invalid_argument("missing required query flag");
   }
 
-  const ContiguousIndex index = ContiguousIndex::load(index_path);
   const std::vector<ReadRecord> reads = read_reads(reads_path);
   if (out_path.has_parent_path()) {
     std::filesystem::create_directories(out_path.parent_path());
@@ -363,7 +516,8 @@ int query_contiguous(int argc, char** argv) {
   }
   output << "read_id\ttau\traw_candidate_count\tcandidate_window_ids\n";
   for (const ReadRecord& read : reads) {
-    const std::vector<uint32_t> candidate_window_ids = index.query(read.sequence);
+    const std::vector<uint32_t> candidate_window_ids =
+        query_candidate_index(index_path, read.sequence);
     output << read.read_id << '\t' << tau << '\t' << candidate_window_ids.size()
            << '\t' << join_window_ids(candidate_window_ids) << '\n';
   }
@@ -542,6 +696,17 @@ int main(int argc, char** argv) {
       return inspect_reference(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]) == "build") {
+      if (argc >= 4 && std::string(argv[2]) == "--method") {
+        if (std::string(argv[3]) == "contig") {
+          return build_contiguous(argc, argv);
+        }
+        if (std::string(argv[3]) == "spaced") {
+          return build_spaced(argc, argv);
+        }
+        if (std::string(argv[3]) == "randstrobe") {
+          return build_randstrobe(argc, argv);
+        }
+      }
       return build_contiguous(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]) == "query") {
