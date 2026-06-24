@@ -93,6 +93,21 @@ if [[ "$first_line" != $'read_id\ttau\traw_candidate_count\tcandidate_window_ids
   exit 1
 fi
 
+spaced_fifo_index="$test_dir/spaced_index_fifo.bin"
+mkfifo "$spaced_fifo_index"
+cat "$spaced_dir/index.bin" >"$spaced_fifo_index" &
+spaced_writer_pid=$!
+run_command timeout 5s "$tool" query --index "$spaced_fifo_index" --reads "$reads" --tau 2 --out "$output_tsv"
+assert_status 0
+assert_empty "$stderr_file"
+first_line=$(head -n 1 "$output_tsv")
+if [[ "$first_line" != $'read_id\ttau\traw_candidate_count\tcandidate_window_ids' ]]; then
+  printf 'unexpected spaced FIFO query header:\n' >&2
+  cat "$output_tsv" >&2
+  exit 1
+fi
+wait "$spaced_writer_pid"
+
 reordered_spaced_dir="$test_dir/spaced_index_reordered"
 run_command "$tool" build --weight 15 --ref "$long_reference" --window 80 --stride 1 --out-dir "$reordered_spaced_dir" --method spaced
 assert_status 0
@@ -111,6 +126,21 @@ if [[ "$first_line" != $'read_id\ttau\traw_candidate_count\tcandidate_window_ids
   cat "$output_tsv" >&2
   exit 1
 fi
+
+randstrobe_fifo_index="$test_dir/randstrobe_index_fifo.bin"
+mkfifo "$randstrobe_fifo_index"
+cat "$randstrobe_dir/index.bin" >"$randstrobe_fifo_index" &
+randstrobe_writer_pid=$!
+run_command timeout 5s "$tool" query --index "$randstrobe_fifo_index" --reads "$reads" --tau 2 --out "$output_tsv"
+assert_status 0
+assert_empty "$stderr_file"
+first_line=$(head -n 1 "$output_tsv")
+if [[ "$first_line" != $'read_id\ttau\traw_candidate_count\tcandidate_window_ids' ]]; then
+  printf 'unexpected randstrobe FIFO query header:\n' >&2
+  cat "$output_tsv" >&2
+  exit 1
+fi
+wait "$randstrobe_writer_pid"
 
 reordered_randstrobe_dir="$test_dir/randstrobe_index_reordered"
 run_command "$tool" build --seed 1234 --w-max 50 --ref "$long_reference" --window 80 --stride 1 --out-dir "$reordered_randstrobe_dir" --method randstrobe --strobe-len 15 --w-min 20

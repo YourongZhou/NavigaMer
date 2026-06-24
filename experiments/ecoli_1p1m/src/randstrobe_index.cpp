@@ -40,11 +40,6 @@ struct DirectoryEntry {
   uint32_t end = 0;
 };
 
-struct LoadedIndexFile {
-  IndexManifest manifest;
-  std::vector<uint8_t> payload;
-};
-
 void append_u32(std::vector<uint8_t>& bytes, uint32_t value);
 void append_u64(std::vector<uint8_t>& bytes, uint64_t value);
 uint32_t read_u32(const std::vector<uint8_t>& bytes, std::size_t& offset);
@@ -330,13 +325,6 @@ std::vector<uint32_t> covering_window_ids_from_manifest(
   return ids;
 }
 
-void read_exact(std::istream& input, void* destination, std::size_t size) {
-  input.read(static_cast<char*>(destination), static_cast<std::streamsize>(size));
-  if (!input) {
-    throw std::runtime_error("truncated index file");
-  }
-}
-
 void append_u32(std::vector<uint8_t>& bytes, uint32_t value) {
   for (unsigned shift = 0; shift < 32; shift += 8) {
     bytes.push_back(static_cast<uint8_t>((value >> shift) & 0xffU));
@@ -471,96 +459,6 @@ class PackedOccurrenceIndex {
   std::vector<DirectoryEntry> directory_;
 };
 
-LoadedIndexFile read_index_file(const std::filesystem::path& path) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) {
-    throw std::runtime_error("unable to open index file: " + path.string());
-  }
-
-  std::array<char, 8> magic{};
-  read_exact(input, magic.data(), magic.size());
-  if (magic != kIndexMagic) {
-    throw std::runtime_error("invalid index magic");
-  }
-
-  auto read_u32_stream = [&]() {
-    std::array<uint8_t, 4> bytes{};
-    read_exact(input, bytes.data(), bytes.size());
-    uint32_t value = 0;
-    for (unsigned shift = 0; shift < 32; shift += 8) {
-      value |= static_cast<uint32_t>(bytes[shift / 8U]) << shift;
-    }
-    return value;
-  };
-  auto read_u64_stream = [&]() {
-    std::array<uint8_t, 8> bytes{};
-    read_exact(input, bytes.data(), bytes.size());
-    uint64_t value = 0;
-    for (unsigned shift = 0; shift < 64; shift += 8) {
-      value |= static_cast<uint64_t>(bytes[shift / 8U]) << shift;
-    }
-    return value;
-  };
-  auto read_double_stream = [&]() {
-    const uint64_t bits = read_u64_stream();
-    double value = 0.0;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-  };
-  auto read_string_stream = [&]() {
-    const uint64_t size = read_u64_stream();
-    if (size > std::numeric_limits<std::size_t>::max()) {
-      throw std::runtime_error("string field too large");
-    }
-    std::string value(static_cast<std::size_t>(size), '\0');
-    read_exact(input, value.data(), static_cast<std::size_t>(size));
-    return value;
-  };
-
-  if (read_u32_stream() != kIndexFormatVersion) {
-    throw std::runtime_error("unsupported index format version");
-  }
-
-  LoadedIndexFile loaded;
-  loaded.manifest.method = read_string_stream();
-  const uint64_t parameter_count = read_u64_stream();
-  loaded.manifest.parameters.reserve(static_cast<std::size_t>(parameter_count));
-  for (uint64_t index = 0; index < parameter_count; ++index) {
-    loaded.manifest.parameters.emplace_back(read_string_stream(),
-                                            read_string_stream());
-  }
-  loaded.manifest.reference_path = read_string_stream();
-  loaded.manifest.reference_sha256 = read_string_stream();
-  loaded.manifest.reference_length = read_u64_stream();
-  loaded.manifest.window_length = read_u32_stream();
-  loaded.manifest.stride = read_u32_stream();
-  loaded.manifest.number_of_windows = read_u64_stream();
-  loaded.manifest.build_command = read_string_stream();
-  loaded.manifest.build_seconds = read_double_stream();
-  loaded.manifest.index_bytes = read_u64_stream();
-  loaded.manifest.created_at = read_string_stream();
-  loaded.manifest.git_commit = read_string_stream();
-  loaded.manifest.format_version = read_u32_stream();
-  loaded.manifest.tool_version = read_string_stream();
-
-  const uint64_t payload_size = read_u64_stream();
-  std::array<uint8_t, 32> digest{};
-  read_exact(input, digest.data(), digest.size());
-  loaded.payload.resize(static_cast<std::size_t>(payload_size));
-  read_exact(input, loaded.payload.data(), loaded.payload.size());
-  std::array<uint8_t, 32> actual_digest = sha256(loaded.payload);
-  if (!std::equal(digest.begin(), digest.end(), actual_digest.begin())) {
-    throw std::runtime_error("payload checksum mismatch");
-  }
-  if (loaded.manifest.index_bytes != payload_size) {
-    throw std::runtime_error("manifest index bytes do not match payload length");
-  }
-  if (input.peek() != std::char_traits<char>::eof()) {
-    throw std::runtime_error("unexpected trailing bytes after index payload");
-  }
-  return loaded;
-}
-
 }  // namespace
 
 std::vector<uint64_t> randstrobe_composite_keys(std::string_view sequence,
@@ -657,21 +555,25 @@ RandstrobeIndex RandstrobeIndex::build(const RandstrobeIndexConfig& config) {
   return index;
 }
 
-RandstrobeIndex RandstrobeIndex::load(const std::filesystem::path& index_path) {
-  const LoadedIndexFile loaded = read_index_file(index_path);
-  if (loaded.manifest.method != "randstrobe") {
+RandstrobeIndex RandstrobeIndex::load(
+    const std::filesystem::path& index_path) {
+  return load(read_index_file(index_path));
+}
+
+RandstrobeIndex RandstrobeIndex::load(const PersistedIndex& loaded_index) {
+  if (loaded_index.manifest.method != "randstrobe") {
     throw std::runtime_error("unsupported randstrobe index method");
   }
 
   RandstrobeIndex index;
-  index.manifest_ = loaded.manifest;
+  index.manifest_ = loaded_index.manifest;
   uint32_t w_min = 0;
   uint32_t w_max = 0;
   uint64_t seed = 0;
   const auto [strobe_length, packed_payload] =
-      parse_randstrobe_payload(loaded.payload, w_min, w_max, seed);
+      parse_randstrobe_payload(loaded_index.payload, w_min, w_max, seed);
   (void)packed_payload;
-  index.payload_ = std::move(loaded.payload);
+  index.payload_ = loaded_index.payload;
   index.strobe_length_ = strobe_length;
   index.w_min_ = w_min;
   index.w_max_ = w_max;

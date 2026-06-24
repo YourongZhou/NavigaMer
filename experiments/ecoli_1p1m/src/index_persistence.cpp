@@ -111,24 +111,19 @@ void write_string(std::ostream& output, const std::string& value) {
 class CheckedReader {
  public:
   explicit CheckedReader(const std::filesystem::path& path)
-      : input_(path, std::ios::binary), remaining_(file_size(path)) {
+      : input_(path, std::ios::binary) {
     if (!input_) {
       throw std::runtime_error("unable to open index file: " + path.string());
     }
   }
 
   void read_exact(void* destination, uint64_t size, std::string_view field) {
-    if (size > remaining_) {
-      throw std::runtime_error("truncated index while reading " +
-                               std::string(field));
-    }
     input_.read(static_cast<char*>(destination),
                 static_cast<std::streamsize>(size));
     if (!input_) {
       throw std::runtime_error("truncated index while reading " +
                                std::string(field));
     }
-    remaining_ -= size;
   }
 
   uint32_t read_u32(std::string_view field) {
@@ -160,7 +155,8 @@ class CheckedReader {
 
   std::string read_string(std::string_view field) {
     const uint64_t size = read_u64(field);
-    if (size > kMaximumStringLength || size > remaining_) {
+    if (size > kMaximumStringLength ||
+        size > static_cast<uint64_t>(std::numeric_limits<std::size_t>::max())) {
       throw std::runtime_error("invalid " + std::string(field) + " length");
     }
     std::string value(static_cast<std::size_t>(size), '\0');
@@ -168,21 +164,10 @@ class CheckedReader {
     return value;
   }
 
-  uint64_t remaining() const { return remaining_; }
+  bool at_eof() { return input_.peek() == std::char_traits<char>::eof(); }
 
  private:
-  static uint64_t file_size(const std::filesystem::path& path) {
-    std::error_code error;
-    const uintmax_t size = std::filesystem::file_size(path, error);
-    if (error || size > std::numeric_limits<uint64_t>::max()) {
-      throw std::runtime_error("unable to determine index file size: " +
-                               path.string());
-    }
-    return static_cast<uint64_t>(size);
-  }
-
   std::ifstream input_;
-  uint64_t remaining_;
 };
 
 void write_manifest_binary(std::ostream& output, const IndexManifest& manifest) {
@@ -234,6 +219,50 @@ IndexManifest read_manifest_binary(CheckedReader& input) {
   manifest.format_version = input.read_u32("manifest format version");
   manifest.tool_version = input.read_string("tool version");
   return manifest;
+}
+
+PersistedIndex read_persisted_index_file(const std::filesystem::path& path) {
+  CheckedReader input(path);
+  std::array<char, 8> magic{};
+  input.read_exact(magic.data(), magic.size(), "magic");
+  if (magic != kMagic) {
+    throw std::runtime_error("invalid index magic");
+  }
+  if (input.read_u32("format version") != kFormatVersion) {
+    throw std::runtime_error("unsupported index format version");
+  }
+
+  PersistedIndex index;
+  index.manifest = read_manifest_binary(input);
+  try {
+    validate_manifest(index.manifest);
+  } catch (const std::exception& error) {
+    throw std::runtime_error("invalid stored manifest: " +
+                             std::string(error.what()));
+  }
+
+  const uint64_t payload_size = input.read_u64("payload length");
+  if (payload_size >
+          static_cast<uint64_t>(std::numeric_limits<std::size_t>::max()) ||
+      payload_size >
+          static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max())) {
+    throw std::runtime_error("invalid or truncated payload length");
+  }
+  Sha256Digest stored_digest{};
+  input.read_exact(stored_digest.data(), stored_digest.size(),
+                   "payload checksum");
+  index.payload.resize(static_cast<std::size_t>(payload_size));
+  input.read_exact(index.payload.data(), payload_size, "payload");
+  if (!input.at_eof()) {
+    throw std::runtime_error("unexpected trailing bytes after index payload");
+  }
+  if (index.manifest.index_bytes != payload_size) {
+    throw std::runtime_error("manifest index bytes do not match payload length");
+  }
+  if (sha256(index.payload) != stored_digest) {
+    throw std::runtime_error("payload checksum mismatch");
+  }
+  return index;
 }
 
 std::string json_escape(std::string_view value) {
@@ -401,50 +430,16 @@ void write_index_atomic(const std::filesystem::path& path,
   }
 }
 
+PersistedIndex read_index_file(const std::filesystem::path& path) {
+  return read_persisted_index_file(path);
+}
+
 PersistedIndex read_index(const std::filesystem::path& path,
                           const IndexManifest& expected_semantics) {
   validate_manifest_semantics(expected_semantics);
-  CheckedReader input(path);
-  std::array<char, 8> magic{};
-  input.read_exact(magic.data(), magic.size(), "magic");
-  if (magic != kMagic) {
-    throw std::runtime_error("invalid index magic");
-  }
-  if (input.read_u32("format version") != kFormatVersion) {
-    throw std::runtime_error("unsupported index format version");
-  }
-
-  PersistedIndex index;
-  index.manifest = read_manifest_binary(input);
-  try {
-    validate_manifest(index.manifest);
-  } catch (const std::exception& error) {
-    throw std::runtime_error("invalid stored manifest: " +
-                             std::string(error.what()));
-  }
+  PersistedIndex index = read_persisted_index_file(path);
   if (!semantically_compatible(index.manifest, expected_semantics)) {
     throw std::runtime_error("incompatible index manifest semantics");
-  }
-
-  const uint64_t payload_size = input.read_u64("payload length");
-  if (payload_size > std::numeric_limits<std::size_t>::max() ||
-      payload_size >
-          static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
-      payload_size > input.remaining() || input.remaining() - payload_size != 32) {
-    throw std::runtime_error("invalid or truncated payload length");
-  }
-  Sha256Digest stored_digest{};
-  input.read_exact(stored_digest.data(), stored_digest.size(), "payload checksum");
-  index.payload.resize(static_cast<std::size_t>(payload_size));
-  input.read_exact(index.payload.data(), payload_size, "payload");
-  if (input.remaining() != 0) {
-    throw std::runtime_error("unexpected trailing bytes after index payload");
-  }
-  if (index.manifest.index_bytes != payload_size) {
-    throw std::runtime_error("manifest index bytes do not match payload length");
-  }
-  if (sha256(index.payload) != stored_digest) {
-    throw std::runtime_error("payload checksum mismatch");
   }
   return index;
 }

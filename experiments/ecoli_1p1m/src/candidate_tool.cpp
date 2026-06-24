@@ -287,20 +287,18 @@ using CandidateIndex = std::variant<ContiguousIndex, SpacedSeedIndex,
                                     RandstrobeIndex>;
 
 CandidateIndex load_candidate_index(const std::filesystem::path& index_path) {
-  try {
-    return ContiguousIndex::load(index_path);
-  } catch (const std::exception&) {
+  const PersistedIndex loaded = read_index_file(index_path);
+  if (loaded.manifest.method == "contig") {
+    return ContiguousIndex::load(loaded);
   }
-  try {
-    return SpacedSeedIndex::load(index_path);
-  } catch (const std::exception&) {
+  if (loaded.manifest.method == "spaced") {
+    return SpacedSeedIndex::load(loaded);
   }
-  try {
-    return RandstrobeIndex::load(index_path);
-  } catch (const std::exception& error) {
-    throw std::runtime_error(error.what());
+  if (loaded.manifest.method == "randstrobe") {
+    return RandstrobeIndex::load(loaded);
   }
-  throw std::runtime_error("unable to load candidate index");
+  throw std::runtime_error("unsupported candidate index method: " +
+                           loaded.manifest.method);
 }
 
 std::vector<uint32_t> query_candidate_index(const CandidateIndex& index,

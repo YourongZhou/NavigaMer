@@ -52,6 +52,7 @@ class ContiguousIndex {
  public:
   static ContiguousIndex build(const ContiguousIndexConfig& config);
   static ContiguousIndex load(const std::filesystem::path& index_path);
+  static ContiguousIndex load(const PersistedIndex& loaded_index);
 
   void save(const std::filesystem::path& out_dir) const;
   std::vector<uint32_t> query(std::string_view query_sequence) const;
@@ -65,6 +66,7 @@ class SpacedSeedIndex {
  public:
   static SpacedSeedIndex build(const SpacedSeedIndexConfig& config);
   static SpacedSeedIndex load(const std::filesystem::path& index_path);
+  static SpacedSeedIndex load(const PersistedIndex& loaded_index);
 
   void save(const std::filesystem::path& out_dir) const;
   std::vector<uint32_t> query(std::string_view query_sequence) const;
@@ -80,6 +82,7 @@ class RandstrobeIndex {
  public:
   static RandstrobeIndex build(const RandstrobeIndexConfig& config);
   static RandstrobeIndex load(const std::filesystem::path& index_path);
+  static RandstrobeIndex load(const PersistedIndex& loaded_index);
 
   void save(const std::filesystem::path& out_dir) const;
   std::vector<uint32_t> query(std::string_view query_sequence) const;

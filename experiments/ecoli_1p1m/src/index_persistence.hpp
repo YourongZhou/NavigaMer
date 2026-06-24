@@ -41,6 +41,7 @@ bool semantically_compatible(const IndexManifest& stored,
 void write_index_atomic(const std::filesystem::path& path,
                         const IndexManifest& manifest,
                         const std::vector<uint8_t>& payload);
+PersistedIndex read_index_file(const std::filesystem::path& path);
 PersistedIndex read_index(const std::filesystem::path& path,
                           const IndexManifest& expected_semantics);
 void write_manifest_json(const std::filesystem::path& path,
