@@ -293,6 +293,21 @@ void test_randstrobe_seed_stability_changes_with_seed() {
   expect_equal(baseline, loaded.query(query));
 }
 
+void test_randstrobe_rejects_unsupported_strobe_length() {
+  TempFasta fasta("randstrobe_reject",
+                  ">ref\n"
+                  "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+                  "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n");
+  const RandstrobeIndexConfig config{fasta.path(), 80, 1, 16, 20, 50, 1234};
+  bool threw = false;
+  try {
+    (void)RandstrobeIndex::build(config);
+  } catch (const std::exception&) {
+    threw = true;
+  }
+  assert(threw);
+}
+
 void test_random_queries_match_naive_for_k_5_and_7() {
   std::mt19937_64 rng(0x5eed1234ull);
   for (uint32_t k : {5U, 7U}) {
@@ -341,6 +356,7 @@ int main() {
   test_spaced_masks_are_distinct_and_weighted();
   test_spaced_seed_round_trip_matches_naive_extraction();
   test_randstrobe_seed_stability_changes_with_seed();
+  test_randstrobe_rejects_unsupported_strobe_length();
   std::cout << "seed index tests passed\n";
   return 0;
 }

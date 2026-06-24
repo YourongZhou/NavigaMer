@@ -81,6 +81,11 @@ if [[ "$first_line" != $'read_id\ttau\traw_candidate_count\tcandidate_window_ids
   exit 1
 fi
 
+reordered_spaced_dir="$test_dir/spaced_index_reordered"
+run_command "$tool" build --weight 15 --ref "$long_reference" --window 80 --stride 1 --out-dir "$reordered_spaced_dir" --method spaced
+assert_status 0
+assert_empty "$stderr_file"
+
 randstrobe_dir="$test_dir/randstrobe_index"
 run_command "$tool" build --method randstrobe --strobe-len 15 --w-min 20 --w-max 50 --seed 1234 --ref "$long_reference" --window 80 --stride 1 --out-dir "$randstrobe_dir"
 assert_status 0
@@ -94,6 +99,16 @@ if [[ "$first_line" != $'read_id\ttau\traw_candidate_count\tcandidate_window_ids
   cat "$output_tsv" >&2
   exit 1
 fi
+
+reordered_randstrobe_dir="$test_dir/randstrobe_index_reordered"
+run_command "$tool" build --seed 1234 --w-max 50 --ref "$long_reference" --window 80 --stride 1 --out-dir "$reordered_randstrobe_dir" --method randstrobe --strobe-len 15 --w-min 20
+assert_status 0
+assert_empty "$stderr_file"
+
+run_command "$tool" build --method randstrobe --strobe-len 16 --w-min 20 --w-max 50 --seed 1234 --ref "$long_reference" --window 80 --stride 1 --out-dir "$test_dir/randstrobe_invalid"
+assert_status 1
+assert_empty "$stdout_file"
+assert_exact "$stderr_file" 'error: randstrobe strobe length must be between 1 and 15 bases'
 
 wrapped_reads="$test_dir/reads_wrapped.fq"
 printf '@read1\nAC\nGT\n+\nII\nII\n' >"$wrapped_reads"

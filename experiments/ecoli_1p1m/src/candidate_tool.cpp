@@ -469,6 +469,19 @@ std::vector<uint32_t> query_candidate_index(
   throw std::runtime_error("unable to load candidate index");
 }
 
+std::string build_method_from_argv(int argc, char** argv) {
+  for (int index = 2; index < argc; ++index) {
+    if (std::string(argv[index]) != "--method") {
+      continue;
+    }
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: --method");
+    }
+    return argv[index + 1];
+  }
+  throw std::invalid_argument("missing required flag: --method");
+}
+
 int query_contiguous(int argc, char** argv) {
   std::filesystem::path index_path;
   std::filesystem::path reads_path;
@@ -696,18 +709,17 @@ int main(int argc, char** argv) {
       return inspect_reference(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]) == "build") {
-      if (argc >= 4 && std::string(argv[2]) == "--method") {
-        if (std::string(argv[3]) == "contig") {
-          return build_contiguous(argc, argv);
-        }
-        if (std::string(argv[3]) == "spaced") {
-          return build_spaced(argc, argv);
-        }
-        if (std::string(argv[3]) == "randstrobe") {
-          return build_randstrobe(argc, argv);
-        }
+      const std::string method = build_method_from_argv(argc, argv);
+      if (method == "contig") {
+        return build_contiguous(argc, argv);
       }
-      return build_contiguous(argc, argv);
+      if (method == "spaced") {
+        return build_spaced(argc, argv);
+      }
+      if (method == "randstrobe") {
+        return build_randstrobe(argc, argv);
+      }
+      throw std::invalid_argument("unknown build method: " + method);
     }
     if (argc >= 2 && std::string(argv[1]) == "query") {
       return query_contiguous(argc, argv);

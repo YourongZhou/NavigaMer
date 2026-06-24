@@ -208,9 +208,9 @@ std::vector<RandstrobeHit> enumerate_randstrobes(std::string_view sequence,
   if (sequence.size() < strobe_length) {
     return hits;
   }
-  if (strobe_length > 30) {
+  if (strobe_length == 0 || strobe_length > 15) {
     throw std::invalid_argument(
-        "randstrobe length must not exceed 30 bases for 60-bit packing");
+        "randstrobe strobe length must be between 1 and 15 bases");
   }
 
   const uint32_t last_first_start =
