@@ -52,7 +52,7 @@ assert_exact() {
 
 run_command "$tool" --help
 assert_status 0
-assert_exact "$stdout_file" $'Usage:\n  candidate_tool --help\n  candidate_tool build --method contig --k N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method spaced --weight W --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method randstrobe --strobe-len 15 --w-min 20 --w-max 50 --seed N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method qgram-safe --q N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method pigeonhole --tau N --nominal-read-length N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build-matrix --ref PATH --window N --stride N --out-dir PATH [--rebuild]\n  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n  candidate_tool inspect-reference --ref PATH --window N --stride N\n  candidate_tool tensor-build --ref PATH --window N --stride N --dimension N --seed N --hnsw-m N --hnsw-ef-construction N --hnsw-ef-search N --out-dir PATH [--exact-vectors 0|1]\n  candidate_tool tensor-query --index-dir PATH --query DNA [--top-k N]'
+assert_exact "$stdout_file" $'Usage:\n  candidate_tool --help\n  candidate_tool build --method contig --k N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method spaced --weight W --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method randstrobe --strobe-len 15 --w-min 20 --w-max 50 --seed N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method qgram-safe --q N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build --method pigeonhole --tau N --nominal-read-length N --ref PATH --window N --stride N --out-dir PATH\n  candidate_tool build-matrix --ref PATH --window N --stride N --out-dir PATH [--rebuild]\n  candidate_tool compare --ref PATH --reads PATH --tau N --window N --stride N --out-dir PATH [--rebuild] [--tensor-top-k N] [--oracle on|off] [--navigamer-bin PATH] [--navigamer-index PATH]\n  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n  candidate_tool inspect-reference --ref PATH --window N --stride N\n  candidate_tool tensor-build --ref PATH --window N --stride N --dimension N --seed N --hnsw-m N --hnsw-ef-construction N --hnsw-ef-search N --out-dir PATH [--exact-vectors 0|1]\n  candidate_tool tensor-query --index-dir PATH --query DNA [--top-k N]'
 assert_empty "$stderr_file"
 
 reads="$test_dir/reads.fq"
@@ -68,6 +68,70 @@ run_command "$tool" query --index "$index_dir/index.bin" --reads "$reads" --tau 
 assert_status 0
 assert_empty "$stderr_file"
 assert_exact "$output_tsv" $'read_id\ttau\traw_candidate_count\tcandidate_window_ids\nread1\t2\t4\t0,1,3,4'
+
+matrix_dir="$test_dir/build_matrix"
+run_command "$tool" build-matrix --ref "$long_reference" --window 80 --stride 1 --out-dir "$matrix_dir"
+assert_status 0
+assert_empty "$stderr_file"
+if [[ ! -f "$matrix_dir/build_summary.tsv" ]]; then
+  printf 'expected build summary at %s\n' "$matrix_dir/build_summary.tsv" >&2
+  exit 1
+fi
+if [[ ! -f "$matrix_dir/indexes/contig/k15/index.bin" ]]; then
+  printf 'expected representative index artifact at %s\n' \
+    "$matrix_dir/indexes/contig/k15/index.bin" >&2
+  exit 1
+fi
+
+compare_reads="$test_dir/reads_compare.fq"
+compare_seq=$(python3 - <<'PY'
+print('ACGTACGTGTCAGTACGTACGTGTCAGTACGTACGTGTCAGTACGTACGT' + 'ACGTACGTGTCAGTACGTACGTGTCAGTAC')
+PY
+)
+printf '@read0\n%s\n+\n%s\n' "$compare_seq" "$(printf 'I%.0s' $(seq 1 ${#compare_seq}))" >"$compare_reads"
+fake_navigamer="$test_dir/fake_navigamer.sh"
+cat >"$fake_navigamer" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--out" ]]; then
+    out="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+cat >"$out" <<'TSV'
+query_id	hit_id	leaf_verify_count	candidate_count_for_prune	query_time_ms
+read0	ref_0	2	3	1.5
+TSV
+EOF
+chmod +x "$fake_navigamer"
+navigamer_index="$test_dir/main.navidx"
+printf 'stub\n' >"$navigamer_index"
+compare_dir="$test_dir/compare"
+run_command "$tool" compare --ref "$long_reference" --reads "$compare_reads" --tau 2 --window 80 --stride 1 --out-dir "$compare_dir" --tensor-top-k 8 --oracle off --navigamer-bin "$fake_navigamer" --navigamer-index "$navigamer_index"
+assert_status 0
+assert_empty "$stderr_file"
+if [[ ! -f "$compare_dir/per_read.tsv" ]]; then
+  printf 'expected compare per-read output at %s\n' "$compare_dir/per_read.tsv" >&2
+  exit 1
+fi
+if [[ ! -f "$compare_dir/summary.tsv" ]]; then
+  printf 'expected compare summary output at %s\n' "$compare_dir/summary.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'NavigaMer\tadaptive\tread0' "$compare_dir/per_read.tsv"; then
+  printf 'expected NavigaMer per-read row in %s\n' "$compare_dir/per_read.tsv" >&2
+  cat "$compare_dir/per_read.tsv" >&2
+  exit 1
+fi
+if ! grep -q $'\tNA\tNA\tNA\tNA\tNA' "$compare_dir/per_read.tsv"; then
+  printf 'expected NA oracle fields in %s\n' "$compare_dir/per_read.tsv" >&2
+  cat "$compare_dir/per_read.tsv" >&2
+  exit 1
+fi
 
 fifo_index="$test_dir/index_fifo.bin"
 mkfifo "$fifo_index"

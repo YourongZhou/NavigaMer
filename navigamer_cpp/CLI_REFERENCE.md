@@ -40,9 +40,11 @@ Used by all pipelines that build the index:
 | `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
 | `--simd-mode` | `auto` | Flat child-MBB and leaf-beacon filter backend: `auto`, `scalar`, `avx2`, or `avx512`; unsupported SIMD falls back to scalar |
 | `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or conservative `auto` (currently DP) |
+| `--search-prefetch` | `off` | Experimental adaptive-search lookahead prefetching: `off` or `on` |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
-| `--index` | *(none)* | Persisted NavigaMer index path for `build`, single-prefix `build-scale`, `query`, and `query-index` |
+| `--path-trace-out` | *(none)* | `query-index-batch` diagnostic TSV path for per-query world/leaf visit paths and adjacent-query overlap |
+| `--index` | *(none)* | Persisted NavigaMer index path for `build`, single-prefix `build-scale`, `query`, `query-index`, and `query-index-batch` |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
@@ -194,6 +196,40 @@ reuse-or-rebuild behavior.
 | `--tolerance` | `2` | Max edit distance |
 | `--mode` | `adaptive` | `adaptive` \| `greedy` \| `exhaustive` |
 
+### `query-index-batch`
+
+Loads one persisted index and searches every FASTQ read from `--reads`. This
+command never rebuilds and writes the same per-query TSV schema as
+`benchmark`, so experiment workflows can compare persisted-index runs against
+reference-window benchmark runs without a second parser.
+
+**Required:** `--index`, `--reads`, `--out`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--tolerance` | `2` | Max edit distance |
+| `--mode` | `adaptive` | Currently only `adaptive` is accepted |
+| `--search-prefetch` | `off` | Experimental lookahead prefetching for adaptive search |
+| `--path-trace-out` | *(none)* | Optional diagnostic TSV with per-query world/leaf path traces |
+| `--out` | *(required)* | Output TSV path |
+
+When `--path-trace-out` is provided, `query-index-batch` enables lightweight
+path tracing inside adaptive search and writes one trace row per input read,
+independent of the hit rows in `--out`. `world_path` records world node integer
+IDs whose centers received exact/bounded distance evaluation; `leaf_path`
+records leaf sequence IDs that reached exact verification. Adjacent-query
+overlap fields compare each row to the previous input read, not to OpenMP
+execution order: `prev_world_jaccard`, `prev_leaf_jaccard`,
+`prev_world_overlap_count`, and `prev_leaf_overlap_count`.
+
+The main hit TSV includes `query_path_class` plus
+`path_contained_step_count`, `path_overlap_step_count`, and
+`path_uncovered_step_count`. These are adaptive traversal diagnostics recorded
+after child-center distance checks: `contained` means a layer step found a
+world whose radius fully contained the query ball, `overlap` means traversal
+continued through non-contained overlapping worlds, and `uncovered` means a
+layer step had no center-verified child world to enter.
+
 ### `run`
 
 Full pipeline: load ref + reads, build, **adaptive** search for every read, optional TSV.
@@ -329,11 +365,13 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `dist_calcs`, `leaf_verify_count`, `candidate_count_for_prune`, `beacon_prune_count`,
 `mbb_filter_mode`, `mbb_scan_child_checks`, `mbb_rect_index_queries`,
 `mbb_rect_candidate_children`, `mbb_rect_fallback_count`,
-`mbb_surviving_child_count`, `mbb_scalar_checks`, `mbb_simd_batches`,
+`mbb_surviving_child_count`, `query_path_class`,
+`path_contained_step_count`, `path_overlap_step_count`,
+`path_uncovered_step_count`, `mbb_scalar_checks`, `mbb_simd_batches`,
 `mbb_simd_fallbacks`, `center_distance_calls_after_mbb`,
 `leaf_beacon_scalar_checks`, `leaf_beacon_simd_batches`,
 `leaf_beacon_simd_fallbacks`,
-`search_qgram_prefilter_enabled`, `search_qgram_q`,
+`search_qgram_prefilter_enabled`, `search_prefetch_enabled`, `search_qgram_q`,
 `search_qgram_signature_build_count`, `search_qgram_signature_missing_count`,
 `search_qgram_checks`, `search_qgram_pruned_children`,
 `search_qgram_passed_children`, `center_distance_calls_before_qgram`,
@@ -404,7 +442,11 @@ per-thread accumulated query and exact-verification time for parallel indexed
 rebinding.
 
 **`layer-radius-experiment`:**  
-`dataset`, `query_id`, `query_length`, `L`, `r_leaf`, `alpha`, `radius_schedule`, `query_time_ms`, `world_access_count`, `node_access_count`, `edge_access_count`, `anchor_distance_count`, `bound_check_count`, `candidate_count`, `candidate_verify_count`
+`dataset`, `query_id`, `source_id`, `query_length`, `L`, `r_leaf`,
+`alpha`, `radius_schedule`, `query_time_ms`, `world_access_count`,
+`node_access_count`, `edge_access_count`, `anchor_distance_count`,
+`bound_check_count`, `candidate_count`, `candidate_verify_count`,
+`result_count`, `source_recovered`, `no_fn`
 
 ## Standalone test binaries
 

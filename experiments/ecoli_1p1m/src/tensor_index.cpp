@@ -460,6 +460,7 @@ TensorIndex build_tensor_index(const TensorIndexConfig& config) {
   index.hnsw = std::make_unique<hnswlib::HierarchicalNSW<float>>(
       index.space.get(), reference.size(), config.hnsw_M,
       config.hnsw_ef_construction);
+  index.hnsw->setEf(config.hnsw_ef_search);
   for (uint32_t window_id = 0; window_id < reference.size(); ++window_id) {
     const float* vector = index.snapshot.exact_vectors.data() +
                           static_cast<std::size_t>(window_id) * config.dimension;
@@ -558,6 +559,7 @@ TensorIndex load_tensor_index(const std::filesystem::path& directory) {
   index.hnsw = std::make_unique<hnswlib::HierarchicalNSW<float>>(
       index.space.get(), hnsw_path.string(), false,
       static_cast<size_t>(row_count));
+  index.hnsw->setEf(index.snapshot.hnsw_ef_search);
   index.hnsw_path = hnsw_path;
   index.exact_path = exact_path;
   return index;
@@ -569,7 +571,6 @@ std::vector<QueryHit> query_tensor_index(TensorIndex& index,
   if (!index.hnsw) {
     throw std::runtime_error("tensor index is not loaded");
   }
-  index.hnsw->setEf(index.snapshot.hnsw_ef_search);
   ts::Tensor<int> tensor(4, index.snapshot.dimension, kTensorSubsequenceLength,
                          index.snapshot.seed);
   const std::vector<float> query_vector =

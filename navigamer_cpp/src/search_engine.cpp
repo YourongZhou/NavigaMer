@@ -7,6 +7,40 @@
 
 namespace navigamer {
 
+namespace {
+
+inline void prefetch_read(const void* ptr) {
+  if (!ptr) return;
+#if defined(__GNUC__) || defined(__clang__)
+  __builtin_prefetch(ptr, 0, 1);
+#else
+  (void)ptr;
+#endif
+}
+
+template <typename T>
+void prefetch_vector_data(const std::vector<T>& values) {
+  if (!values.empty()) prefetch_read(values.data());
+}
+
+void prefetch_sequence(const std::shared_ptr<BioSequence>& sequence) {
+  if (!sequence) return;
+  prefetch_read(sequence.get());
+  if (!sequence->seq.empty()) prefetch_read(sequence->seq.data());
+}
+
+void prefetch_world_node(const std::shared_ptr<WorldNode>& node) {
+  if (!node) return;
+  prefetch_read(node.get());
+  prefetch_sequence(node->center_ptr);
+  prefetch_vector_data(node->child_nodes);
+  prefetch_vector_data(node->child_leaves);
+  prefetch_vector_data(node->child_beacon_mbbs);
+  prefetch_vector_data(node->leaf_beacon_dists);
+}
+
+}  // namespace
+
 const char* mbb_filter_mode_name(MBBFilterMode mode) {
   return mode == MBBFilterMode::Scan ? "scan" : "rect";
 }
@@ -154,6 +188,10 @@ BioGeometrySearchEngine::scan_mbb_surviving_children(
   } else {
     surviving.reserve(children.size());
     for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
+      if (config_.search_prefetch && child_idx + 1 < children.size()) {
+        prefetch_world_node(children[child_idx + 1]);
+        prefetch_vector_data(node->child_beacon_mbbs[child_idx + 1]);
+      }
       stats.edge_access_count++;
       stats.mbb_check_count++;
       stats.candidate_count_for_prune++;
@@ -273,6 +311,9 @@ void BioGeometrySearchEngine::verify_leaf_candidates(
     int leaf_dist = compute_distance(query_seq.seq, child->seq);
     stats.dist_calc_count++;
     stats.leaf_verify_count++;
+    if (config_.trace_paths && child->sequence_id != INVALID_LEAF_ID) {
+      stats.leaf_trace.push_back(child->sequence_id);
+    }
     if (leaf_dist <= tolerance) unique_results[child->id] = child;
   }
 }
@@ -316,6 +357,10 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
 
     LeafBeaconFilterSimdStats simd_stats;
     const uint32_t offset = view.leaf_beacon_begin[node_id];
+    if (config_.search_prefetch) {
+      prefetch_read(view.leaf_beacon_dists.data() + offset);
+      prefetch_read(view.leaf_ids.data() + leaf_begin);
+    }
     survivor_offsets = filter_leaf_beacon_survivors(
         view.leaf_beacon_dists.data() + offset,
         leaf_count,
@@ -336,13 +381,27 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
   } else {
     survivor_offsets.reserve(leaf_count);
     for (size_t leaf_idx = 0; leaf_idx < leaf_count; ++leaf_idx) {
+      if (config_.search_prefetch && leaf_idx + 1 < leaf_count) {
+        prefetch_read(&view.leaf_ids[leaf_begin + leaf_idx + 1]);
+      }
       survivor_offsets.push_back(static_cast<uint32_t>(leaf_idx));
     }
   }
 
-  for (uint32_t leaf_offset : survivor_offsets) {
+  for (size_t survivor_idx = 0; survivor_idx < survivor_offsets.size();
+       ++survivor_idx) {
+    const uint32_t leaf_offset = survivor_offsets[survivor_idx];
     if (leaf_offset >= leaf_count) {
       throw std::runtime_error("SIMD leaf beacon filter returned offset out of range");
+    }
+    if (config_.search_prefetch && survivor_idx + 1 < survivor_offsets.size()) {
+      const uint32_t next_offset = survivor_offsets[survivor_idx + 1];
+      if (next_offset < leaf_count) {
+        const LeafId next_leaf_id = view.leaf_ids[leaf_begin + next_offset];
+        if (next_leaf_id < view.leaves.size()) {
+          prefetch_sequence(view.leaves[next_leaf_id]);
+        }
+      }
     }
     if (!leaf_sieve_ready) stats.node_access_count++;
     const LeafId leaf_id = view.leaf_ids[leaf_begin + leaf_offset];
@@ -356,6 +415,9 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     int leaf_dist = compute_distance(query_seq.seq, child->seq);
     stats.dist_calc_count++;
     stats.leaf_verify_count++;
+    if (config_.trace_paths) {
+      stats.leaf_trace.push_back(leaf_id);
+    }
     if (leaf_dist <= tolerance) unique_results[child->id] = child;
   }
 }
@@ -435,6 +497,9 @@ void BioGeometrySearchEngine::search_layer_adaptive(
                    : compute_distance(query_seq.seq, node->get_center_sequence());
     stats.dist_calc_count++;
     stats.world_access_count++;
+    if (config_.trace_paths && node->integer_id != INVALID_NODE_ID) {
+      stats.world_trace.push_back(node->integer_id);
+    }
     if (layer_id >= 0 && static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
       stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
     }
@@ -448,6 +513,7 @@ void BioGeometrySearchEngine::search_layer_adaptive(
     overlap_nodes.push_back(node);
   }
 
+  stats.record_path_step(overlap_nodes.size(), static_cast<bool>(contained_node));
   if (contained_node) {
     visited_nodes.insert(contained_node->node_id);
     process_node_adaptive(contained_node, layer_id, query_seq, tolerance,
@@ -543,6 +609,9 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
                    : compute_distance(query_seq.seq, node->get_center_sequence());
     stats.dist_calc_count++;
     stats.world_access_count++;
+    if (config_.trace_paths && node->integer_id != INVALID_NODE_ID) {
+      stats.world_trace.push_back(node->integer_id);
+    }
     if (layer_id >= 0 && static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
       stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
     }
@@ -556,6 +625,7 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
     overlap_nodes.push_back(node);
   }
 
+  stats.record_path_step(overlap_nodes.size(), static_cast<bool>(contained_node));
   if (contained_node) {
     scratch.mark_visited(contained_node->integer_id);
     process_node_adaptive_epoch(contained_node, layer_id, query_seq, tolerance,
@@ -609,8 +679,6 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
     throw std::out_of_range("view node id is outside search graph view");
   }
   const auto& node = view.nodes[node_id];
-  stats.mbb_filter_parent_count++;
-
   if (config_.mbb_filter_mode == MBBFilterMode::RectIndex) {
     auto surviving_nodes =
         get_mbb_surviving_children(node, query_beacon_dists, tolerance, stats);
@@ -624,6 +692,7 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
     }
     return surviving;
   }
+  stats.mbb_filter_parent_count++;
 
   const uint32_t child_begin = view.child_begin[node_id];
   const uint32_t child_end = view.child_end[node_id];
@@ -641,6 +710,9 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
   if (!mbb_ok) {
     surviving.reserve(child_count);
     for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
+      if (config_.search_prefetch && child_idx + 1 < child_count) {
+        prefetch_read(&view.child_ids[child_begin + child_idx + 1]);
+      }
       surviving.push_back(view.child_ids[child_begin + child_idx]);
     }
   } else {
@@ -651,6 +723,11 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
     }
 
     MBBFilterSimdStats simd_stats;
+    if (config_.search_prefetch) {
+      prefetch_read(view.mbb_lo.data() + mbb_begin);
+      prefetch_read(view.mbb_hi.data() + mbb_begin);
+      prefetch_read(view.child_ids.data() + child_begin);
+    }
     auto survivor_offsets = filter_mbb_survivors(
         view.mbb_lo.data() + mbb_begin,
         view.mbb_hi.data() + mbb_begin,
@@ -672,9 +749,18 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
     stats.mbb_simd_fallbacks += simd_stats.simd_fallbacks;
 
     surviving.reserve(survivor_offsets.size());
-    for (uint32_t child_offset : survivor_offsets) {
+    for (size_t survivor_idx = 0; survivor_idx < survivor_offsets.size();
+         ++survivor_idx) {
+      const uint32_t child_offset = survivor_offsets[survivor_idx];
       if (child_offset >= child_count) {
         throw std::runtime_error("SIMD MBB filter returned child offset out of range");
+      }
+      if (config_.search_prefetch && survivor_idx + 1 < survivor_offsets.size()) {
+        const uint32_t next_offset = survivor_offsets[survivor_idx + 1];
+        if (next_offset < child_count) {
+          const NodeId next_id = view.child_ids[child_begin + next_offset];
+          if (next_id < view.nodes.size()) prefetch_world_node(view.nodes[next_id]);
+        }
       }
       surviving.push_back(view.child_ids[child_begin + child_offset]);
     }
@@ -729,9 +815,15 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
   NodeId contained_node = INVALID_NODE_ID;
   std::vector<NodeId> overlap_nodes;
 
-  for (NodeId node_id : candidates) {
+  for (size_t candidate_idx = 0; candidate_idx < candidates.size();
+       ++candidate_idx) {
+    const NodeId node_id = candidates[candidate_idx];
     if (node_id >= view.nodes.size() || !view.nodes[node_id]) {
       throw std::out_of_range("view node id is outside search graph view");
+    }
+    if (config_.search_prefetch && candidate_idx + 1 < candidates.size()) {
+      const NodeId next_id = candidates[candidate_idx + 1];
+      if (next_id < view.nodes.size()) prefetch_world_node(view.nodes[next_id]);
     }
     const auto& node = view.nodes[node_id];
     stats.visited_check_count++;
@@ -771,6 +863,9 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
                    : compute_distance(query_seq.seq, node->get_center_sequence());
     stats.dist_calc_count++;
     stats.world_access_count++;
+    if (config_.trace_paths) {
+      stats.world_trace.push_back(node_id);
+    }
     if (layer_id >= 0 && static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
       stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
     }
@@ -784,6 +879,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
     overlap_nodes.push_back(node_id);
   }
 
+  stats.record_path_step(overlap_nodes.size(),
+                         contained_node != INVALID_NODE_ID);
   if (contained_node != INVALID_NODE_ID) {
     flat_mark_visited(contained_node, visited_nodes, scratch);
     process_node_adaptive_view(contained_node, layer_id, query_seq, tolerance,
@@ -806,6 +903,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
 std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
 BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int tolerance) {
   SearchStats stats(static_cast<size_t>(index_.num_primary_layers()));
+  stats.search_prefetch_enabled = config_.search_prefetch;
+  stats.trace_paths_enabled = config_.trace_paths;
   stats.search_qgram_prefilter_enabled =
       config_.search_qgram_prefilter && config_.search_qgram_q > 0;
   stats.search_qgram_q =

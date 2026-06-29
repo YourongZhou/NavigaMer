@@ -63,6 +63,55 @@ struct BuildSummaryRow {
   double wall_seconds = 0.0;
 };
 
+struct QueryRead {
+  std::string read_id;
+  std::string sequence;
+};
+
+struct ComparisonRequest {
+  std::filesystem::path reference_path;
+  std::filesystem::path reads_path;
+  std::vector<QueryRead> reads;
+  uint32_t window_length = 0;
+  uint32_t stride = 0;
+  uint32_t tolerance = 0;
+  std::filesystem::path out_dir;
+  bool oracle_enabled = true;
+  bool rebuild = false;
+  std::filesystem::path navigamer_binary;
+  std::filesystem::path navigamer_index_path;
+  std::size_t tensor_top_k = 64;
+};
+
+struct ComparisonPerReadRow {
+  std::string method;
+  std::string variant;
+  PerReadResult result;
+};
+
+struct ComparisonSummaryRow {
+  std::string method;
+  std::string variant;
+  uint32_t read_count = 0;
+  SummaryStats raw_candidate_count;
+  SummaryStats accepted_candidate_count;
+  SummaryStats retrieval_milliseconds;
+  SummaryStats verification_milliseconds;
+  SummaryStats total_milliseconds;
+  uint32_t oracle_read_count = 0;
+  uint32_t true_neighbor_count_total = 0;
+  uint32_t false_negative_count_total = 0;
+  std::optional<double> mean_recall;
+  std::optional<double> mean_raw_candidate_blowup;
+  std::optional<double> mean_accepted_candidate_blowup;
+};
+
+struct ComparisonReport {
+  std::vector<BuildSummaryRow> build_rows;
+  std::vector<ComparisonPerReadRow> per_read_rows;
+  std::vector<ComparisonSummaryRow> summary_rows;
+};
+
 PerReadResult evaluate_candidates(const std::string& read_id,
                                   const std::string& query_sequence,
                                   const std::vector<uint32_t>& raw_candidates,
@@ -84,3 +133,4 @@ void write_build_summary_tsv(const std::filesystem::path& path,
 
 std::vector<BuildSummaryRow> build_candidate_matrix(
     const BuildMatrixRequest& request);
+ComparisonReport run_comparison(const ComparisonRequest& request);

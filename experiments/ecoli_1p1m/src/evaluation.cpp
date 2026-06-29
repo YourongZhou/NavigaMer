@@ -17,14 +17,20 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <numeric>
+#include <optional>
+#include <set>
+#include <system_error>
 #include <unordered_set>
+#include <unordered_map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace {
 
@@ -116,6 +122,16 @@ std::string join_parameters(const IndexManifest& manifest) {
            << manifest.parameters[index].second;
   }
   return output.str();
+}
+
+std::optional<std::string> manifest_parameter_value(
+    const IndexManifest& manifest, std::string_view key) {
+  for (const auto& entry : manifest.parameters) {
+    if (entry.first == key) {
+      return entry.second;
+    }
+  }
+  return std::nullopt;
 }
 
 template <typename T>
@@ -485,15 +501,17 @@ BuildSummaryRow materialize_recipe(const BuildMatrixRequest& request,
   bool reused = false;
 
   const auto started = std::chrono::steady_clock::now();
-  if (std::filesystem::exists(index_path)) {
+  if (request.rebuild) {
+    if (std::filesystem::exists(index_dir)) {
+      std::filesystem::remove_all(index_dir);
+    }
+  } else if (std::filesystem::exists(index_path)) {
     const IndexManifest stored = recipe.load_manifest(index_dir);
     if (semantically_compatible(stored, expected)) {
       reused = true;
-    } else if (!request.rebuild) {
+    } else {
       throw std::runtime_error("incompatible existing index; remove or rebuild " +
                                index_path.string());
-    } else {
-      std::filesystem::remove_all(index_dir);
     }
   }
 
@@ -552,6 +570,531 @@ std::filesystem::path build_matrix_variant_root(const std::filesystem::path& roo
                                                 std::string_view method,
                                                 std::string_view variant) {
   return root / "indexes" / std::string(method) / std::string(variant);
+}
+
+using CandidateIndex = std::variant<ContiguousIndex, SpacedSeedIndex,
+                                    RandstrobeIndex, QgramSafeIndex,
+                                    PigeonholeIndex>;
+
+CandidateIndex load_candidate_index(const std::filesystem::path& index_path) {
+  const PersistedIndex loaded = read_index_file(index_path);
+  if (loaded.manifest.method == "contig") {
+    return ContiguousIndex::load(loaded);
+  }
+  if (loaded.manifest.method == "spaced") {
+    return SpacedSeedIndex::load(loaded);
+  }
+  if (loaded.manifest.method == "randstrobe") {
+    return RandstrobeIndex::load(loaded);
+  }
+  if (loaded.manifest.method == "qgram-safe") {
+    return QgramSafeIndex::load(loaded);
+  }
+  if (loaded.manifest.method == "pigeonhole") {
+    return PigeonholeIndex::load(loaded);
+  }
+  throw std::runtime_error("unsupported candidate index method: " +
+                           loaded.manifest.method);
+}
+
+std::vector<uint32_t> query_candidate_index(const CandidateIndex& index,
+                                            std::string_view query_sequence,
+                                            uint32_t tau) {
+  return std::visit(
+      [&](const auto& loaded_index) {
+        if constexpr (std::is_same_v<std::decay_t<decltype(loaded_index)>,
+                                     QgramSafeIndex> ||
+                      std::is_same_v<std::decay_t<decltype(loaded_index)>,
+                                     PigeonholeIndex>) {
+          return loaded_index.query(query_sequence, tau);
+        } else {
+          (void)tau;
+          return loaded_index.query(query_sequence);
+        }
+      },
+      index);
+}
+
+std::vector<int> encode_query(std::string_view sequence) {
+  std::vector<int> encoded;
+  encoded.reserve(sequence.size());
+  for (char base : sequence) {
+    switch (base) {
+      case 'A':
+      case 'a':
+        encoded.push_back(0);
+        break;
+      case 'C':
+      case 'c':
+        encoded.push_back(1);
+        break;
+      case 'G':
+      case 'g':
+        encoded.push_back(2);
+        break;
+      case 'T':
+      case 't':
+        encoded.push_back(3);
+        break;
+      default:
+        throw std::invalid_argument("query contains non-ACGT base");
+    }
+  }
+  return encoded;
+}
+
+std::vector<std::string> split_tsv_line(std::string_view line) {
+  std::vector<std::string> fields;
+  std::size_t start = 0;
+  while (start <= line.size()) {
+    const std::size_t end = line.find('\t', start);
+    if (end == std::string_view::npos) {
+      fields.emplace_back(line.substr(start));
+      break;
+    }
+    fields.emplace_back(line.substr(start, end - start));
+    start = end + 1;
+  }
+  return fields;
+}
+
+std::size_t require_column(
+    const std::unordered_map<std::string, std::size_t>& columns,
+    const std::string& name) {
+  const auto it = columns.find(name);
+  if (it == columns.end()) {
+    throw std::runtime_error("missing TSV column: " + name);
+  }
+  return it->second;
+}
+
+uint32_t parse_uint32_exact(const std::string& value,
+                            const std::string& field_name) {
+  if (value.empty()) {
+    throw std::runtime_error("empty numeric field: " + field_name);
+  }
+  std::size_t parsed = 0;
+  const unsigned long long number = std::stoull(value, &parsed);
+  if (parsed != value.size() ||
+      number > static_cast<unsigned long long>(std::numeric_limits<uint32_t>::max())) {
+    throw std::runtime_error("invalid uint32 field: " + field_name);
+  }
+  return static_cast<uint32_t>(number);
+}
+
+double parse_double_exact(const std::string& value,
+                          const std::string& field_name) {
+  if (value.empty()) {
+    throw std::runtime_error("empty numeric field: " + field_name);
+  }
+  std::size_t parsed = 0;
+  const double number = std::stod(value, &parsed);
+  if (parsed != value.size()) {
+    throw std::runtime_error("invalid double field: " + field_name);
+  }
+  return number;
+}
+
+uint32_t parse_navigamer_hit_id(std::string_view hit_id,
+                                const ReferenceWindows& reference) {
+  const std::string prefix = "ref_";
+  if (hit_id.substr(0, prefix.size()) != prefix) {
+    throw std::runtime_error("unsupported NavigaMer hit ID: " +
+                             std::string(hit_id));
+  }
+  const uint32_t start = parse_uint32_exact(std::string(hit_id.substr(prefix.size())),
+                                            "hit_id");
+  const uint32_t window_id = reference.window_id_for_start(start);
+  if (window_id >= reference.size()) {
+    throw std::runtime_error("NavigaMer hit ID exceeds reference windows");
+  }
+  return window_id;
+}
+
+std::vector<uint32_t> brute_force_true_neighbors(
+    std::string_view query_sequence, const ReferenceWindows& reference,
+    uint32_t tolerance) {
+  std::vector<uint32_t> neighbors;
+  neighbors.reserve(reference.size());
+  for (uint32_t window_id = 0; window_id < reference.size(); ++window_id) {
+    const int distance = navigamer::compute_distance_bounded_edlib(
+        std::string(query_sequence), std::string(reference.window(window_id)),
+        static_cast<int>(tolerance));
+    if (distance <= static_cast<int>(tolerance)) {
+      neighbors.push_back(window_id);
+    }
+  }
+  return neighbors;
+}
+
+void annotate_oracle(PerReadResult& result,
+                     const std::vector<uint32_t>& true_neighbor_ids) {
+  OracleMetrics oracle;
+  oracle.true_neighbor_count = static_cast<uint32_t>(true_neighbor_ids.size());
+
+  std::unordered_set<uint32_t> accepted(result.accepted_candidate_ids.begin(),
+                                        result.accepted_candidate_ids.end());
+  uint32_t false_negative_count = 0;
+  for (uint32_t true_id : true_neighbor_ids) {
+    if (accepted.find(true_id) == accepted.end()) {
+      ++false_negative_count;
+    }
+  }
+  oracle.false_negative_count = false_negative_count;
+  if (!true_neighbor_ids.empty()) {
+    const double truth_count = static_cast<double>(true_neighbor_ids.size());
+    oracle.recall =
+        (truth_count - static_cast<double>(false_negative_count)) / truth_count;
+    oracle.raw_candidate_blowup =
+        static_cast<double>(result.raw_candidate_count) / truth_count;
+    oracle.accepted_candidate_blowup =
+        static_cast<double>(result.accepted_candidate_count) / truth_count;
+  }
+  result.oracle = oracle;
+}
+
+std::string render_comparison_per_read_header() {
+  return "method\tvariant\tread_id\ttau\traw_candidate_count\t"
+         "verified_candidate_count\taccepted_candidate_count\t"
+         "retrieval_milliseconds\tverification_milliseconds\t"
+         "total_milliseconds\ttrue_neighbor_count\tfalse_negative_count\t"
+         "recall\traw_candidate_blowup\taccepted_candidate_blowup\n";
+}
+
+std::string render_comparison_per_read_row(
+    const ComparisonPerReadRow& row) {
+  std::ostringstream output;
+  output << row.method << '\t' << row.variant << '\t' << row.result.read_id
+         << '\t' << row.result.tolerance << '\t'
+         << row.result.raw_candidate_count << '\t'
+         << row.result.verified_candidate_count << '\t'
+         << row.result.accepted_candidate_count << '\t' << std::setprecision(17)
+         << row.result.retrieval_milliseconds << '\t'
+         << row.result.verification_milliseconds << '\t'
+         << row.result.total_milliseconds << '\t';
+  if (row.result.oracle.has_value()) {
+    output << render_oracle_metrics_tsv(*row.result.oracle);
+  } else {
+    output << "NA\tNA\tNA\tNA\tNA";
+  }
+  return output.str();
+}
+
+void write_comparison_per_read_tsv(
+    const std::filesystem::path& path,
+    const std::vector<ComparisonPerReadRow>& rows) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream output(path, std::ios::trunc);
+  if (!output) {
+    throw std::runtime_error("unable to create comparison TSV: " +
+                             path.string());
+  }
+  output << render_comparison_per_read_header();
+  for (const ComparisonPerReadRow& row : rows) {
+    output << render_comparison_per_read_row(row) << '\n';
+  }
+}
+
+std::string render_comparison_summary_header() {
+  return "method\tvariant\tread_count\t"
+         "raw_candidate_count_mean\traw_candidate_count_median\t"
+         "raw_candidate_count_p95\traw_candidate_count_p99\t"
+         "accepted_candidate_count_mean\taccepted_candidate_count_median\t"
+         "accepted_candidate_count_p95\taccepted_candidate_count_p99\t"
+         "retrieval_milliseconds_mean\tretrieval_milliseconds_median\t"
+         "retrieval_milliseconds_p95\tretrieval_milliseconds_p99\t"
+         "verification_milliseconds_mean\tverification_milliseconds_median\t"
+         "verification_milliseconds_p95\tverification_milliseconds_p99\t"
+         "total_milliseconds_mean\ttotal_milliseconds_median\t"
+         "total_milliseconds_p95\ttotal_milliseconds_p99\t"
+         "oracle_read_count\ttrue_neighbor_count_total\t"
+         "false_negative_count_total\tmean_recall\t"
+         "mean_raw_candidate_blowup\tmean_accepted_candidate_blowup\n";
+}
+
+std::string render_comparison_summary_row(
+    const ComparisonSummaryRow& row) {
+  std::ostringstream output;
+  output << row.method << '\t' << row.variant << '\t' << row.read_count << '\t'
+         << std::setprecision(17) << row.raw_candidate_count.mean << '\t'
+         << row.raw_candidate_count.median << '\t'
+         << row.raw_candidate_count.p95 << '\t'
+         << row.raw_candidate_count.p99 << '\t'
+         << row.accepted_candidate_count.mean << '\t'
+         << row.accepted_candidate_count.median << '\t'
+         << row.accepted_candidate_count.p95 << '\t'
+         << row.accepted_candidate_count.p99 << '\t'
+         << row.retrieval_milliseconds.mean << '\t'
+         << row.retrieval_milliseconds.median << '\t'
+         << row.retrieval_milliseconds.p95 << '\t'
+         << row.retrieval_milliseconds.p99 << '\t'
+         << row.verification_milliseconds.mean << '\t'
+         << row.verification_milliseconds.median << '\t'
+         << row.verification_milliseconds.p95 << '\t'
+         << row.verification_milliseconds.p99 << '\t'
+         << row.total_milliseconds.mean << '\t'
+         << row.total_milliseconds.median << '\t'
+         << row.total_milliseconds.p95 << '\t'
+         << row.total_milliseconds.p99 << '\t' << row.oracle_read_count << '\t'
+         << row.true_neighbor_count_total << '\t'
+         << row.false_negative_count_total << '\t'
+         << format_optional_field(row.mean_recall) << '\t'
+         << format_optional_field(row.mean_raw_candidate_blowup) << '\t'
+         << format_optional_field(row.mean_accepted_candidate_blowup);
+  return output.str();
+}
+
+void write_comparison_summary_tsv(
+    const std::filesystem::path& path,
+    const std::vector<ComparisonSummaryRow>& rows) {
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream output(path, std::ios::trunc);
+  if (!output) {
+    throw std::runtime_error("unable to create comparison summary TSV: " +
+                             path.string());
+  }
+  output << render_comparison_summary_header();
+  for (const ComparisonSummaryRow& row : rows) {
+    output << render_comparison_summary_row(row) << '\n';
+  }
+}
+
+struct NavigaMerQueryRecord {
+  bool saw_candidate_count = false;
+  uint32_t raw_candidate_count = 0;
+  bool saw_verified_candidate_count = false;
+  uint32_t verified_candidate_count = 0;
+  bool saw_query_time = false;
+  double query_time_ms = 0.0;
+  std::vector<uint32_t> accepted_candidate_ids;
+};
+
+std::vector<ComparisonPerReadRow> run_navigamer_bridge(
+    const ComparisonRequest& request, const ReferenceWindows& reference,
+    const std::vector<std::vector<uint32_t>>& oracle_hits_by_read) {
+  const std::filesystem::path navigamer_binary =
+      request.navigamer_binary.empty()
+          ? navigamer_repo_root() / "navigamer_cpp" / "navigamer"
+          : request.navigamer_binary;
+  if (!std::filesystem::exists(navigamer_binary)) {
+    throw std::runtime_error("NavigaMer binary does not exist: " +
+                             navigamer_binary.string());
+  }
+
+  const std::filesystem::path benchmark_out =
+      request.out_dir / "navigamer_benchmark.tsv";
+  const std::filesystem::path benchmark_stderr =
+      request.out_dir / "navigamer_benchmark.stderr";
+  std::filesystem::create_directories(request.out_dir);
+
+  std::string command;
+  if (!request.navigamer_index_path.empty()) {
+    if (!std::filesystem::exists(request.navigamer_index_path)) {
+      throw std::runtime_error("NavigaMer index does not exist: " +
+                               request.navigamer_index_path.string());
+    }
+    command = shell_quote(navigamer_binary.string()) + " query-index-batch" +
+              " --index " + shell_quote(request.navigamer_index_path.string()) +
+              " --reads " + shell_quote(request.reads_path.string()) +
+              " --tolerance " + std::to_string(request.tolerance) + " --out " +
+              shell_quote(benchmark_out.string()) + " >/dev/null 2>" +
+              shell_quote(benchmark_stderr.string());
+  } else {
+    command = shell_quote(navigamer_binary.string()) + " benchmark --ref " +
+              shell_quote(request.reference_path.string()) + " --reads " +
+              shell_quote(request.reads_path.string()) + " --tolerance " +
+              std::to_string(request.tolerance) + " --window " +
+              std::to_string(request.window_length) + " --stride " +
+              std::to_string(request.stride) + " --out " +
+              shell_quote(benchmark_out.string()) + " >/dev/null 2>" +
+              shell_quote(benchmark_stderr.string());
+  }
+  const int status = std::system(command.c_str());
+  if (status != 0) {
+    std::string error_message = "NavigaMer benchmark failed";
+    if (std::filesystem::exists(benchmark_stderr)) {
+      error_message += ": " + read_file(benchmark_stderr);
+    }
+    throw std::runtime_error(error_message);
+  }
+
+  std::ifstream input(benchmark_out);
+  if (!input) {
+    throw std::runtime_error("unable to open NavigaMer benchmark TSV");
+  }
+  std::string header_line;
+  if (!std::getline(input, header_line)) {
+    throw std::runtime_error("NavigaMer benchmark TSV is empty");
+  }
+  const std::vector<std::string> header_fields = split_tsv_line(header_line);
+  std::unordered_map<std::string, std::size_t> columns;
+  columns.reserve(header_fields.size());
+  for (std::size_t index = 0; index < header_fields.size(); ++index) {
+    columns.emplace(header_fields[index], index);
+  }
+  const std::size_t query_id_col = require_column(columns, "query_id");
+  const std::size_t hit_id_col = require_column(columns, "hit_id");
+  const std::size_t verified_candidate_count_col =
+      require_column(columns, "leaf_verify_count");
+  const std::size_t candidate_count_col =
+      require_column(columns, "candidate_count_for_prune");
+  const std::size_t query_time_col = require_column(columns, "query_time_ms");
+
+  std::unordered_map<std::string, NavigaMerQueryRecord> records;
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    const std::vector<std::string> fields = split_tsv_line(line);
+    const std::string& query_id = fields.at(query_id_col);
+    NavigaMerQueryRecord& record = records[query_id];
+
+    const uint32_t candidate_count =
+        parse_uint32_exact(fields.at(candidate_count_col),
+                           "candidate_count_for_prune");
+    if (!record.saw_candidate_count) {
+      record.raw_candidate_count = candidate_count;
+      record.saw_candidate_count = true;
+    } else if (record.raw_candidate_count != candidate_count) {
+      throw std::runtime_error(
+          "inconsistent NavigaMer candidate count for query: " + query_id);
+    }
+
+    const uint32_t verified_candidate_count =
+        parse_uint32_exact(fields.at(verified_candidate_count_col),
+                           "leaf_verify_count");
+    if (!record.saw_verified_candidate_count) {
+      record.verified_candidate_count = verified_candidate_count;
+      record.saw_verified_candidate_count = true;
+    } else if (record.verified_candidate_count != verified_candidate_count) {
+      throw std::runtime_error(
+          "inconsistent NavigaMer verified count for query: " + query_id);
+    }
+
+    const double query_time_ms =
+        parse_double_exact(fields.at(query_time_col), "query_time_ms");
+    if (!record.saw_query_time) {
+      record.query_time_ms = query_time_ms;
+      record.saw_query_time = true;
+    }
+
+    const std::string& hit_id = fields.at(hit_id_col);
+    if (!hit_id.empty()) {
+      record.accepted_candidate_ids.push_back(
+          parse_navigamer_hit_id(hit_id, reference));
+    }
+  }
+
+  std::vector<ComparisonPerReadRow> rows;
+  rows.reserve(request.reads.size());
+  for (std::size_t read_index = 0; read_index < request.reads.size();
+       ++read_index) {
+    const QueryRead& read = request.reads[read_index];
+    const auto it = records.find(read.read_id);
+    if (it == records.end()) {
+      throw std::runtime_error("missing NavigaMer benchmark row for read: " +
+                               read.read_id);
+    }
+    PerReadResult result;
+    result.read_id = read.read_id;
+    result.tolerance = request.tolerance;
+    result.raw_candidate_count = it->second.raw_candidate_count;
+    result.accepted_candidate_ids = deduplicate_preserving_order(
+        it->second.accepted_candidate_ids);
+    result.accepted_candidate_count =
+        static_cast<uint32_t>(result.accepted_candidate_ids.size());
+    result.verified_candidate_ids = result.accepted_candidate_ids;
+    result.verified_candidate_count = it->second.verified_candidate_count;
+    result.retrieval_milliseconds = it->second.query_time_ms;
+    result.total_milliseconds = result.retrieval_milliseconds;
+    if (request.oracle_enabled) {
+      annotate_oracle(result, oracle_hits_by_read[read_index]);
+    }
+    rows.push_back({"NavigaMer", "adaptive", std::move(result)});
+  }
+  return rows;
+}
+
+std::vector<ComparisonSummaryRow> summarize_comparison_rows(
+    const std::vector<ComparisonPerReadRow>& rows) {
+  struct Aggregate {
+    std::vector<double> raw_candidate_counts;
+    std::vector<double> accepted_candidate_counts;
+    std::vector<double> retrieval_milliseconds;
+    std::vector<double> verification_milliseconds;
+    std::vector<double> total_milliseconds;
+    std::vector<double> recalls;
+    std::vector<double> raw_blowups;
+    std::vector<double> accepted_blowups;
+    uint32_t oracle_read_count = 0;
+    uint32_t true_neighbor_count_total = 0;
+    uint32_t false_negative_count_total = 0;
+  };
+
+  std::map<std::pair<std::string, std::string>, Aggregate> aggregates;
+  for (const ComparisonPerReadRow& row : rows) {
+    Aggregate& aggregate = aggregates[{row.method, row.variant}];
+    aggregate.raw_candidate_counts.push_back(
+        static_cast<double>(row.result.raw_candidate_count));
+    aggregate.accepted_candidate_counts.push_back(
+        static_cast<double>(row.result.accepted_candidate_count));
+    aggregate.retrieval_milliseconds.push_back(row.result.retrieval_milliseconds);
+    aggregate.verification_milliseconds.push_back(
+        row.result.verification_milliseconds);
+    aggregate.total_milliseconds.push_back(row.result.total_milliseconds);
+    if (row.result.oracle.has_value()) {
+      const OracleMetrics& oracle = *row.result.oracle;
+      ++aggregate.oracle_read_count;
+      aggregate.true_neighbor_count_total += oracle.true_neighbor_count.value_or(0);
+      aggregate.false_negative_count_total +=
+          oracle.false_negative_count.value_or(0);
+      if (oracle.recall.has_value()) {
+        aggregate.recalls.push_back(*oracle.recall);
+      }
+      if (oracle.raw_candidate_blowup.has_value()) {
+        aggregate.raw_blowups.push_back(*oracle.raw_candidate_blowup);
+      }
+      if (oracle.accepted_candidate_blowup.has_value()) {
+        aggregate.accepted_blowups.push_back(*oracle.accepted_candidate_blowup);
+      }
+    }
+  }
+
+  std::vector<ComparisonSummaryRow> summary_rows;
+  summary_rows.reserve(aggregates.size());
+  for (const auto& entry : aggregates) {
+    const auto& key = entry.first;
+    const Aggregate& aggregate = entry.second;
+    ComparisonSummaryRow row;
+    row.method = key.first;
+    row.variant = key.second;
+    row.read_count =
+        static_cast<uint32_t>(aggregate.raw_candidate_counts.size());
+    row.raw_candidate_count =
+        summarize_samples(aggregate.raw_candidate_counts);
+    row.accepted_candidate_count =
+        summarize_samples(aggregate.accepted_candidate_counts);
+    row.retrieval_milliseconds =
+        summarize_samples(aggregate.retrieval_milliseconds);
+    row.verification_milliseconds =
+        summarize_samples(aggregate.verification_milliseconds);
+    row.total_milliseconds = summarize_samples(aggregate.total_milliseconds);
+    row.oracle_read_count = aggregate.oracle_read_count;
+    row.true_neighbor_count_total = aggregate.true_neighbor_count_total;
+    row.false_negative_count_total = aggregate.false_negative_count_total;
+    if (!aggregate.recalls.empty()) {
+      row.mean_recall = mean_of(aggregate.recalls);
+    }
+    if (!aggregate.raw_blowups.empty()) {
+      row.mean_raw_candidate_blowup = mean_of(aggregate.raw_blowups);
+    }
+    if (!aggregate.accepted_blowups.empty()) {
+      row.mean_accepted_candidate_blowup = mean_of(aggregate.accepted_blowups);
+    }
+    summary_rows.push_back(std::move(row));
+  }
+  return summary_rows;
 }
 
 }  // namespace
@@ -877,4 +1420,131 @@ std::vector<BuildSummaryRow> build_candidate_matrix(
 
   write_build_summary_tsv(request.out_dir / "build_summary.tsv", rows);
   return rows;
+}
+
+ComparisonReport run_comparison(const ComparisonRequest& request) {
+  if (request.reference_path.empty()) {
+    throw std::invalid_argument("reference path must not be empty");
+  }
+  if (request.reads_path.empty()) {
+    throw std::invalid_argument("reads path must not be empty");
+  }
+  if (request.reads.empty()) {
+    throw std::invalid_argument("reads must not be empty");
+  }
+  if (request.window_length == 0) {
+    throw std::invalid_argument("window length must be greater than zero");
+  }
+  if (request.stride == 0) {
+    throw std::invalid_argument("stride must be greater than zero");
+  }
+  if (request.out_dir.empty()) {
+    throw std::invalid_argument("output directory must not be empty");
+  }
+  if (request.tensor_top_k == 0) {
+    throw std::invalid_argument("tensor top-k must be greater than zero");
+  }
+
+  const ReferenceWindows reference = ReferenceWindows::from_fasta(
+      request.reference_path.string(), request.window_length, request.stride);
+
+  ComparisonReport report;
+  report.build_rows = build_candidate_matrix(
+      BuildMatrixRequest{request.reference_path, request.window_length,
+                         request.stride, request.out_dir, request.rebuild});
+
+  std::vector<std::vector<uint32_t>> oracle_hits_by_read;
+  if (request.oracle_enabled) {
+    oracle_hits_by_read.resize(request.reads.size());
+#pragma omp parallel for schedule(dynamic)
+    for (std::ptrdiff_t read_index = 0;
+         read_index < static_cast<std::ptrdiff_t>(request.reads.size());
+         ++read_index) {
+      oracle_hits_by_read[static_cast<std::size_t>(read_index)] =
+          brute_force_true_neighbors(
+              request.reads[static_cast<std::size_t>(read_index)].sequence,
+              reference, request.tolerance);
+    }
+  }
+
+  report.per_read_rows.reserve(report.build_rows.size() * request.reads.size() +
+                               request.reads.size());
+  for (const BuildSummaryRow& build_row : report.build_rows) {
+    if (build_row.manifest.method == "pigeonhole") {
+      const std::optional<std::string> tau_value =
+          manifest_parameter_value(build_row.manifest, "tau");
+      if (!tau_value.has_value() ||
+          parse_uint32_exact(*tau_value, "pigeonhole.tau") !=
+              request.tolerance) {
+        continue;
+      }
+    }
+    if (build_row.manifest.method == "ts::Tensor") {
+      tensor_index::TensorIndex tensor =
+          tensor_index::load_tensor_index(build_row.index_dir);
+      std::vector<ComparisonPerReadRow> method_rows(request.reads.size());
+#pragma omp parallel for schedule(dynamic)
+      for (std::ptrdiff_t read_index = 0;
+           read_index < static_cast<std::ptrdiff_t>(request.reads.size());
+           ++read_index) {
+        const std::size_t row_index = static_cast<std::size_t>(read_index);
+        const QueryRead& read = request.reads[row_index];
+        PerReadResult result = evaluate_candidates(
+            read.read_id, read.sequence,
+            [&]() {
+              std::vector<uint32_t> labels;
+              for (const tensor_index::QueryHit& hit :
+                   tensor_index::query_tensor_index(
+                       tensor, encode_query(read.sequence), request.tensor_top_k)) {
+                labels.push_back(hit.label);
+              }
+              return labels;
+            },
+            reference, request.tolerance);
+        if (request.oracle_enabled) {
+          annotate_oracle(result, oracle_hits_by_read[row_index]);
+        }
+        method_rows[row_index] =
+            {build_row.manifest.method, build_row.variant, std::move(result)};
+      }
+      report.per_read_rows.insert(report.per_read_rows.end(),
+                                  std::make_move_iterator(method_rows.begin()),
+                                  std::make_move_iterator(method_rows.end()));
+      continue;
+    }
+
+    const CandidateIndex index = load_candidate_index(build_row.index_path);
+    std::vector<ComparisonPerReadRow> method_rows(request.reads.size());
+#pragma omp parallel for schedule(dynamic)
+    for (std::ptrdiff_t read_index = 0;
+         read_index < static_cast<std::ptrdiff_t>(request.reads.size());
+         ++read_index) {
+      const std::size_t row_index = static_cast<std::size_t>(read_index);
+      const QueryRead& read = request.reads[row_index];
+      const CandidateRetriever retriever = [&]() {
+        return query_candidate_index(index, read.sequence, request.tolerance);
+      };
+      PerReadResult result = evaluate_candidates(
+          read.read_id, read.sequence, retriever, reference, request.tolerance);
+      if (request.oracle_enabled) {
+        annotate_oracle(result, oracle_hits_by_read[row_index]);
+      }
+      method_rows[row_index] =
+          {build_row.manifest.method, build_row.variant, std::move(result)};
+    }
+    report.per_read_rows.insert(report.per_read_rows.end(),
+                                std::make_move_iterator(method_rows.begin()),
+                                std::make_move_iterator(method_rows.end()));
+  }
+
+  const std::vector<ComparisonPerReadRow> navigamer_rows =
+      run_navigamer_bridge(request, reference, oracle_hits_by_read);
+  report.per_read_rows.insert(report.per_read_rows.end(), navigamer_rows.begin(),
+                              navigamer_rows.end());
+  report.summary_rows = summarize_comparison_rows(report.per_read_rows);
+  write_comparison_per_read_tsv(request.out_dir / "per_read.tsv",
+                                report.per_read_rows);
+  write_comparison_summary_tsv(request.out_dir / "summary.tsv",
+                               report.summary_rows);
+  return report;
 }

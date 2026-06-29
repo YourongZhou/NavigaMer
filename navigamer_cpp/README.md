@@ -22,6 +22,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer build-scale --ref <fasta|sequence> --window 250 --stride 1 --prefix-lengths 50000 --out build_scale.csv [--index index.navidx] [same primary-layer flags]
 ./navigamer query  --reads <fastq|sequence> --query <sequence> [--index index.navidx] [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer query-index --index index.navidx --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
+./navigamer query-index-batch --index index.navidx --reads reads.fastq --out out.tsv [--path-trace-out trace.tsv] [--tolerance 2] [--mode adaptive]
 ./navigamer run    --ref <fasta|sequence> --reads <fastq|sequence> [--tolerance 2] [--out out.tsv]
 ./navigamer map150 --ref <fasta|sequence> --reads <fastq|sequence> --tolerance <N> --out out.tsv [--locator refpos|seqan]
 ./navigamer benchmark --ref <fasta> --reads <fastq> [--tolerance 2] [--window 200] [--stride 1] [--out out.tsv]
@@ -41,6 +42,7 @@ They also accept `--visited-mode string|epoch` (default `epoch`),
 `--simd-mode auto|scalar|avx2|avx512` (default `auto`),
 `--distance-mode dp|myers|edlib|auto` (default `myers`),
 `--build-distance-mode dp|edlib|auto` (default `edlib`),
+`--search-prefetch off|on` (default `off`),
 `--search-qgram-prefilter off|on` (default `off`), and `--search-qgram-q N`
 (default `5`). `string` keeps the legacy per-query string visited set for
 regression comparisons; `epoch` uses integer node IDs and a reused epoch array.
@@ -57,6 +59,13 @@ shorter-input length, falling back to DP otherwise. `edlib` uses the vendored
 Edlib bounded distance backend. `dp` remains the reference mode; `auto` is
 conservative and currently uses DP. Build distance mode is separate and affects
 only index construction exact/bounded distance calls; its default is `edlib`.
+
+`query-index-batch --path-trace-out <tsv>` writes one diagnostic row per input
+read with the world node IDs whose centers were evaluated, leaf sequence IDs
+that reached exact verification, and set-overlap/Jaccard fields against the
+previous input read. The main hit TSV also reports adaptive path diagnostics:
+`query_path_class`, `path_contained_step_count`, `path_overlap_step_count`,
+and `path_uncovered_step_count`.
 
 Build commands also expose Phase1 helper thresholds for tuning the extended
 sketch step: `--phase1-metric-min-fanout N` (default `64`),
@@ -116,8 +125,10 @@ fingerprints and construction parameters, followed by the collapsed primary DAG,
 unique sequences, `ref_positions`, optional BWT/SA intervals, beacons, MBB rows,
 leaf links, and leaf-beacon rows. Load reconstructs pointer links,
 `SearchGraphView`, and any eligible MBB rectangle indexes. `query-index` is the
-pure load-and-search command. `run`, `benchmark`, `map150`, and `boundary` still
-build in-memory indexes for their current workflows. `boundary` avoids repeated
+pure single-query load-and-search command, while `query-index-batch` loads one
+persisted index and evaluates every FASTQ read into the benchmark-style TSV
+schema used by experiment workflows. `run`, `benchmark`, `map150`, and
+`boundary` still build in-memory indexes for their current workflows. `boundary` avoids repeated
 rebuilds within a parameter sweep by building once per stride mode and reusing
 that in-memory index across the full rate grid. The Phase2 distance backend is
 not part of the manifest signature because it changes only how exact checks are

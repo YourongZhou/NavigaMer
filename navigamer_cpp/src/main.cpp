@@ -43,6 +43,7 @@ void usage(const char* prog) {
             << "  " << prog << " build-scale --ref <path|seq> --window 250 --stride 1 --prefix-lengths csv --out <csv> [--index <file>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--index <file>] [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query-index --index <file> --query <seq> [--tolerance 2] [--mode adaptive]\n"
+            << "  " << prog << " query-index-batch --index <file> --reads <fastq> [--tolerance 2] [--out <tsv>] [--path-trace-out <tsv>] [--mode adaptive]\n"
             << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " map150 --ref <path|seq> --reads <path|seq> --tolerance <N> --out <tsv> [--mode adaptive] [--locator refpos|seqan] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
@@ -50,7 +51,7 @@ void usage(const char* prog) {
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
             << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--leaf-attach-direction auto|seq-to-world|world-to-seq] [--phase2-qgram-postfilter on|off] [--leaf-qgram-postfilter on|off] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64] [--phase1-metric-min-fanout 64] [--phase1-qgram-min-fanout 64] [--phase1-qgram-max-touched 250000] [--progress-interval-seconds 600]\n"
-            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--distance-mode dp|myers|edlib|auto] [--build-distance-mode dp|edlib|auto] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
+            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--distance-mode dp|myers|edlib|auto] [--build-distance-mode dp|edlib|auto] [--search-prefetch off|on] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
 }
 
 std::string format_double(double value) {
@@ -161,6 +162,41 @@ void write_csv(const std::string& output_path,
     }
     out << '\n';
   }
+}
+
+template <typename Id>
+std::string join_id_path(const std::vector<Id>& path) {
+  std::ostringstream os;
+  for (size_t i = 0; i < path.size(); ++i) {
+    if (i) os << ',';
+    os << path[i];
+  }
+  return os.str();
+}
+
+template <typename Id>
+size_t unique_count(const std::vector<Id>& values) {
+  return std::unordered_set<Id>(values.begin(), values.end()).size();
+}
+
+template <typename Id>
+std::pair<std::string, std::string> previous_overlap_summary(
+    const std::vector<Id>& current,
+    const std::vector<Id>& previous,
+    bool has_previous) {
+  if (!has_previous) return {"NA", "NA"};
+
+  std::unordered_set<Id> current_set(current.begin(), current.end());
+  std::unordered_set<Id> previous_set(previous.begin(), previous.end());
+  size_t overlap = 0;
+  for (const auto& id : current_set) {
+    if (previous_set.count(id)) overlap++;
+  }
+  const size_t union_size = current_set.size() + previous_set.size() - overlap;
+  if (union_size == 0) return {"NA", std::to_string(overlap)};
+  return {format_double(static_cast<double>(overlap) /
+                        static_cast<double>(union_size)),
+          std::to_string(overlap)};
 }
 
 std::string format_primary_radii(const navigamer::HierarchyConfig& config) {
@@ -292,6 +328,9 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> build_reference_windows(
 
 struct BoundaryQuery {
   std::string source_id;
+  std::string source_ref_id;
+  int source_start = -1;
+  int source_end = -1;
   navigamer::BioSequence query;
 };
 
@@ -305,13 +344,33 @@ std::vector<BoundaryQuery> generate_boundary_queries(
   queries.reserve(query_count);
   for (size_t i = 0; i < query_count; ++i) {
     const auto& source = index_seqs[pick(gen)];
+    const auto* occ = source->ref_positions.empty() ? nullptr
+                                                    : &source->ref_positions.front();
     queries.push_back({
         source->id,
+        occ ? occ->ref_id : "",
+        occ ? occ->start : -1,
+        occ ? occ->end : -1,
         navigamer::BioSequence(
             "query_" + std::to_string(i),
             mutate_with_exact_substitutions(source->seq, edit_count, gen))});
   }
   return queries;
+}
+
+bool recovers_source_locus(
+    const std::shared_ptr<navigamer::BioSequence>& hit,
+    const BoundaryQuery& query) {
+  if (!hit) return false;
+  if (hit->id == query.source_id) return true;
+  for (const auto& occ : hit->ref_positions) {
+    if (occ.ref_id == query.source_ref_id &&
+        occ.start == query.source_start &&
+        occ.end == query.source_end) {
+      return true;
+    }
+  }
+  return false;
 }
 
 struct BoundaryCellStats {
@@ -650,6 +709,12 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
               << " mbb_rect_index_queries=" << st.mbb_rect_index_queries
               << " mbb_rect_candidate_children=" << st.mbb_rect_candidate_children
               << " mbb_rect_fallback_count=" << st.mbb_rect_fallback_count
+              << " query_path_class=" << st.query_path_class()
+              << " path_contained_step_count="
+              << st.path_contained_step_count
+              << " path_overlap_step_count=" << st.path_overlap_step_count
+              << " path_uncovered_step_count="
+              << st.path_uncovered_step_count
               << " center_distance_calls_after_mbb="
               << st.center_distance_calls_after_mbb
               << " search_qgram_prefilter_enabled="
@@ -835,12 +900,14 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "dist_calcs", "leaf_verify_count", "candidate_count_for_prune", "beacon_prune_count",
       "mbb_filter_mode", "mbb_scan_child_checks", "mbb_rect_index_queries",
       "mbb_rect_candidate_children", "mbb_rect_fallback_count",
-      "mbb_surviving_child_count", "mbb_scalar_checks",
+      "mbb_surviving_child_count", "query_path_class",
+      "path_contained_step_count", "path_overlap_step_count",
+      "path_uncovered_step_count", "mbb_scalar_checks",
       "mbb_simd_batches", "mbb_simd_fallbacks",
       "center_distance_calls_after_mbb",
       "leaf_beacon_scalar_checks", "leaf_beacon_simd_batches",
       "leaf_beacon_simd_fallbacks",
-      "search_qgram_prefilter_enabled", "search_qgram_q",
+      "search_qgram_prefilter_enabled", "search_prefetch_enabled", "search_qgram_q",
       "search_qgram_signature_build_count", "search_qgram_signature_missing_count",
       "search_qgram_checks", "search_qgram_pruned_children",
       "search_qgram_passed_children", "center_distance_calls_before_qgram",
@@ -870,6 +937,10 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
         std::to_string(st.mbb_rect_candidate_children),
         std::to_string(st.mbb_rect_fallback_count),
         std::to_string(st.mbb_surviving_child_count),
+        st.query_path_class(),
+        std::to_string(st.path_contained_step_count),
+        std::to_string(st.path_overlap_step_count),
+        std::to_string(st.path_uncovered_step_count),
         std::to_string(st.mbb_scalar_checks),
         std::to_string(st.mbb_simd_batches),
         std::to_string(st.mbb_simd_fallbacks),
@@ -878,6 +949,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
         std::to_string(st.leaf_beacon_simd_batches),
         std::to_string(st.leaf_beacon_simd_fallbacks),
         st.search_qgram_prefilter_enabled ? "true" : "false",
+        st.search_prefetch_enabled ? "true" : "false",
         std::to_string(st.search_qgram_q),
         std::to_string(st.search_qgram_signature_build_count),
         std::to_string(st.search_qgram_signature_missing_count),
@@ -929,6 +1001,184 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
   if (!out_tsv.empty())
     write_tsv(out_tsv, columns, all_rows);
   std::cerr << "Benchmark rows: " << all_rows.size() << "\n";
+}
+
+void run_query_index_batch(const std::string& index_path,
+                           const std::string& query_input,
+                           int tolerance,
+                           const std::string& out_tsv,
+                           const std::string& path_trace_tsv,
+                           const std::string& mode,
+                           const navigamer::SearchConfig& search_config) {
+  using namespace navigamer;
+  if (mode != "adaptive") {
+    throw std::runtime_error(
+        "query-index-batch currently supports only --mode adaptive");
+  }
+
+  LoadedIndex loaded = load_index(index_path);
+  std::cerr << "Loaded index: " << index_path
+            << " signature=" << loaded.manifest.signature
+            << " sequences=" << loaded.manifest.sequence_count
+            << " world_nodes=" << loaded.manifest.world_node_count << "\n";
+
+  auto queries = load_reads(query_input, "ref");
+  if (queries.empty()) {
+    std::cerr << "No query reads loaded.\n";
+    return;
+  }
+  std::cerr << "Queries: " << queries.size() << "\n";
+
+  BioGeometrySearchEngine engine(loaded.builder, search_config);
+  std::vector<std::string> columns = {
+      "query_id", "hit_id", "distance", "ref_positions", "read_id", "read_len",
+      "ref_id", "strand", "query_start", "reference_start", "aligned_length",
+      "score", "edit_distance", "query_fragment", "reference_fragment",
+      "bwt_start", "bwt_end",
+      "dist_calcs", "leaf_verify_count", "candidate_count_for_prune", "beacon_prune_count",
+      "mbb_filter_mode", "mbb_scan_child_checks", "mbb_rect_index_queries",
+      "mbb_rect_candidate_children", "mbb_rect_fallback_count",
+      "mbb_surviving_child_count", "query_path_class",
+      "path_contained_step_count", "path_overlap_step_count",
+      "path_uncovered_step_count", "mbb_scalar_checks",
+      "mbb_simd_batches", "mbb_simd_fallbacks",
+      "center_distance_calls_after_mbb",
+      "leaf_beacon_scalar_checks", "leaf_beacon_simd_batches",
+      "leaf_beacon_simd_fallbacks",
+      "search_qgram_prefilter_enabled", "search_prefetch_enabled", "search_qgram_q",
+      "search_qgram_signature_build_count", "search_qgram_signature_missing_count",
+      "search_qgram_checks", "search_qgram_pruned_children",
+      "search_qgram_passed_children", "center_distance_calls_before_qgram",
+      "center_distance_calls_after_qgram", "qgram_prune_ratio", "result_count",
+      "avg_mbb_candidates_per_parent",
+      "avg_center_distance_calls_per_query", "query_time_ms"};
+
+  std::vector<std::vector<std::vector<std::string>>> per_query_rows(queries.size());
+  std::vector<SearchStats> per_query_stats(queries.size());
+
+  #pragma omp parallel for schedule(dynamic)
+  for (size_t qi = 0; qi < queries.size(); ++qi) {
+    const auto& read = queries[qi];
+    auto query_start = std::chrono::high_resolution_clock::now();
+    auto [res, st] = engine.search_adaptive(*read, tolerance);
+    auto query_end = std::chrono::high_resolution_clock::now();
+    double query_time_ms =
+        std::chrono::duration<double, std::milli>(query_end - query_start).count();
+    double avg_mbb_candidates =
+        st.mbb_filter_parent_count == 0
+            ? 0.0
+            : static_cast<double>(st.mbb_surviving_child_count) /
+                  static_cast<double>(st.mbb_filter_parent_count);
+    std::vector<std::string> search_stats = {
+        mbb_filter_mode_name(search_config.mbb_filter_mode),
+        std::to_string(st.mbb_scan_child_checks),
+        std::to_string(st.mbb_rect_index_queries),
+        std::to_string(st.mbb_rect_candidate_children),
+        std::to_string(st.mbb_rect_fallback_count),
+        std::to_string(st.mbb_surviving_child_count),
+        st.query_path_class(),
+        std::to_string(st.path_contained_step_count),
+        std::to_string(st.path_overlap_step_count),
+        std::to_string(st.path_uncovered_step_count),
+        std::to_string(st.mbb_scalar_checks),
+        std::to_string(st.mbb_simd_batches),
+        std::to_string(st.mbb_simd_fallbacks),
+        std::to_string(st.center_distance_calls_after_mbb),
+        std::to_string(st.leaf_beacon_scalar_checks),
+        std::to_string(st.leaf_beacon_simd_batches),
+        std::to_string(st.leaf_beacon_simd_fallbacks),
+        st.search_qgram_prefilter_enabled ? "true" : "false",
+        st.search_prefetch_enabled ? "true" : "false",
+        std::to_string(st.search_qgram_q),
+        std::to_string(st.search_qgram_signature_build_count),
+        std::to_string(st.search_qgram_signature_missing_count),
+        std::to_string(st.search_qgram_checks),
+        std::to_string(st.search_qgram_pruned_children),
+        std::to_string(st.search_qgram_passed_children),
+        std::to_string(st.center_distance_calls_before_qgram),
+        std::to_string(st.center_distance_calls_after_qgram),
+        format_double(st.qgram_prune_ratio()),
+        std::to_string(st.result_count),
+        format_double(avg_mbb_candidates),
+        format_double(static_cast<double>(st.center_distance_calls_after_qgram)),
+        format_double(query_time_ms)};
+    if (res.empty()) {
+      std::vector<std::string> row = {
+          read->id, "", "", "", read->id, std::to_string(static_cast<int>(read->seq.size())),
+          "", "+", "0", "0", "0", "0", "", read->seq, "",
+          "-1", "-1",
+          std::to_string(st.dist_calc_count), std::to_string(st.leaf_verify_count),
+          std::to_string(st.candidate_count_for_prune),
+          std::to_string(st.beacon_prune_count)};
+      row.insert(row.end(), search_stats.begin(), search_stats.end());
+      per_query_rows[qi].push_back(std::move(row));
+    } else {
+      for (const auto& hit : res) {
+        int ed = compute_distance(read->seq, hit->seq);
+        auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, *hit, ed);
+        for (const auto& r : rows) {
+          std::vector<std::string> row = {
+              r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
+              r.read_id, r.read_len, r.ref_id, r.strand, r.query_start, r.reference_start,
+              r.aligned_length, r.score, r.edit_distance, r.query_fragment, r.reference_fragment,
+              r.bwt_start, r.bwt_end,
+              std::to_string(st.dist_calc_count), std::to_string(st.leaf_verify_count),
+              std::to_string(st.candidate_count_for_prune),
+              std::to_string(st.beacon_prune_count)};
+          row.insert(row.end(), search_stats.begin(), search_stats.end());
+          per_query_rows[qi].push_back(std::move(row));
+        }
+      }
+    }
+    per_query_stats[qi] = std::move(st);
+  }
+
+  std::vector<std::vector<std::string>> all_rows;
+  for (auto& rows : per_query_rows)
+    for (auto& row : rows)
+      all_rows.push_back(std::move(row));
+
+  if (!out_tsv.empty())
+    write_tsv(out_tsv, columns, all_rows);
+  if (!path_trace_tsv.empty()) {
+    const std::vector<std::string> trace_columns = {
+        "query_id", "query_ordinal", "world_visit_count", "leaf_visit_count",
+        "world_unique_count", "leaf_unique_count", "prev_world_jaccard",
+        "prev_leaf_jaccard", "prev_world_overlap_count",
+        "prev_leaf_overlap_count", "world_path", "leaf_path"};
+    std::vector<std::vector<std::string>> trace_rows;
+    trace_rows.reserve(queries.size());
+    for (size_t qi = 0; qi < queries.size(); ++qi) {
+      const auto& stats = per_query_stats[qi];
+      const bool has_previous = qi > 0;
+      const auto world_overlap = previous_overlap_summary(
+          stats.world_trace,
+          has_previous ? per_query_stats[qi - 1].world_trace
+                       : stats.world_trace,
+          has_previous);
+      const auto leaf_overlap = previous_overlap_summary(
+          stats.leaf_trace,
+          has_previous ? per_query_stats[qi - 1].leaf_trace
+                       : stats.leaf_trace,
+          has_previous);
+      trace_rows.push_back({
+          queries[qi]->id,
+          std::to_string(qi),
+          std::to_string(stats.world_trace.size()),
+          std::to_string(stats.leaf_trace.size()),
+          std::to_string(unique_count(stats.world_trace)),
+          std::to_string(unique_count(stats.leaf_trace)),
+          world_overlap.first,
+          leaf_overlap.first,
+          world_overlap.second,
+          leaf_overlap.second,
+          join_id_path(stats.world_trace),
+          join_id_path(stats.leaf_trace),
+      });
+    }
+    write_tsv(path_trace_tsv, trace_columns, trace_rows);
+  }
+  std::cerr << "Batch query rows: " << all_rows.size() << "\n";
 }
 
 void write_tsv_with_header_even_if_empty(
@@ -1063,7 +1313,7 @@ void run_boundary(const std::string& ref_input, int length,
 
         bool source_found = false;
         for (const auto& hit : res) {
-          if (hit->id == q.source_id) {
+          if (recovers_source_locus(hit, q)) {
             source_found = true;
             break;
           }
@@ -1081,7 +1331,7 @@ void run_boundary(const std::string& ref_input, int length,
           auto [bf_res, bf_st] = engine.search_brute_force(q.query, tolerance_edits, unique_list);
           bool bf_source_found = false;
           for (const auto& hit : bf_res) {
-            if (hit->id == q.source_id) {
+            if (recovers_source_locus(hit, q)) {
               bf_source_found = true;
               break;
             }
@@ -1182,11 +1432,12 @@ void run_layer_radius_experiment(const std::string& ref_input,
             << " query_edits=" << query_edits << "\n";
 
   std::vector<std::string> columns = {
-      "dataset", "query_id", "query_length", "L", "r_leaf", "alpha",
+      "dataset", "query_id", "source_id", "query_length", "L", "r_leaf", "alpha",
       "radius_schedule", "query_time_ms",
       "world_access_count", "node_access_count", "edge_access_count",
       "anchor_distance_count", "bound_check_count",
-      "candidate_count", "candidate_verify_count"};
+      "candidate_count", "candidate_verify_count", "result_count",
+      "source_recovered", "no_fn"};
   std::vector<std::vector<std::string>> rows;
   rows.reserve(layer_values.size() * r_leaf_values.size() * alpha_values.size() * queries.size());
 
@@ -1204,13 +1455,20 @@ void run_layer_radius_experiment(const std::string& ref_input,
           auto start = std::chrono::high_resolution_clock::now();
           auto [results, stats] = engine.search_adaptive(query, tolerance);
           auto end = std::chrono::high_resolution_clock::now();
-          (void)results;
+          bool source_recovered = false;
+          for (const auto& hit : results) {
+            if (recovers_source_locus(hit, queries[query_idx])) {
+              source_recovered = true;
+              break;
+            }
+          }
           double query_time_ms =
               std::chrono::duration<double, std::milli>(end - start).count();
 
           rows.push_back({
               ref_id,
               std::to_string(query_idx),
+              queries[query_idx].source_id,
               std::to_string(static_cast<int>(query.seq.size())),
               std::to_string(L),
               std::to_string(r_leaf),
@@ -1224,6 +1482,9 @@ void run_layer_radius_experiment(const std::string& ref_input,
               std::to_string(stats.bound_check_count),
               std::to_string(stats.candidate_count),
               std::to_string(stats.candidate_verify_count),
+              std::to_string(results.size()),
+              source_recovered ? "1" : "0",
+              source_recovered ? "1" : "0",
           });
         }
       }
@@ -1274,6 +1535,7 @@ int main(int argc, char** argv) {
   std::string distance_mode = "myers";
   std::string build_distance_mode = "edlib";
   std::string search_qgram_prefilter = "off";
+  std::string search_prefetch = "off";
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;
   int qgram_q = 5;
@@ -1299,6 +1561,7 @@ int main(int argc, char** argv) {
   size_t cold_cache_bytes = 256ULL * 1024ULL * 1024ULL;
   std::string summary_out;
   std::string json_out;
+  std::string path_trace_out;
 
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
@@ -1308,6 +1571,10 @@ int main(int argc, char** argv) {
     if (a == "--tolerance" && i + 1 < argc) { tolerance = std::atoi(argv[++i]); continue; }
     if (a == "--mode" && i + 1 < argc) { mode = argv[++i]; continue; }
     if (a == "--out" && i + 1 < argc) { out_tsv = argv[++i]; continue; }
+    if (a == "--path-trace-out" && i + 1 < argc) {
+      path_trace_out = argv[++i];
+      continue;
+    }
     if (a == "--index" && i + 1 < argc) { index_path = argv[++i]; continue; }
     if (a == "--size" && i + 1 < argc) { demo_size = std::atoi(argv[++i]); continue; }
     if (a == "--window" && i + 1 < argc) { window_size = std::atoi(argv[++i]); continue; }
@@ -1450,6 +1717,10 @@ int main(int argc, char** argv) {
       search_qgram_prefilter = argv[++i];
       continue;
     }
+    if (a == "--search-prefetch" && i + 1 < argc) {
+      search_prefetch = argv[++i];
+      continue;
+    }
     if (a == "--search-qgram-q" && i + 1 < argc) {
       search_qgram_q = std::atoi(argv[++i]);
       continue;
@@ -1536,6 +1807,9 @@ int main(int argc, char** argv) {
     search_config.distance_mode = navigamer::parse_distance_mode(distance_mode);
     search_config.search_qgram_prefilter =
         parse_on_off(search_qgram_prefilter, "--search-qgram-prefilter");
+    search_config.search_prefetch =
+        parse_on_off(search_prefetch, "--search-prefetch");
+    search_config.trace_paths = !path_trace_out.empty();
     search_config.search_qgram_q = search_qgram_q;
 
     if (cmd == "demo") {
@@ -1578,6 +1852,15 @@ int main(int argc, char** argv) {
       }
       run_query(ref_input, "", query_seq, tolerance, mode, hierarchy,
                 range_config, search_config, index_path);
+      return 0;
+    }
+    if (cmd == "query-index-batch") {
+      if (index_path.empty() || reads_input.empty() || out_tsv.empty()) {
+        std::cerr << "query-index-batch requires --index, --reads, and --out\n";
+        return 1;
+      }
+      run_query_index_batch(index_path, reads_input, tolerance, out_tsv,
+                            path_trace_out, mode, search_config);
       return 0;
     }
     if (cmd == "run") {

@@ -233,6 +233,251 @@ void test_build_matrix_reuse_and_rebuild_behaviour() {
   }
 }
 
+void test_build_matrix_rebuild_recovers_incomplete_tensor_cache() {
+  TempFasta fasta(
+      "matrix_rebuild",
+      ">ref\n"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT\n");
+  TempDirectory temp;
+
+  const BuildMatrixRequest request{
+      fasta.path(),
+      80,
+      1,
+      temp.file("matrix_rebuild"),
+      false,
+  };
+
+  const std::vector<BuildSummaryRow> initial = build_candidate_matrix(request);
+  const auto tensor_it = std::find_if(
+      initial.begin(), initial.end(),
+      [](const BuildSummaryRow& row) { return row.manifest.method == "ts::Tensor"; });
+  assert(tensor_it != initial.end());
+  assert(std::filesystem::exists(tensor_it->index_dir / "manifest.meta"));
+  assert(std::filesystem::exists(tensor_it->index_dir / "hnsw.bin"));
+
+  std::filesystem::remove(tensor_it->index_dir / "hnsw.bin");
+  assert(std::filesystem::exists(tensor_it->index_dir / "manifest.meta"));
+  assert(!std::filesystem::exists(tensor_it->index_dir / "hnsw.bin"));
+
+  assert_throws([&] { build_candidate_matrix(request); }, "open file");
+
+  const BuildMatrixRequest rebuild_request{
+      fasta.path(),
+      80,
+      1,
+      temp.file("matrix_rebuild"),
+      true,
+  };
+  const std::vector<BuildSummaryRow> rebuilt =
+      build_candidate_matrix(rebuild_request);
+  const auto rebuilt_tensor_it = std::find_if(
+      rebuilt.begin(), rebuilt.end(),
+      [](const BuildSummaryRow& row) { return row.manifest.method == "ts::Tensor"; });
+  assert(rebuilt_tensor_it != rebuilt.end());
+  assert(!rebuilt_tensor_it->reused);
+  assert(std::filesystem::exists(rebuilt_tensor_it->index_dir / "manifest.meta"));
+  assert(std::filesystem::exists(rebuilt_tensor_it->index_dir / "hnsw.bin"));
+  assert(std::filesystem::exists(temp.file("matrix_rebuild") /
+                                 "build_summary.tsv"));
+}
+
+void test_compare_methods_includes_navigamer_bridge_results() {
+  TempFasta fasta(
+      "compare",
+      ">ref\n"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT\n");
+  TempDirectory temp;
+
+  const std::string read0 =
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT";
+  const std::string read1(read0.size(), 'T');
+
+  {
+    std::ofstream reads(temp.file("reads.fq"));
+    reads << "@read0\n" << read0 << "\n+\n"
+          << std::string(read0.size(), 'I') << "\n";
+    reads << "@read1\n" << read1 << "\n+\n"
+          << std::string(read1.size(), 'I') << "\n";
+  }
+
+  const std::filesystem::path fake_navigamer = temp.file("fake_navigamer.sh");
+  {
+    std::ofstream script(fake_navigamer);
+    script
+        << "#!/usr/bin/env bash\n"
+        << "set -euo pipefail\n"
+        << "out=\"\"\n"
+        << "while [[ $# -gt 0 ]]; do\n"
+        << "  if [[ \"$1\" == \"--out\" ]]; then\n"
+        << "    out=\"$2\"\n"
+        << "    shift 2\n"
+        << "  else\n"
+        << "    shift\n"
+        << "  fi\n"
+        << "done\n"
+        << "cat >\"$out\" <<'EOF'\n"
+        << "query_id\thit_id\tleaf_verify_count\tcandidate_count_for_prune\tquery_time_ms\n"
+        << "read0\tref_0\t2\t3\t1.5\n"
+        << "read1\t\t1\t2\t0.5\n"
+        << "EOF\n";
+  }
+  std::filesystem::permissions(
+      fake_navigamer,
+      std::filesystem::perms::owner_exec |
+          std::filesystem::perms::group_exec |
+          std::filesystem::perms::others_exec,
+      std::filesystem::perm_options::add);
+  const std::filesystem::path navigamer_index = temp.file("main.navidx");
+  {
+    std::ofstream index_out(navigamer_index);
+    index_out << "stub\n";
+  }
+
+  ComparisonRequest request;
+  request.reference_path = fasta.path();
+  request.reads_path = temp.file("reads.fq");
+  request.reads = {
+      {"read0", read0},
+      {"read1", read1},
+  };
+  request.window_length = 128;
+  request.stride = 1;
+  request.tolerance = 2;
+  request.out_dir = temp.file("compare_out");
+  request.navigamer_binary = fake_navigamer;
+  request.navigamer_index_path = navigamer_index;
+  request.tensor_top_k = 8;
+
+  const ComparisonReport report = run_comparison(request);
+  assert(report.build_rows.size() == 16);
+  assert(std::filesystem::exists(request.out_dir / "per_read.tsv"));
+  assert(std::filesystem::exists(request.out_dir / "summary.tsv"));
+
+  const auto navigamer_read0 = std::find_if(
+      report.per_read_rows.begin(), report.per_read_rows.end(),
+      [](const ComparisonPerReadRow& row) {
+        return row.method == "NavigaMer" && row.variant == "adaptive" &&
+               row.result.read_id == "read0";
+      });
+  assert(navigamer_read0 != report.per_read_rows.end());
+  assert(navigamer_read0->result.raw_candidate_count == 3);
+  assert(navigamer_read0->result.verified_candidate_count == 2);
+  assert(navigamer_read0->result.accepted_candidate_ids ==
+         std::vector<uint32_t>{0});
+
+  const auto navigamer_summary = std::find_if(
+      report.summary_rows.begin(), report.summary_rows.end(),
+      [](const ComparisonSummaryRow& row) {
+        return row.method == "NavigaMer" && row.variant == "adaptive";
+      });
+  assert(navigamer_summary != report.summary_rows.end());
+  assert(navigamer_summary->read_count == 2);
+}
+
+void test_compare_methods_can_skip_oracle_and_keep_na_fields() {
+  TempFasta fasta(
+      "compare_no_oracle",
+      ">ref\n"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT\n");
+  TempDirectory temp;
+
+  const std::string read0 =
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT"
+      "ACGTACGTACGTACGTACGTACGTACGTACGT";
+  {
+    std::ofstream reads(temp.file("reads.fq"));
+    reads << "@read0\n" << read0 << "\n+\n"
+          << std::string(read0.size(), 'I') << "\n";
+  }
+
+  const std::filesystem::path fake_navigamer = temp.file("fake_navigamer.sh");
+  {
+    std::ofstream script(fake_navigamer);
+    script
+        << "#!/usr/bin/env bash\n"
+        << "set -euo pipefail\n"
+        << "out=\"\"\n"
+        << "while [[ $# -gt 0 ]]; do\n"
+        << "  if [[ \"$1\" == \"--out\" ]]; then\n"
+        << "    out=\"$2\"\n"
+        << "    shift 2\n"
+        << "  else\n"
+        << "    shift\n"
+        << "  fi\n"
+        << "done\n"
+        << "cat >\"$out\" <<'EOF'\n"
+        << "query_id\thit_id\tleaf_verify_count\tcandidate_count_for_prune\tquery_time_ms\n"
+        << "read0\tref_0\t2\t3\t1.5\n"
+        << "EOF\n";
+  }
+  std::filesystem::permissions(
+      fake_navigamer,
+      std::filesystem::perms::owner_exec |
+          std::filesystem::perms::group_exec |
+          std::filesystem::perms::others_exec,
+      std::filesystem::perm_options::add);
+  const std::filesystem::path navigamer_index = temp.file("main.navidx");
+  {
+    std::ofstream index_out(navigamer_index);
+    index_out << "stub\n";
+  }
+
+  ComparisonRequest request;
+  request.reference_path = fasta.path();
+  request.reads_path = temp.file("reads.fq");
+  request.reads = {{"read0", read0}};
+  request.window_length = 128;
+  request.stride = 1;
+  request.tolerance = 2;
+  request.out_dir = temp.file("compare_out");
+  request.oracle_enabled = false;
+  request.navigamer_binary = fake_navigamer;
+  request.navigamer_index_path = navigamer_index;
+  request.tensor_top_k = 8;
+
+  const ComparisonReport report = run_comparison(request);
+  const auto navigamer_row = std::find_if(
+      report.per_read_rows.begin(), report.per_read_rows.end(),
+      [](const ComparisonPerReadRow& row) {
+        return row.method == "NavigaMer" && row.variant == "adaptive" &&
+               row.result.read_id == "read0";
+      });
+  assert(navigamer_row != report.per_read_rows.end());
+  assert(!navigamer_row->result.oracle.has_value());
+
+  const auto navigamer_summary = std::find_if(
+      report.summary_rows.begin(), report.summary_rows.end(),
+      [](const ComparisonSummaryRow& row) {
+        return row.method == "NavigaMer" && row.variant == "adaptive";
+      });
+  assert(navigamer_summary != report.summary_rows.end());
+  assert(navigamer_summary->oracle_read_count == 0);
+  assert(!navigamer_summary->mean_recall.has_value());
+
+  std::ifstream per_read(request.out_dir / "per_read.tsv");
+  assert(per_read.good());
+  std::string header;
+  std::getline(per_read, header);
+  std::string row;
+  std::getline(per_read, row);
+  assert(row.find("\tNA\tNA\tNA\tNA\tNA") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -241,6 +486,9 @@ int main() {
   test_percentile_nearest_rank_is_fixed();
   test_na_oracle_fields_remain_literal_na();
   test_build_matrix_reuse_and_rebuild_behaviour();
+  test_build_matrix_rebuild_recovers_incomplete_tensor_cache();
+  test_compare_methods_includes_navigamer_bridge_results();
+  test_compare_methods_can_skip_oracle_and_keep_na_fields();
   std::cout << "evaluation tests passed\n";
   return 0;
 }

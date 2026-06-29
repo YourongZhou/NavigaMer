@@ -42,6 +42,8 @@ struct SearchConfig {
   SimdMode simd_mode = SimdMode::Auto;
   DistanceMode distance_mode = DistanceMode::Myers;
   bool search_qgram_prefilter = false;
+  bool search_prefetch = false;
+  bool trace_paths = false;
   int search_qgram_q = 5;
 };
 
@@ -64,6 +66,9 @@ struct SearchStats {
   size_t mbb_rect_fallback_count = 0;
   size_t mbb_filter_parent_count = 0;
   size_t mbb_surviving_child_count = 0;
+  size_t path_contained_step_count = 0;
+  size_t path_overlap_step_count = 0;
+  size_t path_uncovered_step_count = 0;
   size_t mbb_scalar_checks = 0;
   size_t mbb_simd_batches = 0;
   size_t mbb_simd_fallbacks = 0;
@@ -78,6 +83,8 @@ struct SearchStats {
   size_t visited_hit_count = 0;
   size_t center_distance_calls_after_mbb = 0;
   bool search_qgram_prefilter_enabled = false;
+  bool search_prefetch_enabled = false;
+  bool trace_paths_enabled = false;
   int search_qgram_q = 0;
   size_t search_qgram_signature_build_count = 0;
   size_t search_qgram_signature_missing_count = 0;
@@ -87,6 +94,8 @@ struct SearchStats {
   size_t center_distance_calls_before_qgram = 0;
   size_t center_distance_calls_after_qgram = 0;
   size_t result_count = 0;
+  std::vector<NodeId> world_trace;
+  std::vector<LeafId> leaf_trace;
 
   SearchStats() = default;
   explicit SearchStats(size_t num_layers) : layer_breakdown(num_layers, 0) {}
@@ -100,6 +109,23 @@ struct SearchStats {
     if (search_qgram_checks == 0) return 0.0;
     return static_cast<double>(search_qgram_pruned_children) /
            search_qgram_checks;
+  }
+
+  void record_path_step(size_t overlap_count, bool contained) {
+    if (contained) {
+      path_contained_step_count++;
+    } else if (overlap_count == 0) {
+      path_uncovered_step_count++;
+    } else {
+      path_overlap_step_count++;
+    }
+  }
+
+  std::string query_path_class() const {
+    if (path_uncovered_step_count > 0) return "uncovered";
+    if (path_overlap_step_count > 0) return "overlap";
+    if (path_contained_step_count > 0) return "contained";
+    return "unclassified";
   }
 };
 

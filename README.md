@@ -91,6 +91,35 @@ cd navigamer_cpp
 
 Full CLI reference: [`navigamer_cpp/CLI_REFERENCE.md`](navigamer_cpp/CLI_REFERENCE.md). C++ layout and tests: [`navigamer_cpp/README.md`](navigamer_cpp/README.md).
 
+## E. coli Comparison Workflow
+
+The experiment-side unified comparison entrypoint lives at
+`experiments/ecoli_1p1m/candidate_tool`.
+
+```bash
+cd experiments/ecoli_1p1m
+make candidate_tool -j
+./candidate_tool compare \
+  --ref /path/to/reference.fa \
+  --reads /path/to/reads.fq \
+  --tau 2 \
+  --window 150 \
+  --stride 1 \
+  --out-dir /tmp/ecoli_compare \
+  [--rebuild] \
+  [--tensor-top-k 64] \
+  [--oracle on|off] \
+  [--navigamer-bin ../../navigamer_cpp/navigamer] \
+  [--navigamer-index ../../navigamer_cpp/.tmp_experiments/ecoli_1p1m.navidx]
+```
+
+`compare` materializes or reuses the baseline candidate indexes, runs the
+baseline methods plus NavigaMer on the same reads, computes brute-force oracle
+neighbors under edit distance when `--oracle on`, and writes `per_read.tsv` and
+`summary.tsv` into `--out-dir`. With `--navigamer-index`, the NavigaMer bridge
+loads that persisted `.navidx` once and calls `navigamer query-index-batch`;
+without it, the bridge falls back to `navigamer benchmark` on reference windows.
+
 The C++ `build` and `query` commands support explicit persisted indexes with
 `--index <file>`. The index file stores a manifest with input fingerprints and
 construction parameters plus the collapsed primary DAG, unique sequences,
@@ -166,6 +195,18 @@ currently remains DP. Index construction separately supports
 `--build-distance-mode dp|edlib|auto` and defaults to `edlib`.
 
 Adaptive child-world traversal also supports the optional
+`--search-prefetch on`, which issues best-effort lookahead prefetch hints for
+flat child/MBB/leaf data without changing pruning or verification semantics.
+It is experimental and intended for locality A/B measurements. It also supports
+`query-index-batch --path-trace-out <tsv>` for locality diagnostics: the trace
+TSV records per-input-read world node IDs evaluated, leaf sequence IDs exactly
+verified, and adjacent-input-read path-overlap/Jaccard fields. The main hit TSV
+also reports adaptive path diagnostics via `query_path_class`,
+`path_contained_step_count`, `path_overlap_step_count`, and
+`path_uncovered_step_count`.
+
+Adaptive search also supports
+the optional
 `--search-qgram-prefilter on` with independent `--search-qgram-q` (default
 `5`). After MBB filtering, it safely rejects a child center only when
 `qgram_l1(query, center) > 2*q*(child.radius+tolerance)`. Every passing child

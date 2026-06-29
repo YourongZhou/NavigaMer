@@ -38,6 +38,9 @@ void print_help() {
          " --out-dir PATH\n"
       << "  candidate_tool build-matrix --ref PATH --window N --stride N"
          " --out-dir PATH [--rebuild]\n"
+      << "  candidate_tool compare --ref PATH --reads PATH --tau N --window N"
+         " --stride N --out-dir PATH [--rebuild] [--tensor-top-k N]"
+         " [--oracle on|off] [--navigamer-bin PATH] [--navigamer-index PATH]\n"
       << "  candidate_tool query --index PATH --reads PATH --tau N --out PATH\n"
       << "  candidate_tool inspect-reference --ref PATH --window N --stride N\n"
       << "  candidate_tool tensor-build --ref PATH --window N --stride N"
@@ -83,6 +86,21 @@ bool parse_bool_flag(const std::string& value, const std::string& flag) {
     return false;
   }
   throw std::invalid_argument("invalid value for " + flag + ": " + value);
+}
+
+bool parse_on_off_flag(const std::string& value, const std::string& flag) {
+  if (value == "on") {
+    return true;
+  }
+  if (value == "off") {
+    return false;
+  }
+  return parse_bool_flag(value, flag);
+}
+
+std::filesystem::path default_navigamer_binary() {
+  return std::filesystem::path(NAVIGAMER_REPO_ROOT) / "navigamer_cpp" /
+         "navigamer";
 }
 
 std::vector<int> encode_query(std::string_view sequence) {
@@ -671,6 +689,74 @@ int build_matrix(int argc, char** argv) {
   return 0;
 }
 
+int compare_methods(int argc, char** argv) {
+  ComparisonRequest request;
+  request.navigamer_binary = default_navigamer_binary();
+  bool saw_ref = false;
+  bool saw_reads = false;
+  bool saw_tau = false;
+  bool saw_window = false;
+  bool saw_stride = false;
+  bool saw_out_dir = false;
+
+  for (int index = 2; index < argc; ++index) {
+    const std::string flag = argv[index];
+    if (flag == "--rebuild") {
+      request.rebuild = true;
+      continue;
+    }
+    if (index + 1 >= argc) {
+      throw std::invalid_argument("missing value for flag: " + flag);
+    }
+    const std::string value = argv[++index];
+    if (flag == "--ref") {
+      request.reference_path = value;
+      saw_ref = true;
+    } else if (flag == "--reads") {
+      request.reads_path = value;
+      saw_reads = true;
+    } else if (flag == "--tau") {
+      request.tolerance = parse_uint32(value, flag);
+      saw_tau = true;
+    } else if (flag == "--window") {
+      request.window_length = parse_uint32(value, flag);
+      saw_window = true;
+    } else if (flag == "--stride") {
+      request.stride = parse_uint32(value, flag);
+      saw_stride = true;
+    } else if (flag == "--out-dir") {
+      request.out_dir = value;
+      saw_out_dir = true;
+    } else if (flag == "--tensor-top-k") {
+      request.tensor_top_k = static_cast<std::size_t>(parse_uint64(value, flag));
+    } else if (flag == "--oracle") {
+      request.oracle_enabled = parse_on_off_flag(value, flag);
+    } else if (flag == "--navigamer-bin") {
+      request.navigamer_binary = value;
+    } else if (flag == "--navigamer-index") {
+      request.navigamer_index_path = value;
+    } else {
+      throw std::invalid_argument("unknown flag: " + flag);
+    }
+  }
+
+  if (!saw_ref || !saw_reads || !saw_tau || !saw_window || !saw_stride ||
+      !saw_out_dir) {
+    throw std::invalid_argument("missing required compare flag");
+  }
+
+  for (const ReadRecord& read : read_reads(request.reads_path)) {
+    request.reads.push_back({read.read_id, read.sequence});
+  }
+  if (request.reads.empty()) {
+    throw std::runtime_error("reads file contains no records");
+  }
+
+  const ComparisonReport report = run_comparison(request);
+  (void)report;
+  return 0;
+}
+
 int query_contiguous(int argc, char** argv) {
   std::filesystem::path index_path;
   std::filesystem::path reads_path;
@@ -900,6 +986,9 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && std::string(argv[1]) == "build-matrix") {
       return build_matrix(argc, argv);
+    }
+    if (argc >= 2 && std::string(argv[1]) == "compare") {
+      return compare_methods(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]) == "build") {
       const std::string method = build_method_from_argv(argc, argv);

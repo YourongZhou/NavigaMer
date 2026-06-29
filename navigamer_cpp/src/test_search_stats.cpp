@@ -59,6 +59,11 @@ int main() {
   assert(stats.leaf_exact_distance_call_count == stats.leaf_verify_count);
   assert(stats.center_exact_distance_call_count ==
          stats.world_access_count);
+  assert(stats.path_contained_step_count +
+             stats.path_overlap_step_count +
+             stats.path_uncovered_step_count >
+         0);
+  assert(!stats.query_path_class().empty());
 
   navigamer::SearchConfig qgram_config;
   qgram_config.search_qgram_prefilter = true;
@@ -79,6 +84,11 @@ int main() {
          qgram_stats.leaf_verify_count);
   assert(qgram_stats.center_exact_distance_call_count ==
          qgram_stats.world_access_count);
+  assert(qgram_stats.path_contained_step_count +
+             qgram_stats.path_overlap_step_count +
+             qgram_stats.path_uncovered_step_count >
+         0);
+  assert(!qgram_stats.query_path_class().empty());
 
   std::cout << "ALL PASSED\n";
   return 0;
