@@ -11,12 +11,12 @@ LDLIBS =
 EDLIB_SRC = third_party/edlib/src/edlib.cpp
 EDLIB_OBJ = $(EDLIB_SRC:.cpp=.o)
 EDLIB_DEP = $(EDLIB_OBJ:.o=.d)
-SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp src/index_persistence.cpp $(EDLIB_SRC) src/main.cpp
+SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp src/index_persistence.cpp src/candidate_verifier.cpp $(EDLIB_SRC) src/main.cpp
 OBJ = $(SRC:.cpp=.o)
 DEP = $(OBJ:.o=.d)
 TARGET = navigamer
 
-LIB_SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/map150.cpp $(EDLIB_SRC)
+LIB_SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/map150.cpp src/candidate_verifier.cpp $(EDLIB_SRC)
 LIB_OBJ = $(LIB_SRC:.cpp=.o)
 TEST_SRC = src/test_recall.cpp
 TEST_OBJ = $(TEST_SRC:.cpp=.o)
@@ -37,6 +37,41 @@ TEST_SEARCH_STATS_SRC = src/test_search_stats.cpp
 TEST_SEARCH_STATS_OBJ = $(TEST_SEARCH_STATS_SRC:.cpp=.o)
 TEST_SEARCH_STATS_DEP = $(TEST_SEARCH_STATS_OBJ:.o=.d)
 TEST_SEARCH_STATS_TARGET = test_search_stats_bin
+
+TEST_QUERY_PROFILE_SRC = src/test_query_profile_stats_smoke.cpp
+TEST_QUERY_PROFILE_OBJ = $(TEST_QUERY_PROFILE_SRC:.cpp=.o)
+TEST_QUERY_PROFILE_DEP = $(TEST_QUERY_PROFILE_OBJ:.o=.d)
+TEST_QUERY_PROFILE_TARGET = test_query_profile_stats_smoke
+
+TEST_LOCAL_ROUTER_SRC = src/test_local_router_no_false_negative.cpp
+TEST_LOCAL_ROUTER_OBJ = $(TEST_LOCAL_ROUTER_SRC:.cpp=.o)
+TEST_LOCAL_ROUTER_DEP = $(TEST_LOCAL_ROUTER_OBJ:.o=.d)
+TEST_LOCAL_ROUTER_TARGET = test_local_router_no_false_negative
+
+TEST_BEST_FIRST_SRC = src/test_best_first_no_false_negative.cpp
+TEST_BEST_FIRST_OBJ = $(TEST_BEST_FIRST_SRC:.cpp=.o)
+TEST_BEST_FIRST_DEP = $(TEST_BEST_FIRST_OBJ:.o=.d)
+TEST_BEST_FIRST_TARGET = test_best_first_no_false_negative
+
+TEST_ROUTER_HINTS_SRC = src/test_router_hints_no_false_negative.cpp
+TEST_ROUTER_HINTS_OBJ = $(TEST_ROUTER_HINTS_SRC:.cpp=.o)
+TEST_ROUTER_HINTS_DEP = $(TEST_ROUTER_HINTS_OBJ:.o=.d)
+TEST_ROUTER_HINTS_TARGET = test_router_hints_no_false_negative
+
+TEST_PATH_REUSE_SRC = src/test_path_reuse_no_false_negative.cpp
+TEST_PATH_REUSE_OBJ = $(TEST_PATH_REUSE_SRC:.cpp=.o)
+TEST_PATH_REUSE_DEP = $(TEST_PATH_REUSE_OBJ:.o=.d)
+TEST_PATH_REUSE_TARGET = test_path_reuse_no_false_negative
+
+TEST_SAFE_CHILD_ROUTER_SRC = src/test_safe_child_router_no_false_negative.cpp
+TEST_SAFE_CHILD_ROUTER_OBJ = $(TEST_SAFE_CHILD_ROUTER_SRC:.cpp=.o)
+TEST_SAFE_CHILD_ROUTER_DEP = $(TEST_SAFE_CHILD_ROUTER_OBJ:.o=.d)
+TEST_SAFE_CHILD_ROUTER_TARGET = test_safe_child_router_no_false_negative
+
+TEST_QUERY_PLANNER_SRC = src/test_query_planner_no_false_negative.cpp
+TEST_QUERY_PLANNER_OBJ = $(TEST_QUERY_PLANNER_SRC:.cpp=.o)
+TEST_QUERY_PLANNER_DEP = $(TEST_QUERY_PLANNER_OBJ:.o=.d)
+TEST_QUERY_PLANNER_TARGET = test_query_planner_no_false_negative
 
 TEST_MAP150_SRC = src/test_map150_recall.cpp
 TEST_MAP150_OBJ = $(TEST_MAP150_SRC:.cpp=.o)
@@ -92,6 +127,11 @@ TEST_QUERY_BENCHMARK_SRC = src/test_query_benchmark_gate.cpp
 TEST_QUERY_BENCHMARK_OBJ = $(TEST_QUERY_BENCHMARK_SRC:.cpp=.o)
 TEST_QUERY_BENCHMARK_DEP = $(TEST_QUERY_BENCHMARK_OBJ:.o=.d)
 TEST_QUERY_BENCHMARK_TARGET = test_query_benchmark_gate
+
+TEST_CANDIDATE_VERIFIER_SRC = src/test_candidate_verifier.cpp
+TEST_CANDIDATE_VERIFIER_OBJ = $(TEST_CANDIDATE_VERIFIER_SRC:.cpp=.o)
+TEST_CANDIDATE_VERIFIER_DEP = $(TEST_CANDIDATE_VERIFIER_OBJ:.o=.d)
+TEST_CANDIDATE_VERIFIER_TARGET = test_candidate_verifier_bin
 
 TEST_EPOCH_VISITED_SRC = src/test_epoch_visited.cpp
 TEST_EPOCH_VISITED_OBJ = $(TEST_EPOCH_VISITED_SRC:.cpp=.o)
@@ -160,7 +200,7 @@ EXP_DEP = $(EXP_OBJ:.cpp=.d)
 LIB_SRC += $(EXP_SRC) src/query_benchmark.cpp src/index_persistence.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
 
-.PHONY: all clean test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_phase1_seed_index_check test_index_persistence test_phase2_distance_verifier test_build_progress test_all
+.PHONY: all clean test test_dist test_hierarchy test_search_stats test_query_profile test_local_router test_best_first test_router_hints test_path_reuse test_safe_child_router test_query_planner test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_candidate_verifier test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_phase1_seed_index_check test_index_persistence test_phase2_distance_verifier test_build_progress test_all
 
 all: $(TARGET)
 
@@ -177,6 +217,27 @@ $(TEST_HIER_TARGET): $(LIB_OBJ) $(TEST_HIER_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_SEARCH_STATS_TARGET): $(LIB_OBJ) $(TEST_SEARCH_STATS_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_QUERY_PROFILE_TARGET): $(LIB_OBJ) $(TEST_QUERY_PROFILE_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_LOCAL_ROUTER_TARGET): $(LIB_OBJ) $(TEST_LOCAL_ROUTER_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_BEST_FIRST_TARGET): $(LIB_OBJ) $(TEST_BEST_FIRST_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_ROUTER_HINTS_TARGET): $(LIB_OBJ) $(TEST_ROUTER_HINTS_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_PATH_REUSE_TARGET): $(LIB_OBJ) $(TEST_PATH_REUSE_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_SAFE_CHILD_ROUTER_TARGET): $(LIB_OBJ) $(TEST_SAFE_CHILD_ROUTER_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_QUERY_PLANNER_TARGET): $(LIB_OBJ) $(TEST_QUERY_PLANNER_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_MAP150_TARGET): $(LIB_OBJ) $(TEST_MAP150_OBJ)
@@ -210,6 +271,9 @@ $(TEST_SEARCH_QGRAM_TARGET): $(LIB_OBJ) $(TEST_SEARCH_QGRAM_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_QUERY_BENCHMARK_TARGET): $(LIB_OBJ) $(TEST_QUERY_BENCHMARK_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+$(TEST_CANDIDATE_VERIFIER_TARGET): $(LIB_OBJ) $(TEST_CANDIDATE_VERIFIER_OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_EPOCH_VISITED_TARGET): $(LIB_OBJ) $(TEST_EPOCH_VISITED_OBJ)
@@ -260,6 +324,27 @@ test_hierarchy: $(TEST_HIER_TARGET)
 test_search_stats: $(TEST_SEARCH_STATS_TARGET)
 	./$(TEST_SEARCH_STATS_TARGET)
 
+test_query_profile: $(TEST_QUERY_PROFILE_TARGET)
+	./$(TEST_QUERY_PROFILE_TARGET)
+
+test_local_router: $(TEST_LOCAL_ROUTER_TARGET)
+	./$(TEST_LOCAL_ROUTER_TARGET)
+
+test_best_first: $(TEST_BEST_FIRST_TARGET)
+	./$(TEST_BEST_FIRST_TARGET)
+
+test_router_hints: $(TEST_ROUTER_HINTS_TARGET)
+	./$(TEST_ROUTER_HINTS_TARGET)
+
+test_path_reuse: $(TEST_PATH_REUSE_TARGET)
+	./$(TEST_PATH_REUSE_TARGET)
+
+test_safe_child_router: $(TEST_SAFE_CHILD_ROUTER_TARGET)
+	./$(TEST_SAFE_CHILD_ROUTER_TARGET)
+
+test_query_planner: $(TEST_QUERY_PLANNER_TARGET)
+	./$(TEST_QUERY_PLANNER_TARGET)
+
 test_map150: $(TEST_MAP150_TARGET)
 	./$(TEST_MAP150_TARGET)
 
@@ -292,6 +377,9 @@ test_search_qgram: $(TEST_SEARCH_QGRAM_TARGET)
 
 test_query_benchmark: $(TEST_QUERY_BENCHMARK_TARGET)
 	./$(TEST_QUERY_BENCHMARK_TARGET)
+
+test_candidate_verifier: $(TEST_CANDIDATE_VERIFIER_TARGET)
+	./$(TEST_CANDIDATE_VERIFIER_TARGET)
 
 test_epoch_visited: $(TEST_EPOCH_VISITED_TARGET)
 	./$(TEST_EPOCH_VISITED_TARGET)
@@ -329,12 +417,12 @@ test_phase2_distance_verifier: $(TEST_PHASE2_DISTANCE_TARGET)
 test_build_progress: $(TEST_BUILD_PROGRESS_TARGET)
 	./$(TEST_BUILD_PROGRESS_TARGET)
 
-test_all: test test_dist test_hierarchy test_search_stats test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_phase1_seed_index_check test_index_persistence test_phase2_distance_verifier test_build_progress
+test_all: test test_dist test_hierarchy test_search_stats test_query_profile test_local_router test_best_first test_router_hints test_path_reuse test_safe_child_router test_query_planner test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_candidate_verifier test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_phase1_seed_index_check test_index_persistence test_phase2_distance_verifier test_build_progress
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJ) $(LIB_OBJ) $(EDLIB_OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TEST_HIER_OBJ) $(TEST_SEARCH_STATS_OBJ) $(TEST_MAP150_OBJ) $(TEST_BOUNDED_OBJ) $(TEST_BOUNDED_MYERS_OBJ) $(TEST_QGRAM_OBJ) $(TEST_RANGE_JOIN_OBJ) $(TEST_BUILD_RANGE_OBJ) $(TEST_BUILD_DISTANCE_OBJ) $(TEST_MBB_RECT_OBJ) $(TEST_MBB_FILTER_OBJ) $(TEST_SEARCH_QGRAM_OBJ) $(TEST_QUERY_BENCHMARK_OBJ) $(TEST_EPOCH_VISITED_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ) $(TEST_SEARCH_DISTANCE_MODE_OBJ) $(TEST_SIMD_MBB_OBJ) $(TEST_SIMD_LEAF_OBJ) $(TEST_BUILD_TIMING_OBJ) $(TEST_BUILD_SCALE_OBJ) $(TEST_PHASE1_HYBRID_OBJ) $(TEST_PHASE1_SEED_OBJ) $(TEST_INDEX_PERSISTENCE_OBJ) $(TEST_PHASE2_DISTANCE_OBJ) $(TEST_BUILD_PROGRESS_OBJ) $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP) $(TEST_PHASE1_SEED_DEP) $(TEST_INDEX_PERSISTENCE_DEP) $(TEST_PHASE2_DISTANCE_DEP) $(TEST_BUILD_PROGRESS_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET) $(TEST_HIER_TARGET) $(TEST_SEARCH_STATS_TARGET) $(TEST_MAP150_TARGET) $(TEST_BOUNDED_TARGET) $(TEST_BOUNDED_MYERS_TARGET) $(TEST_QGRAM_TARGET) $(TEST_RANGE_JOIN_TARGET) $(TEST_BUILD_RANGE_TARGET) $(TEST_BUILD_DISTANCE_TARGET) $(TEST_MBB_RECT_TARGET) $(TEST_MBB_FILTER_TARGET) $(TEST_SEARCH_QGRAM_TARGET) $(TEST_QUERY_BENCHMARK_TARGET) $(TEST_EPOCH_VISITED_TARGET) $(TEST_SEARCH_GRAPH_VIEW_TARGET) $(TEST_SEARCH_DISTANCE_MODE_TARGET) $(TEST_SIMD_MBB_TARGET) $(TEST_SIMD_LEAF_TARGET) $(TEST_BUILD_TIMING_TARGET) $(TEST_BUILD_SCALE_TARGET) $(TEST_PHASE1_HYBRID_TARGET) $(TEST_PHASE1_SEED_TARGET) $(TEST_INDEX_PERSISTENCE_TARGET) $(TEST_PHASE2_DISTANCE_TARGET) $(TEST_BUILD_PROGRESS_TARGET)
+	rm -f $(OBJ) $(LIB_OBJ) $(EDLIB_OBJ) $(TEST_OBJ) $(TEST_DIST_OBJ) $(TEST_HIER_OBJ) $(TEST_SEARCH_STATS_OBJ) $(TEST_QUERY_PROFILE_OBJ) $(TEST_LOCAL_ROUTER_OBJ) $(TEST_BEST_FIRST_OBJ) $(TEST_ROUTER_HINTS_OBJ) $(TEST_PATH_REUSE_OBJ) $(TEST_SAFE_CHILD_ROUTER_OBJ) $(TEST_QUERY_PLANNER_OBJ) $(TEST_MAP150_OBJ) $(TEST_BOUNDED_OBJ) $(TEST_BOUNDED_MYERS_OBJ) $(TEST_QGRAM_OBJ) $(TEST_RANGE_JOIN_OBJ) $(TEST_BUILD_RANGE_OBJ) $(TEST_BUILD_DISTANCE_OBJ) $(TEST_MBB_RECT_OBJ) $(TEST_MBB_FILTER_OBJ) $(TEST_SEARCH_QGRAM_OBJ) $(TEST_QUERY_BENCHMARK_OBJ) $(TEST_CANDIDATE_VERIFIER_OBJ) $(TEST_EPOCH_VISITED_OBJ) $(TEST_SEARCH_GRAPH_VIEW_OBJ) $(TEST_SEARCH_DISTANCE_MODE_OBJ) $(TEST_SIMD_MBB_OBJ) $(TEST_SIMD_LEAF_OBJ) $(TEST_BUILD_TIMING_OBJ) $(TEST_BUILD_SCALE_OBJ) $(TEST_PHASE1_HYBRID_OBJ) $(TEST_PHASE1_SEED_OBJ) $(TEST_INDEX_PERSISTENCE_OBJ) $(TEST_PHASE2_DISTANCE_OBJ) $(TEST_BUILD_PROGRESS_OBJ) $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_QUERY_PROFILE_DEP) $(TEST_LOCAL_ROUTER_DEP) $(TEST_BEST_FIRST_DEP) $(TEST_ROUTER_HINTS_DEP) $(TEST_PATH_REUSE_DEP) $(TEST_SAFE_CHILD_ROUTER_DEP) $(TEST_QUERY_PLANNER_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_CANDIDATE_VERIFIER_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP) $(TEST_PHASE1_SEED_DEP) $(TEST_INDEX_PERSISTENCE_DEP) $(TEST_PHASE2_DISTANCE_DEP) $(TEST_BUILD_PROGRESS_DEP) $(TARGET) $(TEST_TARGET) $(TEST_DIST_TARGET) $(TEST_HIER_TARGET) $(TEST_SEARCH_STATS_TARGET) $(TEST_QUERY_PROFILE_TARGET) $(TEST_LOCAL_ROUTER_TARGET) $(TEST_BEST_FIRST_TARGET) $(TEST_ROUTER_HINTS_TARGET) $(TEST_PATH_REUSE_TARGET) $(TEST_SAFE_CHILD_ROUTER_TARGET) $(TEST_QUERY_PLANNER_TARGET) $(TEST_MAP150_TARGET) $(TEST_BOUNDED_TARGET) $(TEST_BOUNDED_MYERS_TARGET) $(TEST_QGRAM_TARGET) $(TEST_RANGE_JOIN_TARGET) $(TEST_BUILD_RANGE_TARGET) $(TEST_BUILD_DISTANCE_TARGET) $(TEST_MBB_RECT_TARGET) $(TEST_MBB_FILTER_TARGET) $(TEST_SEARCH_QGRAM_TARGET) $(TEST_QUERY_BENCHMARK_TARGET) $(TEST_CANDIDATE_VERIFIER_TARGET) $(TEST_EPOCH_VISITED_TARGET) $(TEST_SEARCH_GRAPH_VIEW_TARGET) $(TEST_SEARCH_DISTANCE_MODE_TARGET) $(TEST_SIMD_MBB_TARGET) $(TEST_SIMD_LEAF_TARGET) $(TEST_BUILD_TIMING_TARGET) $(TEST_BUILD_SCALE_TARGET) $(TEST_PHASE1_HYBRID_TARGET) $(TEST_PHASE1_SEED_TARGET) $(TEST_INDEX_PERSISTENCE_TARGET) $(TEST_PHASE2_DISTANCE_TARGET) $(TEST_BUILD_PROGRESS_TARGET)
 
--include $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP) $(TEST_PHASE1_SEED_DEP) $(TEST_INDEX_PERSISTENCE_DEP) $(TEST_PHASE2_DISTANCE_DEP) $(TEST_BUILD_PROGRESS_DEP)
+-include $(DEP) $(EDLIB_DEP) $(TEST_DEP) $(TEST_DIST_DEP) $(TEST_HIER_DEP) $(TEST_SEARCH_STATS_DEP) $(TEST_QUERY_PROFILE_DEP) $(TEST_LOCAL_ROUTER_DEP) $(TEST_BEST_FIRST_DEP) $(TEST_ROUTER_HINTS_DEP) $(TEST_PATH_REUSE_DEP) $(TEST_SAFE_CHILD_ROUTER_DEP) $(TEST_QUERY_PLANNER_DEP) $(TEST_MAP150_DEP) $(TEST_BOUNDED_DEP) $(TEST_BOUNDED_MYERS_DEP) $(TEST_QGRAM_DEP) $(TEST_RANGE_JOIN_DEP) $(TEST_BUILD_RANGE_DEP) $(TEST_BUILD_DISTANCE_DEP) $(TEST_MBB_RECT_DEP) $(TEST_MBB_FILTER_DEP) $(TEST_SEARCH_QGRAM_DEP) $(TEST_QUERY_BENCHMARK_DEP) $(TEST_CANDIDATE_VERIFIER_DEP) $(TEST_EPOCH_VISITED_DEP) $(TEST_SEARCH_GRAPH_VIEW_DEP) $(TEST_SEARCH_DISTANCE_MODE_DEP) $(TEST_SIMD_MBB_DEP) $(TEST_SIMD_LEAF_DEP) $(TEST_BUILD_TIMING_DEP) $(TEST_BUILD_SCALE_DEP) $(TEST_PHASE1_HYBRID_DEP) $(TEST_PHASE1_SEED_DEP) $(TEST_INDEX_PERSISTENCE_DEP) $(TEST_PHASE2_DISTANCE_DEP) $(TEST_BUILD_PROGRESS_DEP)
