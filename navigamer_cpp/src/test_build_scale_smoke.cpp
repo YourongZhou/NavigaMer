@@ -17,6 +17,14 @@ std::vector<std::string> split_csv_line(const std::string& line) {
   return values;
 }
 
+std::vector<std::string> split_tsv_line(const std::string& line) {
+  std::vector<std::string> values;
+  std::stringstream ss(line);
+  std::string token;
+  while (std::getline(ss, token, '\t')) values.push_back(token);
+  return values;
+}
+
 }  // namespace
 
 int main() {
@@ -153,6 +161,118 @@ int main() {
       ">/tmp/navigamer_build_scale_query.stdout "
       "2>/tmp/navigamer_build_scale_query.stderr";
   assert(std::system(query_command.c_str()) == 0);
+
+  const std::string batch_reads = "/tmp/navigamer_query_index_batch_reads.fq";
+  {
+    std::ofstream reads_out(batch_reads);
+    assert(reads_out.good());
+    reads_out << "@read0\nACGTACGTACGT\n+\nIIIIIIIIIIII\n";
+    reads_out << "@read1\nTTTTTTTTTTTT\n+\nIIIIIIIIIIII\n";
+  }
+  const std::string batch_out = "/tmp/navigamer_query_index_batch.tsv";
+  const std::string batch_trace =
+      "/tmp/navigamer_query_index_batch_trace.tsv";
+  std::remove(batch_out.c_str());
+  std::remove(batch_trace.c_str());
+  const std::string batch_command =
+      "./navigamer query-index-batch --index " + index_path +
+      " --reads " + batch_reads +
+      " --tolerance 0 --search-prefetch on --path-trace-out " +
+      batch_trace + " --out " + batch_out +
+      " >/tmp/navigamer_query_index_batch.stdout "
+      "2>/tmp/navigamer_query_index_batch.stderr";
+  assert(std::system(batch_command.c_str()) == 0);
+  std::ifstream batch_in(batch_out);
+  assert(batch_in.good());
+  std::string batch_header;
+  std::getline(batch_in, batch_header);
+  assert(batch_header.find("query_id\thit_id") == 0);
+  assert(batch_header.find("search_prefetch_enabled") != std::string::npos);
+  assert(batch_header.find("query_path_class") != std::string::npos);
+  assert(batch_header.find("path_contained_step_count") != std::string::npos);
+  assert(batch_header.find("path_overlap_step_count") != std::string::npos);
+  assert(batch_header.find("path_uncovered_step_count") != std::string::npos);
+  std::string batch_row;
+  bool saw_read0 = false;
+  bool saw_read1 = false;
+  while (std::getline(batch_in, batch_row)) {
+    if (batch_row.find("read0\t") == 0) saw_read0 = true;
+    if (batch_row.find("read1\t") == 0) saw_read1 = true;
+    assert(batch_row.find("\ttrue\t") != std::string::npos);
+  }
+  assert(saw_read0);
+  assert(saw_read1);
+
+  std::ifstream trace_in(batch_trace);
+  assert(trace_in.good());
+  std::string trace_header_line;
+  std::getline(trace_in, trace_header_line);
+  const auto trace_header = split_tsv_line(trace_header_line);
+  std::map<std::string, size_t> trace_column;
+  for (size_t i = 0; i < trace_header.size(); ++i) {
+    trace_column[trace_header[i]] = i;
+  }
+  for (const std::string& required : {
+           "query_id",
+           "query_ordinal",
+           "world_visit_count",
+           "leaf_visit_count",
+           "prev_world_jaccard",
+           "prev_leaf_jaccard",
+           "world_path",
+           "leaf_path",
+       }) {
+    assert(trace_column.count(required) == 1);
+  }
+  std::string trace_row0;
+  std::string trace_row1;
+  assert(static_cast<bool>(std::getline(trace_in, trace_row0)));
+  assert(static_cast<bool>(std::getline(trace_in, trace_row1)));
+  const auto trace0 = split_tsv_line(trace_row0);
+  const auto trace1 = split_tsv_line(trace_row1);
+  assert(trace0[trace_column.at("query_id")] == "read0");
+  assert(trace0[trace_column.at("query_ordinal")] == "0");
+  assert(trace1[trace_column.at("query_id")] == "read1");
+  assert(trace1[trace_column.at("query_ordinal")] == "1");
+  assert(trace0[trace_column.at("prev_world_jaccard")] == "NA");
+  assert(trace1[trace_column.at("prev_world_jaccard")] != "NA");
+  assert(std::stoull(trace0[trace_column.at("world_visit_count")]) > 0);
+  assert(std::stoull(trace1[trace_column.at("world_visit_count")]) > 0);
+
+  const std::string layer_out = "/tmp/navigamer_layer_radius_smoke.csv";
+  std::remove(layer_out.c_str());
+  const std::string layer_command =
+      "./navigamer layer-radius-experiment "
+      "--ref ACGTACGTACGTACGTACGTACGTACGTACGT "
+      "--length 8 --stride 4 --tolerance 1 --query-edits 1 "
+      "--queries-per-cell 2 --L-values 2 --r-leaf-values 2 "
+      "--alpha-values 0.5 --out " + layer_out +
+      " >/tmp/navigamer_layer_radius_smoke.stdout "
+      "2>/tmp/navigamer_layer_radius_smoke.stderr";
+  assert(std::system(layer_command.c_str()) == 0);
+  std::ifstream layer_in(layer_out);
+  assert(layer_in.good());
+  std::string layer_header_line;
+  std::getline(layer_in, layer_header_line);
+  const auto layer_header = split_csv_line(layer_header_line);
+  std::map<std::string, size_t> layer_column;
+  for (size_t i = 0; i < layer_header.size(); ++i) {
+    layer_column[layer_header[i]] = i;
+  }
+  for (const std::string& required : {
+           "source_id",
+           "result_count",
+           "source_recovered",
+           "no_fn",
+       }) {
+    assert(layer_column.count(required) == 1);
+  }
+  std::string layer_row_line;
+  assert(static_cast<bool>(std::getline(layer_in, layer_row_line)));
+  const auto layer_row = split_csv_line(layer_row_line);
+  assert(layer_row.size() == layer_header.size());
+  assert(layer_row[layer_column.at("source_recovered")] == "1");
+  assert(layer_row[layer_column.at("no_fn")] == "1");
 
   const std::string reject_command =
       "./navigamer build-scale "

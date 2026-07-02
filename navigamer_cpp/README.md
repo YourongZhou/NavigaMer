@@ -22,6 +22,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer build-scale --ref <fasta|sequence> --window 250 --stride 1 --prefix-lengths 50000 --out build_scale.csv [--index index.navidx] [same primary-layer flags]
 ./navigamer query  --reads <fastq|sequence> --query <sequence> [--index index.navidx] [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer query-index --index index.navidx --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
+./navigamer query-index-batch --index index.navidx --reads <fastq> [--tolerance 2] [--out out.tsv] [--path-trace-out trace.tsv]
 ./navigamer run    --ref <fasta|sequence> --reads <fastq|sequence> [--tolerance 2] [--out out.tsv]
 ./navigamer map150 --ref <fasta|sequence> --reads <fastq|sequence> --tolerance <N> --out out.tsv [--locator refpos|seqan]
 ./navigamer benchmark --ref <fasta> --reads <fastq> [--tolerance 2] [--window 200] [--stride 1] [--out out.tsv]
@@ -45,6 +46,7 @@ They also accept `--visited-mode string|epoch` (default `epoch`),
 `--simd-mode auto|scalar|avx2|avx512` (default `auto`),
 `--distance-mode dp|myers|edlib|auto` (default `myers`),
 `--build-distance-mode dp|edlib|auto` (default `edlib`),
+`--search-prefetch off|on` (default `off`),
 `--search-qgram-prefilter off|on` (default `off`), and `--search-qgram-q N`
 (default `5`). `string` keeps the legacy per-query string visited set for
 regression comparisons; `epoch` uses integer node IDs and a reused epoch array.

@@ -40,6 +40,7 @@ Used by all pipelines that build the index:
 | `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
 | `--simd-mode` | `auto` | Flat child-MBB and leaf-beacon filter backend: `auto`, `scalar`, `avx2`, or `avx512`; unsupported SIMD falls back to scalar |
 | `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or conservative `auto` (currently DP) |
+| `--search-prefetch` | `off` | Best-effort adaptive traversal prefetch hints: `off` or `on`; affects only memory-access hints, not pruning or verification semantics |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 | `--query-profile` | `0` | Enable (`1`) or disable (`0`) per-query profiling timers in adaptive search; counters remain available either way |
@@ -300,6 +301,30 @@ reuse-or-rebuild behavior.
 | ---- | ------- | ----------- |
 | `--tolerance` | `2` | Max edit distance |
 | `--mode` | `adaptive` | `adaptive` \| `greedy` \| `exhaustive` |
+
+### `query-index-batch`
+
+Loads one persisted index and searches every record in `--reads` without
+reloading or rebuilding the index between queries. This is the warm-load batch
+entry point used for source-sorted, duplicated-read, and near-repeat locality
+experiments. It currently supports `--mode adaptive` only; every emitted hit is
+still produced by final bounded exact edit-distance verification.
+
+**Required:** `--index`, `--reads`, `--out`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--tolerance` | `2` | Max edit distance |
+| `--mode` | `adaptive` | Currently only `adaptive` is accepted |
+| `--out` | required | Per-query hit/stat TSV |
+| `--path-trace-out` | *(none)* | Optional locality trace TSV with world/leaf paths and adjacent-query overlap summaries |
+
+The main TSV includes query latency, result counts, adaptive work counters,
+`search_prefetch_enabled`, and path-class counters such as
+`query_path_class`, `path_contained_step_count`, `path_overlap_step_count`, and
+`path_uncovered_step_count`. The optional trace TSV records world node IDs
+evaluated and leaf sequence IDs exactly verified for each input query so batch
+ordering and reuse can be audited without changing query results.
 
 ### `locality-benchmark` / `query-locality-benchmark`
 
