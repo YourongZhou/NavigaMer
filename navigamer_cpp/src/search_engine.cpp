@@ -634,69 +634,6 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
     }
   }
 
-  if (config_.safe_child_router_enabled &&
-      !safe_child_router_mode_is_mbb(config_.safe_child_router_mode)) {
-    const auto build_start = std::chrono::steady_clock::now();
-    RangeJoinConfig safe_child_config;
-    safe_child_config.min_seed_len =
-        std::max(1, config_.safe_child_router_min_seed_len);
-    safe_child_config.max_seed_len = 20;
-    safe_child_config.qgram_q =
-        std::max(1, config_.router_hint_qgram_q > 0
-                         ? config_.router_hint_qgram_q
-                         : config_.search_qgram_q);
-    safe_child_config.candidate_mode =
-        parse_safe_child_router_mode(config_.safe_child_router_mode);
-    safe_child_config.auto_pigeonhole_max_candidates =
-        config_.safe_child_router_max_candidates;
-    safe_child_config.auto_hybrid_on_large_candidates = true;
-
-    std::vector<int> seed_lengths;
-    for (int seed = safe_child_config.min_seed_len;
-         seed <= safe_child_config.max_seed_len; ++seed) {
-      seed_lengths.push_back(seed);
-    }
-
-    for (const auto& layer : index_.primary_layers()) {
-      for (const auto& node : layer) {
-        if (!node || node->child_nodes.size() < config_.safe_child_router_min_fanout) {
-          continue;
-        }
-        ParentSafeChildRouterIndex parent_index;
-        parent_index.child_count = node->child_nodes.size();
-        std::map<int, std::vector<RangeJoinItem>> items_by_radius;
-        bool usable = true;
-        for (size_t child_idx = 0; child_idx < node->child_nodes.size(); ++child_idx) {
-          const auto& child = node->child_nodes[child_idx];
-          if (!child || !child->center_ptr) {
-            usable = false;
-            break;
-          }
-          parent_index.max_child_radius =
-              std::max(parent_index.max_child_radius, child->radius);
-          items_by_radius[child->radius].push_back({child_idx, child->center_ptr->seq});
-        }
-        if (!usable || items_by_radius.empty()) continue;
-        for (auto& [radius, items] : items_by_radius) {
-          ParentSafeChildRouterIndex::RadiusBucket bucket;
-          bucket.radius = radius;
-          bucket.range_index = ExactRangeJoinIndex(safe_child_config);
-          bucket.range_index.build(items);
-          if (safe_child_config.candidate_mode != RangeCandidateMode::FullScan) {
-            bucket.range_index.prepare_seed_lengths(seed_lengths);
-          }
-          parent_index.radius_buckets.push_back(std::move(bucket));
-        }
-        parent_safe_child_router_indexes_.emplace(
-            node->node_id, std::move(parent_index));
-      }
-    }
-    safe_child_router_build_ms_ =
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - build_start)
-            .count();
-  }
-
   if (!config_.router_hint_enabled) return;
 
   RangeJoinConfig router_index_config;
@@ -923,6 +860,80 @@ BioGeometrySearchEngine::get_mbb_surviving_children(
   }
 }
 
+const BioGeometrySearchEngine::ParentSafeChildRouterIndex*
+BioGeometrySearchEngine::parent_safe_child_router_index_for(
+    const std::shared_ptr<WorldNode>& node,
+    SearchStats& stats) const {
+  if (!node || config_.safe_child_router_mode == "full-fallback" ||
+      safe_child_router_mode_is_mbb(config_.safe_child_router_mode)) {
+    return nullptr;
+  }
+
+  std::lock_guard<std::mutex> lock(safe_child_router_mutex_);
+  auto existing = parent_safe_child_router_indexes_.find(node->node_id);
+  if (existing != parent_safe_child_router_indexes_.end()) {
+    return &existing->second;
+  }
+
+  const auto build_start = std::chrono::steady_clock::now();
+  ParentSafeChildRouterIndex parent_index;
+  parent_index.child_count = node->child_nodes.size();
+
+  RangeJoinConfig safe_child_config;
+  safe_child_config.min_seed_len =
+      std::max(1, config_.safe_child_router_min_seed_len);
+  safe_child_config.max_seed_len = 20;
+  safe_child_config.qgram_q =
+      std::max(1, config_.router_hint_qgram_q > 0
+                       ? config_.router_hint_qgram_q
+                       : config_.search_qgram_q);
+  safe_child_config.candidate_mode =
+      parse_safe_child_router_mode(config_.safe_child_router_mode);
+  safe_child_config.auto_pigeonhole_max_candidates =
+      config_.safe_child_router_max_candidates;
+  safe_child_config.auto_hybrid_on_large_candidates = true;
+
+  std::vector<int> seed_lengths;
+  for (int seed = safe_child_config.min_seed_len;
+       seed <= safe_child_config.max_seed_len; ++seed) {
+    seed_lengths.push_back(seed);
+  }
+
+  std::map<int, std::vector<RangeJoinItem>> items_by_radius;
+  bool usable = true;
+  for (size_t child_idx = 0; child_idx < node->child_nodes.size(); ++child_idx) {
+    const auto& child = node->child_nodes[child_idx];
+    if (!child || !child->center_ptr) {
+      usable = false;
+      break;
+    }
+    parent_index.max_child_radius =
+        std::max(parent_index.max_child_radius, child->radius);
+    items_by_radius[child->radius].push_back({child_idx, child->center_ptr->seq});
+  }
+
+  if (usable) {
+    for (auto& [radius, items] : items_by_radius) {
+      ParentSafeChildRouterIndex::RadiusBucket bucket;
+      bucket.radius = radius;
+      bucket.range_index = ExactRangeJoinIndex(safe_child_config);
+      bucket.range_index.build(items);
+      if (safe_child_config.candidate_mode != RangeCandidateMode::FullScan) {
+        bucket.range_index.prepare_seed_lengths(seed_lengths);
+      }
+      parent_index.radius_buckets.push_back(std::move(bucket));
+    }
+  }
+
+  stats.safe_child_router_build_ms +=
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - build_start)
+          .count();
+  auto inserted = parent_safe_child_router_indexes_.emplace(
+      node->node_id, std::move(parent_index));
+  return &inserted.first->second;
+}
+
 std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices(
     const std::shared_ptr<WorldNode>& node,
     const BioSequence& query_seq,
@@ -1082,10 +1093,10 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
     return accept_mbb_candidates();
   }
 
-  auto index_it = parent_safe_child_router_indexes_.find(node->node_id);
-  if (index_it == parent_safe_child_router_indexes_.end() ||
-      index_it->second.child_count != child_count ||
-      index_it->second.radius_buckets.empty() ||
+  const auto* parent_index = parent_safe_child_router_index_for(node, stats);
+  if (!parent_index ||
+      parent_index->child_count != child_count ||
+      parent_index->radius_buckets.empty() ||
       config_.safe_child_router_mode == "full-fallback") {
     stats.child_count_before_router += child_count;
     stats.children_actually_processed += child_count;
@@ -1099,7 +1110,7 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
   stats.child_count_before_router += child_count;
   RangeJoinQueryWorkspace workspace;
   std::vector<size_t> candidates;
-  for (const auto& bucket : index_it->second.radius_buckets) {
+  for (const auto& bucket : parent_index->radius_buckets) {
     const int tau = tolerance + bucket.radius;
     auto result = bucket.range_index.query(query_seq.seq, tau, &workspace);
     if (result.used_full_scan) {

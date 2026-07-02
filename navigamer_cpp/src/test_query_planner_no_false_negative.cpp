@@ -103,6 +103,7 @@ int main() {
     assert(low_stats.local_router_invoked_count == 0);
     assert(low_stats.best_first_invoked_count == 0);
     assert(low_stats.safe_child_router_invoked_count == 0);
+    assert(low_stats.safe_child_router_build_ms == 0.0);
 
     assert(high_stats.planner_invoked_count == 1);
     assert(high_stats.planner_strategy_direct_qgram_count == 0);

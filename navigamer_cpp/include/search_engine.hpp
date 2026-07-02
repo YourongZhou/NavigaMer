@@ -6,6 +6,8 @@
 #include "simd_mbb_filter.hpp"
 #include "structure.hpp"
 #include "tools.hpp"
+#include <map>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -319,8 +321,9 @@ class BioGeometrySearchEngine {
       world_minimizer_signatures_;
   std::unordered_map<std::string, ParentRouterHintIndex>
       parent_router_hint_indexes_;
-  std::unordered_map<std::string, ParentSafeChildRouterIndex>
+  mutable std::map<std::string, ParentSafeChildRouterIndex>
       parent_safe_child_router_indexes_;
+  mutable std::mutex safe_child_router_mutex_;
   double safe_child_router_build_ms_ = 0.0;
 
   bool mbb_prunable_row(const std::vector<MBB>& row, const std::vector<int>& V_Q,
@@ -349,6 +352,9 @@ class BioGeometrySearchEngine {
       int tolerance,
       SearchStats& stats,
       bool* used_router) const;
+  const ParentSafeChildRouterIndex* parent_safe_child_router_index_for(
+      const std::shared_ptr<WorldNode>& node,
+      SearchStats& stats) const;
   std::vector<std::shared_ptr<WorldNode>> scan_mbb_surviving_child_indices(
       const std::shared_ptr<WorldNode>& node,
       const std::vector<size_t>& child_indices,
