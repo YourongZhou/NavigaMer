@@ -25,11 +25,18 @@ __pycache__/
 
 # navigamer_cpp build products
 navigamer_cpp/navigamer
+navigamer_cpp/test_*
 navigamer_cpp/test_recall
 navigamer_cpp/test_distance_bound
+navigamer_cpp/src/*.o
 navigamer_cpp/src/*.d
 navigamer_cpp/src/test_*.o
+navigamer_cpp/third_party/edlib/src/*.o
+navigamer_cpp/third_party/edlib/src/*.d
 navigamer_cpp/build/
+navigamer_cpp/.tmp_experiments/
+navigamer_cpp/build_scale*.csv
+.tmp_experiments/
 
 # VSCode settings
 .vscode/

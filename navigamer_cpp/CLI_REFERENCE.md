@@ -42,6 +42,31 @@ Used by all pipelines that build the index:
 | `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or conservative `auto` (currently DP) |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
+| `--query-profile` | `0` | Enable (`1`) or disable (`0`) per-query profiling timers in adaptive search; counters remain available either way |
+| `--path-reuse` | `0` | Enable (`1`) or disable (`0`) thread-local warm-start caches and query-derived batch scheduling hints |
+| `--router-hints` | `0` | Enable (`1`) or disable (`0`) q-gram/minimizer/pigeonhole router hints before local-router / best-first ordering |
+| `--router-hint-qgram-q` | `5` | Router-hint q-gram length used for cached child-center signatures and parent-local range hints |
+| `--router-hint-minimizer-k` | `4` | Router-hint minimizer k-mer length |
+| `--router-hint-minimizer-w` | `8` | Router-hint minimizer window length in bases; must be at least `k` to produce a usable sketch |
+| `--local-router` | `0` | Enable (`1`) or disable (`0`) parent-local child routing hints after safe MBB filtering |
+| `--local-router-max-anchors` | `4` | Maximum parent-local beacon dimensions used by the router score |
+| `--local-router-max-children` | `64` | Reporting threshold for the router's top-k shortlist counters; `0` means all routed children |
+| `--local-router-score` | `anchor-envelope` | Router scoring mode; current implementation supports only `anchor-envelope` |
+| `--best-first` | `0` | Enable (`1`) or disable (`0`) safe best-first ordering of post-MBB child worlds |
+| `--safe-child-router` | `0` | Enable (`1`) or disable (`0`) parent-local safe child candidate generation before MBB filtering |
+| `--safe-child-router-min-fanout` | `64` | Minimum parent child fanout before building/querying the safe child router |
+| `--safe-child-router-max-candidates` | `4096` | Maximum candidate children accepted from the router before full enumeration fallback |
+| `--safe-child-router-max-ratio` | `0.5` | Maximum candidate/child ratio accepted from the router before full enumeration fallback |
+| `--safe-child-router-min-seed-len` | `8` | Minimum seed length for the parent-local range helper |
+| `--safe-child-router-mode` | `auto` | Candidate helper mode: `auto`, `pigeonhole`, `qgram`, `mbb`, or `full-fallback` |
+| `--safe-child-router-validate` | `0` | Debug validation mode; exact-checks possible children and throws if a routed candidate set misses one |
+| `--query-planner` | `0` | Enable (`1`) or disable (`0`) the adaptive query planner that records per-query routing strategy and may safely bypass expensive router stack work on low-fanout indexes |
+| `--planner-direct-verify-max-candidates` | `32` | Reserved direct-verify planning threshold; currently reported in profile JSON but direct q-gram verification is not selected |
+| `--planner-router-min-fanout` | `64` | Minimum observed primary child fanout before the planner keeps router-hint/local-router/best-first/q-gram ordering work enabled |
+| `--planner-safe-child-router-min-fanout` | `64` | Minimum observed primary child fanout before the planner keeps safe-child-router work enabled |
+| `--planner-allow-direct-qgram-verify` | `1` | Reserved switch for future direct q-gram verification planning; current implementation remains exact traversal only |
+| `--proximal-oracle` | `0` | Enable (`1`) or disable (`0`) query-benchmark proximal-anchor oracle diagnostics; instrumentation only |
+| `--proximal-oracle-k` | `1,2,4` | Comma-separated k values recorded in query-benchmark configuration; TSV currently emits k1/k2/k4 envelope columns |
 | `--index` | *(none)* | Persisted NavigaMer index path for `build`, single-prefix `build-scale`, `query`, and `query-index` |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
@@ -102,6 +127,88 @@ change coarsest-layer search, strict containment, overlap traversal, leaf
 refinement, construction rebinding, or leaf attachment. World-center
 signatures are cached per search engine. Non-ACGT centers/queries, unsupported
 q values, and missing signatures conservatively fall back to no pruning.
+
+Adaptive profiling (`--query-profile 1`) records timing buckets such as
+`query_total_ms`, `anchor_distance_ms`, `mbb_filter_ms`,
+`center_distance_ms`, `leaf_collect_ms`, `leaf_verify_ms`, and
+`result_dedup_ms`, plus counters such as world access, anchor distance calls,
+center distance calls, and raw candidates. `query`, `benchmark`, and
+`query-benchmark` keep the same result semantics; profiling changes only
+instrumentation output.
+
+Adaptive path reuse (`--path-reuse 1`) keeps thread-local warm-start caches for
+exact parent-local anchor-distance vectors on repeated queries and cached child
+shortlists keyed by cheap query-derived fingerprints. It records
+`path_reuse_attempt_count`, `path_reuse_hit_count`,
+`anchor_cache_hit_count`, and `child_shortlist_reuse_hit_count`. These caches
+affect only ordering or exact memoization, never become a sole pruning reason,
+and batch-oriented commands group queries by the same query-derived fingerprint
+while preserving emitted output order.
+
+Adaptive router hints (`--router-hints 1`) run after safe MBB survivor
+generation and before local-router / best-first ordering. The current PR3 path
+builds parent-local child-center range hints with q-gram/pigeonhole candidate
+supersets, then uses q-gram and minimizer similarity only to reprioritize the
+survivor list. Query, benchmark, and query-benchmark output add
+`router_hint_invoked_count`, `router_qgram_ranked_count`,
+`router_minimizer_ranked_count`, `router_pigeonhole_query_count`,
+`router_candidate_count`, `router_candidate_hit_count`, and
+`router_fallback_count`. These counters are advisory only: all non-predicted
+children still remain in the exact fallback order.
+
+Adaptive local routing (`--local-router 1`) ranks MBB-surviving child worlds by
+their parent-local beacon-envelope fit before bounded center verification.
+`--local-router-max-anchors` limits how many beacon dimensions contribute to the
+score, and `--local-router-max-children` controls the reported top-k shortlist
+size without suppressing fallback traversal of the remaining children. Query and
+benchmark output add local-router invocation, shortlist, and fallback counters.
+
+Adaptive safe child routing (`--safe-child-router 1`) runs before child MBB
+filtering for sufficiently high-fanout parents. It builds a parent-local
+child-center range index and queries it at `tolerance + max_child_radius`,
+which is a safe superset for any child satisfying
+`d(query, child.center) <= tolerance + child.radius`. If the candidate set is
+too broad, the range helper falls back to full scan, or validation is requested
+and detects a miss, traversal falls back to the original full child
+enumeration. Returned candidates still go through MBB filtering, bounded center
+distance, and exact leaf verification. Counters include
+`safe_child_router_invoked_count`, `safe_child_router_fallback_count`,
+`safe_child_router_candidate_count`, and
+`safe_child_router_pruned_by_not_candidate_count`.
+
+Adaptive query planning (`--query-planner 1`) runs once per adaptive query and
+records which routing strategy the query used. The current planner is
+conservative: on low-fanout indexes it disables optional q-gram/router ordering
+work for that query, and on high-fanout indexes it keeps the selected optimized
+stack active. It never bypasses MBB filtering, bounded center verification, or
+final exact leaf verification. Query, benchmark, and query-benchmark output
+include `planner_invoked_count`, `planner_strategy_baseline_count`,
+`planner_strategy_router_count`, `planner_strategy_safe_child_router_count`,
+`planner_strategy_path_reuse_count`, `planner_fallback_count`, and
+`planner_decision_ms`.
+
+Proximal-anchor oracle diagnostics (`--proximal-oracle 1`) are available for
+`query-benchmark`. They record actual anchor-source nodes, traversed frontier
+nodes, true-path anchors implied by brute-force hits, global nearest anchors,
+and deterministic random anchors, then report exact edit-distance envelopes.
+This path only adds diagnostic output; it does not change traversal, pruning, or
+result verification.
+
+Adaptive safe best-first ordering (`--best-first 1`) then reprioritizes those
+post-MBB child worlds using conservative parent-local MBB lower bounds with a
+tighter-envelope tie-break before bounded center verification. It records
+`best_first_invoked_count`, `best_first_bound_candidate_count`,
+`child_safe_bound_pruned_count`, `frontier_max_size`, and
+`frontier_total_pushed`. Any pruning from this path must remain a conservative
+`SafeBound`.
+
+Query-side safety contract:
+
+- `RouterHint`: may be incomplete or wrong and must never be the sole pruning reason.
+- `SafeCandidateRouter`: may reduce child enumeration only when it returns a
+  mathematically safe candidate superset; otherwise it must full-fallback.
+- `SafeBound`: may prune only when the bound is conservative and recall-safe.
+- `ExactVerifier`: only exact edit distance `<= tolerance` may emit final hits.
 
 ## I/O conventions (`io_utils`)
 
@@ -194,6 +301,82 @@ reuse-or-rebuild behavior.
 | `--tolerance` | `2` | Max edit distance |
 | `--mode` | `adaptive` | `adaptive` \| `greedy` \| `exhaustive` |
 
+### `locality-benchmark` / `query-locality-benchmark`
+
+Loads one persisted NavigaMer index once, generates clustered query streams from
+`--ref`, and reports load time, engine initialization time, and query-only
+latency separately. It emits `same_template`, `nearby_windows`, and
+`random_windows` datasets for `baseline`, `path_reuse`, and `optimized`
+profiles by default. `query-locality-benchmark` is a compatibility alias with
+the same flags. Use this instead of repeated `query-index` calls when measuring
+batch locality or prefetch/path-reuse effects, because repeated `query-index`
+includes index load time on every query. The TSV also reports primary-DAG
+fanout distribution and router/path-reuse invocation ratios, so low-fanout
+sanity runs can show that router stages were gated while high-fanout runs can
+show whether local routing and safe child routing actually fired.
+
+**Required:** `--index`, `--ref`, `--out`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--query-count` | `256` | Queries per locality dataset |
+| `--query-length` | `250` | Generated query length |
+| `--query-edits` | `--tolerance` | Substitution edits per generated query |
+| `--tolerance` | `2` | Search edit-distance threshold |
+| `--seed` | `42` | Deterministic query generation seed |
+| `--scenarios` / `--scenario` | *(unset)* | Comma-separated scenario presets: `low-fanout`, `high-fanout`, `repeat`, `batch-locality`, `oracle`, or `all`; when set, these override `--locality-datasets` |
+| `--locality-profiles` | `baseline,path_reuse,optimized` | Comma-separated profiles to run; use `baseline,path_reuse` to isolate path reuse before testing the full optimized stack |
+| `--locality-datasets` | `same_template,nearby_windows,random_windows` | Comma-separated query streams; use `same_template,nearby_windows` for larger clustered-query runs |
+| `--batch-schedules` | `original` | Comma-separated internal query schedules: `original`, `random`, `minimizer`, `qgram-signature`, `router-signature`, or `source-oracle`; `source-oracle` is an upper-bound diagnostic only |
+| `--query-fastq-out` | *(unset)* | Optional FASTQ export of the generated locality queries, with `source_pos=` in each read header, for matched external baseline runs |
+
+Scenario presets are implemented as deterministic query-stream selections:
+`low-fanout` maps to random windows, `high-fanout` maps to nearby windows for
+router-opportunity measurement on a high-fanout index, `repeat` cycles through
+nearby repeated-source windows, `batch-locality` emits clustered batches, and
+`oracle` emits source-position-aware windows intended for comparison with
+`source-oracle` scheduling. The benchmark still reports the real fanout
+distribution from the loaded index; choosing `high-fanout` does not fabricate a
+high-fanout index.
+
+Output columns include load/init/query timing, result and mismatch counts,
+mean/p50/p95 query latency, mean world/center/leaf work counters,
+`mean_fanout`, `p50_fanout`, `p95_fanout`, `max_fanout`,
+`router_invoked_ratio`, `local_router_invoked_ratio`,
+`safe_child_router_invoked_ratio`, `path_reuse_hit_ratio`, and average
+router/path-reuse counters. Aggregate locality reuse columns include
+`anchor_cache_hit_count`, `child_shortlist_cache_hit_count`,
+`safe_child_candidate_cache_hit_count`, and
+`productive_world_reuse_hit_count`. `batch_schedule_mode` records the schedule
+used for that row. The optimized locality profile enables deterministic path reuse while
+leaving router hints, safe child routing, local routing, and best-first ordering
+off by default; persisted locality runs already use exact rect MBB filtering, so
+the heavier router stages are measured through explicit query and
+query-benchmark flags instead of the default locality optimized profile.
+
+### `query-locality-report`
+
+Builds or reuses a persisted index, runs the same locality benchmark matrix,
+and writes a small report bundle:
+
+- `summary.tsv`: the locality-benchmark TSV
+- `summary.json`: machine-readable rows and gate status
+- `report.md`: compact Markdown table for review
+
+If `--index` is omitted, the command builds reference windows from `--ref` and
+saves `query_locality.navidx` in `--out-dir` before running query-only
+measurement. `source-oracle` batch scheduling remains an upper-bound diagnostic
+only.
+
+**Required:** `--ref`, `--out-dir`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--index` | *(none)* | Optional persisted index to reuse instead of building one in the report directory |
+| `--out-dir` | required | Directory for `summary.tsv`, `summary.json`, `report.md`, and an auto-built `query_locality.navidx` |
+| `--reference-subset-length` | `0` | Prefix length used when auto-building the report index; `0` uses the full input |
+| `--window`, `--stride`, `--query-count`, `--query-length`, `--query-edits`, `--tolerance`, `--seed`, `--scenarios`, `--locality-profiles`, `--locality-datasets`, `--batch-schedules` | see `locality-benchmark` | Passed through to the locality benchmark |
+
 ### `run`
 
 Full pipeline: load ref + reads, build, **adaptive** search for every read, optional TSV.
@@ -245,10 +428,15 @@ classes (`random_region`, `ordinary_region`, `low_complexity_region`,
 
 - baseline: fixed `scan` MBB filtering, legacy `string` visited mode,
   `original` graph traversal, scalar MBB filtering, `dp` distance mode, and
-  search q-gram disabled
+  search q-gram disabled, `best-first` disabled
 - optimized: `--mbb-filter-mode`, `--visited-mode`, `--graph-view`,
-  `--simd-mode`, `--distance-mode`, `--search-qgram-prefilter`, and
-  `--search-qgram-q`
+  `--simd-mode`, `--distance-mode`, `--search-qgram-prefilter`,
+  `--search-qgram-q`, `--router-hints`, `--local-router`,
+  `--safe-child-router`, `--path-reuse`, `--best-first`, and
+  `--query-planner`
+- optional ablations: with `--query-benchmark-ablations 1`, one additional
+  profile per enabled query-side optimization stage that disables only that
+  stage inside the optimized stack
 - exact brute-force result IDs computed before timing
 
 **Required:** `--ref`, `--out`, `--summary-out`, `--json-out`
@@ -266,6 +454,9 @@ classes (`random_region`, `ordinary_region`, `low_complexity_region`,
 | `--warmup-iterations` | `2` | Untimed warmups per query/profile |
 | `--measured-iterations` | `10` | Timed warm samples per query/profile |
 | `--cold-cache-bytes` | `268435456` | Best-effort eviction buffer touched before each cold sample; `0` disables it |
+| `--query-benchmark-ablations` | `0` | Enable (`1`) or disable (`0`) derived ablation profiles such as `ablation_no_search_qgram`, `ablation_no_router_hints`, `ablation_no_safe_child_router`, `ablation_no_path_reuse`, or `ablation_no_query_planner` when those stages are enabled in the optimized profile |
+| `--proximal-oracle` | `0` | Enable (`1`) or disable (`0`) proximal-anchor oracle diagnostics in detail/summary TSV and JSON |
+| `--proximal-oracle-k` | `1,2,4` | Positive comma-separated k values for proximal-oracle envelope configuration; detail/summary TSV emits k1/k2/k4 |
 | `--out` | required | Detailed per-sample TSV |
 | `--summary-out` | required | Per-class/profile plus `all` aggregate TSV |
 | `--json-out` | required | Configuration, build, memory, aggregate, mismatch, and gate JSON |
@@ -275,7 +466,12 @@ repeated executions and exactly match between profiles and brute force. The
 command writes all outputs before returning and exits `0` when the gate passes,
 `2` on a result/no-FN mismatch, and `1` on configuration or runtime errors.
 Current/peak RSS telemetry is best effort. Candidate-set comparison and
-per-query allocation counting are explicitly reported as `unavailable`.
+per-query allocation counting are explicitly reported as `unavailable`. Summary
+rows also include baseline-relative columns such as
+`cold_avg_speedup_vs_baseline`, `warm_avg_speedup_vs_baseline`,
+`avg_world_access_ratio_vs_baseline`,
+`avg_center_distance_ratio_vs_baseline`, and
+`avg_raw_candidate_ratio_vs_baseline`.
 
 ### `boundary`
 
@@ -330,7 +526,10 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `mbb_filter_mode`, `mbb_scan_child_checks`, `mbb_rect_index_queries`,
 `mbb_rect_candidate_children`, `mbb_rect_fallback_count`,
 `mbb_surviving_child_count`, `mbb_scalar_checks`, `mbb_simd_batches`,
-`mbb_simd_fallbacks`, `center_distance_calls_after_mbb`,
+`mbb_simd_fallbacks`, `best_first_invoked_count`,
+`best_first_reordered_count`, `best_first_bound_candidate_count`,
+`child_safe_bound_pruned_count`, `center_distance_calls_after_mbb`,
+`frontier_max_size`, `frontier_total_pushed`,
 `leaf_beacon_scalar_checks`, `leaf_beacon_simd_batches`,
 `leaf_beacon_simd_fallbacks`,
 `search_qgram_prefilter_enabled`, `search_qgram_q`,
@@ -342,20 +541,40 @@ Each primary-layer radius schedule is generated geometrically from `(L, r_leaf, 
 `avg_center_distance_calls_per_query`, `query_time_ms`
 
 **`query-benchmark` detail:**  
-`query_id`, `query_class`, `profile`, `sample_kind`, `iteration`,
+`query_id`, `query_class`, `profile`, `profile_rank`, `sample_kind`, `iteration`,
 `first_profile`, `latency_ms`, `result_count`, `brute_force_result_count`,
 `result_equal`, `no_fn`, `world_access_count`, `node_access_count`,
 `edge_access_count`, `mbb_checks`, `mbb_survivors`, `mbb_scalar_checks`,
-`mbb_simd_batches`, `mbb_simd_fallbacks`, `qgram_checks`,
+`mbb_simd_batches`, `mbb_simd_fallbacks`, `best_first_invoked_count`,
+`best_first_reordered_count`, `best_first_bound_candidate_count`,
+`child_safe_bound_pruned_count`, `planner_strategy_router_count`,
+`planner_decision_ms`, `qgram_checks`,
 `center_exact_distance_calls`, `leaf_beacon_checks`,
 `leaf_beacon_scalar_checks`, `leaf_beacon_simd_batches`,
-`leaf_beacon_simd_fallbacks`,
+`leaf_beacon_simd_fallbacks`, `frontier_max_size`, `frontier_total_pushed`,
 `leaf_exact_distance_calls`, `visited_checks`, `visited_hits`,
-`candidate_count`, `verified_candidate_count`
+`candidate_count`, `verified_candidate_count`,
+`actual_envelope_k1`, `actual_envelope_k2`, `actual_envelope_k4`,
+`frontier_oracle_envelope_k1`, `frontier_oracle_envelope_k2`,
+`frontier_oracle_envelope_k4`, `true_path_oracle_envelope_k1`,
+`true_path_oracle_envelope_k2`, `true_path_oracle_envelope_k4`,
+`global_oracle_envelope_k1`, `global_oracle_envelope_k2`,
+`global_oracle_envelope_k4`, `random_envelope_k1`, `random_envelope_k2`,
+`random_envelope_k4`, `actual_nearest_anchor_dist`,
+`frontier_oracle_nearest_anchor_dist`,
+`true_path_oracle_nearest_anchor_dist`,
+`global_oracle_nearest_anchor_dist`, `random_nearest_anchor_dist`,
+`global_oracle_gap_vs_actual_k1`, `global_oracle_gap_vs_actual_k2`,
+`global_oracle_gap_vs_actual_k4`, `global_oracle_gap_vs_frontier_k1`,
+`global_oracle_gap_vs_frontier_k2`, `global_oracle_gap_vs_frontier_k4`
 
 The summary TSV reports cold/warm average, p50, p95, and p99 latency; query,
-sample, result, equality-failure, and false-negative totals; and average
-logical counters for each query-class/profile pair plus `all`.
+sample, result, equality-failure, and false-negative totals; baseline-relative
+speedup/work-ratio columns; and average logical counters for each
+query-class/profile pair plus `all`. With `--proximal-oracle 1`, it also
+reports mean actual/frontier/true-path/global/random envelopes for k1/k2/k4 and
+fractions where the global oracle envelope is materially better than actual or
+frontier anchors.
 
 `center_distance_calls_after_mbb` is retained as a compatibility alias for
 `center_distance_calls_before_qgram`. The actual bounded center edit-distance

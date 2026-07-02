@@ -32,6 +32,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
+#include <filesystem>
 #include <omp.h>
 
 namespace {
@@ -46,11 +47,14 @@ void usage(const char* prog) {
             << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " map150 --ref <path|seq> --reads <path|seq> --tolerance <N> --out <tsv> [--mode adaptive] [--locator refpos|seqan] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
-            << "  " << prog << " query-benchmark --ref <fasta|sequence> --out <detail.tsv> --summary-out <summary.tsv> --json-out <summary.json> [--window 200] [--query-length 200] [--tolerance 2]\n"
+            << "  " << prog << " query-benchmark --ref <fasta|sequence> --out <detail.tsv> --summary-out <summary.tsv> --json-out <summary.json> [--window 200] [--query-length 200] [--tolerance 2] [--query-benchmark-ablations 0|1] [--proximal-oracle 0|1] [--proximal-oracle-k 1,2,4]\n"
+            << "  " << prog << " locality-benchmark --index <navidx> --ref <fasta|sequence> --out <summary.tsv> [--query-fastq-out <queries.fq>] [--query-count 256] [--query-length 250] [--query-edits 5] [--tolerance 5] [--scenarios low-fanout,high-fanout,repeat,batch-locality,oracle,all] [--locality-profiles baseline,path_reuse,optimized] [--locality-datasets same_template,nearby_windows,random_windows] [--batch-schedules original,random,minimizer,qgram-signature,router-signature,source-oracle]\n"
+            << "  " << prog << " query-locality-benchmark --index <navidx> --ref <fasta|sequence> --out <summary.tsv> [same flags as locality-benchmark]\n"
+            << "  " << prog << " query-locality-report --ref <fasta|sequence> --out-dir <dir> [--index <navidx>] [--window 250] [--stride 1] [--query-count 256] [--query-length 250] [--query-edits 5] [--tolerance 5] [--scenarios low-fanout,high-fanout,repeat,batch-locality,oracle,all] [--locality-profiles baseline,path_reuse,optimized] [--locality-datasets same_template,nearby_windows,random_windows] [--batch-schedules original,random,minimizer,qgram-signature,router-signature,source-oracle]\n"
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits N] [--queries-per-cell 200] [--stride N | --stride-mode sparse|dense] [--seed 42] [--L-values csv] [--r-leaf-values csv] [--alpha-values csv] [--out <csv>]\n"
             << "Global build flags: [--link-mode full|indexed] [--leaf-attach-mode full|indexed] [--leaf-attach-direction auto|seq-to-world|world-to-seq] [--phase2-qgram-postfilter on|off] [--leaf-qgram-postfilter on|off] [--range-candidate-mode auto|pigeonhole|qgram|hybrid|full] [--qgram-q 5] [--auto-pigeonhole-max-candidates 4096] [--auto-pigeonhole-max-ratio 0.25] [--auto-hybrid-on-large-candidates true] [--range-min-seed-length 8] [--range-max-seed-length 20] [--min-rect-index-fanout 64] [--phase1-metric-min-fanout 64] [--phase1-qgram-min-fanout 64] [--phase1-qgram-max-touched 250000] [--progress-interval-seconds 600]\n"
-            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--distance-mode dp|myers|edlib|auto] [--build-distance-mode dp|edlib|auto] [--search-qgram-prefilter off|on] [--search-qgram-q 5]\n";
+            << "Global adaptive-search flags: [--mbb-filter-mode scan|rect] [--visited-mode string|epoch] [--graph-view original|flat] [--simd-mode auto|scalar|avx2|avx512] [--distance-mode dp|myers|edlib|auto] [--build-distance-mode dp|edlib|auto] [--search-qgram-prefilter off|on] [--search-qgram-q 5] [--query-profile 0|1] [--path-reuse 0|1] [--router-hints 0|1] [--router-hint-qgram-q N] [--router-hint-minimizer-k N] [--router-hint-minimizer-w N] [--local-router 0|1] [--local-router-max-anchors N] [--local-router-max-children N] [--local-router-score anchor-envelope] [--best-first 0|1] [--safe-child-router 0|1] [--safe-child-router-min-fanout N] [--safe-child-router-max-candidates N] [--safe-child-router-max-ratio R] [--safe-child-router-min-seed-len N] [--safe-child-router-mode auto|pigeonhole|qgram|mbb|full-fallback] [--safe-child-router-validate 0|1] [--query-planner 0|1] [--planner-direct-verify-max-candidates N] [--planner-router-min-fanout N] [--planner-safe-child-router-min-fanout N] [--planner-allow-direct-qgram-verify 0|1] [--proximal-oracle 0|1] [--proximal-oracle-k csv]\n";
 }
 
 std::string format_double(double value) {
@@ -109,6 +113,19 @@ std::vector<size_t> parse_size_csv(const std::string& csv,
   return values;
 }
 
+std::vector<std::string> parse_string_csv(const std::string& csv,
+                                          const std::string& flag) {
+  std::vector<std::string> values;
+  std::stringstream ss(csv);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    if (item.empty()) throw std::runtime_error(flag + " contains an empty item");
+    values.push_back(item);
+  }
+  if (values.empty()) throw std::runtime_error(flag + " must not be empty");
+  return values;
+}
+
 size_t parse_positive_size(const std::string& value, const std::string& flag) {
   if (value.empty() || value.front() == '-') {
     throw std::runtime_error(flag + " must be a positive integer");
@@ -145,6 +162,18 @@ bool parse_on_off(const std::string& value, const std::string& flag) {
   throw std::runtime_error(flag + " must be off or on");
 }
 
+bool parse_zero_one(const std::string& value, const std::string& flag) {
+  if (value == "0") return false;
+  if (value == "1") return true;
+  throw std::runtime_error(flag + " must be 0 or 1");
+}
+
+double average_values(const std::vector<double>& values) {
+  if (values.empty()) return 0.0;
+  return std::accumulate(values.begin(), values.end(), 0.0) /
+         static_cast<double>(values.size());
+}
+
 void write_csv(const std::string& output_path,
                const std::vector<std::string>& columns,
                const std::vector<std::vector<std::string>>& rows) {
@@ -179,6 +208,39 @@ std::vector<std::pair<std::string, double>> sorted_descending(
               return left.second > right.second;
             });
   return values;
+}
+
+std::string build_query_batch_key(const std::string& sequence) {
+  constexpr size_t kScheduleQ = 4;
+  if (sequence.size() < kScheduleQ) return "seq:" + sequence;
+  std::vector<std::string> qgrams;
+  qgrams.reserve(sequence.size() - kScheduleQ + 1);
+  for (size_t i = 0; i + kScheduleQ <= sequence.size(); ++i) {
+    qgrams.push_back(sequence.substr(i, kScheduleQ));
+  }
+  std::sort(qgrams.begin(), qgrams.end());
+  qgrams.erase(std::unique(qgrams.begin(), qgrams.end()), qgrams.end());
+  std::ostringstream os;
+  os << "len:" << sequence.size();
+  const size_t limit = std::min<size_t>(8, qgrams.size());
+  for (size_t i = 0; i < limit; ++i) {
+    os << "|" << qgrams[i];
+  }
+  return os.str();
+}
+
+std::vector<size_t> build_scheduled_query_indices(
+    const std::vector<std::shared_ptr<navigamer::BioSequence>>& queries,
+    bool path_reuse_enabled) {
+  std::vector<size_t> indices(queries.size());
+  std::iota(indices.begin(), indices.end(), 0);
+  if (!path_reuse_enabled) return indices;
+  std::stable_sort(indices.begin(), indices.end(),
+                   [&queries](size_t left, size_t right) {
+                     return build_query_batch_key(queries[left]->seq) <
+                            build_query_batch_key(queries[right]->seq);
+                   });
+  return indices;
 }
 
 void print_top_entries(const std::string& title,
@@ -645,6 +707,91 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
     auto [res, st] = engine.search_adaptive(q, tolerance);
     std::cout << "Adaptive hits: " << res.size() << " (dist_calcs=" << st.dist_calc_count
               << " prune_rate=" << st.pruning_rate()
+              << " query_profile_enabled="
+              << (st.query_profile_enabled ? "true" : "false")
+              << " query_total_ms=" << format_double(st.query_total_ms)
+              << " anchor_distance_ms=" << format_double(st.anchor_distance_ms)
+              << " mbb_filter_ms=" << format_double(st.mbb_filter_ms)
+              << " center_distance_ms=" << format_double(st.center_distance_ms)
+              << " leaf_collect_ms=" << format_double(st.leaf_collect_ms)
+              << " leaf_verify_ms=" << format_double(st.leaf_verify_ms)
+              << " result_dedup_ms=" << format_double(st.result_dedup_ms)
+              << " path_reuse_enabled="
+              << (search_config.path_reuse_enabled ? "true" : "false")
+              << " path_reuse_ms=" << format_double(st.path_reuse_ms)
+              << " path_reuse_attempt_count=" << st.path_reuse_attempt_count
+              << " path_reuse_hit_count=" << st.path_reuse_hit_count
+              << " anchor_cache_hit_count=" << st.anchor_cache_hit_count
+              << " child_shortlist_reuse_hit_count="
+              << st.child_shortlist_reuse_hit_count
+              << " router_hint_enabled="
+              << (search_config.router_hint_enabled ? "true" : "false")
+              << " router_hint_invoked_count="
+              << st.router_hint_invoked_count
+              << " router_qgram_ranked_count="
+              << st.router_qgram_ranked_count
+              << " router_minimizer_ranked_count="
+              << st.router_minimizer_ranked_count
+              << " router_pigeonhole_query_count="
+              << st.router_pigeonhole_query_count
+              << " router_candidate_count="
+              << st.router_candidate_count
+              << " router_candidate_hit_count="
+              << st.router_candidate_hit_count
+              << " router_fallback_count="
+              << st.router_fallback_count
+              << " local_router_enabled="
+              << (search_config.local_router_enabled ? "true" : "false")
+              << " local_router_score_mode="
+              << search_config.local_router_score_mode
+              << " local_router_invoked_count="
+              << st.local_router_invoked_count
+              << " local_router_empty_count="
+              << st.local_router_empty_count
+              << " local_router_shortlist_child_count="
+              << st.local_router_shortlist_child_count
+              << " local_router_remaining_child_count="
+              << st.local_router_remaining_child_count
+              << " local_router_fallback_count="
+              << st.local_router_fallback_count
+              << " best_first_enabled="
+              << (search_config.best_first_enabled ? "true" : "false")
+              << " best_first_invoked_count="
+              << st.best_first_invoked_count
+              << " best_first_reordered_count="
+              << st.best_first_reordered_count
+              << " best_first_bound_candidate_count="
+              << st.best_first_bound_candidate_count
+              << " child_safe_bound_pruned_count="
+              << st.child_safe_bound_pruned_count
+              << " safe_child_router_enabled="
+              << (search_config.safe_child_router_enabled ? "true" : "false")
+              << " safe_child_router_invoked_count="
+              << st.safe_child_router_invoked_count
+              << " safe_child_router_skipped_low_fanout_count="
+              << st.safe_child_router_skipped_low_fanout_count
+              << " safe_child_router_fallback_count="
+              << st.safe_child_router_fallback_count
+              << " safe_child_router_candidate_count="
+              << st.safe_child_router_candidate_count
+              << " safe_child_router_pruned_by_not_candidate_count="
+              << st.safe_child_router_pruned_by_not_candidate_count
+              << " safe_child_router_exact_verify_count="
+              << st.safe_child_router_exact_verify_count
+              << " child_count_before_router="
+              << st.child_count_before_router
+              << " post_mbb_survivor_count="
+              << st.post_mbb_survivor_count
+              << " safe_router_candidate_count="
+              << st.safe_router_candidate_count
+              << " candidate_ratio_to_all_children="
+              << format_double(st.candidate_ratio_to_all_children)
+              << " candidate_ratio_to_post_mbb_survivors="
+              << format_double(st.candidate_ratio_to_post_mbb_survivors)
+              << " children_actually_processed="
+              << st.children_actually_processed
+              << " center_checks_saved="
+              << st.center_checks_saved
               << " mbb_filter_mode=" << mbb_filter_mode_name(search_config.mbb_filter_mode)
               << " mbb_scan_child_checks=" << st.mbb_scan_child_checks
               << " mbb_rect_index_queries=" << st.mbb_rect_index_queries
@@ -652,6 +799,8 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
               << " mbb_rect_fallback_count=" << st.mbb_rect_fallback_count
               << " center_distance_calls_after_mbb="
               << st.center_distance_calls_after_mbb
+              << " frontier_max_size=" << st.frontier_max_size
+              << " frontier_total_pushed=" << st.frontier_total_pushed
               << " search_qgram_prefilter_enabled="
               << (st.search_qgram_prefilter_enabled ? "true" : "false")
               << " search_qgram_q=" << st.search_qgram_q
@@ -669,6 +818,10 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
               << " center_distance_calls_after_qgram="
               << st.center_distance_calls_after_qgram
               << " qgram_prune_ratio=" << st.qgram_prune_ratio()
+              << " world_access_count=" << st.world_access_count
+              << " anchor_distance_count=" << st.anchor_distance_count
+              << " center_distance_count=" << st.center_distance_count
+              << " raw_candidate_count=" << st.raw_candidate_count
               << " result_count=" << st.result_count << ")\n";
     for (const auto& h : res) std::cout << "  " << h->id << " dist=" << compute_distance(query_seq, h->seq) << "\n";
   }
@@ -771,9 +924,12 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
       "bwt_start", "bwt_end"};
 
   std::vector<std::vector<std::vector<std::string>>> per_read_rows(reads.size());
+  const auto scheduled_indices =
+      build_scheduled_query_indices(reads, search_config.path_reuse_enabled);
 
-  #pragma omp parallel for schedule(dynamic)
-  for (size_t ri = 0; ri < reads.size(); ++ri) {
+  #pragma omp parallel for schedule(static)
+  for (size_t pos = 0; pos < scheduled_indices.size(); ++pos) {
+    const size_t ri = scheduled_indices[pos];
     const auto& read = reads[ri];
     auto [res, st] = engine.search_adaptive(*read, tolerance);
     for (const auto& hit : res) {
@@ -833,11 +989,50 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "score", "edit_distance", "query_fragment", "reference_fragment",
       "bwt_start", "bwt_end",
       "dist_calcs", "leaf_verify_count", "candidate_count_for_prune", "beacon_prune_count",
+      "query_profile_enabled", "query_count", "query_total_ms",
+      "router_lookup_ms", "anchor_distance_ms", "mbb_filter_ms",
+      "child_bound_ms", "center_distance_ms", "best_first_queue_ms",
+      "leaf_collect_ms", "leaf_mbb_filter_ms", "leaf_verify_ms",
+      "result_dedup_ms", "path_reuse_ms",
+      "path_reuse_attempt_count", "path_reuse_hit_count",
+      "anchor_cache_hit_count", "child_shortlist_reuse_hit_count",
+      "router_hint_enabled", "router_hint_qgram_q",
+      "router_hint_minimizer_k", "router_hint_minimizer_w",
+      "router_hint_invoked_count", "router_qgram_ranked_count",
+      "router_minimizer_ranked_count", "router_pigeonhole_query_count",
+      "router_candidate_count", "router_candidate_hit_count",
+      "router_fallback_count",
+      "local_router_enabled", "local_router_score_mode",
+      "best_first_enabled",
+      "local_router_enabled_count", "local_router_invoked_count",
+      "local_router_empty_count", "local_router_shortlist_child_count",
+      "local_router_remaining_child_count", "local_router_fallback_count",
+      "best_first_invoked_count", "best_first_reordered_count",
+      "best_first_bound_candidate_count", "child_safe_bound_pruned_count",
+      "safe_child_router_enabled", "safe_child_router_invoked_count",
+      "safe_child_router_skipped_low_fanout_count",
+      "safe_child_router_fallback_count",
+      "safe_child_router_candidate_count",
+      "safe_child_router_pruned_by_not_candidate_count",
+      "safe_child_router_exact_verify_count",
+      "child_count_before_router", "post_mbb_survivor_count",
+      "safe_router_candidate_count", "candidate_ratio_to_all_children",
+      "candidate_ratio_to_post_mbb_survivors",
+      "children_actually_processed", "center_checks_saved",
+      "query_planner_enabled", "planner_invoked_count",
+      "planner_strategy_baseline_count",
+      "planner_strategy_direct_qgram_count",
+      "planner_strategy_router_count",
+      "planner_strategy_safe_child_router_count",
+      "planner_strategy_path_reuse_count", "planner_fallback_count",
+      "planner_decision_ms",
       "mbb_filter_mode", "mbb_scan_child_checks", "mbb_rect_index_queries",
       "mbb_rect_candidate_children", "mbb_rect_fallback_count",
       "mbb_surviving_child_count", "mbb_scalar_checks",
       "mbb_simd_batches", "mbb_simd_fallbacks",
-      "center_distance_calls_after_mbb",
+      "center_distance_calls_after_mbb", "frontier_max_size",
+      "frontier_total_pushed", "world_access_count",
+      "anchor_distance_count", "center_distance_count", "raw_candidate_count",
       "leaf_beacon_scalar_checks", "leaf_beacon_simd_batches",
       "leaf_beacon_simd_fallbacks",
       "search_qgram_prefilter_enabled", "search_qgram_q",
@@ -849,21 +1044,103 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "avg_center_distance_calls_per_query", "query_time_ms"};
 
   std::vector<std::vector<std::vector<std::string>>> per_query_rows(queries.size());
+  std::vector<double> summary_query_ms;
+  std::vector<double> summary_world_access;
+  std::vector<double> summary_anchor_distance;
+  std::vector<double> summary_center_distance;
+  std::vector<double> summary_raw_candidates;
+  std::vector<double> summary_result_count;
+  std::vector<double> summary_local_router_invoked;
+  std::vector<double> summary_local_router_shortlisted;
+  std::vector<double> summary_router_hint_invoked;
+  std::vector<double> summary_router_hint_hits;
+  std::vector<double> summary_path_reuse_hits;
+  std::vector<double> summary_anchor_cache_hits;
+  const auto scheduled_indices =
+      build_scheduled_query_indices(queries, search_config.path_reuse_enabled);
 
-  #pragma omp parallel for schedule(dynamic)
-  for (size_t qi = 0; qi < queries.size(); ++qi) {
+  #pragma omp parallel for schedule(static)
+  for (size_t pos = 0; pos < scheduled_indices.size(); ++pos) {
+    const size_t qi = scheduled_indices[pos];
     const auto& read = queries[qi];
     auto query_start = std::chrono::high_resolution_clock::now();
     auto [res, st] = engine.search_adaptive(*read, tolerance);
     auto query_end = std::chrono::high_resolution_clock::now();
     double query_time_ms =
         std::chrono::duration<double, std::milli>(query_end - query_start).count();
+    double profiled_query_ms =
+        st.query_total_ms > 0.0 ? st.query_total_ms : query_time_ms;
     double avg_mbb_candidates =
         st.mbb_filter_parent_count == 0
             ? 0.0
             : static_cast<double>(st.mbb_surviving_child_count) /
                   static_cast<double>(st.mbb_filter_parent_count);
     std::vector<std::string> search_stats = {
+        st.query_profile_enabled ? "true" : "false",
+        std::to_string(st.query_count),
+        format_double(st.query_total_ms),
+        format_double(st.router_lookup_ms),
+        format_double(st.anchor_distance_ms),
+        format_double(st.mbb_filter_ms),
+        format_double(st.child_bound_ms),
+        format_double(st.center_distance_ms),
+        format_double(st.best_first_queue_ms),
+        format_double(st.leaf_collect_ms),
+        format_double(st.leaf_mbb_filter_ms),
+        format_double(st.leaf_verify_ms),
+        format_double(st.result_dedup_ms),
+        format_double(st.path_reuse_ms),
+        std::to_string(st.path_reuse_attempt_count),
+        std::to_string(st.path_reuse_hit_count),
+        std::to_string(st.anchor_cache_hit_count),
+        std::to_string(st.child_shortlist_reuse_hit_count),
+        search_config.router_hint_enabled ? "true" : "false",
+        std::to_string(search_config.router_hint_qgram_q),
+        std::to_string(search_config.router_hint_minimizer_k),
+        std::to_string(search_config.router_hint_minimizer_w),
+        std::to_string(st.router_hint_invoked_count),
+        std::to_string(st.router_qgram_ranked_count),
+        std::to_string(st.router_minimizer_ranked_count),
+        std::to_string(st.router_pigeonhole_query_count),
+        std::to_string(st.router_candidate_count),
+        std::to_string(st.router_candidate_hit_count),
+        std::to_string(st.router_fallback_count),
+        search_config.local_router_enabled ? "true" : "false",
+        search_config.local_router_score_mode,
+        search_config.best_first_enabled ? "true" : "false",
+        std::to_string(st.local_router_enabled_count),
+        std::to_string(st.local_router_invoked_count),
+        std::to_string(st.local_router_empty_count),
+        std::to_string(st.local_router_shortlist_child_count),
+        std::to_string(st.local_router_remaining_child_count),
+        std::to_string(st.local_router_fallback_count),
+        std::to_string(st.best_first_invoked_count),
+        std::to_string(st.best_first_reordered_count),
+        std::to_string(st.best_first_bound_candidate_count),
+        std::to_string(st.child_safe_bound_pruned_count),
+        search_config.safe_child_router_enabled ? "true" : "false",
+        std::to_string(st.safe_child_router_invoked_count),
+        std::to_string(st.safe_child_router_skipped_low_fanout_count),
+        std::to_string(st.safe_child_router_fallback_count),
+        std::to_string(st.safe_child_router_candidate_count),
+        std::to_string(st.safe_child_router_pruned_by_not_candidate_count),
+        std::to_string(st.safe_child_router_exact_verify_count),
+        std::to_string(st.child_count_before_router),
+        std::to_string(st.post_mbb_survivor_count),
+        std::to_string(st.safe_router_candidate_count),
+        format_double(st.candidate_ratio_to_all_children),
+        format_double(st.candidate_ratio_to_post_mbb_survivors),
+        std::to_string(st.children_actually_processed),
+        std::to_string(st.center_checks_saved),
+        search_config.query_planner_enabled ? "true" : "false",
+        std::to_string(st.planner_invoked_count),
+        std::to_string(st.planner_strategy_baseline_count),
+        std::to_string(st.planner_strategy_direct_qgram_count),
+        std::to_string(st.planner_strategy_router_count),
+        std::to_string(st.planner_strategy_safe_child_router_count),
+        std::to_string(st.planner_strategy_path_reuse_count),
+        std::to_string(st.planner_fallback_count),
+        format_double(st.planner_decision_ms),
         mbb_filter_mode_name(search_config.mbb_filter_mode),
         std::to_string(st.mbb_scan_child_checks),
         std::to_string(st.mbb_rect_index_queries),
@@ -874,6 +1151,12 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
         std::to_string(st.mbb_simd_batches),
         std::to_string(st.mbb_simd_fallbacks),
         std::to_string(st.center_distance_calls_after_mbb),
+        std::to_string(st.frontier_max_size),
+        std::to_string(st.frontier_total_pushed),
+        std::to_string(st.world_access_count),
+        std::to_string(st.anchor_distance_count),
+        std::to_string(st.center_distance_count),
+        std::to_string(st.raw_candidate_count),
         std::to_string(st.leaf_beacon_scalar_checks),
         std::to_string(st.leaf_beacon_simd_batches),
         std::to_string(st.leaf_beacon_simd_fallbacks),
@@ -890,7 +1173,28 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
         std::to_string(st.result_count),
         format_double(avg_mbb_candidates),
         format_double(static_cast<double>(st.center_distance_calls_after_qgram)),
-        format_double(query_time_ms)};
+        format_double(profiled_query_ms)};
+    #pragma omp critical
+    {
+      summary_query_ms.push_back(profiled_query_ms);
+      summary_world_access.push_back(static_cast<double>(st.world_access_count));
+      summary_anchor_distance.push_back(static_cast<double>(st.anchor_distance_count));
+      summary_center_distance.push_back(static_cast<double>(st.center_distance_count));
+      summary_raw_candidates.push_back(static_cast<double>(st.raw_candidate_count));
+      summary_result_count.push_back(static_cast<double>(st.result_count));
+      summary_local_router_invoked.push_back(
+          static_cast<double>(st.local_router_invoked_count));
+      summary_local_router_shortlisted.push_back(
+          static_cast<double>(st.local_router_shortlist_child_count));
+      summary_router_hint_invoked.push_back(
+          static_cast<double>(st.router_hint_invoked_count));
+      summary_router_hint_hits.push_back(
+          static_cast<double>(st.router_candidate_hit_count));
+      summary_path_reuse_hits.push_back(
+          static_cast<double>(st.path_reuse_hit_count));
+      summary_anchor_cache_hits.push_back(
+          static_cast<double>(st.anchor_cache_hit_count));
+    }
     if (res.empty()) {
       std::vector<std::string> row = {
           read->id, "", "", "", read->id, std::to_string(static_cast<int>(read->seq.size())),
@@ -928,6 +1232,36 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
 
   if (!out_tsv.empty())
     write_tsv(out_tsv, columns, all_rows);
+  if (!summary_query_ms.empty()) {
+    std::cerr << "Benchmark query summary:"
+              << " mean_query_ms=" << format_double(average_values(summary_query_ms))
+              << " p50_query_ms="
+              << format_double(navigamer::nearest_rank_percentile(summary_query_ms, 0.50))
+              << " p95_query_ms="
+              << format_double(navigamer::nearest_rank_percentile(summary_query_ms, 0.95))
+              << " mean_world_access="
+              << format_double(average_values(summary_world_access))
+              << " mean_anchor_distance_calls="
+              << format_double(average_values(summary_anchor_distance))
+              << " mean_center_distance_calls="
+              << format_double(average_values(summary_center_distance))
+              << " mean_raw_candidates="
+              << format_double(average_values(summary_raw_candidates))
+              << " mean_router_hint_invocations="
+              << format_double(average_values(summary_router_hint_invoked))
+              << " mean_router_hint_hits="
+              << format_double(average_values(summary_router_hint_hits))
+              << " mean_local_router_invocations="
+              << format_double(average_values(summary_local_router_invoked))
+              << " mean_local_router_shortlisted_children="
+              << format_double(average_values(summary_local_router_shortlisted))
+              << " mean_path_reuse_hits="
+              << format_double(average_values(summary_path_reuse_hits))
+              << " mean_anchor_cache_hits="
+              << format_double(average_values(summary_anchor_cache_hits))
+              << " mean_result_count="
+              << format_double(average_values(summary_result_count)) << "\n";
+  }
   std::cerr << "Benchmark rows: " << all_rows.size() << "\n";
 }
 
@@ -1274,6 +1608,31 @@ int main(int argc, char** argv) {
   std::string distance_mode = "myers";
   std::string build_distance_mode = "edlib";
   std::string search_qgram_prefilter = "off";
+  bool router_hint_enabled = false;
+  int router_hint_qgram_q = 5;
+  int router_hint_minimizer_k = 4;
+  int router_hint_minimizer_w = 8;
+  bool path_reuse_enabled = false;
+  bool local_router_enabled = false;
+  size_t local_router_max_anchors = 4;
+  size_t local_router_max_children = 64;
+  std::string local_router_score_mode = "anchor-envelope";
+  bool best_first_enabled = false;
+  bool safe_child_router_enabled = false;
+  size_t safe_child_router_min_fanout = 64;
+  size_t safe_child_router_max_candidates = 4096;
+  double safe_child_router_max_ratio = 0.5;
+  int safe_child_router_min_seed_len = 8;
+  std::string safe_child_router_mode = "auto";
+  bool safe_child_router_validate = false;
+  bool query_planner_enabled = false;
+  size_t planner_direct_verify_max_candidates = 32;
+  size_t planner_router_min_fanout = 64;
+  size_t planner_safe_child_router_min_fanout = 64;
+  bool planner_allow_direct_qgram_verify = true;
+  bool proximal_oracle_enabled = false;
+  std::vector<size_t> proximal_oracle_k_values = {1, 2, 4};
+  bool query_profile = false;
   int range_min_seed_length = 8;
   int range_max_seed_length = 20;
   int qgram_q = 5;
@@ -1294,11 +1653,20 @@ int main(int argc, char** argv) {
   int query_length = 200;
   int threads = 1;
   size_t queries_per_class = 1;
+  size_t query_count = 256;
   size_t warmup_iterations = 2;
   size_t measured_iterations = 10;
   size_t cold_cache_bytes = 256ULL * 1024ULL * 1024ULL;
+  bool query_benchmark_ablations = false;
+  std::string locality_profiles_csv = "baseline,path_reuse,optimized";
+  std::string locality_datasets_csv =
+      "same_template,nearby_windows,random_windows";
+  std::string locality_scenarios_csv;
+  std::string batch_schedules_csv = "original";
+  std::string query_fastq_out;
   std::string summary_out;
   std::string json_out;
+  std::string out_dir;
 
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
@@ -1340,6 +1708,10 @@ int main(int argc, char** argv) {
           parse_positive_size(argv[++i], "--queries-per-class");
       continue;
     }
+    if (a == "--query-count" && i + 1 < argc) {
+      query_count = parse_positive_size(argv[++i], "--query-count");
+      continue;
+    }
     if (a == "--warmup-iterations" && i + 1 < argc) {
       warmup_iterations =
           parse_nonnegative_size(argv[++i], "--warmup-iterations");
@@ -1361,6 +1733,44 @@ int main(int argc, char** argv) {
     }
     if (a == "--json-out" && i + 1 < argc) {
       json_out = argv[++i];
+      continue;
+    }
+    if (a == "--out-dir" && i + 1 < argc) {
+      out_dir = argv[++i];
+      continue;
+    }
+    if (a == "--query-benchmark-ablations" && i + 1 < argc) {
+      query_benchmark_ablations =
+          parse_zero_one(argv[++i], "--query-benchmark-ablations");
+      continue;
+    }
+    if (a == "--proximal-oracle" && i + 1 < argc) {
+      proximal_oracle_enabled = parse_zero_one(argv[++i], "--proximal-oracle");
+      continue;
+    }
+    if (a == "--proximal-oracle-k" && i + 1 < argc) {
+      proximal_oracle_k_values =
+          parse_size_csv(argv[++i], "--proximal-oracle-k");
+      continue;
+    }
+    if (a == "--locality-profiles" && i + 1 < argc) {
+      locality_profiles_csv = argv[++i];
+      continue;
+    }
+    if (a == "--locality-datasets" && i + 1 < argc) {
+      locality_datasets_csv = argv[++i];
+      continue;
+    }
+    if ((a == "--scenarios" || a == "--scenario") && i + 1 < argc) {
+      locality_scenarios_csv = argv[++i];
+      continue;
+    }
+    if (a == "--batch-schedules" && i + 1 < argc) {
+      batch_schedules_csv = argv[++i];
+      continue;
+    }
+    if (a == "--query-fastq-out" && i + 1 < argc) {
+      query_fastq_out = argv[++i];
       continue;
     }
     if (a == "--seed" && i + 1 < argc) {
@@ -1454,6 +1864,112 @@ int main(int argc, char** argv) {
       search_qgram_q = std::atoi(argv[++i]);
       continue;
     }
+    if (a == "--query-profile" && i + 1 < argc) {
+      query_profile = parse_zero_one(argv[++i], "--query-profile");
+      continue;
+    }
+    if (a == "--path-reuse" && i + 1 < argc) {
+      path_reuse_enabled = parse_zero_one(argv[++i], "--path-reuse");
+      continue;
+    }
+    if (a == "--router-hints" && i + 1 < argc) {
+      router_hint_enabled = parse_zero_one(argv[++i], "--router-hints");
+      continue;
+    }
+    if (a == "--router-hint-qgram-q" && i + 1 < argc) {
+      router_hint_qgram_q = std::atoi(argv[++i]);
+      continue;
+    }
+    if (a == "--router-hint-minimizer-k" && i + 1 < argc) {
+      router_hint_minimizer_k = std::atoi(argv[++i]);
+      continue;
+    }
+    if (a == "--router-hint-minimizer-w" && i + 1 < argc) {
+      router_hint_minimizer_w = std::atoi(argv[++i]);
+      continue;
+    }
+    if (a == "--local-router" && i + 1 < argc) {
+      local_router_enabled = parse_zero_one(argv[++i], "--local-router");
+      continue;
+    }
+    if (a == "--local-router-max-anchors" && i + 1 < argc) {
+      local_router_max_anchors =
+          parse_nonnegative_size(argv[++i], "--local-router-max-anchors");
+      continue;
+    }
+    if (a == "--local-router-max-children" && i + 1 < argc) {
+      local_router_max_children =
+          parse_nonnegative_size(argv[++i], "--local-router-max-children");
+      continue;
+    }
+    if (a == "--local-router-score" && i + 1 < argc) {
+      local_router_score_mode = argv[++i];
+      continue;
+    }
+    if (a == "--best-first" && i + 1 < argc) {
+      best_first_enabled = parse_zero_one(argv[++i], "--best-first");
+      continue;
+    }
+    if (a == "--safe-child-router" && i + 1 < argc) {
+      safe_child_router_enabled =
+          parse_zero_one(argv[++i], "--safe-child-router");
+      continue;
+    }
+    if (a == "--safe-child-router-min-fanout" && i + 1 < argc) {
+      safe_child_router_min_fanout =
+          parse_nonnegative_size(argv[++i],
+                                 "--safe-child-router-min-fanout");
+      continue;
+    }
+    if (a == "--safe-child-router-max-candidates" && i + 1 < argc) {
+      safe_child_router_max_candidates =
+          parse_nonnegative_size(argv[++i],
+                                 "--safe-child-router-max-candidates");
+      continue;
+    }
+    if (a == "--safe-child-router-max-ratio" && i + 1 < argc) {
+      safe_child_router_max_ratio = std::stod(argv[++i]);
+      continue;
+    }
+    if (a == "--safe-child-router-min-seed-len" && i + 1 < argc) {
+      safe_child_router_min_seed_len = std::atoi(argv[++i]);
+      continue;
+    }
+    if (a == "--safe-child-router-mode" && i + 1 < argc) {
+      safe_child_router_mode = argv[++i];
+      continue;
+    }
+    if (a == "--safe-child-router-validate" && i + 1 < argc) {
+      safe_child_router_validate =
+          parse_zero_one(argv[++i], "--safe-child-router-validate");
+      continue;
+    }
+    if (a == "--query-planner" && i + 1 < argc) {
+      query_planner_enabled = parse_zero_one(argv[++i], "--query-planner");
+      continue;
+    }
+    if (a == "--planner-direct-verify-max-candidates" && i + 1 < argc) {
+      planner_direct_verify_max_candidates =
+          parse_nonnegative_size(argv[++i],
+                                 "--planner-direct-verify-max-candidates");
+      continue;
+    }
+    if (a == "--planner-router-min-fanout" && i + 1 < argc) {
+      planner_router_min_fanout =
+          parse_nonnegative_size(argv[++i], "--planner-router-min-fanout");
+      continue;
+    }
+    if (a == "--planner-safe-child-router-min-fanout" && i + 1 < argc) {
+      planner_safe_child_router_min_fanout =
+          parse_nonnegative_size(argv[++i],
+                                 "--planner-safe-child-router-min-fanout");
+      continue;
+    }
+    if (a == "--planner-allow-direct-qgram-verify" && i + 1 < argc) {
+      planner_allow_direct_qgram_verify =
+          parse_zero_one(argv[++i], "--planner-allow-direct-qgram-verify");
+      continue;
+    }
     if (a == "--min-rect-index-fanout" && i + 1 < argc) {
       min_rect_index_fanout =
           parse_positive_size(argv[++i], "--min-rect-index-fanout");
@@ -1537,6 +2053,39 @@ int main(int argc, char** argv) {
     search_config.search_qgram_prefilter =
         parse_on_off(search_qgram_prefilter, "--search-qgram-prefilter");
     search_config.search_qgram_q = search_qgram_q;
+    search_config.query_profile = query_profile;
+    search_config.path_reuse_enabled = path_reuse_enabled;
+    search_config.router_hint_enabled = router_hint_enabled;
+    search_config.router_hint_qgram_q = router_hint_qgram_q;
+    search_config.router_hint_minimizer_k = router_hint_minimizer_k;
+    search_config.router_hint_minimizer_w = router_hint_minimizer_w;
+    search_config.local_router_enabled = local_router_enabled;
+    search_config.local_router_max_anchors = local_router_max_anchors;
+    search_config.local_router_max_children = local_router_max_children;
+    search_config.local_router_score_mode = local_router_score_mode;
+    search_config.best_first_enabled = best_first_enabled;
+    search_config.safe_child_router_enabled = safe_child_router_enabled;
+    search_config.safe_child_router_min_fanout = safe_child_router_min_fanout;
+    search_config.safe_child_router_max_candidates =
+        safe_child_router_max_candidates;
+    search_config.safe_child_router_max_ratio = safe_child_router_max_ratio;
+    search_config.safe_child_router_min_seed_len =
+        safe_child_router_min_seed_len;
+    search_config.safe_child_router_mode = safe_child_router_mode;
+    search_config.safe_child_router_validate = safe_child_router_validate;
+    search_config.query_planner_enabled = query_planner_enabled;
+    search_config.planner_direct_verify_max_candidates =
+        planner_direct_verify_max_candidates;
+    search_config.planner_router_min_fanout = planner_router_min_fanout;
+    search_config.planner_safe_child_router_min_fanout =
+        planner_safe_child_router_min_fanout;
+    search_config.planner_allow_direct_qgram_verify =
+        planner_allow_direct_qgram_verify;
+    search_config.proximal_oracle_enabled = proximal_oracle_enabled;
+    if (search_config.local_router_score_mode != "anchor-envelope") {
+      throw std::runtime_error(
+          "--local-router-score must currently be anchor-envelope");
+    }
 
     if (cmd == "demo") {
       run_demo(demo_size, hierarchy, range_config, search_config);
@@ -1627,6 +2176,9 @@ int main(int argc, char** argv) {
       config.warmup_iterations = warmup_iterations;
       config.measured_iterations = measured_iterations;
       config.cold_cache_bytes = cold_cache_bytes;
+      config.enable_ablation_profiles = query_benchmark_ablations;
+      config.proximal_oracle_enabled = proximal_oracle_enabled;
+      config.proximal_oracle_k_values = proximal_oracle_k_values;
       config.detail_tsv_path = out_tsv;
       config.summary_tsv_path = summary_out;
       config.json_path = json_out;
@@ -1639,6 +2191,104 @@ int main(int argc, char** argv) {
         return 2;
       }
       std::cerr << "query-benchmark gate passed\n";
+      return 0;
+    }
+    if (cmd == "locality-benchmark" || cmd == "query-locality-benchmark") {
+      if (index_path.empty() || ref_input.empty() || out_tsv.empty()) {
+        std::cerr << cmd << " requires --index, --ref, and --out\n";
+        return 1;
+      }
+      navigamer::LocalityBenchmarkConfig config;
+      config.index_path = index_path;
+      config.ref_input = ref_input;
+      config.query_count = query_count;
+      config.query_length = query_length;
+      config.tolerance = tolerance;
+      config.edits = query_edits >= 0 ? query_edits : tolerance;
+      config.seed = seed;
+      config.profiles =
+          parse_string_csv(locality_profiles_csv, "--locality-profiles");
+      config.datasets =
+          parse_string_csv(locality_datasets_csv, "--locality-datasets");
+      if (!locality_scenarios_csv.empty()) {
+        config.scenarios =
+            parse_string_csv(locality_scenarios_csv, "--scenarios");
+      }
+      config.batch_schedules =
+          parse_string_csv(batch_schedules_csv, "--batch-schedules");
+      config.out_tsv_path = out_tsv;
+      config.query_fastq_out_path = query_fastq_out;
+      auto locality_result =
+          navigamer::run_persisted_locality_benchmark(config);
+      if (!locality_result.gate_passed) {
+        std::cerr << cmd << " gate failed\n";
+        return 2;
+      }
+      std::cerr << cmd << " gate passed"
+                << " load_ms=" << format_double(locality_result.load_ms)
+                << " rows=" << locality_result.rows.size() << "\n";
+      return 0;
+    }
+    if (cmd == "query-locality-report") {
+      if (ref_input.empty() || out_dir.empty()) {
+        std::cerr << "query-locality-report requires --ref and --out-dir\n";
+        return 1;
+      }
+      std::filesystem::create_directories(out_dir);
+      const std::string summary_path = out_dir + "/summary.tsv";
+      const std::string json_path = out_dir + "/summary.json";
+      const std::string markdown_path = out_dir + "/report.md";
+      std::string report_index_path = index_path;
+      if (report_index_path.empty()) {
+        report_index_path = out_dir + "/query_locality.navidx";
+        auto [ref_id, ref_seq] = navigamer::load_reference(ref_input);
+        const size_t actual_prefix =
+            reference_subset_length == 0
+                ? ref_seq.size()
+                : std::min(reference_subset_length, ref_seq.size());
+        std::string index_ref_seq = ref_seq.substr(0, actual_prefix);
+        auto windows =
+            build_reference_windows(ref_id, index_ref_seq, window_size, stride);
+        navigamer::BioGeometryIndexBuilder builder(hierarchy, range_config);
+        builder.build(windows);
+        auto manifest = navigamer::make_reference_window_index_manifest(
+            ref_input, actual_prefix, window_size, stride, hierarchy,
+            range_config);
+        navigamer::save_index(report_index_path, builder, manifest);
+      }
+
+      navigamer::LocalityBenchmarkConfig config;
+      config.index_path = report_index_path;
+      config.ref_input = ref_input;
+      config.query_count = query_count;
+      config.query_length = query_length;
+      config.tolerance = tolerance;
+      config.edits = query_edits >= 0 ? query_edits : tolerance;
+      config.seed = seed;
+      config.profiles =
+          parse_string_csv(locality_profiles_csv, "--locality-profiles");
+      config.datasets =
+          parse_string_csv(locality_datasets_csv, "--locality-datasets");
+      if (!locality_scenarios_csv.empty()) {
+        config.scenarios =
+            parse_string_csv(locality_scenarios_csv, "--scenarios");
+      }
+      config.batch_schedules =
+          parse_string_csv(batch_schedules_csv, "--batch-schedules");
+      config.out_tsv_path = summary_path;
+      config.query_fastq_out_path = query_fastq_out;
+      auto locality_result =
+          navigamer::run_persisted_locality_benchmark(config);
+      navigamer::write_locality_report_outputs(
+          locality_result, json_path, markdown_path);
+      if (!locality_result.gate_passed) {
+        std::cerr << "query-locality-report gate failed\n";
+        return 2;
+      }
+      std::cerr << "query-locality-report gate passed"
+                << " summary=" << summary_path
+                << " json=" << json_path
+                << " markdown=" << markdown_path << "\n";
       return 0;
     }
     if (cmd == "boundary") {

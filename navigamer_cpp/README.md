@@ -25,7 +25,10 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer run    --ref <fasta|sequence> --reads <fastq|sequence> [--tolerance 2] [--out out.tsv]
 ./navigamer map150 --ref <fasta|sequence> --reads <fastq|sequence> --tolerance <N> --out out.tsv [--locator refpos|seqan]
 ./navigamer benchmark --ref <fasta> --reads <fastq> [--tolerance 2] [--window 200] [--stride 1] [--out out.tsv]
-./navigamer query-benchmark --ref <fasta|sequence> --out detail.tsv --summary-out summary.tsv --json-out summary.json [--window 200] [--query-length 200]
+./navigamer query-benchmark --ref <fasta|sequence> --out detail.tsv --summary-out summary.tsv --json-out summary.json [--window 200] [--query-length 200] [--query-benchmark-ablations 0|1] [--proximal-oracle 0|1] [--proximal-oracle-k 1,2,4]
+./navigamer locality-benchmark --index index.navidx --ref <fasta|sequence> --out summary.tsv [--scenarios low-fanout,high-fanout,repeat,batch-locality,oracle,all]
+./navigamer query-locality-benchmark --index index.navidx --ref <fasta|sequence> --out summary.tsv [same flags as locality-benchmark]
+./navigamer query-locality-report --ref <fasta|sequence> --out-dir report_dir [--index index.navidx] [--scenarios all]
 ./navigamer boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out out.tsv]
 ./navigamer layer-radius-experiment --ref <fasta> [--length 250] [--tolerance 2] [--query-edits 2] [--queries-per-cell 200] [--stride 1 | --stride-mode sparse|dense] [--seed 42] [--L-values 2,3,4,5] [--r-leaf-values 4,8,12] [--alpha-values 0.5,0.7] [--out out.csv]
 ```
@@ -57,6 +60,81 @@ shorter-input length, falling back to DP otherwise. `edlib` uses the vendored
 Edlib bounded distance backend. `dp` remains the reference mode; `auto` is
 conservative and currently uses DP. Build distance mode is separate and affects
 only index construction exact/bounded distance calls; its default is `edlib`.
+Adaptive profiling additionally accepts `--query-profile 0|1` (default `0`) and
+records per-query timing/counter buckets in `SearchStats`, `benchmark`, and
+`query-benchmark` output without changing search results.
+
+Adaptive path reuse additionally accepts `--path-reuse 0|1` (default `0`).
+When enabled, adaptive search keeps thread-local warm-start caches for exact
+parent-local anchor-distance vectors on repeated queries and cached child
+shortlists keyed by cheap query-derived fingerprints. This remains an
+ordering/cache hint only: it never becomes the sole pruning reason, preserves
+exact verification, and records `path_reuse_attempt_count`,
+`path_reuse_hit_count`, `anchor_cache_hit_count`, and
+`child_shortlist_reuse_hit_count`, plus locality-summary counters such as
+`child_shortlist_cache_hit_count`, `safe_child_candidate_cache_hit_count`, and
+`productive_world_reuse_hit_count`. Batch-oriented commands group queries by
+the same query-derived fingerprint while keeping emitted output rows in
+original query order.
+
+Adaptive router hints additionally accept `--router-hints 0|1`,
+`--router-hint-qgram-q N`, `--router-hint-minimizer-k N`, and
+`--router-hint-minimizer-w N`. The current implementation builds parent-local
+child-center range hints from q-gram/pigeonhole candidate supersets and uses
+q-gram plus minimizer scores only to reprioritize post-MBB child traversal.
+This remains a `RouterHint` only: it never becomes the sole pruning reason and
+always preserves full fallback enumeration and exact verification.
+
+Adaptive local routing additionally accepts `--local-router 0|1`,
+`--local-router-max-anchors N`, `--local-router-max-children N`, and
+`--local-router-score anchor-envelope`. The current router uses parent-local
+beacon-envelope scoring only to reorder post-MBB child traversal; it never
+becomes the sole pruning reason and always preserves full fallback enumeration
+and exact verification.
+
+Adaptive safe child routing additionally accepts `--safe-child-router 0|1`,
+`--safe-child-router-min-fanout N`,
+`--safe-child-router-max-candidates N`,
+`--safe-child-router-max-ratio R`,
+`--safe-child-router-min-seed-len N`,
+`--safe-child-router-mode auto|pigeonhole|qgram|mbb|full-fallback`, and
+`--safe-child-router-validate 0|1`. This is a `SafeCandidateRouter`: it may
+reduce child enumeration only when a parent-local radius-bucketed child-center
+range query or parent-local MBB interval query returns a safe candidate
+superset. Radius buckets use `tolerance + child.radius`; MBB mode rejects a
+child only when the query-to-anchor distance is outside that child's stored
+MBB interval by more than `tolerance`. Candidate sets that are too broad or
+cannot be proven safe fall back to full enumeration, and every survivor still
+goes through bounded center verification and final exact leaf verification.
+
+Adaptive query planning additionally accepts `--query-planner 0|1`,
+`--planner-router-min-fanout N`, and
+`--planner-safe-child-router-min-fanout N`. The current planner is
+conservative: it records a per-query strategy and can skip optional
+q-gram/router ordering work on low-fanout indexes, but it never skips MBB
+filtering, bounded center verification, or final exact leaf verification.
+TSV/JSON outputs include planner strategy counters and `planner_decision_ms`.
+
+`query-benchmark` can enable proximal-anchor oracle diagnostics with
+`--proximal-oracle 1` and `--proximal-oracle-k 1,2,4`. The extra output compares
+actual anchor sources, traversed frontier anchors, true-path anchors, global
+nearest anchors, and deterministic random anchors using exact edit-distance
+envelopes. It records diagnostics only and does not change search results.
+
+Adaptive safe best-first ordering additionally accepts `--best-first 0|1`
+(default `0`). The current implementation uses conservative parent-local MBB
+lower bounds and tighter envelope spans to reprioritize post-MBB child worlds
+before bounded center verification. It records queue/bound counters in
+`SearchStats` and may prune only when that lower bound itself is a conservative
+`SafeBound`.
+
+Query-side optimization safety contract:
+
+- `RouterHint` may affect only ordering, warm-starts, or candidate priority.
+- `SafeCandidateRouter` may reduce enumeration only with a safe candidate
+  superset and must full-fallback otherwise.
+- `SafeBound` may prune only when it is conservative and no-false-negative.
+- `ExactVerifier` remains the final authority for returned hits.
 
 Build commands also expose Phase1 helper thresholds for tuning the extended
 sketch step: `--phase1-metric-min-fanout N` (default `64`),
@@ -82,13 +160,25 @@ distance calls without changing accepted links. Use
 visited mode, original graph traversal, `dp` distance mode, and search q-gram
 disabled. It compares that with the profile selected by `--mbb-filter-mode`,
 `--visited-mode`, `--graph-view`, `--simd-mode`, `--distance-mode`,
-`--search-qgram-prefilter`, and `--search-qgram-q`.
+`--search-qgram-prefilter`, `--search-qgram-q`, `--router-hints`,
+`--local-router`, `--best-first`, `--safe-child-router`, `--path-reuse`, and
+`--query-planner`.
+With
+`--query-benchmark-ablations 1`, it also derives one ablation profile per
+enabled query-side optimization stage by disabling only that stage within the
+optimized stack.
 It deterministically generates random-region, ordinary-region,
 low-complexity-region, no-hit, single-hit, and multi-hit queries. Step 0 runs
 queries serially even though `--threads` is recorded and applied to OpenMP.
 One best-effort eviction-buffer cold sample and configured warm samples are
-reported per query/profile. Any repeated-result, cross-profile, or brute-force
-no-FN mismatch makes the command return `2`.
+reported per query/profile. The summary TSV and JSON add baseline-relative
+speedup/work-ratio columns so optimized and ablation profiles can be compared
+without post-processing. With `--proximal-oracle 1`, detail rows add
+actual/frontier/true-path/global/random envelope fields for k1/k2/k4,
+nearest-anchor distances, and global-oracle gap fields; summary rows add mean
+envelopes and fractions where the global oracle is materially better than the
+observed actual/frontier anchors. Any repeated-result, cross-profile, or
+brute-force no-FN mismatch makes the command return `2`.
 
 ## Module map
 
@@ -116,7 +206,27 @@ fingerprints and construction parameters, followed by the collapsed primary DAG,
 unique sequences, `ref_positions`, optional BWT/SA intervals, beacons, MBB rows,
 leaf links, and leaf-beacon rows. Load reconstructs pointer links,
 `SearchGraphView`, and any eligible MBB rectangle indexes. `query-index` is the
-pure load-and-search command. `run`, `benchmark`, `map150`, and `boundary` still
+pure load-and-search command for one query, so repeated invocations include
+index load time each time. Use `locality-benchmark --index <navidx> --ref
+<fasta> --out <tsv>` or the alias `query-locality-benchmark` to load once and
+separate persisted-index load time, search-engine initialization time, and
+query-only latency. `--scenarios low-fanout,high-fanout,repeat,batch-locality,
+oracle,all` selects deterministic query streams for router gating, nearby
+window routing, repeat stress, batch locality, and source-oracle diagnostics.
+The locality summary reports the actual loaded-index fanout distribution
+(`mean_fanout`, `p95_fanout`, `max_fanout`) plus router/path-reuse ratios so a
+run can distinguish low-fanout gating from high-fanout router usage.
+`--batch-schedules` can compare original, random, minimizer, q-gram signature,
+router signature, and source-sorted oracle query ordering; the source oracle
+schedule is diagnostic only.
+Use `--query-fastq-out <path>` to export the deterministic generated queries
+with `source_pos=` read-header annotations for matched external baseline
+candidate-recovery checks.
+`query-locality-report --ref <fasta|sequence> --out-dir <dir>` wraps that
+persisted benchmark and writes `summary.tsv`, `summary.json`, and `report.md`;
+if `--index` is omitted, it first builds `query_locality.navidx` in the report
+directory. `run`, `benchmark`,
+`map150`, and `boundary` still
 build in-memory indexes for their current workflows. `boundary` avoids repeated
 rebuilds within a parameter sweep by building once per stride mode and reusing
 that in-memory index across the full rate grid. The Phase2 distance backend is
@@ -172,6 +282,7 @@ For long-sequence boundary studies, `boundary` outputs one aggregated TSV row pe
 | Exact MBB rectangle lookup | `make test_mbb_rect && ./test_mbb_rect_index` |
 | Scan/rect adaptive equivalence and fallback | `make test_mbb_filter && ./test_mbb_filter_equivalence` |
 | Search q-gram on/off and scan/rect equivalence | `make test_search_qgram && ./test_search_qgram_prefilter` |
+| Safe child router no-FN / candidate superset / fallback | `make test_safe_child_router && ./test_safe_child_router_no_false_negative` |
 | Persisted index round-trip and manifest matching | `make test_index_persistence && ./test_index_persistence_bin` |
 | Phase2 CPU verifier behavior | `make test_phase2_distance_verifier && ./test_phase2_distance_verifier_bin` |
 | Build heartbeat formatting and timer | `make test_build_progress` |
