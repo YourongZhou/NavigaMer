@@ -106,7 +106,14 @@ int main() {
 
     assert(high_stats.planner_invoked_count == 1);
     assert(high_stats.planner_strategy_direct_qgram_count == 0);
-    assert(high_stats.planner_strategy_router_count == 1);
+    assert(high_stats.planner_strategy_safe_child_router_count == 1);
+    assert(high_stats.planner_disable_router_ordering);
+    if (high_stats.safe_child_router_invoked_count > 0 &&
+        high_stats.safe_child_router_fallback_count == 0) {
+      assert(high_stats.router_hint_invoked_count == 0);
+      assert(high_stats.local_router_invoked_count == 0);
+      assert(high_stats.best_first_invoked_count == 0);
+    }
   }
 
   std::cout << "query planner no-false-negative tests passed\n";

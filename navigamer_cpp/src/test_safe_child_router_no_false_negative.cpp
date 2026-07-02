@@ -141,6 +141,11 @@ int main() {
       assert(safe_stats.candidate_ratio_to_all_children > 0.0);
       assert(safe_stats.candidate_ratio_to_post_mbb_survivors > 0.0);
     }
+    if (safe_stats.safe_child_router_invoked_count > 0 &&
+        safe_stats.safe_child_router_fallback_count == 0) {
+      assert(safe_stats.safe_child_router_exact_pruned_count > 0);
+      assert(safe_stats.safe_child_router_center_distance_reused_count > 0);
+    }
     invoked += safe_stats.safe_child_router_invoked_count;
   }
   assert(invoked > 0);

@@ -127,6 +127,8 @@ struct AggregateRecord {
   size_t safe_child_router_candidate_count = 0;
   size_t safe_child_router_pruned_by_not_candidate_count = 0;
   size_t safe_child_router_exact_verify_count = 0;
+  size_t safe_child_router_exact_pruned_count = 0;
+  size_t safe_child_router_center_distance_reused_count = 0;
   size_t child_count_before_router = 0;
   size_t post_mbb_survivor_count = 0;
   size_t safe_router_candidate_count = 0;
@@ -515,6 +517,10 @@ std::vector<AggregateRecord> aggregate_records(
           record.stats.safe_child_router_pruned_by_not_candidate_count;
       aggregate.safe_child_router_exact_verify_count +=
           record.stats.safe_child_router_exact_verify_count;
+      aggregate.safe_child_router_exact_pruned_count +=
+          record.stats.safe_child_router_exact_pruned_count;
+      aggregate.safe_child_router_center_distance_reused_count +=
+          record.stats.safe_child_router_center_distance_reused_count;
       aggregate.child_count_before_router +=
           record.stats.child_count_before_router;
       aggregate.post_mbb_survivor_count += record.stats.post_mbb_survivor_count;
@@ -2558,6 +2564,8 @@ QueryBenchmarkRunResult run_query_benchmark(
       "safe_child_router_candidate_count",
       "safe_child_router_pruned_by_not_candidate_count",
       "safe_child_router_exact_verify_count",
+      "safe_child_router_exact_pruned_count",
+      "safe_child_router_center_distance_reused_count",
       "child_count_before_router", "post_mbb_survivor_count",
       "safe_router_candidate_count", "candidate_ratio_to_all_children",
       "candidate_ratio_to_post_mbb_survivors",
@@ -2659,6 +2667,9 @@ QueryBenchmarkRunResult run_query_benchmark(
         std::to_string(
             record.stats.safe_child_router_pruned_by_not_candidate_count),
         std::to_string(record.stats.safe_child_router_exact_verify_count),
+        std::to_string(record.stats.safe_child_router_exact_pruned_count),
+        std::to_string(
+            record.stats.safe_child_router_center_distance_reused_count),
         std::to_string(record.stats.child_count_before_router),
         std::to_string(record.stats.post_mbb_survivor_count),
         std::to_string(record.stats.safe_router_candidate_count),
@@ -2772,6 +2783,8 @@ QueryBenchmarkRunResult run_query_benchmark(
       "avg_safe_child_router_candidate_count",
       "avg_safe_child_router_pruned_by_not_candidate_count",
       "avg_safe_child_router_exact_verify_count",
+      "avg_safe_child_router_exact_pruned_count",
+      "avg_safe_child_router_center_distance_reused_count",
       "avg_child_count_before_router", "avg_post_mbb_survivor_count",
       "avg_safe_router_candidate_count",
       "avg_candidate_ratio_to_all_children",
@@ -2966,6 +2979,11 @@ QueryBenchmarkRunResult run_query_benchmark(
             sample_count)),
         format_double(average_counter(
             aggregate.safe_child_router_exact_verify_count, sample_count)),
+        format_double(average_counter(
+            aggregate.safe_child_router_exact_pruned_count, sample_count)),
+        format_double(average_counter(
+            aggregate.safe_child_router_center_distance_reused_count,
+            sample_count)),
         format_double(average_counter(aggregate.child_count_before_router,
                                       sample_count)),
         format_double(average_counter(aggregate.post_mbb_survivor_count,

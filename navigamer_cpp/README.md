@@ -115,6 +115,9 @@ child only when the query-to-anchor distance is outside that child's stored
 MBB interval by more than `tolerance`. Candidate sets that are too broad or
 cannot be proven safe fall back to full enumeration, and every survivor still
 goes through bounded center verification and final exact leaf verification.
+Accepted safe-router child-center distances are cached for the same query, so
+the later traversal step does not recompute distances already used by the
+safe-router exact postfilter.
 
 Adaptive query planning additionally accepts `--query-planner 0|1`,
 `--planner-router-min-fanout N`, and

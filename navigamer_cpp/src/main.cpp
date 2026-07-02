@@ -838,6 +838,10 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
               << st.safe_child_router_pruned_by_not_candidate_count
               << " safe_child_router_exact_verify_count="
               << st.safe_child_router_exact_verify_count
+              << " safe_child_router_exact_pruned_count="
+              << st.safe_child_router_exact_pruned_count
+              << " safe_child_router_center_distance_reused_count="
+              << st.safe_child_router_center_distance_reused_count
               << " child_count_before_router="
               << st.child_count_before_router
               << " post_mbb_survivor_count="
@@ -1075,6 +1079,8 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "safe_child_router_candidate_count",
       "safe_child_router_pruned_by_not_candidate_count",
       "safe_child_router_exact_verify_count",
+      "safe_child_router_exact_pruned_count",
+      "safe_child_router_center_distance_reused_count",
       "child_count_before_router", "post_mbb_survivor_count",
       "safe_router_candidate_count", "candidate_ratio_to_all_children",
       "candidate_ratio_to_post_mbb_survivors",
@@ -1188,6 +1194,8 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
         std::to_string(st.safe_child_router_candidate_count),
         std::to_string(st.safe_child_router_pruned_by_not_candidate_count),
         std::to_string(st.safe_child_router_exact_verify_count),
+        std::to_string(st.safe_child_router_exact_pruned_count),
+        std::to_string(st.safe_child_router_center_distance_reused_count),
         std::to_string(st.child_count_before_router),
         std::to_string(st.post_mbb_survivor_count),
         std::to_string(st.safe_router_candidate_count),

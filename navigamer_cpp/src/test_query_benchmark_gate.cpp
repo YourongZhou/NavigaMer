@@ -462,6 +462,10 @@ int main() {
     assert(header.find("safe_child_router_invoked_count") != std::string::npos);
     assert(header.find("safe_child_router_pruned_by_not_candidate_count") !=
            std::string::npos);
+    assert(header.find("safe_child_router_exact_pruned_count") !=
+           std::string::npos);
+    assert(header.find("safe_child_router_center_distance_reused_count") !=
+           std::string::npos);
     assert(header.find("child_count_before_router") != std::string::npos);
     assert(header.find("post_mbb_survivor_count") != std::string::npos);
     assert(header.find("safe_router_candidate_count") != std::string::npos);
@@ -509,6 +513,10 @@ int main() {
     assert(header.find("avg_safe_child_router_invoked_count") !=
            std::string::npos);
     assert(header.find("avg_safe_child_router_pruned_by_not_candidate_count") !=
+           std::string::npos);
+    assert(header.find("avg_safe_child_router_exact_pruned_count") !=
+           std::string::npos);
+    assert(header.find("avg_safe_child_router_center_distance_reused_count") !=
            std::string::npos);
     assert(header.find("avg_child_count_before_router") != std::string::npos);
     assert(header.find("avg_post_mbb_survivor_count") != std::string::npos);

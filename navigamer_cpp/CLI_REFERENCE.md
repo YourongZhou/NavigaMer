@@ -175,7 +175,12 @@ enumeration. Returned candidates still go through MBB filtering, bounded center
 distance, and exact leaf verification. Counters include
 `safe_child_router_invoked_count`, `safe_child_router_fallback_count`,
 `safe_child_router_candidate_count`, and
-`safe_child_router_pruned_by_not_candidate_count`.
+`safe_child_router_pruned_by_not_candidate_count`. The router also applies a
+bounded exact child-center postfilter to its safe superset before accepting the
+candidate set; rejected children are counted in
+`safe_child_router_exact_pruned_count`, and accepted child-center distances are
+cached for the same query so later traversal can reuse them through
+`safe_child_router_center_distance_reused_count`.
 
 Adaptive query planning (`--query-planner 1`) runs once per adaptive query and
 records which routing strategy the query used. The current planner is
@@ -186,7 +191,10 @@ final exact leaf verification. Query, benchmark, and query-benchmark output
 include `planner_invoked_count`, `planner_strategy_baseline_count`,
 `planner_strategy_router_count`, `planner_strategy_safe_child_router_count`,
 `planner_strategy_path_reuse_count`, `planner_fallback_count`, and
-`planner_decision_ms`.
+`planner_decision_ms`. When safe-child routing is selected as the high-fanout
+strategy, the planner skips extra router/local/best-first ordering work after
+safe candidate reduction so the query does not pay both reduction and ranking
+overheads.
 
 Proximal-anchor oracle diagnostics (`--proximal-oracle 1`) are available for
 `query-benchmark`. They record actual anchor-source nodes, traversed frontier

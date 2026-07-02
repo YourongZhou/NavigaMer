@@ -386,6 +386,50 @@ ActivePathReuseContext* active_path_reuse_context(
   return it == g_active_path_reuse_context_by_engine.end() ? nullptr : it->second;
 }
 
+struct ActiveCenterDistanceContext {
+  std::unordered_map<std::string, int> dist_by_node;
+};
+
+thread_local std::unordered_map<const BioGeometrySearchEngine*,
+                                ActiveCenterDistanceContext*>
+    g_active_center_distance_context_by_engine;
+
+class ScopedActiveCenterDistanceContext {
+ public:
+  ScopedActiveCenterDistanceContext(const BioGeometrySearchEngine* engine,
+                                    ActiveCenterDistanceContext* context)
+      : engine_(engine) {
+    if (!engine_ || !context) return;
+    auto it = g_active_center_distance_context_by_engine.find(engine_);
+    if (it != g_active_center_distance_context_by_engine.end()) {
+      previous_ = it->second;
+      had_previous_ = true;
+    }
+    g_active_center_distance_context_by_engine[engine_] = context;
+  }
+
+  ~ScopedActiveCenterDistanceContext() {
+    if (!engine_) return;
+    if (had_previous_) {
+      g_active_center_distance_context_by_engine[engine_] = previous_;
+    } else {
+      g_active_center_distance_context_by_engine.erase(engine_);
+    }
+  }
+
+ private:
+  const BioGeometrySearchEngine* engine_ = nullptr;
+  ActiveCenterDistanceContext* previous_ = nullptr;
+  bool had_previous_ = false;
+};
+
+ActiveCenterDistanceContext* active_center_distance_context(
+    const BioGeometrySearchEngine* engine) {
+  auto it = g_active_center_distance_context_by_engine.find(engine);
+  return it == g_active_center_distance_context_by_engine.end() ? nullptr
+                                                               : it->second;
+}
+
 std::string build_path_reuse_fingerprint(const std::string& sequence) {
   auto signature = compute_minimizer_signature(sequence, 4, 8);
   if (!signature.usable || signature.codes.empty()) {
@@ -907,6 +951,47 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
     return true;
   };
 
+  auto exact_filter_center_candidates =
+      [&](std::vector<size_t> candidates) -> std::vector<size_t> {
+    if (candidates.empty()) return candidates;
+    std::vector<size_t> filtered;
+    filtered.reserve(candidates.size());
+    auto* center_cache = active_center_distance_context(this);
+    for (size_t child_idx : candidates) {
+      if (child_idx >= child_count) continue;
+      const auto& child = node->child_nodes[child_idx];
+      if (!child || !child->center_ptr) {
+        stats.safe_child_router_fallback_count++;
+        return {};
+      }
+      const int child_tau = tolerance + child->radius;
+      int dist = std::numeric_limits<int>::max();
+      bool cache_hit = false;
+      if (center_cache) {
+        auto cache_it = center_cache->dist_by_node.find(child->node_id);
+        if (cache_it != center_cache->dist_by_node.end()) {
+          dist = cache_it->second;
+          cache_hit = true;
+        }
+      }
+      if (!cache_hit) {
+        stats.safe_child_router_exact_verify_count++;
+        dist = compute_distance_bounded_with_mode(
+            query_seq.seq, child->center_ptr->seq, child_tau,
+            config_.distance_mode);
+        if (center_cache) {
+          center_cache->dist_by_node[child->node_id] = dist;
+        }
+      }
+      if (dist <= child_tau) {
+        filtered.push_back(child_idx);
+      } else {
+        stats.safe_child_router_exact_pruned_count++;
+      }
+    }
+    return filtered;
+  };
+
   auto accept_mbb_candidates = [&]() -> std::vector<size_t> {
     if (!mbb_router_ready()) {
       stats.children_actually_processed += child_count;
@@ -955,6 +1040,8 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
         }
       }
     }
+
+    candidates = exact_filter_center_candidates(std::move(candidates));
 
     const double ratio = child_count == 0
                              ? 1.0
@@ -1028,6 +1115,8 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
       std::remove_if(candidates.begin(), candidates.end(),
                      [child_count](size_t idx) { return idx >= child_count; }),
       candidates.end());
+
+  candidates = exact_filter_center_candidates(std::move(candidates));
 
   const double ratio = child_count == 0
                            ? 1.0
@@ -1735,7 +1824,18 @@ int BioGeometrySearchEngine::compute_center_distance_for_search(
     const std::string& node_id,
     const std::string& center_sequence,
     int tau,
-    bool after_mbb_filter) const {
+    bool after_mbb_filter,
+    bool* cache_hit) const {
+  if (cache_hit) *cache_hit = false;
+  if (after_mbb_filter) {
+    if (auto* center_cache = active_center_distance_context(this)) {
+      auto cache_it = center_cache->dist_by_node.find(node_id);
+      if (cache_it != center_cache->dist_by_node.end()) {
+        if (cache_hit) *cache_hit = true;
+        return cache_it->second;
+      }
+    }
+  }
   auto* reuse = active_path_reuse_context(this);
   const bool record_exact_center_distance =
       reuse && reuse->enabled && config_.path_reuse_enabled;
@@ -1967,10 +2067,13 @@ void BioGeometrySearchEngine::process_node_adaptive(
           ? scan_mbb_surviving_child_indices(node, child_indices, V_Q,
                                              tolerance, stats)
           : get_mbb_surviving_children(node, V_Q, tolerance, stats);
-  auto ordered = rank_children_with_router_hints(
-      node, surviving, query_seq, tolerance, stats, router_qgram_signature,
-      router_minimizers);
-  if (!used_safe_child_router) {
+  auto ordered =
+      (used_safe_child_router && stats.planner_disable_router_ordering)
+          ? surviving
+          : rank_children_with_router_hints(
+                node, surviving, query_seq, tolerance, stats,
+                router_qgram_signature, router_minimizers);
+  if (!used_safe_child_router && !stats.planner_disable_router_ordering) {
     ordered = rank_children_with_local_router(node, ordered, V_Q, stats);
     ordered = rank_children_with_best_first(node, ordered, V_Q, tolerance, stats);
   }
@@ -2035,14 +2138,19 @@ void BioGeometrySearchEngine::search_layer_adaptive(
     if (near_query_triangle_prunes_center(node->node_id, tau, stats)) {
       continue;
     }
-    stats.center_exact_distance_call_count++;
-    stats.center_distance_count++;
+    bool center_cache_hit = false;
     ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                    &stats.center_distance_ms);
     int dist = compute_center_distance_for_search(
         query_seq, node->node_id, node->get_center_sequence(), tau,
-        after_mbb_filter);
-    stats.dist_calc_count++;
+        after_mbb_filter, &center_cache_hit);
+    if (center_cache_hit) {
+      stats.safe_child_router_center_distance_reused_count++;
+    } else {
+      stats.center_exact_distance_call_count++;
+      stats.center_distance_count++;
+      stats.dist_calc_count++;
+    }
     stats.world_access_count++;
     if (config_.trace_paths && node->integer_id != INVALID_NODE_ID) {
       stats.world_trace.push_back(node->integer_id);
@@ -2117,10 +2225,13 @@ void BioGeometrySearchEngine::process_node_adaptive_epoch(
           ? scan_mbb_surviving_child_indices(node, child_indices, V_Q,
                                              tolerance, stats)
           : get_mbb_surviving_children(node, V_Q, tolerance, stats);
-  auto ordered = rank_children_with_router_hints(
-      node, surviving, query_seq, tolerance, stats, router_qgram_signature,
-      router_minimizers);
-  if (!used_safe_child_router) {
+  auto ordered =
+      (used_safe_child_router && stats.planner_disable_router_ordering)
+          ? surviving
+          : rank_children_with_router_hints(
+                node, surviving, query_seq, tolerance, stats,
+                router_qgram_signature, router_minimizers);
+  if (!used_safe_child_router && !stats.planner_disable_router_ordering) {
     ordered = rank_children_with_local_router(node, ordered, V_Q, stats);
     ordered = rank_children_with_best_first(node, ordered, V_Q, tolerance, stats);
   }
@@ -2185,14 +2296,19 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
     if (near_query_triangle_prunes_center(node->node_id, tau, stats)) {
       continue;
     }
-    stats.center_exact_distance_call_count++;
-    stats.center_distance_count++;
+    bool center_cache_hit = false;
     ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                    &stats.center_distance_ms);
     int dist = compute_center_distance_for_search(
         query_seq, node->node_id, node->get_center_sequence(), tau,
-        after_mbb_filter);
-    stats.dist_calc_count++;
+        after_mbb_filter, &center_cache_hit);
+    if (center_cache_hit) {
+      stats.safe_child_router_center_distance_reused_count++;
+    } else {
+      stats.center_exact_distance_call_count++;
+      stats.center_distance_count++;
+      stats.dist_calc_count++;
+    }
     stats.world_access_count++;
     if (config_.trace_paths && node->integer_id != INVALID_NODE_ID) {
       stats.world_trace.push_back(node->integer_id);
@@ -2490,10 +2606,13 @@ void BioGeometrySearchEngine::process_node_adaptive_view(
           ? scan_mbb_surviving_child_ids_view(node_id, child_offsets, V_Q,
                                               tolerance, stats)
           : get_mbb_surviving_child_ids_view(node_id, V_Q, tolerance, stats);
-  auto ordered = rank_child_ids_with_router_hints_view(
-      node_id, surviving, query_seq, tolerance, stats, router_qgram_signature,
-      router_minimizers);
-  if (!used_safe_child_router) {
+  auto ordered =
+      (used_safe_child_router && stats.planner_disable_router_ordering)
+          ? surviving
+          : rank_child_ids_with_router_hints_view(
+                node_id, surviving, query_seq, tolerance, stats,
+                router_qgram_signature, router_minimizers);
+  if (!used_safe_child_router && !stats.planner_disable_router_ordering) {
     ordered = rank_child_ids_with_local_router_view(node_id, ordered, V_Q, stats);
     ordered = rank_child_ids_with_best_first_view(node_id, ordered, V_Q,
                                                   tolerance, stats);
@@ -2566,14 +2685,19 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
     if (near_query_triangle_prunes_center(node->node_id, tau, stats)) {
       continue;
     }
-    stats.center_exact_distance_call_count++;
-    stats.center_distance_count++;
+    bool center_cache_hit = false;
     ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                    &stats.center_distance_ms);
     int dist = compute_center_distance_for_search(
         query_seq, node->node_id, node->get_center_sequence(), tau,
-        after_mbb_filter);
-    stats.dist_calc_count++;
+        after_mbb_filter, &center_cache_hit);
+    if (center_cache_hit) {
+      stats.safe_child_router_center_distance_reused_count++;
+    } else {
+      stats.center_exact_distance_call_count++;
+      stats.center_distance_count++;
+      stats.dist_calc_count++;
+    }
     stats.world_access_count++;
     if (config_.trace_paths) {
       stats.world_trace.push_back(node_id);
@@ -2641,10 +2765,12 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
       stats.planner_strategy_baseline_count = 1;
       stats.planner_disable_router_stack = true;
     } else {
-      stats.planner_strategy_router_count = 1;
       if (config_.safe_child_router_enabled &&
           max_fanout >= config_.planner_safe_child_router_min_fanout) {
         stats.planner_strategy_safe_child_router_count = 1;
+        stats.planner_disable_router_ordering = true;
+      } else {
+        stats.planner_strategy_router_count = 1;
       }
       if (config_.path_reuse_enabled) {
         stats.planner_strategy_path_reuse_count = 1;
@@ -2703,6 +2829,9 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
   ScopedActivePathReuseContext scoped_reuse(this,
                                             reuse_context.enabled ? &reuse_context
                                                                   : nullptr);
+  ActiveCenterDistanceContext center_distance_context;
+  ScopedActiveCenterDistanceContext scoped_center_distances(
+      this, &center_distance_context);
   const auto query_start = std::chrono::steady_clock::now();
   if (reuse_context.enabled && reuse_context.previous_exact_query_match &&
       reuse_context.previous && reuse_context.previous->exact_query_completed &&

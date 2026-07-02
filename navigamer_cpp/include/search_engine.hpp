@@ -198,6 +198,8 @@ struct SearchStats {
   double safe_child_router_candidate_ratio_sum = 0.0;
   size_t safe_child_router_pruned_by_not_candidate_count = 0;
   size_t safe_child_router_exact_verify_count = 0;
+  size_t safe_child_router_exact_pruned_count = 0;
+  size_t safe_child_router_center_distance_reused_count = 0;
   size_t child_count_before_router = 0;
   size_t post_mbb_survivor_count = 0;
   size_t safe_router_candidate_count = 0;
@@ -216,6 +218,7 @@ struct SearchStats {
   size_t planner_fallback_count = 0;
   double planner_decision_ms = 0.0;
   bool planner_disable_router_stack = false;
+  bool planner_disable_router_ordering = false;
   std::vector<std::string> proximal_actual_anchor_node_ids;
   std::vector<std::string> proximal_frontier_node_ids;
   size_t result_count = 0;
@@ -479,7 +482,8 @@ class BioGeometrySearchEngine {
       const std::string& node_id,
       const std::string& center_sequence,
       int tau,
-      bool after_mbb_filter) const;
+      bool after_mbb_filter,
+      bool* cache_hit = nullptr) const;
   void process_node_adaptive_view(
       NodeId node_id, int current_layer,
       const BioSequence& query_seq, int tolerance,
