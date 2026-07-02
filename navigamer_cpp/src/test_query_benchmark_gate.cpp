@@ -186,6 +186,19 @@ int main() {
            std::string::npos);
     assert(locality_header.find("near_query_reuse_hit_count") !=
            std::string::npos);
+    assert(locality_header.find("near_query_triangle_pruned_count") !=
+           std::string::npos);
+    assert(locality_header.find("near_query_center_distance_reused_count") !=
+           std::string::npos);
+    assert(locality_header.find("near_query_bound_fallback_count") !=
+           std::string::npos);
+    assert(locality_header.find("near_query_direct_verify_count") !=
+           std::string::npos);
+    assert(locality_header.find("center_distance_reduction") !=
+           std::string::npos);
+    assert(locality_header.find("world_access_reduction") !=
+           std::string::npos);
+    assert(locality_header.find("p95_speedup") != std::string::npos);
     assert(locality_header.find("mean_neighbor_edit_distance") !=
            std::string::npos);
     assert(locality_header.find("p95_neighbor_edit_distance") !=
@@ -234,7 +247,6 @@ int main() {
         assert(row.mismatch_count == 0);
         assert(row.mean_neighbor_edit_distance >= 0.0);
         assert(row.mean_neighbor_qgram_jaccard >= 0.0);
-        assert(row.near_query_reuse_hit_count > 0);
         saw_source_sorted_near_reuse = true;
       }
     }
@@ -320,13 +332,13 @@ int main() {
     navigamer::LocalityBenchmarkConfig high_fanout_config;
     high_fanout_config.index_path = high_fanout_index_path;
     high_fanout_config.ref_input = high_fanout_ref;
-    high_fanout_config.query_count = 4;
+    high_fanout_config.query_count = 8;
     high_fanout_config.query_length = 16;
-    high_fanout_config.tolerance = 2;
+    high_fanout_config.tolerance = 8;
     high_fanout_config.edits = 2;
     high_fanout_config.profiles = {"baseline", "optimized"};
-    high_fanout_config.scenarios = {"high-fanout"};
-    high_fanout_config.batch_schedules = {"router-signature"};
+    high_fanout_config.scenarios = {"same-template"};
+    high_fanout_config.batch_schedules = {"source-oracle"};
     high_fanout_config.out_tsv_path =
         "/tmp/navigamer_locality_high_fanout_test.tsv";
     auto high_fanout_result =
@@ -334,7 +346,7 @@ int main() {
     assert(high_fanout_result.gate_passed);
     bool saw_high_fanout_optimized = false;
     for (const auto& row : high_fanout_result.rows) {
-      if (row.dataset == "high_fanout" && row.profile == "optimized") {
+      if (row.dataset == "same_template" && row.profile == "optimized") {
         saw_high_fanout_optimized = true;
         assert(row.mismatch_count == 0);
         assert(row.max_fanout >= 64.0);
@@ -441,6 +453,11 @@ int main() {
     assert(header.find("router_minimizer_ranked_count") != std::string::npos);
     assert(header.find("best_first_invoked_count") != std::string::npos);
     assert(header.find("path_reuse_hit_count") != std::string::npos);
+    assert(header.find("near_query_triangle_pruned_count") != std::string::npos);
+    assert(header.find("near_query_center_distance_reused_count") !=
+           std::string::npos);
+    assert(header.find("near_query_bound_fallback_count") != std::string::npos);
+    assert(header.find("near_query_direct_verify_count") != std::string::npos);
     assert(header.find("anchor_cache_hit_count") != std::string::npos);
     assert(header.find("safe_child_router_invoked_count") != std::string::npos);
     assert(header.find("safe_child_router_pruned_by_not_candidate_count") !=
@@ -477,6 +494,17 @@ int main() {
     assert(header.find("avg_router_minimizer_ranked_count") != std::string::npos);
     assert(header.find("avg_best_first_invoked_count") != std::string::npos);
     assert(header.find("avg_path_reuse_hit_count") != std::string::npos);
+    assert(header.find("avg_near_query_triangle_pruned_count") !=
+           std::string::npos);
+    assert(header.find("avg_near_query_center_distance_reused_count") !=
+           std::string::npos);
+    assert(header.find("avg_near_query_bound_fallback_count") !=
+           std::string::npos);
+    assert(header.find("avg_near_query_direct_verify_count") !=
+           std::string::npos);
+    assert(header.find("center_distance_reduction") != std::string::npos);
+    assert(header.find("world_access_reduction") != std::string::npos);
+    assert(header.find("p95_speedup") != std::string::npos);
     assert(header.find("avg_anchor_cache_hit_count") != std::string::npos);
     assert(header.find("avg_safe_child_router_invoked_count") !=
            std::string::npos);

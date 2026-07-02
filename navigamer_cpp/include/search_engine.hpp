@@ -50,6 +50,8 @@ struct SearchConfig {
   int search_qgram_q = 5;
   bool query_profile = false;
   bool path_reuse_enabled = false;
+  int near_query_max_neighbor_edit_distance = 8;
+  double near_query_min_qgram_jaccard = 0.35;
   bool router_hint_enabled = false;
   int router_hint_qgram_q = 5;
   int router_hint_minimizer_k = 4;
@@ -151,7 +153,16 @@ struct SearchStats {
   size_t unsafe_hint_ignored_count = 0;
   size_t path_reuse_attempt_count = 0;
   size_t path_reuse_hit_count = 0;
-  bool query_similarity_schedule_enabled = false;
+  size_t near_query_reuse_attempt_count = 0;
+  size_t near_query_reuse_hit_count = 0;
+	  size_t near_query_triangle_pruned_count = 0;
+	  size_t near_query_center_distance_reused_count = 0;
+	  size_t near_query_bound_fallback_count = 0;
+	  size_t near_query_direct_verify_count = 0;
+	  size_t near_query_leaf_triangle_pruned_count = 0;
+	  size_t near_query_leaf_distance_reused_count = 0;
+	  size_t near_query_leaf_bound_fallback_count = 0;
+	  bool query_similarity_schedule_enabled = false;
   size_t query_similarity_cluster_count = 0;
   double query_similarity_mean_neighbor_distance = 0.0;
   size_t anchor_cache_hit_count = 0;
@@ -193,6 +204,8 @@ struct SearchStats {
   size_t planner_strategy_router_count = 0;
   size_t planner_strategy_safe_child_router_count = 0;
   size_t planner_strategy_path_reuse_count = 0;
+  size_t planner_near_reuse_enabled_count = 0;
+  size_t planner_near_reuse_disabled_count = 0;
   size_t planner_fallback_count = 0;
   double planner_decision_ms = 0.0;
   bool planner_disable_router_stack = false;
@@ -431,6 +444,16 @@ class BioGeometrySearchEngine {
       NodeId node_id,
       const std::vector<NodeId>& candidates,
       SearchStats& stats) const;
+  bool near_query_triangle_prunes_center(
+      const std::string& node_id,
+      int tau,
+      SearchStats& stats) const;
+  int compute_center_distance_for_search(
+      const BioSequence& query_seq,
+      const std::string& node_id,
+      const std::string& center_sequence,
+      int tau,
+      bool after_mbb_filter) const;
   void process_node_adaptive_view(
       NodeId node_id, int current_layer,
       const BioSequence& query_seq, int tolerance,

@@ -347,8 +347,15 @@ mean/p50/p95 query latency, mean world/center/leaf work counters,
 router/path-reuse counters. Aggregate locality reuse columns include
 `anchor_cache_hit_count`, `child_shortlist_cache_hit_count`,
 `safe_child_candidate_cache_hit_count`, and
-`productive_world_reuse_hit_count`. `batch_schedule_mode` records the schedule
-used for that row. The optimized locality profile enables deterministic path reuse while
+`productive_world_reuse_hit_count`. Near-query reuse columns include
+	`near_query_triangle_pruned_count`, `near_query_center_distance_reused_count`,
+	`near_query_bound_fallback_count`, `near_query_direct_verify_count`,
+	`near_query_leaf_triangle_pruned_count`,
+	`near_query_leaf_distance_reused_count`,
+	`near_query_leaf_bound_fallback_count`,
+	`center_distance_reduction`, `world_access_reduction`, and `p95_speedup`.
+`batch_schedule_mode` records the schedule used for that row. The optimized
+locality profile enables deterministic path reuse while
 leaving router hints, safe child routing, local routing, and best-first ordering
 off by default; persisted locality runs already use exact rect MBB filtering, so
 the heavier router stages are measured through explicit query and
@@ -472,6 +479,44 @@ rows also include baseline-relative columns such as
 `avg_world_access_ratio_vs_baseline`,
 `avg_center_distance_ratio_vs_baseline`, and
 `avg_raw_candidate_ratio_vs_baseline`.
+
+### `candidate-verify`
+
+Exact verification and TP/FP/FN accounting for external seed candidate TSVs.
+This command is intended for fair comparisons with randstrobe, strobemer, and
+spaced-seed tools that emit candidate reference-window IDs. It does not generate
+seed candidates itself; measure that step separately, then add this command's
+`verify_ms` to get the full seed-to-final-match mapping time. `truth_ms` is
+quality-audit time and should not be included in mapper runtime.
+
+**Required:** `--ref`, `--reads`, `--candidates`, `--out`, `--summary-out`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--ref` | required | Reference FASTA or literal sequence used to reconstruct candidate windows |
+| `--reads` | required | Query FASTQ; `source_pos=` in headers is used by `--truth source` |
+| `--candidates` | required | Candidate TSV with `read_id`, `tau`, `raw_candidate_count`, and `candidate_window_ids` columns |
+| `--window` | `200` | Candidate/reference window length |
+| `--stride` | `1` | Step between reference-window starts; `window_id * stride` gives the reference start |
+| `--tolerance` | `2` | Fallback edit-distance threshold when a candidate row is missing; row-level `tau` is preferred |
+| `--truth` | `source` | `source` checks the annotated origin window; `exhaustive` scans every reference window for a full small-run no-FN audit |
+| `--out` | required | Per-query detail TSV |
+| `--summary-out` | required | One-row aggregate TSV |
+
+All reported matches are bounded exact edit-distance verified against the query
+sequence. Source truth mode can count a verified non-origin window as FP;
+exhaustive truth mode uses the same exact verifier over all windows, so verified
+candidate FPs should be zero unless the inputs are inconsistent.
+
+Detail output columns:
+`read_id`, `tau`, `raw_candidate_count`, `verified_match_count`,
+`truth_match_count`, `tp_count`, `fp_count`, `fn_count`,
+`verified_window_ids`, `truth_window_ids`.
+
+Summary output columns:
+`query_count`, `raw_candidate_count`, `verified_match_count`,
+`truth_match_count`, `tp_count`, `fp_count`, `fn_count`, `verify_ms`,
+`truth_ms`.
 
 ### `boundary`
 

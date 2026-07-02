@@ -140,13 +140,22 @@ struct AggregateRecord {
   size_t planner_strategy_router_count = 0;
   size_t planner_strategy_safe_child_router_count = 0;
   size_t planner_strategy_path_reuse_count = 0;
+  size_t planner_near_reuse_enabled_count = 0;
+  size_t planner_near_reuse_disabled_count = 0;
   size_t planner_fallback_count = 0;
   double planner_decision_ms = 0.0;
   size_t frontier_max_size = 0;
   size_t frontier_total_pushed = 0;
   size_t path_reuse_attempt_count = 0;
   size_t path_reuse_hit_count = 0;
-  size_t anchor_cache_hit_count = 0;
+  size_t near_query_triangle_pruned_count = 0;
+	  size_t near_query_center_distance_reused_count = 0;
+	  size_t near_query_bound_fallback_count = 0;
+	  size_t near_query_direct_verify_count = 0;
+	  size_t near_query_leaf_triangle_pruned_count = 0;
+	  size_t near_query_leaf_distance_reused_count = 0;
+	  size_t near_query_leaf_bound_fallback_count = 0;
+	  size_t anchor_cache_hit_count = 0;
   size_t child_shortlist_reuse_hit_count = 0;
   std::array<double, 3> proximal_actual_envelope_sum = {0.0, 0.0, 0.0};
   std::array<double, 3> proximal_frontier_envelope_sum = {0.0, 0.0, 0.0};
@@ -277,6 +286,10 @@ void append_profile_if_distinct(std::vector<BenchmarkProfileSpec>& profiles,
         existing.search_qgram_q == candidate.search_qgram_q &&
         existing.query_profile == candidate.query_profile &&
         existing.path_reuse_enabled == candidate.path_reuse_enabled &&
+        existing.near_query_max_neighbor_edit_distance ==
+            candidate.near_query_max_neighbor_edit_distance &&
+        existing.near_query_min_qgram_jaccard ==
+            candidate.near_query_min_qgram_jaccard &&
         existing.router_hint_enabled == candidate.router_hint_enabled &&
         existing.router_hint_qgram_q == candidate.router_hint_qgram_q &&
         existing.router_hint_minimizer_k == candidate.router_hint_minimizer_k &&
@@ -525,6 +538,10 @@ std::vector<AggregateRecord> aggregate_records(
           record.stats.planner_strategy_safe_child_router_count;
       aggregate.planner_strategy_path_reuse_count +=
           record.stats.planner_strategy_path_reuse_count;
+      aggregate.planner_near_reuse_enabled_count +=
+          record.stats.planner_near_reuse_enabled_count;
+      aggregate.planner_near_reuse_disabled_count +=
+          record.stats.planner_near_reuse_disabled_count;
       aggregate.planner_fallback_count += record.stats.planner_fallback_count;
       aggregate.planner_decision_ms += record.stats.planner_decision_ms;
       aggregate.frontier_max_size += record.stats.frontier_max_size;
@@ -532,7 +549,21 @@ std::vector<AggregateRecord> aggregate_records(
       aggregate.path_reuse_attempt_count +=
           record.stats.path_reuse_attempt_count;
       aggregate.path_reuse_hit_count += record.stats.path_reuse_hit_count;
-      aggregate.anchor_cache_hit_count += record.stats.anchor_cache_hit_count;
+      aggregate.near_query_triangle_pruned_count +=
+          record.stats.near_query_triangle_pruned_count;
+      aggregate.near_query_center_distance_reused_count +=
+          record.stats.near_query_center_distance_reused_count;
+      aggregate.near_query_bound_fallback_count +=
+          record.stats.near_query_bound_fallback_count;
+	      aggregate.near_query_direct_verify_count +=
+	          record.stats.near_query_direct_verify_count;
+	      aggregate.near_query_leaf_triangle_pruned_count +=
+	          record.stats.near_query_leaf_triangle_pruned_count;
+	      aggregate.near_query_leaf_distance_reused_count +=
+	          record.stats.near_query_leaf_distance_reused_count;
+	      aggregate.near_query_leaf_bound_fallback_count +=
+	          record.stats.near_query_leaf_bound_fallback_count;
+	      aggregate.anchor_cache_hit_count += record.stats.anchor_cache_hit_count;
       aggregate.child_shortlist_reuse_hit_count +=
           record.stats.child_shortlist_reuse_hit_count;
       if (record.proximal.enabled) {
@@ -1604,6 +1635,13 @@ LocalityBenchmarkRow run_locality_profile(
   size_t productive_world_reuse_hit_total = 0;
   size_t verified_result_cache_hit_total = 0;
   size_t near_query_reuse_hit_total = 0;
+  size_t near_query_triangle_pruned_total = 0;
+  size_t near_query_center_distance_reused_total = 0;
+	  size_t near_query_bound_fallback_total = 0;
+	  size_t near_query_direct_verify_total = 0;
+	  size_t near_query_leaf_triangle_pruned_total = 0;
+	  size_t near_query_leaf_distance_reused_total = 0;
+	  size_t near_query_leaf_bound_fallback_total = 0;
   std::unordered_map<std::string, std::vector<std::shared_ptr<BioSequence>>>
       exact_result_cache;
   exact_result_cache.reserve(queries.size());
@@ -1689,9 +1727,22 @@ LocalityBenchmarkRow run_locality_profile(
     safe_child_candidate_cache_hit_total +=
         stats.safe_child_candidate_cache_hit_count;
     productive_world_reuse_hit_total += stats.productive_world_reuse_hit_count;
-    near_query_reuse_hit_total += stats.anchor_cache_hit_count +
+    near_query_reuse_hit_total += stats.near_query_reuse_hit_count +
+                                  stats.anchor_cache_hit_count +
                                   stats.child_shortlist_cache_hit_count +
                                   stats.safe_child_candidate_cache_hit_count;
+    near_query_triangle_pruned_total +=
+        stats.near_query_triangle_pruned_count;
+    near_query_center_distance_reused_total +=
+        stats.near_query_center_distance_reused_count;
+	    near_query_bound_fallback_total += stats.near_query_bound_fallback_count;
+	    near_query_direct_verify_total += stats.near_query_direct_verify_count;
+	    near_query_leaf_triangle_pruned_total +=
+	        stats.near_query_leaf_triangle_pruned_count;
+	    near_query_leaf_distance_reused_total +=
+	        stats.near_query_leaf_distance_reused_count;
+	    near_query_leaf_bound_fallback_total +=
+	        stats.near_query_leaf_bound_fallback_count;
     local_router_shortlisted.push_back(
         static_cast<double>(stats.local_router_shortlist_child_count));
     best_first_invoked.push_back(
@@ -1737,6 +1788,17 @@ LocalityBenchmarkRow run_locality_profile(
   row.productive_world_reuse_hit_count = productive_world_reuse_hit_total;
   row.verified_result_cache_hit_count = verified_result_cache_hit_total;
   row.near_query_reuse_hit_count = near_query_reuse_hit_total;
+  row.near_query_triangle_pruned_count = near_query_triangle_pruned_total;
+  row.near_query_center_distance_reused_count =
+      near_query_center_distance_reused_total;
+	  row.near_query_bound_fallback_count = near_query_bound_fallback_total;
+	  row.near_query_direct_verify_count = near_query_direct_verify_total;
+	  row.near_query_leaf_triangle_pruned_count =
+	      near_query_leaf_triangle_pruned_total;
+	  row.near_query_leaf_distance_reused_count =
+	      near_query_leaf_distance_reused_total;
+	  row.near_query_leaf_bound_fallback_count =
+	      near_query_leaf_bound_fallback_total;
   row.mean_path_reuse_hits = average(path_reuse_hits);
   row.mean_anchor_cache_hits = average(anchor_cache_hits);
   row.mean_child_shortlist_hits = average(child_shortlist_hits);
@@ -2010,6 +2072,10 @@ std::vector<std::string> locality_columns() {
       "safe_child_router_invoked_ratio", "path_reuse_hit_ratio",
       "unique_query_count", "duplicate_group_count", "duplicate_ratio",
       "verified_result_cache_hit_count", "near_query_reuse_hit_count",
+      "near_query_triangle_pruned_count",
+      "near_query_center_distance_reused_count",
+      "near_query_bound_fallback_count", "near_query_direct_verify_count",
+      "center_distance_reduction", "world_access_reduction", "p95_speedup",
       "mean_neighbor_edit_distance", "p95_neighbor_edit_distance",
       "mean_neighbor_qgram_jaccard",
       "anchor_cache_hit_count", "child_shortlist_cache_hit_count",
@@ -2021,8 +2087,11 @@ std::vector<std::string> locality_columns() {
       "mean_child_count_before_router", "mean_post_mbb_survivor_count",
       "mean_safe_router_candidate_count",
       "mean_candidate_ratio_to_all_children",
-      "mean_candidate_ratio_to_post_mbb_survivors",
-      "mean_children_actually_processed", "mean_center_checks_saved"};
+	      "mean_candidate_ratio_to_post_mbb_survivors",
+	      "mean_children_actually_processed", "mean_center_checks_saved",
+	      "near_query_leaf_triangle_pruned_count",
+	      "near_query_leaf_distance_reused_count",
+	      "near_query_leaf_bound_fallback_count"};
 }
 
 std::vector<std::string> locality_row_values(const LocalityBenchmarkRow& row) {
@@ -2056,6 +2125,13 @@ std::vector<std::string> locality_row_values(const LocalityBenchmarkRow& row) {
       format_double(row.duplicate_ratio),
       std::to_string(row.verified_result_cache_hit_count),
       std::to_string(row.near_query_reuse_hit_count),
+      std::to_string(row.near_query_triangle_pruned_count),
+      std::to_string(row.near_query_center_distance_reused_count),
+      std::to_string(row.near_query_bound_fallback_count),
+      std::to_string(row.near_query_direct_verify_count),
+      format_double(row.center_distance_reduction),
+      format_double(row.world_access_reduction),
+      format_double(row.p95_speedup),
       format_double(row.mean_neighbor_edit_distance),
       format_double(row.p95_neighbor_edit_distance),
       format_double(row.mean_neighbor_qgram_jaccard),
@@ -2076,9 +2152,12 @@ std::vector<std::string> locality_row_values(const LocalityBenchmarkRow& row) {
       format_double(row.mean_post_mbb_survivor_count),
       format_double(row.mean_safe_router_candidate_count),
       format_double(row.mean_candidate_ratio_to_all_children),
-      format_double(row.mean_candidate_ratio_to_post_mbb_survivors),
-      format_double(row.mean_children_actually_processed),
-      format_double(row.mean_center_checks_saved)};
+	      format_double(row.mean_candidate_ratio_to_post_mbb_survivors),
+	      format_double(row.mean_children_actually_processed),
+	      format_double(row.mean_center_checks_saved),
+	      std::to_string(row.near_query_leaf_triangle_pruned_count),
+	      std::to_string(row.near_query_leaf_distance_reused_count),
+	      std::to_string(row.near_query_leaf_bound_fallback_count)};
 }
 
 LocalityBenchmarkRunResult run_persisted_locality_benchmark(
@@ -2142,12 +2221,24 @@ LocalityBenchmarkRunResult run_persisted_locality_benchmark(
           locality_schedule_order(queries, schedule, config.seed + 7919U);
       const auto scheduled_queries = apply_locality_schedule(queries, order);
       const auto baseline_ids = apply_result_schedule(original_baseline_ids, order);
+      LocalityBenchmarkRow baseline_reference;
+      bool have_baseline_reference = false;
       if (contains_profile(config.profiles, "baseline")) {
         LocalityBenchmarkRow row = run_locality_profile(
             dataset_name, "baseline", schedule, loaded.builder, scheduled_queries,
             {}, config.tolerance, result.load_ms, nullptr);
         if (row.mismatch_count != 0) gate_passed = false;
+        row.center_distance_reduction = 0.0;
+        row.world_access_reduction = 0.0;
+        row.p95_speedup = 1.0;
+        baseline_reference = row;
+        have_baseline_reference = true;
         result.rows.push_back(std::move(row));
+      } else {
+        baseline_reference = run_locality_profile(
+            dataset_name, "baseline", schedule, loaded.builder, scheduled_queries,
+            {}, config.tolerance, result.load_ms, nullptr);
+        have_baseline_reference = true;
       }
       for (const auto& profile : config.profiles) {
         if (profile == "baseline") continue;
@@ -2155,6 +2246,14 @@ LocalityBenchmarkRunResult run_persisted_locality_benchmark(
             dataset_name, profile, schedule, loaded.builder, scheduled_queries,
             baseline_ids, config.tolerance, result.load_ms, nullptr);
         if (row.mismatch_count != 0) gate_passed = false;
+        if (have_baseline_reference) {
+          row.center_distance_reduction =
+              baseline_reference.mean_center_distance - row.mean_center_distance;
+          row.world_access_reduction =
+              baseline_reference.mean_world_access - row.mean_world_access;
+          row.p95_speedup =
+              safe_speedup(baseline_reference.p95_query_ms, row.p95_query_ms);
+        }
         result.rows.push_back(std::move(row));
       }
     }
@@ -2437,7 +2536,13 @@ QueryBenchmarkRunResult run_query_benchmark(
       "leaf_collect_ms", "leaf_mbb_filter_ms", "leaf_verify_ms",
       "result_dedup_ms", "path_reuse_ms",
       "path_reuse_attempt_count", "path_reuse_hit_count",
-      "anchor_cache_hit_count", "child_shortlist_reuse_hit_count",
+      "near_query_triangle_pruned_count",
+      "near_query_center_distance_reused_count",
+	      "near_query_bound_fallback_count", "near_query_direct_verify_count",
+	      "near_query_leaf_triangle_pruned_count",
+	      "near_query_leaf_distance_reused_count",
+	      "near_query_leaf_bound_fallback_count",
+	      "anchor_cache_hit_count", "child_shortlist_reuse_hit_count",
       "router_hint_invoked_count", "router_qgram_ranked_count",
       "router_minimizer_ranked_count", "router_pigeonhole_query_count",
       "router_candidate_count", "router_candidate_hit_count",
@@ -2460,7 +2565,9 @@ QueryBenchmarkRunResult run_query_benchmark(
       "planner_invoked_count", "planner_strategy_baseline_count",
       "planner_strategy_direct_qgram_count", "planner_strategy_router_count",
       "planner_strategy_safe_child_router_count",
-      "planner_strategy_path_reuse_count", "planner_fallback_count",
+      "planner_strategy_path_reuse_count",
+      "planner_near_reuse_enabled_count",
+      "planner_near_reuse_disabled_count", "planner_fallback_count",
       "planner_decision_ms",
       "actual_envelope_k1", "actual_envelope_k2", "actual_envelope_k4",
       "frontier_oracle_envelope_k1", "frontier_oracle_envelope_k2",
@@ -2519,7 +2626,14 @@ QueryBenchmarkRunResult run_query_benchmark(
         format_double(record.stats.path_reuse_ms),
         std::to_string(record.stats.path_reuse_attempt_count),
         std::to_string(record.stats.path_reuse_hit_count),
-        std::to_string(record.stats.anchor_cache_hit_count),
+        std::to_string(record.stats.near_query_triangle_pruned_count),
+        std::to_string(record.stats.near_query_center_distance_reused_count),
+	        std::to_string(record.stats.near_query_bound_fallback_count),
+	        std::to_string(record.stats.near_query_direct_verify_count),
+	        std::to_string(record.stats.near_query_leaf_triangle_pruned_count),
+	        std::to_string(record.stats.near_query_leaf_distance_reused_count),
+	        std::to_string(record.stats.near_query_leaf_bound_fallback_count),
+	        std::to_string(record.stats.anchor_cache_hit_count),
         std::to_string(record.stats.child_shortlist_reuse_hit_count),
         std::to_string(record.stats.router_hint_invoked_count),
         std::to_string(record.stats.router_qgram_ranked_count),
@@ -2558,6 +2672,8 @@ QueryBenchmarkRunResult run_query_benchmark(
         std::to_string(record.stats.planner_strategy_router_count),
         std::to_string(record.stats.planner_strategy_safe_child_router_count),
         std::to_string(record.stats.planner_strategy_path_reuse_count),
+        std::to_string(record.stats.planner_near_reuse_enabled_count),
+        std::to_string(record.stats.planner_near_reuse_disabled_count),
         std::to_string(record.stats.planner_fallback_count),
         format_double(record.stats.planner_decision_ms),
         format_double(record.proximal.actual_envelope[0]),
@@ -2630,6 +2746,14 @@ QueryBenchmarkRunResult run_query_benchmark(
       "avg_mbb_scalar_checks",
       "avg_mbb_simd_batches", "avg_mbb_simd_fallbacks", "avg_qgram_checks",
       "avg_path_reuse_attempt_count", "avg_path_reuse_hit_count",
+      "avg_near_query_triangle_pruned_count",
+      "avg_near_query_center_distance_reused_count",
+	      "avg_near_query_bound_fallback_count",
+	      "avg_near_query_direct_verify_count",
+	      "avg_near_query_leaf_triangle_pruned_count",
+	      "avg_near_query_leaf_distance_reused_count",
+	      "avg_near_query_leaf_bound_fallback_count",
+	      "center_distance_reduction", "world_access_reduction", "p95_speedup",
       "avg_anchor_cache_hit_count", "avg_child_shortlist_reuse_hit_count",
       "avg_router_hint_invoked_count", "avg_router_qgram_ranked_count",
       "avg_router_minimizer_ranked_count",
@@ -2657,7 +2781,9 @@ QueryBenchmarkRunResult run_query_benchmark(
       "avg_planner_strategy_direct_qgram_count",
       "avg_planner_strategy_router_count",
       "avg_planner_strategy_safe_child_router_count",
-      "avg_planner_strategy_path_reuse_count", "avg_planner_fallback_count",
+      "avg_planner_strategy_path_reuse_count",
+      "avg_planner_near_reuse_enabled_count",
+      "avg_planner_near_reuse_disabled_count", "avg_planner_fallback_count",
       "avg_planner_decision_ms",
       "mean_actual_envelope_k1", "mean_actual_envelope_k2",
       "mean_actual_envelope_k4",
@@ -2689,6 +2815,7 @@ QueryBenchmarkRunResult run_query_benchmark(
   struct BaselineAggregateView {
     double cold_avg_ms = 0.0;
     double warm_avg_ms = 0.0;
+    double warm_p95_ms = 0.0;
     double avg_world_access_count = 0.0;
     double avg_center_distance_count = 0.0;
     double avg_raw_candidate_count = 0.0;
@@ -2700,6 +2827,7 @@ QueryBenchmarkRunResult run_query_benchmark(
     baseline_by_class[aggregate.query_class] = {
         average(aggregate.cold_latencies),
         average(aggregate.warm_latencies),
+        percentile_or_zero(aggregate.warm_latencies, 0.95),
         average_counter(aggregate.world_access_count, sample_count),
         average_counter(aggregate.center_distance_count, sample_count),
         average_counter(aggregate.raw_candidate_count, sample_count),
@@ -2767,6 +2895,27 @@ QueryBenchmarkRunResult run_query_benchmark(
                                       sample_count)),
         format_double(average_counter(aggregate.path_reuse_hit_count,
                                       sample_count)),
+        format_double(average_counter(
+            aggregate.near_query_triangle_pruned_count, sample_count)),
+        format_double(average_counter(
+            aggregate.near_query_center_distance_reused_count, sample_count)),
+        format_double(average_counter(
+            aggregate.near_query_bound_fallback_count, sample_count)),
+	        format_double(average_counter(
+	            aggregate.near_query_direct_verify_count, sample_count)),
+	        format_double(average_counter(
+	            aggregate.near_query_leaf_triangle_pruned_count, sample_count)),
+	        format_double(average_counter(
+	            aggregate.near_query_leaf_distance_reused_count, sample_count)),
+	        format_double(average_counter(
+	            aggregate.near_query_leaf_bound_fallback_count, sample_count)),
+	        format_double(baseline.avg_center_distance_count -
+                      avg_center_distance_count),
+        format_double(baseline.avg_world_access_count -
+                      avg_world_access_count),
+        format_double(safe_speedup(
+            baseline.warm_p95_ms,
+            percentile_or_zero(aggregate.warm_latencies, 0.95))),
         format_double(average_counter(aggregate.anchor_cache_hit_count,
                                       sample_count)),
         format_double(average_counter(
@@ -2843,6 +2992,10 @@ QueryBenchmarkRunResult run_query_benchmark(
             aggregate.planner_strategy_safe_child_router_count, sample_count)),
         format_double(average_counter(
             aggregate.planner_strategy_path_reuse_count, sample_count)),
+        format_double(average_counter(
+            aggregate.planner_near_reuse_enabled_count, sample_count)),
+        format_double(average_counter(
+            aggregate.planner_near_reuse_disabled_count, sample_count)),
         format_double(average_counter(aggregate.planner_fallback_count,
                                       sample_count)),
         format_double(sample_count == 0
@@ -2980,6 +3133,10 @@ QueryBenchmarkRunResult run_query_benchmark(
          << bool_string(profile_config.search_qgram_prefilter) << ","
          << "\"path_reuse_enabled\":"
          << bool_string(profile_config.path_reuse_enabled) << ","
+         << "\"near_query_max_neighbor_edit_distance\":"
+         << profile_config.near_query_max_neighbor_edit_distance << ","
+         << "\"near_query_min_qgram_jaccard\":"
+         << format_double(profile_config.near_query_min_qgram_jaccard) << ","
          << "\"router_hint_enabled\":"
          << bool_string(profile_config.router_hint_enabled) << ","
          << "\"router_hint_qgram_q\":"

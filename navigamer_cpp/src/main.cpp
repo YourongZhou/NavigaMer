@@ -16,6 +16,7 @@
 #include "map150.hpp"
 #include "query_benchmark.hpp"
 #include "index_persistence.hpp"
+#include "candidate_verifier.hpp"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -47,8 +48,9 @@ void usage(const char* prog) {
             << "  " << prog << " run  --ref <path|seq> --reads <path|seq> [--tolerance 2] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " map150 --ref <path|seq> --reads <path|seq> --tolerance <N> --out <tsv> [--mode adaptive] [--locator refpos|seqan] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " benchmark --ref <fasta> --reads <fastq> [--tolerance 5] [--window 200] [--stride 1] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
-            << "  " << prog << " query-benchmark --ref <fasta|sequence> --out <detail.tsv> --summary-out <summary.tsv> --json-out <summary.json> [--window 200] [--query-length 200] [--tolerance 2] [--query-benchmark-ablations 0|1] [--proximal-oracle 0|1] [--proximal-oracle-k 1,2,4]\n"
-            << "  " << prog << " locality-benchmark --index <navidx> --ref <fasta|sequence> --out <summary.tsv> [--query-fastq-out <queries.fq>] [--query-count 256] [--query-length 250] [--query-edits 5] [--tolerance 5] [--scenarios low-fanout,high-fanout,repeat,batch-locality,oracle,all] [--locality-profiles baseline,path_reuse,optimized] [--locality-datasets same_template,nearby_windows,random_windows] [--batch-schedules original,random,minimizer,qgram-signature,router-signature,source-oracle]\n"
+	            << "  " << prog << " query-benchmark --ref <fasta|sequence> --out <detail.tsv> --summary-out <summary.tsv> --json-out <summary.json> [--window 200] [--query-length 200] [--tolerance 2] [--query-benchmark-ablations 0|1] [--proximal-oracle 0|1] [--proximal-oracle-k 1,2,4]\n"
+	            << "  " << prog << " candidate-verify --ref <fasta|sequence> --reads <fastq> --candidates <candidate.tsv> --out <detail.tsv> --summary-out <summary.tsv> [--window 150] [--stride 1] [--tolerance 5] [--truth source|exhaustive]\n"
+	            << "  " << prog << " locality-benchmark --index <navidx> --ref <fasta|sequence> --out <summary.tsv> [--query-fastq-out <queries.fq>] [--query-count 256] [--query-length 250] [--query-edits 5] [--tolerance 5] [--scenarios low-fanout,high-fanout,repeat,batch-locality,oracle,all] [--locality-profiles baseline,path_reuse,optimized] [--locality-datasets same_template,nearby_windows,random_windows] [--batch-schedules original,random,minimizer,qgram-signature,router-signature,source-oracle]\n"
             << "  " << prog << " query-locality-benchmark --index <navidx> --ref <fasta|sequence> --out <summary.tsv> [same flags as locality-benchmark]\n"
             << "  " << prog << " query-locality-report --ref <fasta|sequence> --out-dir <dir> [--index <navidx>] [--window 250] [--stride 1] [--query-count 256] [--query-length 250] [--query-edits 5] [--tolerance 5] [--scenarios low-fanout,high-fanout,repeat,batch-locality,oracle,all] [--locality-profiles baseline,path_reuse,optimized] [--locality-datasets same_template,nearby_windows,random_windows] [--batch-schedules original,random,minimizer,qgram-signature,router-signature,source-oracle]\n"
             << "  " << prog << " boundary --ref <fasta> [--length 250] [--error-rates csv] [--tolerance-rates csv] [--queries-per-cell 200] [--stride-mode sparse|dense] [--seed 42] [--out <tsv>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
@@ -1038,10 +1040,13 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       "search_qgram_prefilter_enabled", "search_qgram_q",
       "search_qgram_signature_build_count", "search_qgram_signature_missing_count",
       "search_qgram_checks", "search_qgram_pruned_children",
-      "search_qgram_passed_children", "center_distance_calls_before_qgram",
-      "center_distance_calls_after_qgram", "qgram_prune_ratio", "result_count",
-      "avg_mbb_candidates_per_parent",
-      "avg_center_distance_calls_per_query", "query_time_ms"};
+	      "search_qgram_passed_children", "center_distance_calls_before_qgram",
+	      "center_distance_calls_after_qgram", "qgram_prune_ratio", "result_count",
+	      "avg_mbb_candidates_per_parent",
+	      "avg_center_distance_calls_per_query", "query_time_ms",
+	      "near_query_leaf_triangle_pruned_count",
+	      "near_query_leaf_distance_reused_count",
+	      "near_query_leaf_bound_fallback_count"};
 
   std::vector<std::vector<std::vector<std::string>>> per_query_rows(queries.size());
   std::vector<double> summary_query_ms;
@@ -1170,10 +1175,13 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
         std::to_string(st.center_distance_calls_before_qgram),
         std::to_string(st.center_distance_calls_after_qgram),
         format_double(st.qgram_prune_ratio()),
-        std::to_string(st.result_count),
-        format_double(avg_mbb_candidates),
-        format_double(static_cast<double>(st.center_distance_calls_after_qgram)),
-        format_double(profiled_query_ms)};
+	        std::to_string(st.result_count),
+	        format_double(avg_mbb_candidates),
+	        format_double(static_cast<double>(st.center_distance_calls_after_qgram)),
+	        format_double(profiled_query_ms),
+	        std::to_string(st.near_query_leaf_triangle_pruned_count),
+	        std::to_string(st.near_query_leaf_distance_reused_count),
+	        std::to_string(st.near_query_leaf_bound_fallback_count)};
     #pragma omp critical
     {
       summary_query_ms.push_back(profiled_query_ms);
@@ -1577,11 +1585,13 @@ int main(int argc, char** argv) {
   }
   std::string cmd = argv[1];
   std::string ref_input, reads_input, query_seq, mode = "adaptive", out_tsv;
+  std::string candidates_tsv;
   std::string index_path;
   int tolerance = 2;
-  int demo_size = 500;
-  int window_size = 200;
-  int stride = 1;
+	  int demo_size = 500;
+	  int window_size = 200;
+	  bool window_explicit = false;
+	  int stride = 1;
   bool stride_explicit = false;
   int boundary_length = 250;
   size_t queries_per_cell = 200;
@@ -1667,6 +1677,7 @@ int main(int argc, char** argv) {
   std::string summary_out;
   std::string json_out;
   std::string out_dir;
+  std::string candidate_truth_mode = "source";
 
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
@@ -1675,10 +1686,18 @@ int main(int argc, char** argv) {
     if (a == "--query" && i + 1 < argc) { query_seq = argv[++i]; continue; }
     if (a == "--tolerance" && i + 1 < argc) { tolerance = std::atoi(argv[++i]); continue; }
     if (a == "--mode" && i + 1 < argc) { mode = argv[++i]; continue; }
-    if (a == "--out" && i + 1 < argc) { out_tsv = argv[++i]; continue; }
+	    if (a == "--out" && i + 1 < argc) { out_tsv = argv[++i]; continue; }
+	    if (a == "--candidates" && i + 1 < argc) {
+	      candidates_tsv = argv[++i];
+	      continue;
+	    }
     if (a == "--index" && i + 1 < argc) { index_path = argv[++i]; continue; }
     if (a == "--size" && i + 1 < argc) { demo_size = std::atoi(argv[++i]); continue; }
-    if (a == "--window" && i + 1 < argc) { window_size = std::atoi(argv[++i]); continue; }
+	    if (a == "--window" && i + 1 < argc) {
+	      window_size = std::atoi(argv[++i]);
+	      window_explicit = true;
+	      continue;
+	    }
     if (a == "--stride" && i + 1 < argc) {
       stride = std::atoi(argv[++i]);
       stride_explicit = true;
@@ -1735,10 +1754,14 @@ int main(int argc, char** argv) {
       json_out = argv[++i];
       continue;
     }
-    if (a == "--out-dir" && i + 1 < argc) {
-      out_dir = argv[++i];
-      continue;
-    }
+	    if (a == "--out-dir" && i + 1 < argc) {
+	      out_dir = argv[++i];
+	      continue;
+	    }
+	    if (a == "--truth" && i + 1 < argc) {
+	      candidate_truth_mode = argv[++i];
+	      continue;
+	    }
     if (a == "--query-benchmark-ablations" && i + 1 < argc) {
       query_benchmark_ablations =
           parse_zero_one(argv[++i], "--query-benchmark-ablations");
@@ -2156,7 +2179,7 @@ int main(int argc, char** argv) {
                     hierarchy, range_config, search_config);
       return 0;
     }
-    if (cmd == "query-benchmark") {
+	    if (cmd == "query-benchmark") {
       if (ref_input.empty() || out_tsv.empty() || summary_out.empty() ||
           json_out.empty()) {
         std::cerr << "query-benchmark requires --ref, --out, --summary-out, "
@@ -2191,9 +2214,41 @@ int main(int argc, char** argv) {
         return 2;
       }
       std::cerr << "query-benchmark gate passed\n";
-      return 0;
-    }
-    if (cmd == "locality-benchmark" || cmd == "query-locality-benchmark") {
+	      return 0;
+	    }
+	    if (cmd == "candidate-verify") {
+	      if (ref_input.empty() || reads_input.empty() || candidates_tsv.empty() ||
+	          out_tsv.empty() || summary_out.empty()) {
+	        std::cerr << "candidate-verify requires --ref, --reads, --candidates, "
+	                     "--out, and --summary-out\n";
+	        return 1;
+	      }
+	      navigamer::CandidateVerifierConfig config;
+	      config.reference_input = ref_input;
+	      config.reads_fastq_path = reads_input;
+	      config.candidates_tsv_path = candidates_tsv;
+	      config.detail_tsv_path = out_tsv;
+	      config.summary_tsv_path = summary_out;
+	      config.tolerance = tolerance;
+	      config.window_length = window_explicit ? window_size : 150;
+	      config.stride = stride;
+	      config.truth_mode =
+	          navigamer::parse_candidate_truth_mode(candidate_truth_mode);
+	      const auto summary = navigamer::run_candidate_verifier(config);
+	      std::cerr << "candidate-verify done"
+	                << " queries=" << summary.query_count
+	                << " raw_candidates=" << summary.raw_candidate_count
+	                << " verified=" << summary.verified_match_count
+	                << " truth=" << summary.truth_match_count
+	                << " tp=" << summary.tp_count
+	                << " fp=" << summary.fp_count
+	                << " fn=" << summary.fn_count
+	                << " verify_ms=" << format_double(summary.verify_ms)
+	                << " truth_ms=" << format_double(summary.truth_ms)
+	                << "\n";
+	      return 0;
+	    }
+	    if (cmd == "locality-benchmark" || cmd == "query-locality-benchmark") {
       if (index_path.empty() || ref_input.empty() || out_tsv.empty()) {
         std::cerr << cmd << " requires --index, --ref, and --out\n";
         return 1;

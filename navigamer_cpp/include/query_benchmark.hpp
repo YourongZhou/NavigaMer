@@ -113,6 +113,16 @@ struct LocalityBenchmarkRow {
   double duplicate_ratio = 0.0;
   size_t verified_result_cache_hit_count = 0;
   size_t near_query_reuse_hit_count = 0;
+  size_t near_query_triangle_pruned_count = 0;
+	  size_t near_query_center_distance_reused_count = 0;
+	  size_t near_query_bound_fallback_count = 0;
+	  size_t near_query_direct_verify_count = 0;
+	  size_t near_query_leaf_triangle_pruned_count = 0;
+	  size_t near_query_leaf_distance_reused_count = 0;
+	  size_t near_query_leaf_bound_fallback_count = 0;
+	  double center_distance_reduction = 0.0;
+  double world_access_reduction = 0.0;
+  double p95_speedup = 1.0;
   double mean_neighbor_edit_distance = 0.0;
   double p95_neighbor_edit_distance = 0.0;
   double mean_neighbor_qgram_jaccard = 0.0;

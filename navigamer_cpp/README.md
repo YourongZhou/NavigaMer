@@ -26,6 +26,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer map150 --ref <fasta|sequence> --reads <fastq|sequence> --tolerance <N> --out out.tsv [--locator refpos|seqan]
 ./navigamer benchmark --ref <fasta> --reads <fastq> [--tolerance 2] [--window 200] [--stride 1] [--out out.tsv]
 ./navigamer query-benchmark --ref <fasta|sequence> --out detail.tsv --summary-out summary.tsv --json-out summary.json [--window 200] [--query-length 200] [--query-benchmark-ablations 0|1] [--proximal-oracle 0|1] [--proximal-oracle-k 1,2,4]
+./navigamer candidate-verify --ref <fasta|sequence> --reads <fastq> --candidates candidates.tsv --out detail.tsv --summary-out summary.tsv [--window 150] [--stride 1] [--tolerance 5] [--truth source|exhaustive]
 ./navigamer locality-benchmark --index index.navidx --ref <fasta|sequence> --out summary.tsv [--scenarios low-fanout,high-fanout,repeat,batch-locality,oracle,all]
 ./navigamer query-locality-benchmark --index index.navidx --ref <fasta|sequence> --out summary.tsv [same flags as locality-benchmark]
 ./navigamer query-locality-report --ref <fasta|sequence> --out-dir report_dir [--index index.navidx] [--scenarios all]
@@ -72,10 +73,16 @@ ordering/cache hint only: it never becomes the sole pruning reason, preserves
 exact verification, and records `path_reuse_attempt_count`,
 `path_reuse_hit_count`, `anchor_cache_hit_count`, and
 `child_shortlist_reuse_hit_count`, plus locality-summary counters such as
-`child_shortlist_cache_hit_count`, `safe_child_candidate_cache_hit_count`, and
-`productive_world_reuse_hit_count`. Batch-oriented commands group queries by
-the same query-derived fingerprint while keeping emitted output rows in
-original query order.
+	`child_shortlist_cache_hit_count`, `safe_child_candidate_cache_hit_count`, and
+	`productive_world_reuse_hit_count`. Near-query reuse appends triangle-bound
+	center, leaf, and direct-verify counters plus `center_distance_reduction`,
+	`world_access_reduction`, and `p95_speedup` to locality/query-benchmark TSVs.
+	Leaf verification uses bounded exact edit distance; when path reuse is enabled,
+	it caches leaf distances up to the configured near-query neighbor bound so the
+	next nearby query can safely prune leaves by triangle inequality without
+	rebuilding the index.
+	Batch-oriented commands group queries by the same query-derived fingerprint
+while keeping emitted output rows in original query order.
 
 Adaptive router hints additionally accept `--router-hints 0|1`,
 `--router-hint-qgram-q N`, `--router-hint-minimizer-k N`, and
@@ -180,6 +187,16 @@ envelopes and fractions where the global oracle is materially better than the
 observed actual/frontier anchors. Any repeated-result, cross-profile, or
 brute-force no-FN mismatch makes the command return `2`.
 
+`candidate-verify` is the exact verifier used for external seed baselines such
+as randstrobe, strobemer, or spaced-seed candidate TSVs. It reads query FASTQ
+records, candidate window IDs, and the same reference/window geometry, then
+exactly verifies each candidate with bounded edit distance before reporting final
+matches. `--truth source` uses `source_pos=` FASTQ annotations as the expected
+origin window, while `--truth exhaustive` scans all reference windows for a
+small-run no-FN audit. Candidate generation time remains the external tool's
+time; `verify_ms` is the exact extension/verification time, and `truth_ms` is
+quality-audit time only.
+
 ## Module map
 
 | Header / source | Purpose |
@@ -192,6 +209,7 @@ brute-force no-FN mismatch makes the command return `2`.
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | `BioGeometryIndexBuilder`: dedup → phase1 extended sketch → phase2 rebinding → phase3 auxiliary collapse + MBB → leaves |
 | `include/index_persistence.hpp`, `src/index_persistence.cpp` | Binary index persistence, manifest signatures, save/load, and load-time graph reconstruction |
+| `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
 | `include/io_utils.hpp`, `src/io_utils.cpp` | FASTA/FASTQ load, TSV output |
 | `include/map150.hpp`, `src/map150.cpp` | Fixed-150bp mapper pipeline: stride-1 reference windows, `2t` candidate search, occurrence location, final exact verifier |

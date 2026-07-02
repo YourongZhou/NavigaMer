@@ -292,7 +292,14 @@ orders such as original, random, minimizer, qgram-signature, router-signature,
 and source-oracle; source-oracle is reported only as an upper-bound diagnostic.
 `--query-fastq-out` exports the generated query stream with `source_pos=` read
 header annotations so external candidate baselines can be run on the same
-reads.
+reads. `candidate-verify` consumes those FASTQ records plus external seed
+candidate TSVs, exactly verifies every candidate by edit distance, and reports
+TP/FP/FN. Its `verify_ms` is the extension/verification part to add to external
+candidate-generation time; `truth_ms` is evaluation-only audit work.
+Leaf-stage near-query reuse is query-only: it caches bounded exact leaf
+distances from the previous nearby query and uses triangle lower bounds to skip
+provably impossible leaf verifications without changing or rebuilding the
+persisted index.
 
 `query-locality-report --ref <fasta|sequence> --out-dir <dir>` wraps the
 persisted locality benchmark and writes `summary.tsv`, `summary.json`, and

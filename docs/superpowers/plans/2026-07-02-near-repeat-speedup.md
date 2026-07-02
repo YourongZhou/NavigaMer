@@ -27,7 +27,6 @@ For a previous query `q0`, current query `q1`, and a world/center sequence `c`:
 ```text
 d(q1, c) >= max(0, d(q0, c) - d(q0, q1))
 ```
-
 If the stored previous distance `d(q0, c)` is known and:
 
 ```text
@@ -399,4 +398,3 @@ PROMPT
 )" \
   > .codex_logs/near_repeat_speedup_v3_launcher_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 ```
-
