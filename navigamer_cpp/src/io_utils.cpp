@@ -3,6 +3,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace navigamer {
@@ -10,6 +11,22 @@ namespace navigamer {
 static bool is_file(const std::string& path) {
   std::ifstream f(path);
   return f.good();
+}
+
+static bool parse_source_pos(const std::string& header, size_t* source_pos) {
+  const std::string key = "source_pos=";
+  size_t pos = header.find(key);
+  if (pos == std::string::npos) return false;
+  pos += key.size();
+  if (pos >= header.size() || !std::isdigit(static_cast<unsigned char>(header[pos]))) {
+    return false;
+  }
+  char* end = nullptr;
+  const unsigned long long value =
+      std::strtoull(header.c_str() + pos, &end, 10);
+  if (end == header.c_str() + pos) return false;
+  *source_pos = static_cast<size_t>(value);
+  return true;
 }
 
 std::pair<std::string, std::string> load_reference(const std::string& path_or_string) {
@@ -55,7 +72,8 @@ std::vector<std::shared_ptr<BioSequence>> load_reads(
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
     if (line.empty()) continue;
     if (line[0] != '@') continue;
-    std::string seq_id = line.substr(1);
+    std::string header_body = line.substr(1);
+    std::string seq_id = header_body;
     size_t sp = seq_id.find_first_of(" \t");
     if (sp != std::string::npos) seq_id = seq_id.substr(0, sp);
     if (!std::getline(f, line)) break;
@@ -63,8 +81,11 @@ std::vector<std::shared_ptr<BioSequence>> load_reads(
     while (!sequence.empty() && (sequence.back() == '\r' || sequence.back() == '\n')) sequence.pop_back();
     std::getline(f, line);  // +
     std::getline(f, line);   // qual
-    if (!sequence.empty())
-      reads.push_back(std::make_shared<BioSequence>(seq_id, sequence));
+    if (!sequence.empty()) {
+      auto read = std::make_shared<BioSequence>(seq_id, sequence);
+      read->has_source_pos = parse_source_pos(header_body, &read->source_pos);
+      reads.push_back(read);
+    }
   }
   return reads;
 }

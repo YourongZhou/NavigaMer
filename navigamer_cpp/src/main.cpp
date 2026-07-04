@@ -272,6 +272,30 @@ std::vector<size_t> build_scheduled_query_indices(
   std::vector<size_t> indices(queries.size());
   std::iota(indices.begin(), indices.end(), 0);
   if (!path_reuse_enabled) return indices;
+  const bool has_source_positions = std::any_of(
+      queries.begin(), queries.end(),
+      [](const std::shared_ptr<navigamer::BioSequence>& query) {
+        return query && query->has_source_pos;
+      });
+  if (has_source_positions) {
+    std::stable_sort(indices.begin(), indices.end(),
+                     [&queries](size_t left, size_t right) {
+                       const auto& left_query = queries[left];
+                       const auto& right_query = queries[right];
+                       const bool left_has = left_query && left_query->has_source_pos;
+                       const bool right_has = right_query && right_query->has_source_pos;
+                       if (left_has && right_has) {
+                         if (left_query->source_pos != right_query->source_pos) {
+                           return left_query->source_pos < right_query->source_pos;
+                         }
+                         return left < right;
+                       }
+                       if (left_has != right_has) return left_has;
+                       return build_query_batch_key(left_query ? left_query->seq : "") <
+                              build_query_batch_key(right_query ? right_query->seq : "");
+                     });
+    return indices;
+  }
   std::stable_sort(indices.begin(), indices.end(),
                    [&queries](size_t left, size_t right) {
                      return build_query_batch_key(queries[left]->seq) <
@@ -1836,7 +1860,7 @@ int main(int argc, char** argv) {
   int router_hint_qgram_q = 5;
   int router_hint_minimizer_k = 4;
   int router_hint_minimizer_w = 8;
-  bool path_reuse_enabled = false;
+  bool path_reuse_enabled = true;
   bool local_router_enabled = false;
   size_t local_router_max_anchors = 4;
   size_t local_router_max_children = 64;
@@ -1886,7 +1910,7 @@ int main(int argc, char** argv) {
   std::string locality_datasets_csv =
       "same_template,nearby_windows,random_windows";
   std::string locality_scenarios_csv;
-  std::string batch_schedules_csv = "original";
+  std::string batch_schedules_csv = "source-oracle";
   std::string query_fastq_out;
   std::string summary_out;
   std::string json_out;
@@ -2535,15 +2559,25 @@ int main(int argc, char** argv) {
             reference_subset_length == 0
                 ? ref_seq.size()
                 : std::min(reference_subset_length, ref_seq.size());
-        std::string index_ref_seq = ref_seq.substr(0, actual_prefix);
-        auto windows =
-            build_reference_windows(ref_id, index_ref_seq, window_size, stride);
-        navigamer::BioGeometryIndexBuilder builder(hierarchy, range_config);
-        builder.build(windows);
         auto manifest = navigamer::make_reference_window_index_manifest(
             ref_input, actual_prefix, window_size, stride, hierarchy,
             range_config);
-        navigamer::save_index(report_index_path, builder, manifest);
+        std::string reason;
+        if (navigamer::index_matches_manifest(report_index_path, manifest,
+                                              nullptr, &reason)) {
+          std::cerr << "Reusing report index: " << report_index_path << "\n";
+        } else {
+          if (std::filesystem::exists(report_index_path)) {
+            std::cerr << "Report index not reused: " << reason << "\n";
+          }
+          std::string index_ref_seq = ref_seq.substr(0, actual_prefix);
+          auto windows =
+              build_reference_windows(ref_id, index_ref_seq, window_size, stride);
+          navigamer::BioGeometryIndexBuilder builder(hierarchy, range_config);
+          builder.build(windows);
+          navigamer::save_index(report_index_path, builder, manifest);
+          std::cerr << "Built report index: " << report_index_path << "\n";
+        }
       }
 
       navigamer::LocalityBenchmarkConfig config;

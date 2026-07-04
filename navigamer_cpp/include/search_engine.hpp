@@ -105,6 +105,8 @@ struct SearchStats {
   size_t frontier_max_size = 0;
   size_t frontier_total_pushed = 0;
   size_t contained_fastpath_count = 0;
+  size_t contained_path_reuse_attempt_count = 0;
+  size_t contained_path_reuse_hit_count = 0;
   size_t overlap_fallback_count = 0;
   size_t leaf_world_count = 0;
   size_t raw_candidate_count = 0;
@@ -416,7 +418,8 @@ class BioGeometrySearchEngine {
       bool after_mbb_filter,
       const QGramSignature* query_qgram_signature,
       const QGramSignature* router_qgram_signature,
-      const std::vector<uint64_t>* router_minimizers) const;
+      const std::vector<uint64_t>* router_minimizers,
+      const std::string& contained_parent_key) const;
   void search_layer_adaptive_epoch(
       const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
       const BioSequence& query_seq, int tolerance,
@@ -426,7 +429,8 @@ class BioGeometrySearchEngine {
       bool after_mbb_filter,
       const QGramSignature* query_qgram_signature,
       const QGramSignature* router_qgram_signature,
-      const std::vector<uint64_t>* router_minimizers) const;
+      const std::vector<uint64_t>* router_minimizers,
+      const std::string& contained_parent_key) const;
 
   bool flat_is_visited(
       NodeId node_id,
@@ -500,7 +504,8 @@ class BioGeometrySearchEngine {
       bool after_mbb_filter,
       const QGramSignature* query_qgram_signature,
       const QGramSignature* router_qgram_signature,
-      const std::vector<uint64_t>* router_minimizers) const;
+      const std::vector<uint64_t>* router_minimizers,
+      const std::string& contained_parent_key) const;
 
   void traverse_exhaustive(
       const std::shared_ptr<WorldNode>& node, int current_layer,

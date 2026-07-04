@@ -144,7 +144,7 @@ int main() {
     locality_config.datasets = {"same_template", "nearby_windows"};
     locality_config.scenarios = {"all"};
     assert((locality_config.batch_schedules ==
-            std::vector<std::string>{"original"}));
+            std::vector<std::string>{"source-oracle"}));
     locality_config.batch_schedules = {"original", "random", "qgram-signature",
                                        "source-oracle"};
     locality_config.out_tsv_path = "/tmp/navigamer_locality_test.tsv";

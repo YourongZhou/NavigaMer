@@ -119,6 +119,22 @@ int main() {
     assert(attempts > 0);
     assert(hits > 0);
     assert(productive_reuse_hits > 0);
+
+    navigamer::BioGeometrySearchEngine contained_reused(builder, reuse_config);
+    const std::vector<navigamer::BioSequence> near_queries = {
+        navigamer::BioSequence("near0", "AAAATA"),
+        navigamer::BioSequence("near1", "AAAATT"),
+    };
+    size_t contained_reuse_hits = 0;
+    for (const auto& query : near_queries) {
+      auto [baseline_hits, baseline_stats] = baseline.search_adaptive(query, 2);
+      auto [reuse_hits, reuse_stats] =
+          contained_reused.search_adaptive(query, 2);
+      assert(ids(reuse_hits) == ids(baseline_hits));
+      assert(reuse_stats.result_count == baseline_stats.result_count);
+      contained_reuse_hits += reuse_stats.contained_path_reuse_hit_count;
+    }
+    assert(contained_reuse_hits > 0);
   }
 
   {

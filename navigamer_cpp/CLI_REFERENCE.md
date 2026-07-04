@@ -44,7 +44,7 @@ Used by all pipelines that build the index:
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 | `--query-profile` | `0` | Enable (`1`) or disable (`0`) per-query profiling timers in adaptive search; counters remain available either way |
-| `--path-reuse` | `0` | Enable (`1`) or disable (`0`) thread-local warm-start caches and query-derived batch scheduling hints |
+| `--path-reuse` | `1` | Enable (`1`) or disable (`0`) thread-local warm-start caches and query-derived batch scheduling hints |
 | `--router-hints` | `0` | Enable (`1`) or disable (`0`) q-gram/minimizer/pigeonhole router hints before local-router / best-first ordering |
 | `--router-hint-qgram-q` | `5` | Router-hint q-gram length used for cached child-center signatures and parent-local range hints |
 | `--router-hint-minimizer-k` | `4` | Router-hint minimizer k-mer length |
@@ -352,7 +352,7 @@ show whether local routing and safe child routing actually fired.
 | `--scenarios` / `--scenario` | *(unset)* | Comma-separated scenario presets: `low-fanout`, `high-fanout`, `repeat`, `batch-locality`, `oracle`, or `all`; when set, these override `--locality-datasets` |
 | `--locality-profiles` | `baseline,path_reuse,optimized` | Comma-separated profiles to run; use `baseline,path_reuse` to isolate path reuse before testing the full optimized stack |
 | `--locality-datasets` | `same_template,nearby_windows,random_windows` | Comma-separated query streams; use `same_template,nearby_windows` for larger clustered-query runs |
-| `--batch-schedules` | `original` | Comma-separated internal query schedules: `original`, `random`, `minimizer`, `qgram-signature`, `router-signature`, or `source-oracle`; `source-oracle` is an upper-bound diagnostic only |
+| `--batch-schedules` | `source-oracle` | Comma-separated internal query schedules: `original`, `random`, `minimizer`, `qgram-signature`, `router-signature`, or `source-oracle`; `source-oracle` is an upper-bound diagnostic only |
 | `--query-fastq-out` | *(unset)* | Optional FASTQ export of the generated locality queries, with `source_pos=` in each read header, for matched external baseline runs |
 
 Scenario presets are implemented as deterministic query-stream selections:
@@ -395,8 +395,9 @@ and writes a small report bundle:
 - `summary.json`: machine-readable rows and gate status
 - `report.md`: compact Markdown table for review
 
-If `--index` is omitted, the command builds reference windows from `--ref` and
-saves `query_locality.navidx` in `--out-dir` before running query-only
+If `--index` is omitted, the command reuses a manifest-compatible
+`query_locality.navidx` in `--out-dir` or builds reference windows from `--ref`
+and saves that file when it is missing or stale before running query-only
 measurement. `source-oracle` batch scheduling remains an upper-bound diagnostic
 only.
 

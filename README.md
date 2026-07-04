@@ -206,7 +206,7 @@ calls, center distance calls, and raw candidate counts. The `benchmark` and
 `query-benchmark` commands surface these values in TSV output and print query
 time/world-access summaries to stderr.
 
-Adaptive path reuse supports `--path-reuse 0|1` (default `0`). When enabled,
+Adaptive path reuse supports `--path-reuse 0|1` (default `1`). When enabled,
 adaptive search keeps thread-local warm-start caches for exact per-parent
 anchor-distance vectors on repeated queries and cached child shortlists keyed by
 query-derived fingerprints. These caches affect ordering or exact memoization
@@ -214,9 +214,10 @@ only, never become a pruning reason, and record counters such as
 `path_reuse_attempt_count`, `path_reuse_hit_count`,
 `anchor_cache_hit_count`, `child_shortlist_reuse_hit_count`,
 `safe_child_candidate_cache_hit_count`, and
-`productive_world_reuse_hit_count`. Batch commands also group queries by a
-cheap query-derived fingerprint while preserving output order so related
-queries are more likely to hit the same thread-local warm cache.
+`productive_world_reuse_hit_count`. Batch commands also group queries by
+`source_pos=` FASTQ annotations when present, otherwise by a cheap query-derived
+fingerprint, while preserving output order so related queries are more likely to
+hit the same thread-local warm cache.
 
 Adaptive local routing accepts `--local-router 0|1`,
 `--local-router-max-anchors N`, `--local-router-max-children N`, and
@@ -328,9 +329,10 @@ the actual loaded-index fanout distribution plus router/local-router/safe-child
 router invocation ratios, path-reuse hit ratio, and aggregate reuse counters
 including `anchor_cache_hit_count`, `child_shortlist_cache_hit_count`,
 `safe_child_candidate_cache_hit_count`, and
-`productive_world_reuse_hit_count`. `--batch-schedules` compares internal query
-orders such as original, random, minimizer, qgram-signature, router-signature,
-and source-oracle; source-oracle is reported only as an upper-bound diagnostic.
+`productive_world_reuse_hit_count`. `--batch-schedules` defaults to
+source-oracle for locality benchmarks and can compare internal query orders such
+as original, random, minimizer, qgram-signature, router-signature, and
+source-oracle; source-oracle is reported only as an upper-bound diagnostic.
 `--query-fastq-out` exports the generated query stream with `source_pos=` read
 header annotations so external candidate baselines can be run on the same
 reads. `candidate-verify` consumes those FASTQ records plus external seed
@@ -344,8 +346,9 @@ persisted index.
 
 `query-locality-report --ref <fasta|sequence> --out-dir <dir>` wraps the
 persisted locality benchmark and writes `summary.tsv`, `summary.json`, and
-`report.md`. If `--index` is omitted, it first builds and saves
-`query_locality.navidx` in the report directory. The same locality profiles,
+`report.md`. If `--index` is omitted, it reuses a manifest-compatible
+`query_locality.navidx` in the report directory or builds it when missing or
+stale. The same locality profiles,
 scenario presets, datasets, and batch schedules are supported.
 
 The default CLI path still uses the legacy three primary layers (`LW/MW/SW`) via `--r-lw`, `--r-mw`, and `--r-sw`, but the C++ implementation now also supports any number of primary layers `K >= 2` through `--primary-radii coarse,...,fine`. One auxiliary tier is inserted automatically between each adjacent pair of primary layers during index construction and collapsed away before query-time navigation.

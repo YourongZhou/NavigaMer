@@ -334,6 +334,7 @@ struct PathReuseCacheEntry {
 	  std::unordered_map<std::string, int> leaf_dist_by_id;
 	  std::unordered_map<std::string, std::vector<std::string>>
 	      child_orders_by_parent;
+	  std::unordered_map<std::string, std::string> contained_child_by_parent;
 	};
 
 struct ActivePathReuseContext {
@@ -398,6 +399,10 @@ std::string build_path_reuse_fingerprint(const std::string& sequence) {
     out << "|" << signature.codes[i];
   }
   return out.str();
+}
+
+std::string contained_root_parent_key(int layer_id) {
+  return "__root_layer:" + std::to_string(layer_id);
 }
 
 std::unordered_set<std::string> near_query_qgram_set(const std::string& sequence,
@@ -1979,7 +1984,7 @@ void BioGeometrySearchEngine::process_node_adaptive(
   search_layer_adaptive(ordered, child_layer, query_seq, tolerance,
                         unique_results, visited_nodes, stats, true,
                         query_qgram_signature, router_qgram_signature,
-                        router_minimizers);
+                        router_minimizers, node->node_id);
 }
 
 void BioGeometrySearchEngine::search_layer_adaptive(
@@ -1991,10 +1996,61 @@ void BioGeometrySearchEngine::search_layer_adaptive(
     bool after_mbb_filter,
     const QGramSignature* query_qgram_signature,
     const QGramSignature* router_qgram_signature,
-    const std::vector<uint64_t>* router_minimizers) const {
+    const std::vector<uint64_t>* router_minimizers,
+    const std::string& contained_parent_key) const {
   std::shared_ptr<WorldNode> contained_node;
   std::vector<std::shared_ptr<WorldNode>> overlap_nodes;
   update_frontier_stats(stats, candidates.size());
+
+  if (auto* reuse = active_path_reuse_context(this);
+      reuse && reuse->enabled && reuse->previous_near_query_match &&
+      reuse->previous) {
+    auto cached_it =
+        reuse->previous->contained_child_by_parent.find(contained_parent_key);
+    if (cached_it != reuse->previous->contained_child_by_parent.end()) {
+      stats.contained_path_reuse_attempt_count++;
+      for (const auto& node : candidates) {
+        if (!node || node->node_id != cached_it->second) continue;
+        stats.visited_check_count++;
+        if (visited_nodes.count(node->node_id)) {
+          stats.visited_hit_count++;
+          break;
+        }
+        const int tau = node->radius + tolerance;
+        stats.center_exact_distance_call_count++;
+        stats.center_distance_count++;
+        ScopedSearchTimer center_timer(stats.query_profile_enabled,
+                                       &stats.center_distance_ms);
+        const int dist = compute_center_distance_for_search(
+            query_seq, node->node_id, node->get_center_sequence(), tau,
+            after_mbb_filter);
+        stats.dist_calc_count++;
+        stats.world_access_count++;
+        if (config_.trace_paths && node->integer_id != INVALID_NODE_ID) {
+          stats.world_trace.push_back(node->integer_id);
+        }
+        if (layer_id >= 0 &&
+            static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
+          stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
+        }
+        if (dist <= tau && dist + tolerance <= node->radius) {
+          stats.contained_fastpath_count++;
+          stats.contained_path_reuse_hit_count++;
+          stats.path_reuse_hit_count++;
+          stats.record_path_step(0, true);
+          reuse->next.contained_child_by_parent[contained_parent_key] =
+              node->node_id;
+          visited_nodes.insert(node->node_id);
+          process_node_adaptive(node, layer_id, query_seq, tolerance,
+                                unique_results, visited_nodes, stats,
+                                query_qgram_signature, router_qgram_signature,
+                                router_minimizers);
+          return;
+        }
+        break;
+      }
+    }
+  }
 
   for (size_t candidate_idx = 0; candidate_idx < candidates.size();
        ++candidate_idx) {
@@ -2066,6 +2122,11 @@ void BioGeometrySearchEngine::search_layer_adaptive(
 
   stats.record_path_step(overlap_nodes.size(), static_cast<bool>(contained_node));
   if (contained_node) {
+    if (auto* reuse = active_path_reuse_context(this);
+        reuse && reuse->enabled) {
+      reuse->next.contained_child_by_parent[contained_parent_key] =
+          contained_node->node_id;
+    }
     visited_nodes.insert(contained_node->node_id);
     process_node_adaptive(contained_node, layer_id, query_seq, tolerance,
                           unique_results, visited_nodes, stats,
@@ -2129,7 +2190,7 @@ void BioGeometrySearchEngine::process_node_adaptive_epoch(
   search_layer_adaptive_epoch(ordered, child_layer, query_seq, tolerance,
                               unique_results, scratch, stats, true,
                               query_qgram_signature, router_qgram_signature,
-                              router_minimizers);
+                              router_minimizers, node->node_id);
 }
 
 void BioGeometrySearchEngine::search_layer_adaptive_epoch(
@@ -2141,10 +2202,62 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
     bool after_mbb_filter,
     const QGramSignature* query_qgram_signature,
     const QGramSignature* router_qgram_signature,
-    const std::vector<uint64_t>* router_minimizers) const {
+    const std::vector<uint64_t>* router_minimizers,
+    const std::string& contained_parent_key) const {
   std::shared_ptr<WorldNode> contained_node;
   std::vector<std::shared_ptr<WorldNode>> overlap_nodes;
   update_frontier_stats(stats, candidates.size());
+
+  if (auto* reuse = active_path_reuse_context(this);
+      reuse && reuse->enabled && reuse->previous_near_query_match &&
+      reuse->previous) {
+    auto cached_it =
+        reuse->previous->contained_child_by_parent.find(contained_parent_key);
+    if (cached_it != reuse->previous->contained_child_by_parent.end()) {
+      stats.contained_path_reuse_attempt_count++;
+      for (const auto& node : candidates) {
+        if (!node || node->node_id != cached_it->second) continue;
+        stats.visited_check_count++;
+        if (scratch.is_visited(node->integer_id)) {
+          stats.visited_hit_count++;
+          break;
+        }
+        const int tau = node->radius + tolerance;
+        stats.center_exact_distance_call_count++;
+        stats.center_distance_count++;
+        ScopedSearchTimer center_timer(stats.query_profile_enabled,
+                                       &stats.center_distance_ms);
+        const int dist = compute_center_distance_for_search(
+            query_seq, node->node_id, node->get_center_sequence(), tau,
+            after_mbb_filter);
+        stats.dist_calc_count++;
+        stats.world_access_count++;
+        if (config_.trace_paths && node->integer_id != INVALID_NODE_ID) {
+          stats.world_trace.push_back(node->integer_id);
+        }
+        if (layer_id >= 0 &&
+            static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
+          stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
+        }
+        if (dist <= tau && dist + tolerance <= node->radius) {
+          stats.contained_fastpath_count++;
+          stats.contained_path_reuse_hit_count++;
+          stats.path_reuse_hit_count++;
+          stats.record_path_step(0, true);
+          reuse->next.contained_child_by_parent[contained_parent_key] =
+              node->node_id;
+          scratch.mark_visited(node->integer_id);
+          process_node_adaptive_epoch(node, layer_id, query_seq, tolerance,
+                                      unique_results, scratch, stats,
+                                      query_qgram_signature,
+                                      router_qgram_signature,
+                                      router_minimizers);
+          return;
+        }
+        break;
+      }
+    }
+  }
 
   for (size_t candidate_idx = 0; candidate_idx < candidates.size();
        ++candidate_idx) {
@@ -2216,6 +2329,11 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
 
   stats.record_path_step(overlap_nodes.size(), static_cast<bool>(contained_node));
   if (contained_node) {
+    if (auto* reuse = active_path_reuse_context(this);
+        reuse && reuse->enabled) {
+      reuse->next.contained_child_by_parent[contained_parent_key] =
+          contained_node->node_id;
+    }
     scratch.mark_visited(contained_node->integer_id);
     process_node_adaptive_epoch(contained_node, layer_id, query_seq, tolerance,
                                 unique_results, scratch, stats,
@@ -2503,7 +2621,7 @@ void BioGeometrySearchEngine::process_node_adaptive_view(
   search_layer_adaptive_view(ordered, child_layer, query_seq, tolerance,
                              unique_results, visited_nodes, scratch, stats, true,
                              query_qgram_signature, router_qgram_signature,
-                             router_minimizers);
+                             router_minimizers, node->node_id);
 }
 
 void BioGeometrySearchEngine::search_layer_adaptive_view(
@@ -2516,11 +2634,67 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
     bool after_mbb_filter,
     const QGramSignature* query_qgram_signature,
     const QGramSignature* router_qgram_signature,
-    const std::vector<uint64_t>* router_minimizers) const {
+    const std::vector<uint64_t>* router_minimizers,
+    const std::string& contained_parent_key) const {
   const auto& view = index_.search_graph_view();
   NodeId contained_node = INVALID_NODE_ID;
   std::vector<NodeId> overlap_nodes;
   update_frontier_stats(stats, candidates.size());
+
+  if (auto* reuse = active_path_reuse_context(this);
+      reuse && reuse->enabled && reuse->previous_near_query_match &&
+      reuse->previous) {
+    auto cached_it =
+        reuse->previous->contained_child_by_parent.find(contained_parent_key);
+    if (cached_it != reuse->previous->contained_child_by_parent.end()) {
+      stats.contained_path_reuse_attempt_count++;
+      for (NodeId node_id : candidates) {
+        if (node_id >= view.nodes.size() || !view.nodes[node_id]) {
+          throw std::out_of_range("view node id is outside search graph view");
+        }
+        const auto& node = view.nodes[node_id];
+        if (node->node_id != cached_it->second) continue;
+        stats.visited_check_count++;
+        if (flat_is_visited(node_id, visited_nodes, scratch)) {
+          stats.visited_hit_count++;
+          break;
+        }
+        const int tau = node->radius + tolerance;
+        stats.center_exact_distance_call_count++;
+        stats.center_distance_count++;
+        ScopedSearchTimer center_timer(stats.query_profile_enabled,
+                                       &stats.center_distance_ms);
+        const int dist = compute_center_distance_for_search(
+            query_seq, node->node_id, node->get_center_sequence(), tau,
+            after_mbb_filter);
+        stats.dist_calc_count++;
+        stats.world_access_count++;
+        if (config_.trace_paths) {
+          stats.world_trace.push_back(node_id);
+        }
+        if (layer_id >= 0 &&
+            static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
+          stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
+        }
+        if (dist <= tau && dist + tolerance <= node->radius) {
+          stats.contained_fastpath_count++;
+          stats.contained_path_reuse_hit_count++;
+          stats.path_reuse_hit_count++;
+          stats.record_path_step(0, true);
+          reuse->next.contained_child_by_parent[contained_parent_key] =
+              node->node_id;
+          flat_mark_visited(node_id, visited_nodes, scratch);
+          process_node_adaptive_view(node_id, layer_id, query_seq, tolerance,
+                                     unique_results, visited_nodes, scratch,
+                                     stats, query_qgram_signature,
+                                     router_qgram_signature,
+                                     router_minimizers);
+          return;
+        }
+        break;
+      }
+    }
+  }
 
   for (size_t candidate_idx = 0; candidate_idx < candidates.size();
        ++candidate_idx) {
@@ -2598,6 +2772,11 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
   stats.record_path_step(overlap_nodes.size(),
                          contained_node != INVALID_NODE_ID);
   if (contained_node != INVALID_NODE_ID) {
+    if (auto* reuse = active_path_reuse_context(this);
+        reuse && reuse->enabled) {
+      reuse->next.contained_child_by_parent[contained_parent_key] =
+          view.nodes[contained_node]->node_id;
+    }
     flat_mark_visited(contained_node, visited_nodes, scratch);
     process_node_adaptive_view(contained_node, layer_id, query_seq, tolerance,
                                unique_results, visited_nodes, scratch, stats,
@@ -2811,19 +2990,23 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
 
   if (config_.graph_view_mode == GraphViewMode::Original &&
       config_.visited_mode == VisitedMode::StringSet) {
+    const std::string root_key =
+        contained_root_parent_key(index_.coarsest_primary_layer_index());
     search_layer_adaptive(index_.primary_layer(index_.coarsest_primary_layer_index()),
                           index_.coarsest_primary_layer_index(), query_seq, tolerance,
                           unique_results, visited_nodes, stats, false,
                           query_qgram_signature_ptr, router_qgram_signature_ptr,
-                          router_minimizers_ptr);
+                          router_minimizers_ptr, root_key);
   } else if (config_.graph_view_mode == GraphViewMode::Original) {
     thread_local SearchScratch scratch;
     scratch.begin_query(index_.num_world_nodes());
+    const std::string root_key =
+        contained_root_parent_key(index_.coarsest_primary_layer_index());
     search_layer_adaptive_epoch(
         index_.primary_layer(index_.coarsest_primary_layer_index()),
         index_.coarsest_primary_layer_index(), query_seq, tolerance,
         unique_results, scratch, stats, false, query_qgram_signature_ptr,
-        router_qgram_signature_ptr, router_minimizers_ptr);
+        router_qgram_signature_ptr, router_minimizers_ptr, root_key);
   } else {
     std::vector<NodeId> top_candidates;
     const auto& top_layer =
@@ -2837,23 +3020,27 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
     }
 
     if (config_.visited_mode == VisitedMode::StringSet) {
+      const std::string root_key =
+          contained_root_parent_key(index_.coarsest_primary_layer_index());
       search_layer_adaptive_view(top_candidates,
                                  index_.coarsest_primary_layer_index(),
                                  query_seq, tolerance, unique_results,
                                  &visited_nodes, nullptr, stats, false,
                                  query_qgram_signature_ptr,
                                  router_qgram_signature_ptr,
-                                 router_minimizers_ptr);
+                                 router_minimizers_ptr, root_key);
     } else {
       thread_local SearchScratch scratch;
       scratch.begin_query(index_.num_world_nodes());
+      const std::string root_key =
+          contained_root_parent_key(index_.coarsest_primary_layer_index());
       search_layer_adaptive_view(top_candidates,
                                  index_.coarsest_primary_layer_index(),
                                  query_seq, tolerance, unique_results,
                                  nullptr, &scratch, stats, false,
                                  query_qgram_signature_ptr,
                                  router_qgram_signature_ptr,
-                                 router_minimizers_ptr);
+                                 router_minimizers_ptr, root_key);
     }
   }
 

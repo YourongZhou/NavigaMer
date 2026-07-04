@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <cstddef>
 #include "mbb_rect_index.hpp"
 
 namespace navigamer {
@@ -41,6 +42,8 @@ struct BioSequence {
   std::string id;
   std::string seq;
   LeafId sequence_id = INVALID_LEAF_ID;
+  bool has_source_pos = false;
+  size_t source_pos = 0;
   std::vector<RefPosition> ref_positions;
   BwtInterval bwt_interval;
 

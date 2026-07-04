@@ -67,7 +67,7 @@ Adaptive profiling additionally accepts `--query-profile 0|1` (default `0`) and
 records per-query timing/counter buckets in `SearchStats`, `benchmark`, and
 `query-benchmark` output without changing search results.
 
-Adaptive path reuse additionally accepts `--path-reuse 0|1` (default `0`).
+Adaptive path reuse additionally accepts `--path-reuse 0|1` (default `1`).
 When enabled, adaptive search keeps thread-local warm-start caches for exact
 parent-local anchor-distance vectors on repeated queries and cached child
 shortlists keyed by cheap query-derived fingerprints. This remains an
@@ -236,16 +236,18 @@ window routing, repeat stress, batch locality, and source-oracle diagnostics.
 The locality summary reports the actual loaded-index fanout distribution
 (`mean_fanout`, `p95_fanout`, `max_fanout`) plus router/path-reuse ratios so a
 run can distinguish low-fanout gating from high-fanout router usage.
-`--batch-schedules` can compare original, random, minimizer, q-gram signature,
-router signature, and source-sorted oracle query ordering; the source oracle
-schedule is diagnostic only.
+`--batch-schedules` defaults to source-sorted oracle query ordering for locality
+benchmarks and can compare original, random, minimizer, q-gram signature, router
+signature, and source-sorted oracle query ordering; the source oracle schedule is
+diagnostic only.
 Use `--query-fastq-out <path>` to export the deterministic generated queries
 with `source_pos=` read-header annotations for matched external baseline
 candidate-recovery checks.
 `query-locality-report --ref <fasta|sequence> --out-dir <dir>` wraps that
 persisted benchmark and writes `summary.tsv`, `summary.json`, and `report.md`;
-if `--index` is omitted, it first builds `query_locality.navidx` in the report
-directory. `run`, `benchmark`,
+if `--index` is omitted, it reuses a manifest-compatible
+`query_locality.navidx` in the report directory or builds it when missing or
+stale. `run`, `benchmark`,
 `map150`, and `boundary` still
 build in-memory indexes for their current workflows. `boundary` avoids repeated
 rebuilds within a parameter sweep by building once per stride mode and reusing

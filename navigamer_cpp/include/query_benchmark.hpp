@@ -78,7 +78,7 @@ struct LocalityBenchmarkConfig {
   std::vector<std::string> datasets = {
       "same_template", "nearby_windows", "random_windows"};
   std::vector<std::string> scenarios;
-  std::vector<std::string> batch_schedules = {"original"};
+  std::vector<std::string> batch_schedules = {"source-oracle"};
   std::string out_tsv_path;
   std::string query_fastq_out_path;
 };

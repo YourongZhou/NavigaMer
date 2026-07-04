@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -1030,6 +1031,10 @@ double safe_speedup(double baseline_ms, double current_ms) {
   return baseline_ms / current_ms;
 }
 
+void locality_progress(const std::string& message) {
+  std::cerr << "[locality-benchmark] " << message << std::endl;
+}
+
 }  // namespace
 
 const char* query_class_name(QueryClass value) {
@@ -1578,6 +1583,9 @@ LocalityBenchmarkRow run_locality_profile(
     int tolerance,
     double load_ms,
     std::vector<std::vector<std::string>>* observed_ids) {
+  locality_progress("profile start dataset=" + dataset + " profile=" + profile +
+                    " schedule=" + batch_schedule_mode +
+                    " queries=" + std::to_string(queries.size()));
   auto init_start = std::chrono::high_resolution_clock::now();
   BioGeometrySearchEngine engine(builder, locality_profile_config(profile));
   auto init_end = std::chrono::high_resolution_clock::now();
@@ -1648,8 +1656,19 @@ LocalityBenchmarkRow run_locality_profile(
   const bool enable_exact_result_cache = profile != "baseline";
 
   auto query_start = std::chrono::high_resolution_clock::now();
+  const size_t progress_interval =
+      queries.size() <= 32 ? 1 : std::max<size_t>(1, queries.size() / 8);
   for (size_t i = 0; i < queries.size(); ++i) {
     const auto& query = queries[i].query;
+    const bool report_query =
+        i == 0 || queries.size() <= 32 ||
+        ((i + 1) % progress_interval == 0) || (i + 1 == queries.size());
+    if (report_query) {
+      locality_progress("query start dataset=" + dataset + " profile=" +
+                        profile + " schedule=" + batch_schedule_mode +
+                        " query=" + std::to_string(i + 1) + "/" +
+                        std::to_string(queries.size()));
+    }
     auto one_start = std::chrono::high_resolution_clock::now();
     std::vector<std::shared_ptr<BioSequence>> hits;
     SearchStats stats(static_cast<size_t>(builder.num_primary_layers()));
@@ -1762,6 +1781,16 @@ LocalityBenchmarkRow run_locality_profile(
     children_actually_processed.push_back(
         static_cast<double>(stats.children_actually_processed));
     center_checks_saved.push_back(static_cast<double>(stats.center_checks_saved));
+    if (report_query) {
+      locality_progress("query finish dataset=" + dataset + " profile=" +
+                        profile + " schedule=" + batch_schedule_mode +
+                        " query=" + std::to_string(i + 1) + "/" +
+                        std::to_string(queries.size()) +
+                        " latency_ms=" + std::to_string(latencies.back()) +
+                        " hits=" + std::to_string(ids.size()) +
+                        " leaf_verify=" +
+                        std::to_string(stats.leaf_verify_count));
+    }
   }
   auto query_end = std::chrono::high_resolution_clock::now();
   row.query_wall_ms =
@@ -1817,6 +1846,12 @@ LocalityBenchmarkRow run_locality_profile(
       average(candidate_ratio_to_post_mbb_survivors);
   row.mean_children_actually_processed = average(children_actually_processed);
   row.mean_center_checks_saved = average(center_checks_saved);
+  locality_progress("profile finish dataset=" + dataset + " profile=" +
+                    profile + " schedule=" + batch_schedule_mode +
+                    " mean_ms=" + std::to_string(row.mean_query_ms) +
+                    " p95_ms=" + std::to_string(row.p95_query_ms) +
+                    " fn=" + std::to_string(row.fn_count) +
+                    " mismatch=" + std::to_string(row.mismatch_count));
   return row;
 }
 
@@ -2172,6 +2207,7 @@ LocalityBenchmarkRunResult run_persisted_locality_benchmark(
     throw std::invalid_argument("locality benchmark requires out_tsv_path");
   }
 
+  locality_progress("load index start path=" + config.index_path);
   auto load_start = std::chrono::high_resolution_clock::now();
   LoadedIndex loaded = load_index(config.index_path);
   auto load_end = std::chrono::high_resolution_clock::now();
@@ -2179,17 +2215,30 @@ LocalityBenchmarkRunResult run_persisted_locality_benchmark(
   LocalityBenchmarkRunResult result;
   result.load_ms =
       std::chrono::duration<double, std::milli>(load_end - load_start).count();
+  locality_progress("load index finish ms=" + std::to_string(result.load_ms));
 
+  locality_progress("load reference start input=" + config.ref_input);
   auto [ref_id, ref_seq] = load_reference(config.ref_input);
   (void)ref_id;
+  locality_progress("load reference finish length=" +
+                    std::to_string(ref_seq.size()));
+  locality_progress("generate query sets start query_count=" +
+                    std::to_string(config.query_count) +
+                    " query_length=" + std::to_string(config.query_length) +
+                    " edits=" + std::to_string(config.edits));
   const auto query_sets = generate_locality_benchmark_queries(
       ref_seq, config.query_count, config.query_length, config.edits,
       config.seed);
+  locality_progress("generate query sets finish");
   validate_locality_profiles(config.profiles);
   const auto dataset_names =
       expand_locality_scenarios(config.scenarios, config.datasets);
   validate_locality_datasets(dataset_names);
   validate_locality_batch_schedules(config.batch_schedules);
+  locality_progress("validated profiles=" + std::to_string(config.profiles.size()) +
+                    " datasets=" + std::to_string(dataset_names.size()) +
+                    " schedules=" +
+                    std::to_string(config.batch_schedules.size()));
 
   const std::map<std::string, const std::vector<LocalityBenchmarkQuery>*>
       all_datasets = {{"same_template", &query_sets.same_template},
@@ -2214,9 +2263,15 @@ LocalityBenchmarkRunResult run_persisted_locality_benchmark(
   bool gate_passed = true;
   for (const auto& dataset_name : dataset_names) {
     const auto& queries = *all_datasets.at(dataset_name);
+    locality_progress("dataset start name=" + dataset_name +
+                      " queries=" + std::to_string(queries.size()));
+    locality_progress("baseline ids start dataset=" + dataset_name);
     const auto original_baseline_ids =
         baseline_locality_ids(loaded.builder, queries, config.tolerance);
+    locality_progress("baseline ids finish dataset=" + dataset_name);
     for (const auto& schedule : config.batch_schedules) {
+      locality_progress("schedule start dataset=" + dataset_name +
+                        " schedule=" + schedule);
       const auto order =
           locality_schedule_order(queries, schedule, config.seed + 7919U);
       const auto scheduled_queries = apply_locality_schedule(queries, order);
@@ -2235,10 +2290,9 @@ LocalityBenchmarkRunResult run_persisted_locality_benchmark(
         have_baseline_reference = true;
         result.rows.push_back(std::move(row));
       } else {
-        baseline_reference = run_locality_profile(
-            dataset_name, "baseline", schedule, loaded.builder, scheduled_queries,
-            {}, config.tolerance, result.load_ms, nullptr);
-        have_baseline_reference = true;
+        locality_progress("hidden baseline reference skipped dataset=" +
+                          dataset_name + " schedule=" + schedule +
+                          " reason=baseline_profile_not_requested");
       }
       for (const auto& profile : config.profiles) {
         if (profile == "baseline") continue;
@@ -2256,7 +2310,10 @@ LocalityBenchmarkRunResult run_persisted_locality_benchmark(
         }
         result.rows.push_back(std::move(row));
       }
+      locality_progress("schedule finish dataset=" + dataset_name +
+                        " schedule=" + schedule);
     }
+    locality_progress("dataset finish name=" + dataset_name);
   }
   result.gate_passed = gate_passed;
 
@@ -2265,7 +2322,10 @@ LocalityBenchmarkRunResult run_persisted_locality_benchmark(
   for (const auto& row : result.rows) {
     rows.push_back(locality_row_values(row));
   }
+  locality_progress("write summary start path=" + config.out_tsv_path +
+                    " rows=" + std::to_string(rows.size()));
   write_tsv(config.out_tsv_path, locality_columns(), rows);
+  locality_progress("write summary finish path=" + config.out_tsv_path);
   return result;
 }
 
