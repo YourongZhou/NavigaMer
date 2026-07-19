@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,22 @@ std::uint64_t splitmix64(std::uint64_t value) {
   value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
   value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
   return value ^ (value >> 31U);
+}
+
+void record_parallel_failure(std::atomic<bool>& failed,
+                             std::string& failure_message,
+                             const char* message) noexcept {
+  failed.store(true, std::memory_order_relaxed);
+#pragma omp critical(dna_edit_distribution_failure)
+  {
+    if (failure_message.empty()) {
+      try {
+        failure_message = message;
+      } catch (...) {
+        // Preserve the failure flag even if allocating the diagnostic fails.
+      }
+    }
+  }
 }
 
 }  // namespace
@@ -126,46 +143,64 @@ HistogramResult compute_histogram(const std::size_t length,
     throw std::invalid_argument("sequence length exceeds the WFA2 API limit");
   }
 
-  std::vector<std::vector<std::uint64_t>> local_counts(
-      static_cast<std::size_t>(threads),
-      std::vector<std::uint64_t>(length + 1U, 0));
+  HistogramResult result;
+  result.counts.assign(length + 1U, 0);
   std::atomic<bool> failed{false};
   std::string failure_message;
   int actual_threads = 0;
 
-#pragma omp parallel num_threads(threads) shared(actual_threads, failure_message)
+#pragma omp parallel num_threads(threads) shared(actual_threads, failure_message, result)
   {
-    const int thread_id = omp_get_thread_num();
+    std::vector<std::uint64_t> local_counts;
+    std::unique_ptr<ExactWfaAligner> aligner;
+    std::string first;
+    std::string second;
+
 #pragma omp single
     { actual_threads = omp_get_num_threads(); }
 
     try {
-      ExactWfaAligner aligner;
-      std::string first;
-      std::string second;
+      local_counts.assign(length + 1U, 0);
+      aligner = std::make_unique<ExactWfaAligner>();
       first.reserve(length);
       second.reserve(length);
-      auto& counts = local_counts[static_cast<std::size_t>(thread_id)];
+    } catch (const std::exception& error) {
+      record_parallel_failure(failed, failure_message, error.what());
+    } catch (...) {
+      record_parallel_failure(failed, failure_message,
+                              "unknown worker initialization failure");
+    }
+
+    // Every worker must encounter the same work-sharing construct, including
+    // when another worker failed to initialize its aligner or local storage.
+#pragma omp barrier
 
 #pragma omp for schedule(static)
-      for (std::uint64_t pair_index = 0; pair_index < pairs; ++pair_index) {
-        if (failed.load(std::memory_order_relaxed)) {
-          continue;
-        }
+    for (std::uint64_t pair_index = 0; pair_index < pairs; ++pair_index) {
+      if (failed.load(std::memory_order_relaxed)) {
+        continue;
+      }
+      try {
         generate_pair(length, seed, pair_index, first, second);
-        const int edit_distance = aligner.distance(first, second);
-        if (edit_distance < 0 ||
-            edit_distance > static_cast<int>(length)) {
+        const int edit_distance = aligner->distance(first, second);
+        if (edit_distance < 0 || edit_distance > static_cast<int>(length)) {
           throw std::runtime_error("WFA2 returned an out-of-range distance");
         }
-        ++counts[static_cast<std::size_t>(edit_distance)];
+        ++local_counts[static_cast<std::size_t>(edit_distance)];
+      } catch (const std::exception& error) {
+        record_parallel_failure(failed, failure_message, error.what());
+      } catch (...) {
+        record_parallel_failure(failed, failure_message,
+                                "unknown alignment failure");
       }
-    } catch (const std::exception& error) {
-      failed.store(true, std::memory_order_relaxed);
-#pragma omp critical(dna_edit_distribution_failure)
+    }
+
+    if (!failed.load(std::memory_order_relaxed)) {
+#pragma omp critical(dna_edit_distribution_merge)
       {
-        if (failure_message.empty()) {
-          failure_message = error.what();
+        for (std::size_t distance = 0; distance < local_counts.size();
+             ++distance) {
+          result.counts[distance] += local_counts[distance];
         }
       }
     }
@@ -177,15 +212,7 @@ HistogramResult compute_histogram(const std::size_t length,
                                  : failure_message);
   }
 
-  HistogramResult result;
-  result.counts.assign(length + 1U, 0);
   result.actual_threads = actual_threads;
-  for (int thread_id = 0; thread_id < actual_threads; ++thread_id) {
-    const auto& counts = local_counts[static_cast<std::size_t>(thread_id)];
-    for (std::size_t distance = 0; distance < counts.size(); ++distance) {
-      result.counts[distance] += counts[distance];
-    }
-  }
   return result;
 }
 

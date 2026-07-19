@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import math
 import os
 import subprocess
 import sys
@@ -48,14 +49,30 @@ def read_counts(path):
     ]
     distances = [int(row["edit_distance"]) for row in rows]
     counts = [int(row["count"]) for row in rows]
+    probabilities = [float(row["probability"]) for row in rows]
+    cumulative = [float(row["cumulative_probability"]) for row in rows]
     assert min(distances) == 0
     assert max(distances) == 12
     assert sum(counts) == 64
     assert all(0 <= distance <= 12 for distance in distances)
+    assert math.isclose(sum(probabilities), 1.0, abs_tol=1e-12)
+    assert math.isclose(cumulative[-1], 1.0, abs_tol=1e-12)
+    for count, probability in zip(counts, probabilities):
+        assert math.isclose(probability, count / 64, abs_tol=1e-12)
     return counts
 
 
-def read_summary(path):
+def nearest_rank(counts, probability):
+    target = math.ceil(probability * sum(counts))
+    cumulative = 0
+    for distance, count in enumerate(counts):
+        cumulative += count
+        if cumulative >= target:
+            return distance
+    raise AssertionError("quantile target exceeds histogram")
+
+
+def read_summary(path, counts):
     with path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert list(rows[0]) == ["metric", "value"]
@@ -78,6 +95,25 @@ def read_summary(path):
     assert required <= summary.keys()
     assert summary["length"] == "12"
     assert summary["num_pairs"] == "64"
+    total = sum(counts)
+    mean = sum(distance * count for distance, count in enumerate(counts)) / total
+    variance = (
+        sum((distance - mean) ** 2 * count for distance, count in enumerate(counts))
+        / total
+    )
+    nonzero = [distance for distance, count in enumerate(counts) if count]
+    assert math.isclose(float(summary["mean"]), mean, abs_tol=1e-12)
+    assert math.isclose(
+        float(summary["standard_deviation"]), math.sqrt(variance), abs_tol=1e-12
+    )
+    assert int(summary["min"]) == min(nonzero)
+    assert int(summary["median"]) == nearest_rank(counts, 0.50)
+    assert int(summary["max"]) == max(nonzero)
+    assert int(summary["mode"]) == max(range(len(counts)), key=counts.__getitem__)
+    assert int(summary["q05"]) == nearest_rank(counts, 0.05)
+    assert int(summary["q95"]) == nearest_rank(counts, 0.95)
+    assert float(summary["elapsed_seconds"]) > 0
+    assert float(summary["pairs_per_second"]) > 0
 
 
 def main():
@@ -92,7 +128,7 @@ def main():
         parallel_counts = read_counts(parallel / "histogram.csv")
         serial_counts = read_counts(serial / "histogram.csv")
         assert parallel_counts == serial_counts
-        read_summary(parallel / "summary.csv")
+        read_summary(parallel / "summary.csv", parallel_counts)
 
         with (parallel / "run_metadata.json").open(encoding="utf-8") as handle:
             metadata = json.load(handle)
@@ -102,6 +138,17 @@ def main():
         assert metadata["requested_threads"] == 4
         assert metadata["actual_threads"] >= 1
         assert metadata["wfa2_lib_version"] == "2.3.6"
+        assert metadata["wfa2_lib_commit"] == (
+            "0db345a8fe862fd7873d3354c499da385583a65a"
+        )
+        assert metadata["distance_metric"] == "exact global Levenshtein"
+        assert metadata["alignment_scope"] == "score_only"
+        assert metadata["heuristic"] == "none"
+        assert metadata["compiler"]
+        assert metadata["started_at_utc"]
+        assert metadata["finished_at_utc"]
+        assert metadata["elapsed_seconds"] > 0
+        assert metadata["pairs_per_second"] > 0
 
         subprocess.run(
             [

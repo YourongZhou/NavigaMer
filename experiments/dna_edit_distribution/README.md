@@ -22,7 +22,8 @@ or call the NavigaMer index/search implementation.
 
 ## Build and test
 
-The established project environment provides CMake, Python, and matplotlib.
+The established project environment provides CMake 3.20 or newer, Python, and
+matplotlib.
 WFA2-lib is downloaded by CMake at configure time, so the first configure needs
 network access.
 

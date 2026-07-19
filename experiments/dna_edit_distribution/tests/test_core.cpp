@@ -35,6 +35,15 @@ void test_wfa_matches_dynamic_programming() {
     CHECK(aligner.distance(first, second) ==
           dna_edit_distribution::levenshtein_dp(first, second));
   }
+
+  for (std::uint64_t pair_index = 0; pair_index < 50; ++pair_index) {
+    dna_edit_distribution::generate_pair(
+        30, 20260719, pair_index, first, second);
+    first.resize(18U + pair_index % 9U);
+    second.resize(19U + (pair_index * 3U) % 8U);
+    CHECK(aligner.distance(first, second) ==
+          dna_edit_distribution::levenshtein_dp(first, second));
+  }
 }
 
 void test_generator_is_pair_index_deterministic() {
