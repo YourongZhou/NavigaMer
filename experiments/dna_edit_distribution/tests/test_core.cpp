@@ -64,6 +64,21 @@ void test_histogram_is_thread_count_independent() {
   CHECK(parallel.actual_threads >= 1);
 }
 
+void test_summary_from_known_histogram() {
+  const std::vector<std::uint64_t> counts{0, 1, 3, 1};
+  const dna_edit_distribution::Summary summary =
+      dna_edit_distribution::summarize(counts);
+  CHECK(summary.mean == 2.0);
+  CHECK(summary.standard_deviation > 0.63);
+  CHECK(summary.standard_deviation < 0.64);
+  CHECK(summary.min == 1);
+  CHECK(summary.median == 2);
+  CHECK(summary.max == 3);
+  CHECK(summary.mode == 2);
+  CHECK(summary.q05 == 1);
+  CHECK(summary.q95 == 3);
+}
+
 }  // namespace
 
 int main() {
@@ -71,6 +86,7 @@ int main() {
   test_wfa_matches_dynamic_programming();
   test_generator_is_pair_index_deterministic();
   test_histogram_is_thread_count_independent();
+  test_summary_from_known_histogram();
   if (failures != 0) {
     std::cerr << failures << " test assertion(s) failed\n";
     return 1;
