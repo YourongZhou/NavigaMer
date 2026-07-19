@@ -35,6 +35,11 @@ find_package(OpenMP REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 enable_testing()
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CTestCustom.cmake
+  ${CMAKE_BINARY_DIR}/CTestCustom.cmake
+  COPYONLY
+)
 
 add_library(dna_edit_distribution_core src/core.cpp src/report.cpp)
 target_include_directories(
