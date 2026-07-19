@@ -3,7 +3,9 @@
 import argparse
 import csv
 import json
+import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from pathlib import Path
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--plot-script", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -99,6 +102,21 @@ def main():
         assert metadata["requested_threads"] == 4
         assert metadata["actual_threads"] >= 1
         assert metadata["wfa2_lib_version"] == "2.3.6"
+
+        subprocess.run(
+            [
+                sys.executable,
+                str(args.plot_script),
+                "--histogram",
+                str(parallel / "histogram.csv"),
+                "--output-dir",
+                str(parallel),
+            ],
+            check=True,
+            env={**os.environ, "MPLBACKEND": "Agg"},
+        )
+        assert (parallel / "edit_distance_distribution.png").stat().st_size > 0
+        assert (parallel / "edit_distance_distribution.pdf").stat().st_size > 0
 
 
 if __name__ == "__main__":

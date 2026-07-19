@@ -81,4 +81,5 @@ add_test(
     ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_cli.py
     --binary ${CMAKE_BINARY_DIR}/dna_edit_distribution
+    --plot-script ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/plot_distribution.py
 )
