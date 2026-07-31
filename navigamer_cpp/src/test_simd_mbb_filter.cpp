@@ -10,11 +10,11 @@
 namespace {
 
 std::vector<uint32_t> reference_survivors(
-    const std::vector<int32_t>& lo,
-    const std::vector<int32_t>& hi,
+    const std::vector<uint16_t>& lo,
+    const std::vector<uint16_t>& hi,
     size_t child_count,
     size_t dim,
-    const std::vector<int32_t>& query,
+    const std::vector<int>& query,
     int32_t tolerance) {
   std::vector<uint32_t> out;
   for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
@@ -34,17 +34,17 @@ std::vector<uint32_t> reference_survivors(
 
 void assert_random_equivalence() {
   std::mt19937 rng(20260616);
-  std::uniform_int_distribution<int32_t> pick_center(0, 200);
+  std::uniform_int_distribution<int32_t> pick_center(20, 65515);
   std::uniform_int_distribution<int32_t> pick_width(0, 20);
-  std::uniform_int_distribution<int32_t> pick_query(0, 200);
+  std::uniform_int_distribution<int32_t> pick_query(0, 70000);
   const std::vector<size_t> dims = {1, 2, 4, 8, 16, 32};
   const std::vector<size_t> child_counts = {1, 7, 8, 9, 31, 64, 1000};
 
   for (size_t dim : dims) {
     for (size_t child_count : child_counts) {
-      std::vector<int32_t> lo(dim * child_count);
-      std::vector<int32_t> hi(dim * child_count);
-      std::vector<int32_t> query(dim);
+      std::vector<uint16_t> lo(dim * child_count);
+      std::vector<uint16_t> hi(dim * child_count);
+      std::vector<int> query(dim);
       for (size_t dim_idx = 0; dim_idx < dim; ++dim_idx) {
         query[dim_idx] = pick_query(rng);
         for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
@@ -55,7 +55,7 @@ void assert_random_equivalence() {
           hi[flat] = center + width;
         }
       }
-      for (int32_t tolerance : {0, 1, 3, 7, 15}) {
+      for (int32_t tolerance : {0, 1, 3, 15, 5000}) {
         auto expected =
             reference_survivors(lo, hi, child_count, dim, query, tolerance);
 
@@ -101,4 +101,3 @@ int main() {
   std::cout << "SIMD MBB filter tests passed\n";
   return 0;
 }
-

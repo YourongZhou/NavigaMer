@@ -2403,12 +2403,6 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
   if (leaf_sieve_ready) {
     ScopedSearchTimer leaf_filter_timer(stats.query_profile_enabled,
                                         &stats.leaf_mbb_filter_ms);
-    std::vector<int32_t> query32;
-    query32.reserve(V_Q.size());
-    for (int distance : V_Q) {
-      query32.push_back(static_cast<int32_t>(distance));
-    }
-
     LeafBeaconFilterSimdStats simd_stats;
     const uint32_t offset = node.leaf_beacon_begin;
     if (config_.search_prefetch) {
@@ -2419,7 +2413,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
         view.leaf_beacon_dists.data() + offset,
         leaf_count,
         node.beacon_count,
-        query32.data(),
+        V_Q.data(),
         static_cast<int32_t>(tolerance),
         config_.simd_mode,
         &simd_stats);
@@ -2979,12 +2973,6 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
     }
   } else {
     ScopedSearchTimer timer(stats.query_profile_enabled, &stats.mbb_filter_ms);
-    std::vector<int32_t> query32;
-    query32.reserve(query_beacon_dists.size());
-    for (int distance : query_beacon_dists) {
-      query32.push_back(static_cast<int32_t>(distance));
-    }
-
     MBBFilterSimdStats simd_stats;
     if (config_.search_prefetch) {
       prefetch_read(view.mbb_lo.data() + mbb_begin);
@@ -2996,7 +2984,7 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
         view.mbb_hi.data() + mbb_begin,
         child_count,
         dim,
-        query32.data(),
+        query_beacon_dists.data(),
         static_cast<int32_t>(tolerance),
         config_.simd_mode,
         &simd_stats);

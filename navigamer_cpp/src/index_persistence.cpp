@@ -13,7 +13,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '6'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '7'};
 
 template <typename T>
 void write_pod(std::ostream& out, const T& value) {
@@ -240,7 +240,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 6) {
+  if (manifest.format_version != 7) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -362,31 +362,32 @@ class IndexPersistenceAccess {
 
 namespace {
 
-void write_i32_vector(std::ostream& out,
-                      const std::vector<int32_t>& values) {
+void write_u16_vector(std::ostream& out,
+                      const std::vector<uint16_t>& values) {
   write_size(out, values.size());
   if (values.empty()) return;
-  const size_t byte_count = values.size() * sizeof(int32_t);
+  const size_t byte_count = values.size() * sizeof(uint16_t);
   if (byte_count > static_cast<size_t>(
                        std::numeric_limits<std::streamsize>::max())) {
-    throw std::runtime_error("i32 vector exceeds stream size range");
+    throw std::runtime_error("u16 vector exceeds stream size range");
   }
   out.write(reinterpret_cast<const char*>(values.data()),
             static_cast<std::streamsize>(byte_count));
-  if (!out) throw std::runtime_error("failed to write i32 vector");
+  if (!out) throw std::runtime_error("failed to write u16 vector");
 }
 
-std::vector<int32_t> read_i32_vector(std::istream& in, const char* field) {
+std::vector<uint16_t> read_u16_vector(
+    std::istream& in, const char* field) {
   const size_t count = read_size(in, field);
   if (count > static_cast<size_t>(
                   std::numeric_limits<std::streamsize>::max()) /
-                  sizeof(int32_t)) {
+                  sizeof(uint16_t)) {
     throw std::runtime_error(std::string(field) +
                              " exceeds stream size range");
   }
-  std::vector<int32_t> values(count);
+  std::vector<uint16_t> values(count);
   if (values.empty()) return values;
-  const size_t byte_count = count * sizeof(int32_t);
+  const size_t byte_count = count * sizeof(uint16_t);
   in.read(reinterpret_cast<char*>(values.data()),
           static_cast<std::streamsize>(byte_count));
   if (!in) {
@@ -620,9 +621,9 @@ void write_search_graph_view(std::ostream& out,
   write_u32_vector(out, view.child_ids);
   write_u32_vector(out, view.leaf_ids);
   write_u32_vector(out, view.beacon_ids);
-  write_i32_vector(out, view.mbb_lo);
-  write_i32_vector(out, view.mbb_hi);
-  write_i32_vector(out, view.leaf_beacon_dists);
+  write_u16_vector(out, view.mbb_lo);
+  write_u16_vector(out, view.mbb_hi);
+  write_u16_vector(out, view.leaf_beacon_dists);
 }
 
 SearchGraphView read_search_graph_view(std::istream& in) {
@@ -634,10 +635,10 @@ SearchGraphView read_search_graph_view(std::istream& in) {
   view.child_ids = read_u32_vector(in, "child_ids");
   view.leaf_ids = read_u32_vector(in, "leaf_ids");
   view.beacon_ids = read_u32_vector(in, "beacon_ids");
-  view.mbb_lo = read_i32_vector(in, "mbb_lo");
-  view.mbb_hi = read_i32_vector(in, "mbb_hi");
+  view.mbb_lo = read_u16_vector(in, "mbb_lo");
+  view.mbb_hi = read_u16_vector(in, "mbb_hi");
   view.leaf_beacon_dists =
-      read_i32_vector(in, "leaf_beacon_dists");
+      read_u16_vector(in, "leaf_beacon_dists");
   return view;
 }
 
@@ -704,7 +705,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 6) {
+  if (manifest.format_version != 7) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -748,7 +749,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 6;
+  stored.format_version = 7;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -769,7 +770,7 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 6) {
+  if (manifest.format_version != 7) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }

@@ -36,7 +36,9 @@ without rescanning the reference. No per-window
 `BioSequence`, identifier, occurrence vector, or sequence string is allocated.
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
-Persisted format version 6 stores this representation directly.
+MBB bounds and leaf-beacon distances use checked 16-bit storage; values above
+65,535 are rejected rather than truncated. Persisted format version 7 stores
+this representation directly.
 
 ## Installation
 

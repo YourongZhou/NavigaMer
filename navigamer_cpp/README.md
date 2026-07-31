@@ -293,6 +293,8 @@ fixed window length. Query output resolves all occurrences directly from these
 records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
+Finalized MBB bounds and leaf-beacon distances use checked 16-bit values;
+distances above 65,535 fail explicitly instead of being truncated.
 
 ## Parameter sweeps
 

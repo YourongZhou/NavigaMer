@@ -3026,6 +3026,14 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     }
     return static_cast<uint32_t>(value);
   };
+  auto to_u16_distance = [](int value, const char* field) -> uint16_t {
+    if (value < 0 ||
+        value > static_cast<int>(std::numeric_limits<uint16_t>::max())) {
+      throw std::runtime_error(
+          std::string(field) + " exceeds 16-bit stored distance range");
+    }
+    return static_cast<uint16_t>(value);
+  };
 
   SearchGraphView view;
   view.sequences = std::move(search_graph_view_.sequences);
@@ -3104,11 +3112,13 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             const size_t flat = record.mbb_begin +
                                 dim * child_count + child_idx;
             view.mbb_lo[flat] =
-                static_cast<int32_t>(
-                    node.child_beacon_mbbs[child_idx][dim].min_dist);
+                to_u16_distance(
+                    node.child_beacon_mbbs[child_idx][dim].min_dist,
+                    "MBB lower bound");
             view.mbb_hi[flat] =
-                static_cast<int32_t>(
-                    node.child_beacon_mbbs[child_idx][dim].max_dist);
+                to_u16_distance(
+                    node.child_beacon_mbbs[child_idx][dim].max_dist,
+                    "MBB upper bound");
           }
         }
       }
@@ -3131,8 +3141,9 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             const size_t flat = record.leaf_beacon_begin +
                                 dim * leaf_count + leaf_idx;
             view.leaf_beacon_dists[flat] =
-                static_cast<int32_t>(
-                    node.leaf_beacon_dists[leaf_idx][dim]);
+                to_u16_distance(
+                    node.leaf_beacon_dists[leaf_idx][dim],
+                    "leaf beacon distance");
           }
         }
       }

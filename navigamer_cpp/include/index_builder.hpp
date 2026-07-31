@@ -277,11 +277,11 @@ struct SearchGraphView {
   std::vector<NodeId> child_ids;
   std::vector<LeafId> leaf_ids;
 
-  std::vector<int32_t> mbb_lo;
-  std::vector<int32_t> mbb_hi;
+  std::vector<uint16_t> mbb_lo;
+  std::vector<uint16_t> mbb_hi;
   std::vector<LeafId> beacon_ids;
 
-  std::vector<int32_t> leaf_beacon_dists;
+  std::vector<uint16_t> leaf_beacon_dists;
 };
 
 class BioGeometryIndexBuilder {
