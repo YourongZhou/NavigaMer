@@ -488,22 +488,25 @@ static_assert(sizeof(WorldNodeRecord) == 24,
 // phases have produced the same node/edge sets as the original algorithm.
 struct BuildWorldNodeRecord {
   LeafId center_sequence_id = INVALID_LEAF_ID;
-  int radius = 0;
-  int expanded_layer_index = -1;
-  int primary_layer_index = -1;
-  bool is_primary = false;
+  uint32_t geometry_index = INVALID_NODE_ID;
 
   // Phase 1-3 child NodeIds. Finest-layer nodes reuse the same uint32_t
   // storage for LeafIds after their child list is cleared.
   std::vector<NodeId> child_or_leaf_ids;
-  std::vector<LeafId> beacon_ids;
-  // Dimension-major, matching SearchGraphView directly:
-  // [beacon_index * child_count + child_index].
-  // Stores d(child center, beacon); the child radius reconstructs the MBB.
-  std::vector<uint8_t> child_beacon_dists;
-  // Dimension-major: [beacon_index * leaf_count + leaf_index].
-  std::vector<uint8_t> leaf_beacon_dists;
 };
+static_assert(sizeof(BuildWorldNodeRecord) <= 32,
+              "mutable build node must remain compact");
+
+// Geometry exists only for primary nodes. Keeping these vectors out of every
+// expanded-layer node avoids two empty vector headers on auxiliary nodes.
+struct BuildNodeGeometry {
+  std::vector<LeafId> beacon_ids;
+  // Non-finest nodes store dimension-major child MBB distances here;
+  // finest nodes reuse the same vector for one distance per leaf.
+  std::vector<uint8_t> link_beacon_dists;
+};
+static_assert(sizeof(BuildNodeGeometry) <= 48,
+              "primary-node build geometry must remain compact");
 
 struct SearchGraphView {
   // Canonical array representation. NodeId and LeafId are positions in
@@ -714,6 +717,7 @@ class BioGeometryIndexBuilder {
   SearchGraphView search_graph_view_;
   std::vector<int> expanded_radii_;
   std::vector<BuildWorldNodeRecord> build_nodes_;
+  std::vector<BuildNodeGeometry> build_node_geometry_;
   std::vector<NodeId> final_node_ids_;
   std::vector<std::vector<NodeId>> extended_layers_;
   std::vector<std::vector<NodeId>> primary_layers_;

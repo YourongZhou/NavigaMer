@@ -21,7 +21,10 @@
 The finalized index uses `SequenceStore`, `WorldNodeRecord`, and flat ID/data
 arrays declared in `navigamer_cpp/include/index_builder.hpp`. Construction also
 uses an array of `BuildWorldNodeRecord` values and integer relationships; it
-does not allocate a temporary `WorldNode` pointer graph. Edit distance is in
+does not allocate a temporary `WorldNode` pointer graph. Build-node radii and
+tier identities are implicit in the layer arrays. Only primary nodes receive a
+separate geometry record, whose distance vector is reused for child MBB cells
+or finest-layer leaf distances. Edit distance is in
 `navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in
 `navigamer_cpp/src/io_utils.cpp`.
 
