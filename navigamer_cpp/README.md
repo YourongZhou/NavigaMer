@@ -275,6 +275,13 @@ while streaming the key column and packed shard IDs. Consumed pages are released
 as the merge advances, bounding the working set by one shard list plus roughly
 one spool page per shard instead of all router entries. Query-time layout is
 unchanged.
+
+Reference-window deduplication uses a contiguous exact open-addressed table with
+one 64-bit slot per bucket and a maximum load of 7/8. The stored 32-bit hash is
+only a probe hint; candidate equality is confirmed byte-for-byte against the
+shared reference, making correctness independent of collisions. Ambiguous-base
+windows are counted before allocation, and the build-only table is released
+before occurrence sorting.
 Use `--query-fastq-out <path>` to export the deterministic generated queries
 with `source_pos=` read-header annotations for matched external baseline
 candidate-recovery checks.

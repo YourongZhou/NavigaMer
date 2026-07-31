@@ -307,6 +307,12 @@ directly into the sidecar. Consumed pages are released as the merge advances,
 bounding the working set by one shard list plus roughly one spool page per shard.
 This changes build peak memory, not query-time layout.
 
+Within each shard, reference-window deduplication uses a contiguous 64-bit-slot
+open-addressed table at no more than 7/8 load instead of a node-allocated
+`string_view` hash map. Hash matches are confirmed byte-for-byte against the
+shared reference, so 32-bit hash collisions do not affect correctness or recall.
+The temporary table is released before repeated-occurrence sorting.
+
 **Required:** `--ref`, `--index`, `--shard-windows`
 
 | Flag | Default | Description |

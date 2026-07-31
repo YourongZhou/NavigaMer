@@ -234,6 +234,11 @@ to a page-aligned temporary spool, then memory-maps and k-way merges the lists
 directly into the sidecar. Consumed pages are released as the merge advances,
 so the working set is bounded by one shard list plus roughly one spool page per
 shard instead of all router entries. The final query-time layout is unchanged.
+Reference-window deduplication likewise uses one contiguous 64-bit open-addressed
+slot per table bucket instead of a node-allocated `string_view` hash map. Its
+32-bit hash is only a lookup hint: every match is confirmed byte-for-byte against
+the shared reference, so hash collisions cannot merge leaves or reduce recall.
+The table is released before repeated-occurrence sorting.
 Query loading validates signatures, counts, file bounds, layer ranges, shard
 coordinates, and the bundle checksum without rescanning every mapped node or
 edge; completed or resumed builds perform the full per-part validation.

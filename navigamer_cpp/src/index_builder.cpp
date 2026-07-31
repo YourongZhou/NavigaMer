@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -79,6 +80,74 @@ class ReferencePositionEncoder {
     previous_ = position;
     if (pending_size_ == pending_.size()) flush();
     return id;
+  }
+
+  uint32_t position(LeafId id) const {
+    if (id >= count_) {
+      throw std::out_of_range("reference sequence id");
+    }
+    const size_t block_idx =
+        static_cast<size_t>(id) / kReferencePositionBlockSize;
+    const size_t in_block =
+        static_cast<size_t>(id) % kReferencePositionBlockSize;
+    if (block_idx == blocks_.size()) {
+      if (in_block >= pending_size_) {
+        throw std::runtime_error(
+            "reference position encoder has too few entries");
+      }
+      return pending_[in_block];
+    }
+    const auto& block = blocks_.at(block_idx);
+    if (in_block == 0) return block.base;
+    if (block.encoding == ReferencePositionEncoding::Linear) {
+      return block.base +
+             static_cast<uint32_t>(in_block * block.payload_size);
+    }
+    const uint8_t* payload = payload_.data() + block.payload_begin;
+    const size_t encoded_idx = in_block - 1;
+    switch (block.encoding) {
+      case ReferencePositionEncoding::Linear:
+        break;
+      case ReferencePositionEncoding::Bitset: {
+        size_t remaining = encoded_idx;
+        for (size_t byte_idx = 0;
+             byte_idx < block.payload_size; ++byte_idx) {
+          uint8_t bits = payload[byte_idx];
+          const size_t bit_count = static_cast<size_t>(
+              __builtin_popcount(static_cast<unsigned int>(bits)));
+          if (remaining >= bit_count) {
+            remaining -= bit_count;
+            continue;
+          }
+          while (remaining != 0) {
+            bits = static_cast<uint8_t>(bits & (bits - 1));
+            --remaining;
+          }
+          const unsigned int bit = static_cast<unsigned int>(
+              __builtin_ctz(static_cast<unsigned int>(bits)));
+          return block.base +
+                 static_cast<uint32_t>(byte_idx * 8 + bit + 1);
+        }
+        throw std::runtime_error(
+            "reference position bitset has too few entries");
+      }
+      case ReferencePositionEncoding::Delta8:
+        return block.base + payload[encoded_idx];
+      case ReferencePositionEncoding::Delta16: {
+        uint16_t delta = 0;
+        std::memcpy(&delta, payload + encoded_idx * sizeof(delta),
+                    sizeof(delta));
+        return block.base + delta;
+      }
+      case ReferencePositionEncoding::Absolute32: {
+        uint32_t position = 0;
+        std::memcpy(&position,
+                    payload + encoded_idx * sizeof(position),
+                    sizeof(position));
+        return position;
+      }
+    }
+    throw std::runtime_error("invalid reference position encoding");
   }
 
   void finish(SequenceStore& store) {
@@ -182,6 +251,77 @@ class ReferencePositionEncoder {
   uint32_t previous_ = 0;
   std::vector<ReferencePositionBlock> blocks_;
   std::vector<uint8_t> payload_;
+};
+
+uint32_t reference_sequence_hash(std::string_view sequence) {
+  return static_cast<uint32_t>(
+      std::hash<std::string_view>{}(sequence));
+}
+
+// Build-only exact dictionary for fixed-length reference windows. The hash is
+// only a probe hint: equal hashes are confirmed against the shared reference,
+// so collisions cannot merge distinct sequences or introduce false negatives.
+class ReferenceSequenceTable {
+ public:
+  struct Lookup {
+    LeafId id = INVALID_LEAF_ID;
+    size_t slot = 0;
+  };
+
+  explicit ReferenceSequenceTable(size_t maximum_items)
+      : capacity_(capacity_for(maximum_items)),
+        slots_(new uint64_t[capacity_]()) {}
+
+  template <typename PositionOf>
+  Lookup find(uint32_t hash, std::string_view sequence,
+              std::string_view reference,
+              PositionOf&& position_of) const {
+    size_t slot = static_cast<size_t>(hash % capacity_);
+    for (size_t probe = 0; probe < capacity_; ++probe) {
+      const uint64_t packed = slots_[slot];
+      if (packed == 0) return {INVALID_LEAF_ID, slot};
+      const LeafId id =
+          static_cast<LeafId>(static_cast<uint32_t>(packed) - 1);
+      if (static_cast<uint32_t>(packed >> 32) == hash) {
+        const size_t source_pos = position_of(id);
+        if (source_pos <= reference.size() &&
+            sequence.size() <= reference.size() - source_pos &&
+            sequence == reference.substr(source_pos, sequence.size())) {
+          return {id, slot};
+        }
+      }
+      if (++slot == capacity_) slot = 0;
+    }
+    throw std::runtime_error("reference sequence hash table is full");
+  }
+
+  void insert(const Lookup& lookup, uint32_t hash, LeafId id) {
+    if (lookup.id != INVALID_LEAF_ID ||
+        slots_[lookup.slot] != 0 ||
+        size_ >= capacity_) {
+      throw std::runtime_error("invalid reference sequence table insertion");
+    }
+    slots_[lookup.slot] =
+        (static_cast<uint64_t>(hash) << 32) |
+        (static_cast<uint64_t>(id) + 1);
+    ++size_;
+  }
+
+ private:
+  static size_t capacity_for(size_t maximum_items) {
+    if (maximum_items == 0) return 1;
+    const size_t extra =
+        maximum_items / 7 + (maximum_items % 7 != 0 ? 1 : 0);
+    if (maximum_items >
+        std::numeric_limits<size_t>::max() - extra) {
+      throw std::runtime_error("reference sequence table size overflow");
+    }
+    return maximum_items + extra;
+  }
+
+  size_t capacity_ = 0;
+  size_t size_ = 0;
+  std::unique_ptr<uint64_t[]> slots_;
 };
 
 struct Phase1CoverScanResult {
@@ -2066,80 +2206,131 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
         "too many reference windows for 32-bit LeafId");
   }
 
-  ReferencePositionEncoder position_encoder;
-  std::unordered_map<std::string_view, LeafId> sequence_ids;
-  sequence_ids.reserve(window_count);
-  std::vector<ReferenceOccurrence> additional_occurrences;
-  size_t processed_windows = 0;
+  size_t valid_window_count = 0;
   for (const auto& contig : store.reference_contigs) {
-    const size_t contig_begin = contig.begin;
-    const size_t contig_end = contig.end;
-    if (contig_end - contig_begin < window_length) continue;
-    size_t next_invalid = contig_begin;
-    for (size_t start = contig_begin;
-         start + window_length <= contig_end;
-         start += stride) {
-      stats_.added_sequences++;
-      processed_windows++;
-      if (next_invalid < start) next_invalid = start;
-      while (next_invalid < contig_end &&
-             is_acgt(store.reference_sequence[next_invalid])) {
-        next_invalid++;
+    size_t run_begin = contig.begin;
+    while (run_begin < contig.end) {
+      while (run_begin < contig.end &&
+             !is_acgt(store.reference_sequence[run_begin])) {
+        ++run_begin;
       }
-      if (next_invalid < start + window_length) {
-        stats_.invalid_reference_windows++;
-      } else {
-        const std::string_view sequence(
-            store.reference_sequence.data() + start, window_length);
-        const auto existing = sequence_ids.find(sequence);
-        if (existing != sequence_ids.end()) {
-          stats_.deduplicated++;
-          if (stride == 1) {
-            additional_occurrences.push_back(
-                {existing->second, static_cast<uint32_t>(start)});
+      size_t run_end = run_begin;
+      while (run_end < contig.end &&
+             is_acgt(store.reference_sequence[run_end])) {
+        ++run_end;
+      }
+      if (run_end - run_begin >= window_length) {
+        const size_t offset = run_begin - contig.begin;
+        size_t first_start = run_begin;
+        const size_t remainder = offset % stride;
+        if (remainder != 0) {
+          const size_t adjustment = stride - remainder;
+          if (adjustment > run_end - run_begin) {
+            run_begin = run_end;
+            continue;
           }
-        } else {
-          const LeafId sequence_id =
-              position_encoder.append(static_cast<uint32_t>(start));
-          sequence_ids.emplace(sequence, sequence_id);
+          first_start += adjustment;
+        }
+        const size_t last_start = run_end - window_length;
+        if (first_start <= last_start) {
+          valid_window_count +=
+              1 + (last_start - first_start) / stride;
         }
       }
-      if (progress &&
-          (processed_windows % 65536 == 0 ||
-           processed_windows == window_count)) {
-        progress->set_completed(processed_windows);
-      }
+      run_begin = run_end;
     }
   }
-  position_encoder.finish(store);
-  // A sampled leaf represents its sequence at every valid reference
-  // occurrence, including positions that are not themselves stride-selected.
-  // For stride 1 the first pass already collected exactly this set.
-  if (stride != 1) {
+
+  ReferencePositionEncoder position_encoder;
+  std::vector<ReferenceOccurrence> additional_occurrences;
+  {
+    ReferenceSequenceTable sequence_ids(valid_window_count);
+    const std::string_view reference(store.reference_sequence);
+    const auto position_of = [&](LeafId id) {
+      return position_encoder.position(id);
+    };
+    size_t processed_windows = 0;
     for (const auto& contig : store.reference_contigs) {
       const size_t contig_begin = contig.begin;
       const size_t contig_end = contig.end;
       if (contig_end - contig_begin < window_length) continue;
       size_t next_invalid = contig_begin;
       for (size_t start = contig_begin;
-           start + window_length <= contig_end; ++start) {
+           start + window_length <= contig_end;
+           start += stride) {
+        stats_.added_sequences++;
+        processed_windows++;
         if (next_invalid < start) next_invalid = start;
         while (next_invalid < contig_end &&
                is_acgt(store.reference_sequence[next_invalid])) {
           next_invalid++;
         }
-        if (next_invalid < start + window_length) continue;
-        const std::string_view sequence(
-            store.reference_sequence.data() + start, window_length);
-        const auto existing = sequence_ids.find(sequence);
-        if (existing == sequence_ids.end()) continue;
-        if (store.source_position(existing->second) != start) {
-          additional_occurrences.push_back(
-              {existing->second, static_cast<uint32_t>(start)});
+        if (next_invalid < start + window_length) {
+          stats_.invalid_reference_windows++;
+        } else {
+          const std::string_view sequence(
+              store.reference_sequence.data() + start, window_length);
+          const uint32_t hash = reference_sequence_hash(sequence);
+          const auto lookup = sequence_ids.find(
+              hash, sequence, reference, position_of);
+          if (lookup.id != INVALID_LEAF_ID) {
+            stats_.deduplicated++;
+            if (stride == 1) {
+              additional_occurrences.push_back(
+                  {lookup.id, static_cast<uint32_t>(start)});
+            }
+          } else {
+            const LeafId sequence_id =
+                position_encoder.append(static_cast<uint32_t>(start));
+            sequence_ids.insert(lookup, hash, sequence_id);
+          }
+        }
+        if (progress &&
+            (processed_windows % 65536 == 0 ||
+             processed_windows == window_count)) {
+          progress->set_completed(processed_windows);
+        }
+      }
+    }
+    if (processed_windows != window_count ||
+        stats_.invalid_reference_windows > processed_windows ||
+        valid_window_count !=
+            processed_windows - stats_.invalid_reference_windows) {
+      throw std::runtime_error(
+          "reference valid-window count is inconsistent");
+    }
+    // A sampled leaf represents its sequence at every valid reference
+    // occurrence, including positions that are not themselves stride-selected.
+    // For stride 1 the first pass already collected exactly this set.
+    if (stride != 1) {
+      for (const auto& contig : store.reference_contigs) {
+        const size_t contig_begin = contig.begin;
+        const size_t contig_end = contig.end;
+        if (contig_end - contig_begin < window_length) continue;
+        size_t next_invalid = contig_begin;
+        for (size_t start = contig_begin;
+             start + window_length <= contig_end; ++start) {
+          if (next_invalid < start) next_invalid = start;
+          while (next_invalid < contig_end &&
+                 is_acgt(store.reference_sequence[next_invalid])) {
+            next_invalid++;
+          }
+          if (next_invalid < start + window_length) continue;
+          const std::string_view sequence(
+              store.reference_sequence.data() + start, window_length);
+          const uint32_t hash = reference_sequence_hash(sequence);
+          const auto lookup = sequence_ids.find(
+              hash, sequence, reference, position_of);
+          if (lookup.id == INVALID_LEAF_ID) continue;
+          if (position_encoder.position(lookup.id) != start) {
+            additional_occurrences.push_back(
+                {lookup.id, static_cast<uint32_t>(start)});
+          }
         }
       }
     }
   }
+  position_encoder.finish(store);
   std::sort(
       additional_occurrences.begin(),
       additional_occurrences.end(),
