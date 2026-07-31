@@ -76,6 +76,7 @@ class QGramCountIndex {
     size_t item_id = 0;
     size_t sequence_length = 0;
     size_t total_qgrams = 0;
+    bool qgram_indexable = false;
   };
 
   struct Posting {
@@ -85,7 +86,7 @@ class QGramCountIndex {
 
   int q_;
   std::vector<StoredItem> items_;
-  std::unordered_map<std::string, std::vector<Posting>> postings_;
+  std::unordered_map<uint64_t, std::vector<Posting>> postings_;
 };
 
 }  // namespace navigamer

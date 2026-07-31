@@ -3101,21 +3101,6 @@ void BioGeometrySearchEngine::process_node_adaptive_view(
   if (node.beacon_count > 0) {
     V_Q = compute_query_beacon_distances_view(node_id, query_seq, stats);
   }
-  if (auto* reuse = active_path_reuse_context(this);
-      reuse && reuse->enabled && !reuse->previous_near_query_match) {
-    for (uint32_t child_idx = 0; child_idx < node.child_count; ++child_idx) {
-      const NodeId child_id =
-          view.child_ids[node.child_begin + child_idx];
-      if (child_id >= view.node_records.size()) continue;
-      const auto& child = view.node_records[child_id];
-      if (child.center_sequence_id >= view.sequences.size()) continue;
-      const std::string child_key = node_key(child_id);
-      if (reuse->next.center_dist_by_node.count(child_key) != 0) continue;
-      reuse->next.center_dist_by_node[child_key] = compute_distance(
-          query_seq.seq, view.sequences[child.center_sequence_id].seq);
-      stats.dist_calc_count++;
-    }
-  }
   bool used_safe_child_router = false;
   auto child_offsets = safe_child_router_candidate_indices_view(
       node_id, query_seq, V_Q, tolerance, stats, &used_safe_child_router);

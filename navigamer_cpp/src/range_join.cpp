@@ -51,6 +51,53 @@ void copy_seed_counters(RangeJoinQueryResult& target,
   target.pigeonhole_candidate_count = source.pigeonhole_candidate_count;
 }
 
+bool encode_dna_seed(const std::string& sequence, size_t start, int seed_len,
+                     uint64_t* code) {
+  if (!code || seed_len <= 0 || seed_len > 32 ||
+      start + static_cast<size_t>(seed_len) > sequence.size()) {
+    return false;
+  }
+  uint64_t value = 0;
+  for (int offset = 0; offset < seed_len; ++offset) {
+    value <<= 2;
+    switch (sequence[start + static_cast<size_t>(offset)]) {
+      case 'A':
+        break;
+      case 'C':
+        value |= 1;
+        break;
+      case 'G':
+        value |= 2;
+        break;
+      case 'T':
+        value |= 3;
+        break;
+      default:
+        return false;
+    }
+  }
+  *code = value;
+  return true;
+}
+
+bool is_acgt_sequence(const std::string& sequence) {
+  for (char base : sequence) {
+    if (base != 'A' && base != 'C' && base != 'G' && base != 'T') {
+      return false;
+    }
+  }
+  return true;
+}
+
+uint64_t dna_base_bits(char base) {
+  switch (base) {
+    case 'C': return 1;
+    case 'G': return 2;
+    case 'T': return 3;
+    default: return 0;
+  }
+}
+
 }  // namespace
 
 const char* range_candidate_mode_name(RangeCandidateMode mode) {
@@ -102,6 +149,7 @@ void ExactRangeJoinIndex::build(const std::vector<RangeJoinItem>& items) {
   item_lengths_by_id_.clear();
   item_lengths_by_id_.reserve(items.size());
   postings_by_seed_len_.clear();
+  unindexable_items_by_seed_len_.clear();
   qgram_ready_ = false;
   std::vector<QGramCountIndex::Item> qgram_items;
   if (!defer_qgram_build_) qgram_items.reserve(items.size());
@@ -147,15 +195,42 @@ ExactRangeJoinIndex::postings_for_seed_len(int seed_len) {
   if (existing != postings_by_seed_len_.end()) return existing->second;
 
   PostingLists postings;
+  std::vector<size_t> unindexable_items;
+  std::vector<uint64_t> item_codes;
   for (const auto& item : items_) {
     if (item.sequence.size() < static_cast<size_t>(seed_len)) continue;
-    std::unordered_set<std::string> seen;
+    if (seed_len > 32 || !is_acgt_sequence(item.sequence)) {
+      unindexable_items.push_back(item.item_id);
+      continue;
+    }
+    item_codes.clear();
+    item_codes.reserve(
+        item.sequence.size() - static_cast<size_t>(seed_len) + 1);
     const size_t last = item.sequence.size() - static_cast<size_t>(seed_len);
-    for (size_t pos = 0; pos <= last; ++pos) {
-      std::string seed = item.sequence.substr(pos, static_cast<size_t>(seed_len));
-      if (seen.insert(seed).second) postings[seed].push_back(item.item_id);
+    const uint64_t mask =
+        seed_len == 32
+            ? std::numeric_limits<uint64_t>::max()
+            : (uint64_t{1} << (2 * seed_len)) - 1;
+    uint64_t code = 0;
+    for (int offset = 0; offset < seed_len; ++offset) {
+      code = (code << 2) |
+             dna_base_bits(item.sequence[static_cast<size_t>(offset)]);
+    }
+    item_codes.push_back(code);
+    for (size_t pos = 1; pos <= last; ++pos) {
+      const size_t next = pos + static_cast<size_t>(seed_len) - 1;
+      code = ((code << 2) | dna_base_bits(item.sequence[next])) & mask;
+      item_codes.push_back(code);
+    }
+    std::sort(item_codes.begin(), item_codes.end());
+    item_codes.erase(std::unique(item_codes.begin(), item_codes.end()),
+                     item_codes.end());
+    for (uint64_t code : item_codes) {
+      postings[code].push_back(item.item_id);
     }
   }
+  unindexable_items_by_seed_len_[seed_len] =
+      std::move(unindexable_items);
   return postings_by_seed_len_.emplace(seed_len, std::move(postings)).first->second;
 }
 
@@ -361,8 +436,15 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   for (int block_idx = 0; block_idx < block_count; ++block_idx) {
     const size_t block_start =
         static_cast<size_t>(block_idx) * static_cast<size_t>(result.block_len);
-    std::string seed =
-        query_sequence.substr(block_start, static_cast<size_t>(result.seed_len));
+    uint64_t seed = 0;
+    if (!encode_dna_seed(
+            query_sequence, block_start, result.seed_len, &seed)) {
+      auto fallback = full_scan(query_sequence, tau, true);
+      merge_range_timing(fallback, result);
+      fallback.block_len = block_len;
+      fallback.seed_len = seed_len;
+      return fallback;
+    }
     PostingLists::const_iterator posting;
     {
       ScopedTimer timer(&result.range_posting_lookup_ms);
@@ -380,6 +462,21 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
           result.final_candidate_pairs = 0;
           return result;
         }
+      }
+    }
+  }
+  auto unindexable_it =
+      unindexable_items_by_seed_len_.find(result.seed_len);
+  if (unindexable_it != unindexable_items_by_seed_len_.end()) {
+    ScopedTimer timer(&result.range_seed_union_ms);
+    for (size_t item_id : unindexable_it->second) {
+      candidates.insert(item_id);
+      if (candidates.size() > early_abort_candidate_limit) {
+        result.seed_candidate_pairs_before_length_filter = candidates.size();
+        result.pigeonhole_candidate_count = candidates.size();
+        result.pigeonhole_early_abort_count = 1;
+        result.final_candidate_pairs = 0;
+        return result;
       }
     }
   }

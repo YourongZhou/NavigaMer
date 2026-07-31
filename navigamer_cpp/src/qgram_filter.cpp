@@ -52,14 +52,13 @@ QGramSignature compute_qgram_signature(const std::string& sequence, int q) {
   signature.sequence_length = sequence.size();
   if (q <= 0 || q > 32) return signature;
 
-  std::vector<uint8_t> bases;
-  bases.reserve(sequence.size());
   for (char c : sequence) {
     switch (c) {
-      case 'A': bases.push_back(0); break;
-      case 'C': bases.push_back(1); break;
-      case 'G': bases.push_back(2); break;
-      case 'T': bases.push_back(3); break;
+      case 'A':
+      case 'C':
+      case 'G':
+      case 'T':
+        break;
       default: return signature;
     }
   }
@@ -76,8 +75,15 @@ QGramSignature compute_qgram_signature(const std::string& sequence, int q) {
   std::vector<uint64_t> codes;
   codes.reserve(signature.total_qgrams);
   uint64_t code = 0;
-  for (size_t i = 0; i < bases.size(); ++i) {
-    code = ((code << 2) | bases[i]) & mask;
+  for (size_t i = 0; i < sequence.size(); ++i) {
+    uint64_t base = 0;
+    switch (sequence[i]) {
+      case 'C': base = 1; break;
+      case 'G': base = 2; break;
+      case 'T': base = 3; break;
+      default: break;
+    }
+    code = ((code << 2) | base) & mask;
     if (i + 1 >= q_size) codes.push_back(code);
   }
   std::sort(codes.begin(), codes.end());
@@ -167,10 +173,13 @@ void QGramCountIndex::build(const std::vector<Item>& items) {
 
   for (const auto& item : items) {
     const size_t internal_idx = items_.size();
-    items_.push_back({item.item_id, item.sequence.size(),
-                      qgram_total(item.sequence, q_)});
-    for (const auto& entry : compute_qgram_counts(item.sequence, q_)) {
-      postings_[entry.first].push_back({internal_idx, entry.second});
+    QGramSignature signature = compute_qgram_signature(item.sequence, q_);
+    items_.push_back(
+        {item.item_id, item.sequence.size(), signature.total_qgrams,
+         signature.safe_for_pruning});
+    if (!signature.safe_for_pruning) continue;
+    for (const auto& entry : signature.entries) {
+      postings_[entry.code].push_back({internal_idx, entry.count});
     }
   }
 }
@@ -182,23 +191,26 @@ std::vector<size_t> QGramCountIndex::query(
 
   QueryStats local_stats;
   local_stats.total_items = items_.size();
-  const size_t query_total = qgram_total(query_sequence, q_);
-  const auto query_counts = compute_qgram_counts(query_sequence, q_);
+  const QGramSignature query_signature =
+      compute_qgram_signature(query_sequence, q_);
+  const size_t query_total = query_signature.total_qgrams;
   QGramQueryWorkspace local_workspace;
   QGramQueryWorkspace* ws = workspace ? workspace : &local_workspace;
   ws->reset(items_.size());
 
-  for (const auto& query_entry : query_counts) {
-    auto posting_it = postings_.find(query_entry.first);
-    if (posting_it == postings_.end()) continue;
-    for (const auto& posting : posting_it->second) {
-      if (ws->seen_epoch[posting.internal_idx] != ws->epoch) {
-        ws->seen_epoch[posting.internal_idx] = ws->epoch;
-        ws->shared[posting.internal_idx] = 0;
-        ws->touched.push_back(posting.internal_idx);
+  if (query_signature.safe_for_pruning) {
+    for (const auto& query_entry : query_signature.entries) {
+      auto posting_it = postings_.find(query_entry.code);
+      if (posting_it == postings_.end()) continue;
+      for (const auto& posting : posting_it->second) {
+        if (ws->seen_epoch[posting.internal_idx] != ws->epoch) {
+          ws->seen_epoch[posting.internal_idx] = ws->epoch;
+          ws->shared[posting.internal_idx] = 0;
+          ws->touched.push_back(posting.internal_idx);
+        }
+        ws->shared[posting.internal_idx] +=
+            std::min(static_cast<size_t>(query_entry.count), posting.count);
       }
-      ws->shared[posting.internal_idx] +=
-          std::min(query_entry.second, posting.count);
     }
   }
 
@@ -206,7 +218,9 @@ std::vector<size_t> QGramCountIndex::query(
   candidates.reserve(items_.size());
   const long long query_length = static_cast<long long>(query_sequence.size());
   const long long max_l1 = 2LL * static_cast<long long>(q_) * tau;
-  if (query_total == 0) local_stats.full_scan_fallbacks = 1;
+  if (!query_signature.safe_for_pruning || query_total == 0) {
+    local_stats.full_scan_fallbacks = 1;
+  }
 
   for (size_t internal_idx = 0; internal_idx < items_.size(); ++internal_idx) {
     const auto& item = items_[internal_idx];
@@ -216,7 +230,8 @@ std::vector<size_t> QGramCountIndex::query(
       continue;
     }
 
-    if (query_total == 0 || item.total_qgrams == 0) {
+    if (!query_signature.safe_for_pruning || !item.qgram_indexable ||
+        query_total == 0 || item.total_qgrams == 0) {
       candidates.push_back(item.item_id);
       continue;
     }

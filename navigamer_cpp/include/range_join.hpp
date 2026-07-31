@@ -4,6 +4,7 @@
 #include "qgram_filter.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -87,12 +88,14 @@ class ExactRangeJoinIndex {
       RangeJoinQueryWorkspace* workspace) const;
 
  private:
-  using PostingLists = std::unordered_map<std::string, std::vector<size_t>>;
+  using PostingLists = std::unordered_map<uint64_t, std::vector<size_t>>;
 
   RangeJoinConfig config_;
   std::vector<RangeJoinItem> items_;
   std::unordered_map<size_t, size_t> item_lengths_by_id_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
+  std::unordered_map<int, std::vector<size_t>>
+      unindexable_items_by_seed_len_;
   mutable QGramCountIndex qgram_index_;
   mutable bool qgram_ready_ = false;
   bool defer_qgram_build_ = false;

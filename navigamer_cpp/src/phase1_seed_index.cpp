@@ -39,6 +39,16 @@ bool is_acgt(const std::string& sequence) {
   return true;
 }
 
+uint64_t dna_base_bits(char base) {
+  switch (base) {
+    case 'A': return 0;
+    case 'C': return 1;
+    case 'G': return 2;
+    case 'T': return 3;
+    default: return 0;
+  }
+}
+
 bool length_compatible(size_t lhs, size_t rhs, int tau) {
   return std::llabs(static_cast<long long>(lhs) -
                     static_cast<long long>(rhs)) <= tau;
@@ -95,11 +105,19 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
 
   const size_t seed_count =
       sequence.size() - static_cast<size_t>(seed_len) + 1;
+  const uint64_t mask =
+      seed_len == 32
+          ? std::numeric_limits<uint64_t>::max()
+          : (uint64_t{1} << (2 * seed_len)) - 1;
+  uint64_t code = 0;
+  for (int offset = 0; offset < seed_len; ++offset) {
+    code = (code << 2) |
+           dna_base_bits(sequence[static_cast<size_t>(offset)]);
+  }
   for (size_t start = 0; start < seed_count; ++start) {
-    uint64_t code = 0;
-    if (!encode_seed(sequence, start, seed_len, code)) {
-      state.unindexable_items.push_back(item_idx);
-      return;
+    if (start > 0) {
+      const size_t next = start + static_cast<size_t>(seed_len) - 1;
+      code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
     }
     if (start > std::numeric_limits<uint32_t>::max()) {
       state.unindexable_items.push_back(item_idx);

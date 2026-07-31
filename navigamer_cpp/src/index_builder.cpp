@@ -786,6 +786,89 @@ void accumulate_phase2_candidate_stats(
       candidates.auto_candidate_ratio_sum;
 }
 
+void accumulate_leaf_candidate_stats(
+    BioGeometryIndexBuilder::Statistics& stats,
+    const RangeJoinQueryResult& candidates) {
+  accumulate_range_timing(stats, candidates);
+  stats.leaf_candidate_pairs += candidates.candidate_item_ids.size();
+  if (candidates.used_full_scan) stats.leaf_full_scan_fallback_count++;
+  if (candidates.mode_used == RangeCandidateMode::PigeonholeOnly) {
+    stats.leaf_pigeonhole_queries++;
+  } else if (candidates.mode_used == RangeCandidateMode::QGramOnly) {
+    stats.leaf_qgram_queries++;
+  } else if (candidates.mode_used == RangeCandidateMode::Hybrid) {
+    stats.leaf_hybrid_queries++;
+  }
+  stats.leaf_qgram_candidate_pairs += candidates.qgram_candidate_count;
+  stats.leaf_qgram_pruned_by_l1 += candidates.qgram_pruned_by_l1;
+  stats.leaf_length_pruned_pairs += candidates.length_filtered_items;
+  stats.leaf_seed_candidate_pairs_before_length_filter +=
+      candidates.seed_candidate_pairs_before_length_filter;
+  stats.leaf_seed_length_pruned_candidates +=
+      candidates.seed_length_pruned_candidates;
+  stats.leaf_pigeonhole_early_abort_count +=
+      candidates.pigeonhole_early_abort_count;
+  stats.leaf_range_final_candidate_pairs += candidates.final_candidate_pairs;
+  stats.leaf_required_shared_nonpositive_count +=
+      candidates.required_shared_nonpositive;
+  stats.leaf_auto_pigeonhole_accepted +=
+      candidates.auto_pigeonhole_accepted;
+  stats.leaf_auto_pigeonhole_rejected_large_candidates +=
+      candidates.auto_pigeonhole_rejected_large_candidates;
+  stats.leaf_auto_qgram_invoked += candidates.auto_qgram_invoked;
+  stats.leaf_auto_hybrid_invoked += candidates.auto_hybrid_invoked;
+  stats.leaf_auto_final_candidate_pairs +=
+      candidates.auto_final_candidate_pairs;
+  stats.leaf_auto_candidate_ratio_sum +=
+      candidates.auto_candidate_ratio_sum;
+}
+
+void merge_leaf_local_stats(
+    BioGeometryIndexBuilder::Statistics& target,
+    const BioGeometryIndexBuilder::Statistics& local) {
+  target.leaf_candidate_pairs += local.leaf_candidate_pairs;
+  target.leaf_exact_distance_calls += local.leaf_exact_distance_calls;
+  target.leaf_full_scan_fallback_count +=
+      local.leaf_full_scan_fallback_count;
+  target.leaf_pigeonhole_queries += local.leaf_pigeonhole_queries;
+  target.leaf_qgram_queries += local.leaf_qgram_queries;
+  target.leaf_hybrid_queries += local.leaf_hybrid_queries;
+  target.leaf_qgram_candidate_pairs += local.leaf_qgram_candidate_pairs;
+  target.leaf_qgram_pruned_by_l1 += local.leaf_qgram_pruned_by_l1;
+  target.leaf_length_pruned_pairs += local.leaf_length_pruned_pairs;
+  target.leaf_seed_candidate_pairs_before_length_filter +=
+      local.leaf_seed_candidate_pairs_before_length_filter;
+  target.leaf_seed_length_pruned_candidates +=
+      local.leaf_seed_length_pruned_candidates;
+  target.leaf_pigeonhole_early_abort_count +=
+      local.leaf_pigeonhole_early_abort_count;
+  target.leaf_range_final_candidate_pairs +=
+      local.leaf_range_final_candidate_pairs;
+  target.leaf_required_shared_nonpositive_count +=
+      local.leaf_required_shared_nonpositive_count;
+  target.leaf_auto_pigeonhole_accepted +=
+      local.leaf_auto_pigeonhole_accepted;
+  target.leaf_auto_pigeonhole_rejected_large_candidates +=
+      local.leaf_auto_pigeonhole_rejected_large_candidates;
+  target.leaf_auto_qgram_invoked += local.leaf_auto_qgram_invoked;
+  target.leaf_auto_hybrid_invoked += local.leaf_auto_hybrid_invoked;
+  target.leaf_auto_final_candidate_pairs +=
+      local.leaf_auto_final_candidate_pairs;
+  target.leaf_auto_candidate_ratio_sum +=
+      local.leaf_auto_candidate_ratio_sum;
+  target.range_posting_lookup_ms += local.range_posting_lookup_ms;
+  target.range_seed_union_ms += local.range_seed_union_ms;
+  target.range_length_filter_ms += local.range_length_filter_ms;
+  target.range_qgram_query_ms += local.range_qgram_query_ms;
+  target.range_hybrid_intersection_ms +=
+      local.range_hybrid_intersection_ms;
+  target.range_full_scan_ms += local.range_full_scan_ms;
+  target.leaf_candidate_query_ms += local.leaf_candidate_query_ms;
+  target.leaf_exact_verify_ms += local.leaf_exact_verify_ms;
+  target.leaf_beacon_distance_ms += local.leaf_beacon_distance_ms;
+  target.leaf_tuple_emit_ms += local.leaf_tuple_emit_ms;
+}
+
 void merge_phase2_local_stats(BioGeometryIndexBuilder::Statistics& target,
                               const BioGeometryIndexBuilder::Statistics& local) {
   target.phase2_candidate_pairs += local.phase2_candidate_pairs;
@@ -1982,41 +2065,6 @@ void BioGeometryIndexBuilder::attach_leaves(
       }
     }
 
-    auto record_leaf_candidates = [&](const RangeJoinQueryResult& candidates) {
-      stats_.leaf_candidate_pairs += candidates.candidate_item_ids.size();
-      if (candidates.used_full_scan) stats_.leaf_full_scan_fallback_count++;
-      if (candidates.mode_used == RangeCandidateMode::PigeonholeOnly) {
-        stats_.leaf_pigeonhole_queries++;
-      } else if (candidates.mode_used == RangeCandidateMode::QGramOnly) {
-        stats_.leaf_qgram_queries++;
-      } else if (candidates.mode_used == RangeCandidateMode::Hybrid) {
-        stats_.leaf_hybrid_queries++;
-      }
-      stats_.leaf_qgram_candidate_pairs += candidates.qgram_candidate_count;
-      stats_.leaf_qgram_pruned_by_l1 += candidates.qgram_pruned_by_l1;
-      stats_.leaf_length_pruned_pairs += candidates.length_filtered_items;
-      stats_.leaf_seed_candidate_pairs_before_length_filter +=
-          candidates.seed_candidate_pairs_before_length_filter;
-      stats_.leaf_seed_length_pruned_candidates +=
-          candidates.seed_length_pruned_candidates;
-      stats_.leaf_pigeonhole_early_abort_count +=
-          candidates.pigeonhole_early_abort_count;
-      stats_.leaf_range_final_candidate_pairs +=
-          candidates.final_candidate_pairs;
-      stats_.leaf_required_shared_nonpositive_count +=
-          candidates.required_shared_nonpositive;
-      stats_.leaf_auto_pigeonhole_accepted +=
-          candidates.auto_pigeonhole_accepted;
-      stats_.leaf_auto_pigeonhole_rejected_large_candidates +=
-          candidates.auto_pigeonhole_rejected_large_candidates;
-      stats_.leaf_auto_qgram_invoked += candidates.auto_qgram_invoked;
-      stats_.leaf_auto_hybrid_invoked += candidates.auto_hybrid_invoked;
-      stats_.leaf_auto_final_candidate_pairs +=
-          candidates.auto_final_candidate_pairs;
-      stats_.leaf_auto_candidate_ratio_sum +=
-          candidates.auto_candidate_ratio_sum;
-    };
-
     if (actual_direction == LeafAttachDirection::SeqToWorld) {
       std::vector<RangeJoinItem> items;
       items.reserve(finest_layer.size());
@@ -2040,8 +2088,7 @@ void BioGeometryIndexBuilder::attach_leaves(
           ScopedTimer timer(&stats_.leaf_candidate_query_ms);
           candidates = world_index.query(seq->seq, max_radius);
         }
-        accumulate_range_timing(stats_, candidates);
-        record_leaf_candidates(candidates);
+        accumulate_leaf_candidate_stats(stats_, candidates);
         {
           ScopedTimer verify_timer(&stats_.leaf_exact_verify_ms);
           for (size_t world_idx : candidates.candidate_item_ids) {
@@ -2091,7 +2138,6 @@ void BioGeometryIndexBuilder::attach_leaves(
       }
     } else {
       struct LeafAttachTuple {
-        size_t world_idx = 0;
         size_t seq_idx = 0;
         std::vector<int> beacon_dists;
       };
@@ -2106,82 +2152,125 @@ void BioGeometryIndexBuilder::attach_leaves(
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         sequence_index.build(items);
+        std::vector<int> seed_lengths;
+        seed_lengths.reserve(finest_layer.size());
+        for (NodeId node_id : finest_layer) {
+          const auto& world = build_nodes_[node_id];
+          const auto& center =
+              search_graph_view_.sequences[world.center_sequence_id].seq;
+          const int block_len = static_cast<int>(
+              center.size() / static_cast<size_t>(world.radius + 1));
+          seed_lengths.push_back(std::min(
+              range_config_.range_join.max_seed_len, block_len));
+        }
+        if (range_config_.range_join.candidate_mode ==
+                RangeCandidateMode::Auto ||
+            range_config_.range_join.candidate_mode ==
+                RangeCandidateMode::PigeonholeOnly ||
+            range_config_.range_join.candidate_mode ==
+                RangeCandidateMode::Hybrid) {
+          std::sort(seed_lengths.begin(), seed_lengths.end());
+          seed_lengths.erase(
+              std::unique(seed_lengths.begin(), seed_lengths.end()),
+              seed_lengths.end());
+          sequence_index.prepare_seed_lengths(seed_lengths);
+        }
       }
 
-      std::vector<LeafAttachTuple> tuples;
-      for (size_t world_idx = 0; world_idx < finest_layer.size(); ++world_idx) {
-        auto& world = build_nodes_[finest_layer[world_idx]];
-        const auto& center =
-            search_graph_view_.sequences[world.center_sequence_id].seq;
-        RangeJoinQueryResult candidates;
-        {
-          ScopedTimer timer(&stats_.leaf_candidate_query_ms);
-          candidates =
-              sequence_index.query(center, world.radius);
-        }
-        accumulate_range_timing(stats_, candidates);
-        record_leaf_candidates(candidates);
-        {
-          ScopedTimer verify_timer(&stats_.leaf_exact_verify_ms);
-          for (size_t seq_idx : candidates.candidate_item_ids) {
-            const auto& seq = unique_seqs[seq_idx];
-            if (std::llabs(static_cast<long long>(seq->seq.size()) -
-                           static_cast<long long>(center.size())) >
-                world.radius) {
-              stats_.leaf_length_pruned_pairs++;
-              continue;
-            }
-            if (range_config_.leaf_qgram_postfilter &&
-                qgram_can_prune_edit_distance(
-                    world_qgram_signatures[world_idx],
-                    leaf_qgram_signatures[seq_idx], world.radius)) {
-              stats_.leaf_qgram_pruned_by_l1++;
-              continue;
-            }
-            stats_.leaf_exact_distance_calls++;
-            int dist = build_distance_bounded(center, seq->seq,
-                                              world.radius,
-                                              range_config_.distance_mode);
-            if (dist <= world.radius) {
-              auto beacon_dists = leaf_beacon_distances_timed(
-                  seq, world.beacon_ids, search_graph_view_.sequences, dist,
-                  range_config_.distance_mode,
-                  &stats_.leaf_beacon_distance_ms);
-              {
-                ScopedTimer timer(&stats_.leaf_tuple_emit_ms);
-                tuples.push_back(
-                    {world_idx, seq_idx, std::move(beacon_dists)});
+      const int thread_count = std::max(
+          1, std::min(
+                 omp_get_max_threads(),
+                 static_cast<int>(std::min<size_t>(
+                     finest_layer.size(),
+                     static_cast<size_t>(std::numeric_limits<int>::max())))));
+      std::vector<BioGeometryIndexBuilder::Statistics> thread_stats(
+          static_cast<size_t>(thread_count));
+      std::vector<std::vector<LeafAttachTuple>> tuples_by_world(
+          finest_layer.size());
+
+#pragma omp parallel if(thread_count > 1) num_threads(thread_count)
+      {
+        const int tid = omp_get_thread_num();
+        auto& local_stats = thread_stats[static_cast<size_t>(tid)];
+        RangeJoinQueryWorkspace workspace;
+
+#pragma omp for schedule(dynamic, 8)
+        for (size_t world_idx = 0; world_idx < finest_layer.size();
+             ++world_idx) {
+          const auto& world = build_nodes_[finest_layer[world_idx]];
+          const auto& center =
+              search_graph_view_.sequences[world.center_sequence_id].seq;
+          RangeJoinQueryResult candidates;
+          {
+            ScopedTimer timer(&local_stats.leaf_candidate_query_ms);
+            candidates =
+                static_cast<const ExactRangeJoinIndex&>(sequence_index)
+                    .query(center, world.radius, &workspace);
+          }
+          accumulate_leaf_candidate_stats(local_stats, candidates);
+          auto& world_tuples = tuples_by_world[world_idx];
+          {
+            ScopedTimer verify_timer(&local_stats.leaf_exact_verify_ms);
+            for (size_t seq_idx : candidates.candidate_item_ids) {
+              const auto& seq = unique_seqs[seq_idx];
+              if (std::llabs(static_cast<long long>(seq->seq.size()) -
+                             static_cast<long long>(center.size())) >
+                  world.radius) {
+                local_stats.leaf_length_pruned_pairs++;
+                continue;
+              }
+              if (range_config_.leaf_qgram_postfilter &&
+                  qgram_can_prune_edit_distance(
+                      world_qgram_signatures[world_idx],
+                      leaf_qgram_signatures[seq_idx], world.radius)) {
+                local_stats.leaf_qgram_pruned_by_l1++;
+                continue;
+              }
+              local_stats.leaf_exact_distance_calls++;
+              const int dist = build_distance_bounded(
+                  center, seq->seq, world.radius,
+                  range_config_.distance_mode);
+              if (dist <= world.radius) {
+                auto beacon_dists = leaf_beacon_distances_timed(
+                    seq, world.beacon_ids, search_graph_view_.sequences, dist,
+                    range_config_.distance_mode,
+                    &local_stats.leaf_beacon_distance_ms);
+                ScopedTimer timer(&local_stats.leaf_tuple_emit_ms);
+                world_tuples.push_back(
+                    {seq_idx, std::move(beacon_dists)});
               }
             }
           }
+          if (progress && world_idx % 256 == 255) progress->advance(256);
         }
-        if (progress && world_idx % 256 == 255) progress->advance(256);
       }
       if (progress) progress->set_completed(finest_layer.size());
 
+      for (const auto& local_stats : thread_stats) {
+        merge_leaf_local_stats(stats_, local_stats);
+      }
       {
         ScopedTimer timer(&stats_.leaf_tuple_merge_sort_ms);
-        std::sort(tuples.begin(), tuples.end(),
-                  [](const LeafAttachTuple& lhs,
-                     const LeafAttachTuple& rhs) {
-                    if (lhs.world_idx != rhs.world_idx) {
-                      return lhs.world_idx < rhs.world_idx;
-                    }
-                    return lhs.seq_idx < rhs.seq_idx;
-                  });
+        for (auto& world_tuples : tuples_by_world) {
+          std::sort(
+              world_tuples.begin(), world_tuples.end(),
+              [](const LeafAttachTuple& lhs, const LeafAttachTuple& rhs) {
+                return lhs.seq_idx < rhs.seq_idx;
+              });
+        }
       }
       {
         ScopedTimer timer(&stats_.leaf_populate_ms);
-        for (auto& tuple : tuples) {
-          auto& world =
-              build_nodes_[finest_layer[tuple.world_idx]];
-          world.leaf_ids.push_back(
-              unique_seqs[tuple.seq_idx]->sequence_id);
-          world.leaf_beacon_dists.push_back(std::move(tuple.beacon_dists));
-        }
-        for (NodeId node_id : finest_layer) {
-          auto& node = build_nodes_[node_id];
-          node.data_count = static_cast<int>(node.leaf_ids.size());
+        for (size_t world_idx = 0; world_idx < finest_layer.size();
+             ++world_idx) {
+          auto& world = build_nodes_[finest_layer[world_idx]];
+          for (auto& tuple : tuples_by_world[world_idx]) {
+            world.leaf_ids.push_back(
+                unique_seqs[tuple.seq_idx]->sequence_id);
+            world.leaf_beacon_dists.push_back(
+                std::move(tuple.beacon_dists));
+          }
+          world.data_count = static_cast<int>(world.leaf_ids.size());
         }
       }
     }
