@@ -291,11 +291,13 @@ relative to the original contig.
 Each part is an ordinary v20 `.navidx` file. A completed part is reused only
 after its input fingerprint, construction signature, reference slice, contig,
 and source coordinates validate. Damaged or incompatible parts are rebuilt,
-and newly completed parts are installed atomically. The final v2 `.navshard`
+and newly completed parts are installed atomically. The final v3 `.navshard`
 manifest is written only after all parts are valid. Multi-part bundles with
 windows of at least 64 bases also store a memory-mapped `.route` sidecar of
-exact 16-mer minimizers. At tolerance `d`, one 64-base seed is taken from each
-of `d + 1` disjoint query blocks; only shards containing at least one seed
+exact 16-mer minimizers. Minimizers use a 32-bit array and parallel shard IDs
+use exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
+64-base seed is taken from each of `d + 1` disjoint query blocks; only shards
+containing at least one seed
 minimizer are searched. This is a pigeonhole necessary condition for an exact
 edit-distance hit. Unsupported short/ambiguous queries or an unavailable
 sidecar conservatively search all parts.

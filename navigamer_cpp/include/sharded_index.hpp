@@ -22,7 +22,7 @@ struct IndexShardDescriptor {
 };
 
 struct ShardedIndexManifest {
-  uint32_t format_version = 2;
+  uint32_t format_version = 3;
   size_t window_length = 0;
   size_t stride = 0;
   size_t total_window_count = 0;
@@ -41,17 +41,21 @@ struct ShardRouteSelection {
   std::vector<uint32_t> shard_ids;
 };
 
-// Sorted packed (minimizer_code, shard_id) pairs are memory-mapped from the
-// router sidecar. Exact query blocks provide a no-false-negative necessary
-// condition; unsupported queries conservatively disable routing.
+// Sorted minimizer codes and bit-packed parallel shard IDs are memory-mapped
+// from the router sidecar. Exact query blocks provide a no-false-negative
+// necessary condition; unsupported queries conservatively disable routing.
 struct ShardedSeedRouter {
   uint32_t k = 0;
   uint32_t window = 0;
   uint32_t shard_count = 0;
-  FinalArray<uint64_t> entries;
+  uint32_t shard_id_bits = 0;
+  FinalArray<uint32_t> minimizer_codes;
+  FinalArray<uint8_t> packed_shard_ids;
 
   bool enabled() const {
-    return k != 0 && window >= k && shard_count != 0 && !entries.empty();
+    return k != 0 && window >= k && shard_count != 0 &&
+           shard_id_bits != 0 && !minimizer_codes.empty() &&
+           !packed_shard_ids.empty();
   }
   ShardRouteSelection select(
       std::string_view query, int tolerance) const;

@@ -99,6 +99,59 @@ std::string deterministic_dna(size_t size) {
   return sequence;
 }
 
+uint32_t shard_id_bits(uint32_t shard_count) {
+  uint32_t bits = 0;
+  uint32_t largest_id = shard_count - 1;
+  do {
+    ++bits;
+    largest_id >>= 1;
+  } while (largest_id != 0);
+  return bits;
+}
+
+std::vector<uint8_t> pack_shard_ids(
+    const std::vector<uint32_t>& shard_ids, uint32_t bits) {
+  std::vector<uint8_t> packed(
+      (shard_ids.size() * bits + 7) / 8, 0);
+  size_t bit_offset = 0;
+  for (uint32_t shard_id : shard_ids) {
+    for (uint32_t bit = 0; bit < bits; ++bit) {
+      if ((shard_id & (uint32_t{1} << bit)) != 0) {
+        packed[(bit_offset + bit) / 8] |= static_cast<uint8_t>(
+            uint8_t{1} << ((bit_offset + bit) % 8));
+      }
+    }
+    bit_offset += bits;
+  }
+  return packed;
+}
+
+void test_bit_packed_shard_id_boundaries() {
+  const std::vector<uint32_t> shard_counts = {
+      1, 2, 3, 4, 255, 256, 257,
+      65535, 65536, 65537, uint32_t{1} << 20};
+  for (uint32_t shard_count : shard_counts) {
+    std::vector<uint32_t> expected = {
+        0, shard_count / 2, shard_count - 1};
+    std::sort(expected.begin(), expected.end());
+    expected.erase(
+        std::unique(expected.begin(), expected.end()),
+        expected.end());
+
+    navigamer::ShardedSeedRouter router;
+    router.k = 1;
+    router.window = 1;
+    router.shard_count = shard_count;
+    router.shard_id_bits = shard_id_bits(shard_count);
+    router.minimizer_codes.assign(expected.size(), 0);
+    router.packed_shard_ids.set_owned(
+        pack_shard_ids(expected, router.shard_id_bits));
+    const auto selected = router.select("A", 0);
+    assert(selected.enabled);
+    assert(selected.shard_ids == expected);
+  }
+}
+
 std::set<std::string> matching_sequences(
     const std::vector<navigamer::LoadedIndex>& shards,
     const navigamer::BioSequence& query,
@@ -150,7 +203,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(reloaded_manifest.window_length == window);
-  assert(reloaded_manifest.format_version == 2);
+  assert(reloaded_manifest.format_version == 3);
   assert(reloaded_manifest.stride == stride);
   assert(reloaded_manifest.shards.size() ==
          manifest.shards.size());
@@ -283,39 +336,54 @@ void test_seed_router_no_false_negatives() {
   assert(manifest.router_k == 16);
   assert(manifest.router_window == 64);
   assert(manifest.router_entry_count > 0);
+  const size_t expected_router_bytes =
+      48 + manifest.router_entry_count * sizeof(uint32_t) +
+      (manifest.router_entry_count * 3 + 7) / 8;
+  assert(std::filesystem::file_size(
+             bundle.string() + ".route") ==
+         expected_router_bytes);
+  assert(expected_router_bytes <
+         40 + manifest.router_entry_count * sizeof(uint64_t));
   const auto router = navigamer::load_sharded_seed_router(
       bundle.string(), manifest);
   assert(router.enabled());
-  assert(router.entries.is_mapped());
+  assert(router.shard_id_bits == 3);
+  assert(router.minimizer_codes.is_mapped());
+  assert(router.packed_shard_ids.is_mapped());
   const auto shards = navigamer::load_sharded_index(
       bundle.string(), manifest);
 
-  const std::string exact = reference.substr(98, window);
-  std::vector<std::pair<std::string, int>> cases;
-  cases.emplace_back(exact, 2);
-  std::string substitutions = exact;
-  substitutions[7] = substitutions[7] == 'A' ? 'C' : 'A';
-  substitutions[151] = substitutions[151] == 'G' ? 'T' : 'G';
-  cases.emplace_back(std::move(substitutions), 2);
-  std::string insertion = exact;
-  insertion.insert(insertion.begin() + 95, 'A');
-  cases.emplace_back(std::move(insertion), 2);
-  std::string deletion = exact;
-  deletion.erase(deletion.begin() + 96);
-  cases.emplace_back(std::move(deletion), 2);
-
+  const std::vector<size_t> source_positions = {
+      0, 1, 50, 98, 99, 100, 101, 198, 199,
+      200, 201, 298, 299, 300, 301, 399, 400};
   size_t ordinal = 0;
-  for (const auto& [sequence, tolerance] : cases) {
-    const auto route = router.select(sequence, tolerance);
-    assert(route.enabled);
-    assert(!route.shard_ids.empty());
-    navigamer::BioSequence query(
-        "router_" + std::to_string(ordinal++), sequence);
-    assert(matching_occurrences(shards, query, tolerance) ==
-           matching_occurrences(
-               shards, query, tolerance, &route.shard_ids));
+  for (size_t source_pos : source_positions) {
+    const std::string exact = reference.substr(source_pos, window);
+    for (int mutation = 0; mutation < 5; ++mutation) {
+      std::string sequence = exact;
+      if (mutation == 1) {
+        sequence[7] = sequence[7] == 'A' ? 'C' : 'A';
+        sequence[151] = sequence[151] == 'G' ? 'T' : 'G';
+      } else if (mutation == 2) {
+        sequence.insert(sequence.begin() + 95, 'A');
+      } else if (mutation == 3) {
+        sequence.erase(sequence.begin() + 96);
+      } else if (mutation == 4) {
+        sequence.insert(sequence.begin() + 33, 'C');
+        sequence.erase(sequence.begin() + 177);
+      }
+      const auto route = router.select(sequence, 2);
+      assert(route.enabled);
+      assert(!route.shard_ids.empty());
+      navigamer::BioSequence query(
+          "router_" + std::to_string(ordinal++), sequence);
+      assert(matching_occurrences(shards, query, 2) ==
+             matching_occurrences(
+                 shards, query, 2, &route.shard_ids));
+    }
   }
 
+  const std::string exact = reference.substr(98, window);
   std::string ambiguous = exact;
   ambiguous[10] = 'N';
   assert(!router.select(ambiguous, 2).enabled);
@@ -328,6 +396,7 @@ void test_seed_router_no_false_negatives() {
 }  // namespace
 
 int main() {
+  test_bit_packed_shard_id_boundaries();
   test_sharded_round_trip_and_no_false_negatives();
   test_seed_router_no_false_negatives();
   std::cout << "sharded index tests passed\n";
