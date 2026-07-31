@@ -1468,12 +1468,23 @@ void run_query_index_batch(const std::string& index_path,
         }
         if (sequence_store.reference_backed &&
             materialized_hit.ref_positions.empty()) {
-          materialized_hit.add_occurrence(
-              sequence_store.reference_id,
-              static_cast<int>(materialized_hit.source_pos),
-              static_cast<int>(
-                  materialized_hit.source_pos + hit_sequence.size()),
-              "+");
+          size_t occurrence = sequence_store.reference_sequence.find(
+              materialized_hit.seq);
+          while (occurrence != std::string::npos) {
+            if (occurrence >
+                static_cast<size_t>(std::numeric_limits<int>::max()) -
+                    hit_sequence.size()) {
+              throw std::runtime_error(
+                  "reference occurrence exceeds RefPosition integer range");
+            }
+            materialized_hit.add_occurrence(
+                sequence_store.reference_id,
+                static_cast<int>(occurrence),
+                static_cast<int>(occurrence + hit_sequence.size()),
+                "+");
+            occurrence = sequence_store.reference_sequence.find(
+                materialized_hit.seq, occurrence + 1);
+          }
         }
         auto rows = search_results_to_tsv_rows(
             read->id, read->seq, 0, materialized_hit, ed);
