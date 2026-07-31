@@ -358,6 +358,7 @@ class BioGeometrySearchEngine {
       NodeId node_id,
       const BioSequence& query_seq,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       int tolerance,
       SearchStats& stats,
       bool* used_router) const;
@@ -456,12 +457,14 @@ class BioGeometrySearchEngine {
   std::vector<NodeId> get_mbb_surviving_child_ids_view(
       NodeId node_id,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       int tolerance,
       SearchStats& stats) const;
   std::vector<NodeId> scan_mbb_surviving_child_ids_view(
       NodeId node_id,
       const std::vector<size_t>& child_offsets,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       int tolerance,
       SearchStats& stats) const;
   std::vector<NodeId> rank_child_ids_with_router_hints_view(
@@ -476,11 +479,13 @@ class BioGeometrySearchEngine {
       NodeId node_id,
       const std::vector<NodeId>& candidates,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       SearchStats& stats) const;
   std::vector<NodeId> rank_child_ids_with_best_first_view(
       NodeId node_id,
       const std::vector<NodeId>& candidates,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       int tolerance,
       SearchStats& stats) const;
   std::vector<NodeId> apply_path_reuse_order_view(

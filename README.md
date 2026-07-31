@@ -37,13 +37,16 @@ without rescanning the reference. No per-window
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 9 stores one
+edit distance fits in one byte. Persisted format version 10 stores one
 child-center-to-beacon distance per MBB cell instead of separate lower and
 upper bounds. Search reconstructs the same interval from the child-layer
 radius; equivalently, a child survives exactly when the two beacon distances
 differ by at most `child_radius + tolerance`. Leaf distances are also flat
 bytes, and finest-layer nodes reuse their cleared child buffer for leaf IDs.
-No per-edge distance vector is allocated before finalization.
+Finalized nodes are 32-byte records containing only the center ID and shared
+array offsets/counts. Layer arrays imply both the layer ID and its radii, while
+`leaf_begin` also addresses the aligned leaf-distance array. No per-edge
+distance vector is allocated before finalization.
 
 ## Installation
 

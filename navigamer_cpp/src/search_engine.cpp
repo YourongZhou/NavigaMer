@@ -687,36 +687,46 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
       seed_lengths.push_back(seed);
     }
 
-    for (NodeId node_id = 0; node_id < view.node_records.size(); ++node_id) {
-      const auto& node = view.node_records[node_id];
-      if (node.child_count < config_.safe_child_router_min_fanout) {
-        continue;
-      }
-      ParentSafeChildRouterIndex parent_index;
-      parent_index.child_count = node.child_count;
-      std::map<int, std::vector<RangeJoinItemView>> items_by_radius;
-      bool usable = true;
-      for (size_t child_idx = 0; child_idx < node.child_count; ++child_idx) {
-        const NodeId child_id = view.child_ids[node.child_begin + child_idx];
-        if (child_id >= view.node_records.size()) {
-          usable = false;
-          break;
+    const auto& primary_radii =
+        index_.hierarchy_config().primary_radii;
+    for (size_t parent_layer = 0;
+         parent_layer + 1 < view.layer_begin.size();
+         ++parent_layer) {
+      const int child_radius = primary_radii[parent_layer + 1];
+      for (NodeId node_id = view.layer_begin[parent_layer];
+           node_id < view.layer_end[parent_layer]; ++node_id) {
+        const auto& node = view.node_records[node_id];
+        if (node.child_count <
+            config_.safe_child_router_min_fanout) {
+          continue;
         }
-        const auto& child = view.node_records[child_id];
-        if (child.center_sequence_id >= view.sequences.size()) {
-          usable = false;
-          break;
+        ParentSafeChildRouterIndex parent_index;
+        parent_index.child_count = node.child_count;
+        parent_index.max_child_radius = child_radius;
+        std::vector<RangeJoinItemView> items;
+        items.reserve(node.child_count);
+        bool usable = true;
+        for (size_t child_idx = 0;
+             child_idx < node.child_count; ++child_idx) {
+          const NodeId child_id =
+              view.child_ids[node.child_begin + child_idx];
+          if (child_id >= view.node_records.size()) {
+            usable = false;
+            break;
+          }
+          const auto& child = view.node_records[child_id];
+          if (child.center_sequence_id >= view.sequences.size()) {
+            usable = false;
+            break;
+          }
+          items.push_back(
+              {child_idx,
+               view.sequences.sequence(
+                   child.center_sequence_id)});
         }
-        parent_index.max_child_radius =
-            std::max(parent_index.max_child_radius, child.radius);
-        items_by_radius[child.radius].push_back(
-            {child_idx,
-             view.sequences.sequence(child.center_sequence_id)});
-      }
-      if (!usable || items_by_radius.empty()) continue;
-      for (auto& [radius, items] : items_by_radius) {
+        if (!usable || items.empty()) continue;
         ParentSafeChildRouterIndex::RadiusBucket bucket;
-        bucket.radius = radius;
+        bucket.radius = child_radius;
         bucket.range_index = ExactRangeJoinIndex(safe_child_config);
         bucket.range_index.build_views(std::move(items));
         bucket.range_index.prepare_qgram();
@@ -724,9 +734,9 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
           bucket.range_index.prepare_seed_lengths(seed_lengths);
         }
         parent_index.radius_buckets.push_back(std::move(bucket));
+        parent_safe_child_router_indexes_.emplace(
+            node_key(node_id), std::move(parent_index));
       }
-      parent_safe_child_router_indexes_.emplace(
-          node_key(node_id), std::move(parent_index));
     }
     safe_child_router_build_ms_ =
         std::chrono::duration<double, std::milli>(
@@ -1223,6 +1233,7 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
     NodeId node_id,
     const BioSequence& query_seq,
     const std::vector<int>& query_beacon_dists,
+    int child_radius,
     int tolerance,
     SearchStats& stats,
     bool* used_router) const {
@@ -1258,7 +1269,6 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
     }
     std::vector<size_t> candidates;
     candidates.reserve(child_count);
-    const int child_radius = node.child_radius;
     for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
       bool prunable = false;
       for (size_t dim = 0; dim < node.beacon_count; ++dim) {
@@ -1369,7 +1379,7 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
         stats.safe_child_router_fallback_count++;
         return {};
       }
-      const int child_tau = tolerance + child.radius;
+      const int child_tau = tolerance + child_radius;
       stats.safe_child_router_exact_verify_count++;
       const int dist = compute_query_distance_with_mode(
           query_seq.seq,
@@ -1612,8 +1622,24 @@ std::vector<std::string> BioGeometrySearchEngine::debug_safe_child_router_candid
     V_Q = compute_query_beacon_distances_view(parent_id, query_seq, stats);
   }
   bool routed = false;
+  const auto layer_it = std::upper_bound(
+      view.layer_end.begin(), view.layer_end.end(), parent_id);
+  if (layer_it == view.layer_end.end()) {
+    throw std::invalid_argument(
+        "debug safe child router parent has no layer");
+  }
+  const size_t parent_layer =
+      static_cast<size_t>(
+          std::distance(view.layer_end.begin(), layer_it));
+  const auto& primary_radii =
+      index_.hierarchy_config().primary_radii;
+  const int child_radius =
+      parent_layer + 1 < primary_radii.size()
+          ? primary_radii[parent_layer + 1]
+          : 0;
   auto child_indices = safe_child_router_candidate_indices_view(
-      parent_id, query_seq, V_Q, tolerance, stats, &routed);
+      parent_id, query_seq, V_Q, child_radius, tolerance,
+      stats, &routed);
   std::vector<std::string> out;
   if (!routed) {
     child_indices.clear();
@@ -1717,6 +1743,7 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_local_router_vi
     NodeId node_id,
     const std::vector<NodeId>& candidates,
     const std::vector<int>& query_beacon_dists,
+    int child_radius,
   SearchStats& stats) const {
   if (!config_.local_router_enabled) return candidates;
   if (stats.planner_disable_router_stack) return candidates;
@@ -1757,7 +1784,6 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_local_router_vi
   };
   std::vector<RankedChild> ranked;
   ranked.reserve(candidates.size());
-  const int child_radius = node.child_radius;
   for (size_t candidate_idx = 0; candidate_idx < candidates.size();
        ++candidate_idx) {
     const NodeId candidate = candidates[candidate_idx];
@@ -2069,6 +2095,7 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_best_first_view
     NodeId node_id,
     const std::vector<NodeId>& candidates,
     const std::vector<int>& query_beacon_dists,
+    int child_radius,
     int tolerance,
   SearchStats& stats) const {
   if (!config_.best_first_enabled) return candidates;
@@ -2098,7 +2125,6 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_best_first_view
   };
   std::vector<RankedChild> ranked;
   ranked.reserve(candidates.size());
-  const int child_radius = node.child_radius;
   for (size_t candidate_idx = 0; candidate_idx < candidates.size();
        ++candidate_idx) {
     const NodeId candidate = candidates[candidate_idx];
@@ -2411,7 +2437,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
   std::vector<int> V_Q;
   const bool has_leaf_sieve =
       node.beacon_count > 0 &&
-      node.leaf_beacon_begin +
+      node.leaf_begin +
               static_cast<size_t>(node.beacon_count) * leaf_count <=
           view.leaf_beacon_dists.size();
   if (has_leaf_sieve) {
@@ -2425,7 +2451,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     ScopedSearchTimer leaf_filter_timer(stats.query_profile_enabled,
                                         &stats.leaf_mbb_filter_ms);
     LeafBeaconFilterSimdStats simd_stats;
-    const uint32_t offset = node.leaf_beacon_begin;
+    const uint32_t offset = node.leaf_begin;
     if (config_.search_prefetch) {
       prefetch_read(view.leaf_beacon_dists.data() + offset);
       prefetch_read(view.leaf_ids.data() + leaf_begin);
@@ -2951,6 +2977,7 @@ NAVIGAMER_QUERY_HOT_ALIGN
 std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
     NodeId node_id,
     const std::vector<int>& query_beacon_dists,
+    int child_radius,
     int tolerance,
   SearchStats& stats) const {
   const auto& view = index_.search_graph_view();
@@ -3006,7 +3033,7 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
         child_count,
         dim,
         query_beacon_dists.data(),
-        node.child_radius,
+        child_radius,
         static_cast<int32_t>(tolerance),
         config_.simd_mode,
         &simd_stats);
@@ -3049,6 +3076,7 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
     NodeId node_id,
     const std::vector<size_t>& child_offsets,
     const std::vector<int>& query_beacon_dists,
+    int child_radius,
     int tolerance,
   SearchStats& stats) const {
   const auto& view = index_.search_graph_view();
@@ -3081,7 +3109,6 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
     }
   } else {
     ScopedSearchTimer timer(stats.query_profile_enabled, &stats.mbb_filter_ms);
-    const int child_radius = node.child_radius;
     for (size_t child_offset : child_offsets) {
       stats.edge_access_count++;
       stats.mbb_check_count++;
@@ -3146,25 +3173,32 @@ void BioGeometrySearchEngine::process_node_adaptive_view(
   if (node.child_count == 0) return;
 
   int child_layer = current_layer + 1;
+  const int child_radius =
+      index_.hierarchy_config().primary_radii.at(
+          static_cast<size_t>(child_layer));
   std::vector<int> V_Q;
   if (node.beacon_count > 0) {
     V_Q = compute_query_beacon_distances_view(node_id, query_seq, stats);
   }
   bool used_safe_child_router = false;
   auto child_offsets = safe_child_router_candidate_indices_view(
-      node_id, query_seq, V_Q, tolerance, stats, &used_safe_child_router);
+      node_id, query_seq, V_Q, child_radius, tolerance,
+      stats, &used_safe_child_router);
   auto surviving =
       used_safe_child_router
-          ? scan_mbb_surviving_child_ids_view(node_id, child_offsets, V_Q,
-                                              tolerance, stats)
-          : get_mbb_surviving_child_ids_view(node_id, V_Q, tolerance, stats);
+          ? scan_mbb_surviving_child_ids_view(
+                node_id, child_offsets, V_Q, child_radius,
+                tolerance, stats)
+          : get_mbb_surviving_child_ids_view(
+                node_id, V_Q, child_radius, tolerance, stats);
   auto ordered = rank_child_ids_with_router_hints_view(
       node_id, surviving, query_seq, tolerance, stats, router_qgram_signature,
       router_minimizers);
   if (!used_safe_child_router) {
-    ordered = rank_child_ids_with_local_router_view(node_id, ordered, V_Q, stats);
-    ordered = rank_child_ids_with_best_first_view(node_id, ordered, V_Q,
-                                                  tolerance, stats);
+    ordered = rank_child_ids_with_local_router_view(
+        node_id, ordered, V_Q, child_radius, stats);
+    ordered = rank_child_ids_with_best_first_view(
+        node_id, ordered, V_Q, child_radius, tolerance, stats);
   }
   ordered = apply_path_reuse_order_view(node_id, ordered, stats);
 
@@ -3191,6 +3225,9 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
     const std::vector<uint64_t>* router_minimizers,
     const std::string& contained_parent_key) const {
   const auto& view = index_.search_graph_view();
+  const int layer_radius =
+      index_.hierarchy_config().primary_radii.at(
+          static_cast<size_t>(layer_id));
   NodeId contained_node = INVALID_NODE_ID;
   std::vector<NodeId> overlap_nodes;
   update_frontier_stats(stats, candidates.size());
@@ -3217,7 +3254,7 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
           stats.visited_hit_count++;
           break;
         }
-        const int tau = node.radius + tolerance;
+        const int tau = layer_radius + tolerance;
         stats.center_exact_distance_call_count++;
         stats.center_distance_count++;
         ScopedSearchTimer center_timer(stats.query_profile_enabled,
@@ -3235,7 +3272,7 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
             static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
           stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
         }
-        if (dist <= tau && dist + tolerance <= node.radius) {
+        if (dist <= tau && dist + tolerance <= layer_radius) {
           stats.contained_fastpath_count++;
           stats.contained_path_reuse_hit_count++;
           stats.path_reuse_hit_count++;
@@ -3282,7 +3319,7 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
       continue;
     }
 
-    const int tau = node.radius + tolerance;
+    const int tau = layer_radius + tolerance;
     if (after_mbb_filter) {
       stats.center_distance_calls_after_mbb++;
       stats.center_distance_calls_before_qgram++;
@@ -3332,7 +3369,7 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
       stats.proximal_frontier_node_ids.push_back(key);
     }
 
-    if (dist + tolerance <= node.radius) {
+    if (dist + tolerance <= layer_radius) {
       stats.contained_fastpath_count++;
       contained_node = node_id;
       break;
@@ -3653,6 +3690,9 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
 
   for (int layer_id = index_.coarsest_primary_layer_index();
        layer_id <= index_.finest_primary_layer_index(); ++layer_id) {
+    const int layer_radius =
+        index_.hierarchy_config().primary_radii.at(
+            static_cast<size_t>(layer_id));
     NodeId best_node = INVALID_NODE_ID;
     int min_dist = std::numeric_limits<int>::max();
 
@@ -3672,7 +3712,7 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
       if (layer_id >= 0 && static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
         stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
       }
-      if (dist <= node.radius + tolerance && dist < min_dist) {
+      if (dist <= layer_radius + tolerance && dist < min_dist) {
         min_dist = dist;
         best_node = node_id;
       }
@@ -3693,7 +3733,11 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
     std::vector<int> V_Q =
         compute_query_beacon_distances_view(best_node, query_seq, stats);
     current =
-        get_mbb_surviving_child_ids_view(best_node, V_Q, tolerance, stats);
+        get_mbb_surviving_child_ids_view(
+            best_node, V_Q,
+            index_.hierarchy_config().primary_radii.at(
+                static_cast<size_t>(layer_id + 1)),
+            tolerance, stats);
   }
 
   return {{}, stats};
@@ -3754,7 +3798,10 @@ void BioGeometrySearchEngine::traverse_exhaustive_view(
       static_cast<size_t>(current_layer) < stats.layer_breakdown.size()) {
     stats.layer_breakdown[static_cast<size_t>(current_layer)]++;
   }
-  if (dist > node.radius + tolerance) return;
+  const int layer_radius =
+      index_.hierarchy_config().primary_radii.at(
+          static_cast<size_t>(current_layer));
+  if (dist > layer_radius + tolerance) return;
 
   for (uint32_t child_idx = 0; child_idx < node.child_count; ++child_idx) {
     stats.edge_access_count++;

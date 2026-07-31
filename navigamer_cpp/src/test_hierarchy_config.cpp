@@ -80,7 +80,6 @@ void validate_primary_layout(const std::vector<int>& primary_radii) {
       for (uint32_t node_id = view.layer_begin[layer];
            node_id < view.layer_end[layer]; ++node_id) {
         const auto& node = view.node_records[node_id];
-        assert(node.primary_layer_index == i);
         assert(node.beacon_count > 0);
         if (node.child_count > 0) saw_child = true;
       }

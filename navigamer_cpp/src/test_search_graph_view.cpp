@@ -51,7 +51,6 @@ void assert_view_equivalent_to_original() {
     for (uint32_t node_id = view.layer_begin[layer];
          node_id < view.layer_end[layer]; ++node_id) {
       const auto& record = view.node_records[node_id];
-      assert(record.primary_layer_index == static_cast<int>(layer));
       assert(record.center_sequence_id < view.sequences.size());
       assert(record.child_begin + record.child_count <=
              view.child_ids.size());
@@ -62,7 +61,7 @@ void assert_view_equivalent_to_original() {
                  static_cast<size_t>(record.child_count) *
                      record.beacon_count <=
              view.child_beacon_dists.size());
-      assert(record.leaf_beacon_begin +
+      assert(record.leaf_begin +
                  static_cast<size_t>(record.leaf_count) *
                      record.beacon_count <=
              view.leaf_beacon_dists.size());

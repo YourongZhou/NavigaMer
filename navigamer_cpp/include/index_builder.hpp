@@ -233,9 +233,6 @@ struct SequenceStore {
 // global arrays in SearchGraphView and are addressed by offset + count.
 struct WorldNodeRecord {
   LeafId center_sequence_id = INVALID_LEAF_ID;
-  int radius = 0;
-  int child_radius = 0;
-  int primary_layer_index = -1;
 
   uint32_t child_begin = 0;
   uint32_t child_count = 0;
@@ -244,8 +241,9 @@ struct WorldNodeRecord {
   uint32_t beacon_begin = 0;
   uint32_t beacon_count = 0;
   uint32_t mbb_begin = 0;
-  uint32_t leaf_beacon_begin = 0;
 };
+static_assert(sizeof(WorldNodeRecord) == 32,
+              "finalized world node must remain 32 bytes");
 
 // Mutable construction record. It intentionally contains only integer
 // references: no WorldNode objects are allocated while building the hierarchy.
