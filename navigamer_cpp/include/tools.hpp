@@ -28,6 +28,30 @@ int compute_distance_bounded_dp(const std::string& a, const std::string& b,
 int compute_distance_edlib(const std::string& a, const std::string& b);
 int compute_distance_bounded_edlib(const std::string& a, const std::string& b,
                                    int tau);
+
+struct PreparedEdlibDnaPattern {
+  std::string pattern;
+  void* handle = nullptr;
+
+  PreparedEdlibDnaPattern() = default;
+  ~PreparedEdlibDnaPattern();
+  PreparedEdlibDnaPattern(PreparedEdlibDnaPattern&& other) noexcept;
+  PreparedEdlibDnaPattern& operator=(
+      PreparedEdlibDnaPattern&& other) noexcept;
+  PreparedEdlibDnaPattern(const PreparedEdlibDnaPattern&) = delete;
+  PreparedEdlibDnaPattern& operator=(
+      const PreparedEdlibDnaPattern&) = delete;
+};
+
+PreparedEdlibDnaPattern prepare_edlib_dna_pattern(
+    const std::string& pattern);
+int compute_distance_bounded_edlib_prepared(
+    const PreparedEdlibDnaPattern& pattern,
+    const std::string& text,
+    int tau);
+int compute_distance_edlib_prepared(
+    const PreparedEdlibDnaPattern& pattern,
+    const std::string& text);
 bool compute_distance_bounded_myers_supported(const std::string& a,
                                               const std::string& b);
 int compute_distance_bounded_myers(const std::string& a, const std::string& b,

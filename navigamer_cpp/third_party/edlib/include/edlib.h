@@ -30,6 +30,8 @@ extern "C" {
 #define EDLIB_STATUS_OK 0
 #define EDLIB_STATUS_ERROR 1
 
+    typedef struct EdlibDnaPrepared EdlibDnaPrepared;
+
     /**
      * Alignment methods - how should Edlib treat gaps before and after query?
      */
@@ -244,6 +246,35 @@ extern "C" {
         const char* target, int targetLength,
         const EdlibAlignConfig config
     );
+
+    /**
+     * Prepares an uppercase A/C/G/T query for repeated distance-only global
+     * alignments. Returns NULL for unsupported input or allocation failure.
+     */
+    EDLIB_API EdlibDnaPrepared* edlibDnaPrepare(
+        const char* query, int queryLength
+    );
+
+    /**
+     * Returns the exact edit distance, -1 when it is larger than k, and -2
+     * for invalid or unsupported input.
+     */
+    EDLIB_API int edlibDnaPreparedBoundedDistance(
+        const EdlibDnaPrepared* prepared,
+        const char* target, int targetLength,
+        int k
+    );
+
+    /**
+     * Returns the exact global edit distance, or -2 for invalid or
+     * unsupported input.
+     */
+    EDLIB_API int edlibDnaPreparedDistance(
+        const EdlibDnaPrepared* prepared,
+        const char* target, int targetLength
+    );
+
+    EDLIB_API void edlibDnaPreparedFree(EdlibDnaPrepared* prepared);
 
 
     /**

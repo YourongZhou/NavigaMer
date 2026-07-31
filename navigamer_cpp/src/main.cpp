@@ -1842,7 +1842,7 @@ int main(int argc, char** argv) {
   std::string leaf_attach_mode = "indexed";
   std::string leaf_attach_direction = "auto";
   std::string phase2_qgram_postfilter = "off";
-  std::string leaf_qgram_postfilter = "on";
+  std::string leaf_qgram_postfilter = "off";
   std::string range_candidate_mode = "auto";
   std::string mbb_filter_mode = "scan";
   std::string visited_mode = "epoch";

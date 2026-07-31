@@ -97,31 +97,107 @@ Problem: Phase 1 first checked a locality hint with exact Edlib, then usually
 recomputed the same candidate distance during the best-cover scan.
 
 Method: a successful hint initializes the best-cover result with its already
-known exact distance. The scan still considers every candidate that could beat
-it or win the deterministic tie break.
+known exact distance. A failed hint is also remembered so that the scan does
+not repeat the same rejected comparison. Once a best cover exists, later
+bounded checks use only the largest distance that could improve it, including
+the deterministic lowest-index tie break, instead of always using the full
+layer radius. The scan still considers every candidate that could beat the
+current result.
 
-Safety: this removes only a duplicate computation. Candidate ordering,
-best-distance comparison, and tie behavior are unchanged.
+Safety: these changes remove duplicate work and tighten an exact verifier's
+stopping threshold only when a larger distance cannot change the selected
+cover. Candidate ordering, best-distance comparison, and tie behavior are
+unchanged.
+
+### Prepared DNA Edlib patterns
+
+Problem: the same sequence is compared against many targets in every build
+phase. Standard Edlib repeatedly discovers the alphabet, constructs the Myers
+`Peq` bit masks, allocates block storage, and encodes the target for every
+comparison.
+
+Method: an uppercase A/C/G/T-only prepared API caches the query's `Peq` masks.
+The masks are constructed in one pass over the query, target characters are
+mapped inside the Myers column loop, and each worker reuses thread-local block
+storage. A move-only RAII handle avoids an unnecessary shared-ownership control
+allocation. Phase 1 prepares each input sequence once; Phase 2 prepares the
+side with fewer consecutive runs in each batch; MBB construction and leaf
+attachment prepare their repeated outer-loop sequence once.
+
+Safety: the Myers recurrence and global edit-distance result are unchanged.
+Prepared objects are immutable after construction and therefore safe to share
+for reads. Invalid input, ambiguous DNA, allocation failure, or any prepared
+backend error falls back to the original Edlib implementation. Randomized
+tests compare prepared bounded and unbounded results with both dynamic
+programming and the original Edlib path.
+
+### Compact seed postings and epoch unions
+
+Problem: range-join seed postings stored 64-bit external IDs and each query
+allocated an `unordered_set` to union posting lists. The index also retained a
+separate hash table solely to recover item lengths.
+
+Method: postings store the item's position in the contiguous item array:
+16-bit indexes for at most 65,535 items and 32-bit indexes otherwise. A
+worker-local epoch array deduplicates posting hits without per-query hash-node
+allocations. Item IDs and lengths are read from the contiguous item record.
+If an array index cannot be represented, the operation conservatively uses a
+full scan.
+
+Safety: internal positions are translated back to the original item ID before
+returning candidates. Epoch marking changes only duplicate removal. Capacity
+overflow and unindexable DNA expand the candidate set rather than remove an
+item.
+
+### Phase 2 base-count lower bound
+
+Problem: range joining uses the maximum parent radius for a layer so that one
+index query safely covers every parent. Many resulting parent-child pairs
+cannot meet their smaller pair-specific radius, but q-gram signatures cost
+more to construct than they save on this workload.
+
+Method: Phase 2 computes four A/C/G/T counts per center and rejects a pair only
+when half the count-vector L1 distance, rounded up, exceeds that pair's exact
+radius. This skipped 261,886 exact calls on the fixed benchmark. The optional
+Phase 2 q-gram postfilter remains available but off by default.
+
+Safety: a single edit changes the base-count L1 distance by at most two, so the
+value is a strict edit-distance lower bound. Ambiguous symbols disable the
+bound. Every surviving pair is still checked with exact bounded Edlib.
 
 ### Compact, build-local q-gram signatures
 
 Problem: leaf attachment retained a generic q-gram signature for every leaf
 and every finest-layer world. A generic entry occupies 16 bytes on the tested
 64-bit build, even though `q=5` needs only a 10-bit code and the observed
-counts fit in 16 bits.
+counts need only 6 bits.
 
-Method: build-time leaf signatures use a 4-byte `{uint16_t code, uint16_t
-count}` entry when representable. In world-to-sequence mode, each worker
+Method: build-time leaf signatures pack code and count into one 2-byte entry
+when `q <= 7` and both fields fit. In world-to-sequence mode, each worker
 creates only the current world's signature and releases it after that world is
 processed. Generic signatures remain the fallback for larger codes or counts.
-The reusable q-gram inverted index also stores 32-bit internal item indexes
-and counts, and range-index construction consumes sequence views instead of
-making a second copy of every string.
+The reusable q-gram inverted index stores 32-bit internal item indexes and
+counts, and range-index construction consumes sequence views instead of making
+a second copy of every string.
 
 Safety: compact entries contain the same exact code/count pairs. Mixed or
 unsupported representations disable the postfilter instead of pruning. Item
 views are consumed synchronously while their owning range-index strings are
 alive; no view is retained.
+
+### Direct leaf verification by default
+
+Problem: after prepared Edlib made exact checks much cheaper, constructing
+leaf q-gram signatures cost more than the exact calls they removed.
+
+Method: indexed leaf attachment now directly verifies range candidates by
+default. `--leaf-qgram-postfilter on` is retained for unusually broad or
+repetitive candidate regimes. On the fixed workload, disabling it reduced
+Phase 4 from roughly 130 ms to roughly 74 ms.
+
+Safety: removing a prefilter can only send more candidates to the exact
+verifier. It cannot introduce a false negative, and accepted links remain
+identical.
 
 ### Move range-index inputs
 
@@ -157,19 +233,20 @@ On the fixed benchmark and release `-O2` build:
 
 | Measurement | Pointer-era baseline | Current | Change |
 | --- | ---: | ---: | ---: |
-| Mean adaptive query time | 19.096 ms | about 1.33 ms | about 14.4x faster |
-| Build time, 16 threads | about 2.39 s | about 0.85 s | about 2.8x faster |
-| Peak build RSS | about 94,500 KB | about 34,900 KB | about 63% lower |
+| Mean adaptive query time | 19.096 ms | 1.332 ms | 14.3x faster |
+| Build time, 16 threads | about 2.39 s | about 0.473 s | about 5.1x faster |
+| Build time, 64 threads | about 2.39 s | about 0.387 s | about 6.2x faster |
+| Peak build RSS, 16 threads | about 94,500 KB | about 28,500 KB | about 70% lower |
 
 The query comparison uses identical query/hit/distance/reference-position
 fields. Build comparisons use identical structural counters. Timings should be
 read as same-host engineering measurements, not hardware-independent claims.
 An alternating 10-run query A/B comparison between the previous checkpoint and
-this one measured 1.3274 versus 1.3302 ms over 5,120 query samples, a 0.2%
-difference inside run-to-run noise; the current build changes add no
-per-query algorithmic work. At 64 build threads, the same input takes about
-0.61 seconds (about 3.9x faster than the pointer-era run) with higher RSS from
-worker-local state.
+this one measured 1.3311 versus 1.3323 ms over 5,120 query samples, a 0.09%
+difference inside run-to-run noise; wall time was identical. Query semantic
+fields were byte-identical to both the previous checkpoint and the fixed
+reference. At 64 build threads, peak RSS is about 32 MB because more
+worker-local state is live concurrently.
 
 ## Why the 100x memory and 10x build targets are not met
 
@@ -182,22 +259,22 @@ whole-process RSS reduction is below the data-size lower bound for this
 benchmark.
 
 A 10x build target relative to 2.39 seconds is below 0.239 seconds. Phase 1
-alone currently takes about 0.25 seconds and is intentionally
+currently takes about 0.153 seconds and is intentionally
 insertion-order-dependent: each sequence selects the best current covering
 world, and creating or selecting that world changes the candidates available
 to later sequences and lower layers. Parallel snapshot construction would
-change the tree. Safe lower-bound pruning reduced Phase 1 scan calls from
-58,662 to 27,419, while 18,707 already-computed hint distances are now reused.
-Including 20,784 hint checks, Phase 1 still needs 48,203 exact
-threshold-distance decisions. It already exceeds the whole-build 10x target
-before Phase 2, MBB construction, leaf attachment, input storage, and output
-materialization.
+change the tree. At 64 threads, Phase 1 and Phase 2 together take about
+0.30 seconds, already exceeding the entire 10x budget before MBB construction,
+leaf attachment, input storage, and output materialization.
 
-A specialized DNA Edlib path that removed repeated alphabet discovery and
-reused allocation workspaces was also prototyped and rejected: Phase 1 remained
-about 0.25 seconds and total build remained in the same 0.82--0.86 second
-range. This shows that those allocations are not the limiting cost on this
-workload.
+An allocation-only Edlib workspace prototype was rejected because it did not
+improve wall time. The successful prepared path is different: it also caches
+the query-dependent `Peq` masks and fuses target encoding into the Myers loop.
+Other rejected A/B experiments include non-owning range-item storage (about
+0.2 MB saved with added lifetime risk and no speed gain), direct construction
+of compact leaf q-grams (no stable gain), enabling the Phase 2 q-gram
+postfilter (about 0.625 s instead of 0.473 s), and speculative query path
+distances (roughly three times slower).
 
 Further large reductions would require a different contract or a new exact
 distance backend, for example a verified SIMD/GPU batch kernel, direct

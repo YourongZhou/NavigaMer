@@ -75,7 +75,7 @@ struct BuildRangeConfig {
   size_t phase1_qgram_max_touched = 250000;
   bool phase1_preserve_input_order = true;
   bool phase2_qgram_postfilter = false;
-  bool leaf_qgram_postfilter = true;
+  bool leaf_qgram_postfilter = false;
   int progress_interval_seconds = 600;
 };
 
@@ -180,6 +180,7 @@ class BioGeometryIndexBuilder {
     size_t phase2_hybrid_queries = 0;
     size_t phase2_qgram_candidate_pairs = 0;
     size_t phase2_qgram_pruned_by_l1 = 0;
+    size_t phase2_base_count_pruned_pairs = 0;
     size_t phase2_length_pruned_pairs = 0;
     size_t phase2_seed_candidate_pairs_before_length_filter = 0;
     size_t phase2_seed_length_pruned_candidates = 0;
@@ -230,6 +231,7 @@ class BioGeometryIndexBuilder {
     size_t phase1_length_pruned_candidates = 0;
     size_t phase1_lower_bound_pruned_candidates = 0;
     size_t phase1_exact_distance_reused = 0;
+    size_t phase1_exact_rejection_reused = 0;
     size_t phase1_exact_distance_calls = 0;
     size_t phase1_best_cover_hits = 0;
     size_t phase1_cover_misses = 0;

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <vector>
 #include <cstring>
+#include <memory>
 #include <string>
 
 namespace {
@@ -95,6 +96,13 @@ public:
 
 } // anonymous namespace
 
+struct EdlibDnaPrepared {
+    int queryLength = 0;
+    int maxNumBlocks = 0;
+    int W = 0;
+    vector<Word> peq;
+};
+
 static int myersCalcEditDistanceSemiGlobal(const Word* Peq, int W, int maxNumBlocks,
                                            int queryLength,
                                            const unsigned char* target, int targetLength,
@@ -106,7 +114,9 @@ static int myersCalcEditDistanceNW(const Word* Peq, int W, int maxNumBlocks,
                                    const unsigned char* target, int targetLength,
                                    int k, int* bestScore_,
                                    int* position_, bool findAlignment,
-                                   AlignmentData** alignData, int targetStopPosition);
+                                   AlignmentData** alignData, int targetStopPosition,
+                                   Block* blockWorkspace = NULL,
+                                   const unsigned char* targetCodeMap = NULL);
 
 
 static int obtainAlignment(
@@ -298,6 +308,136 @@ extern "C" EdlibAlignResult edlibAlign(const char* const queryOriginal, const in
     //-------------------//
 
     return result;
+}
+
+extern "C" EdlibDnaPrepared* edlibDnaPrepare(
+        const char* const queryOriginal, const int queryLength) {
+    if (queryLength < 0 ||
+        (queryLength > 0 && queryOriginal == NULL)) {
+        return NULL;
+    }
+
+    try {
+        for (int i = 0; i < queryLength; ++i) {
+            const char base = queryOriginal[i];
+            if (base != 'A' && base != 'C' &&
+                base != 'G' && base != 'T') {
+                return NULL;
+            }
+        }
+
+        unique_ptr<EdlibDnaPrepared> prepared(new EdlibDnaPrepared());
+        prepared->queryLength = queryLength;
+        if (queryLength == 0) return prepared.release();
+        prepared->maxNumBlocks = ceilDiv(queryLength, WORD_SIZE);
+        prepared->W = prepared->maxNumBlocks * WORD_SIZE - queryLength;
+        prepared->peq.resize(
+            static_cast<size_t>(5 * prepared->maxNumBlocks));
+        for (int r = 0; r < queryLength; ++r) {
+            int symbol = 0;
+            switch (queryOriginal[r]) {
+                case 'A': symbol = 0; break;
+                case 'C': symbol = 1; break;
+                case 'G': symbol = 2; break;
+                case 'T': symbol = 3; break;
+            }
+            const int block = r / WORD_SIZE;
+            const int bit = r % WORD_SIZE;
+            prepared->peq[static_cast<size_t>(
+                symbol * prepared->maxNumBlocks + block)] |= WORD_1 << bit;
+        }
+        for (int r = queryLength;
+             r < prepared->maxNumBlocks * WORD_SIZE; ++r) {
+            const int block = r / WORD_SIZE;
+            const int bit = r % WORD_SIZE;
+            for (int symbol = 0; symbol < 4; ++symbol) {
+                prepared->peq[static_cast<size_t>(
+                    symbol * prepared->maxNumBlocks + block)] |= WORD_1 << bit;
+            }
+        }
+        for (int block = 0; block < prepared->maxNumBlocks; ++block) {
+            prepared->peq[static_cast<size_t>(
+                4 * prepared->maxNumBlocks + block)] =
+                static_cast<Word>(-1);
+        }
+        return prepared.release();
+    } catch (...) {
+        return NULL;
+    }
+}
+
+static int edlibDnaPreparedDistanceImpl(
+        const EdlibDnaPrepared* const prepared,
+        const char* const targetOriginal, const int targetLength,
+        const int requestedK, const bool dynamicK) {
+    if (prepared == NULL || targetLength < 0 ||
+        (!dynamicK && requestedK < 0) ||
+        (targetLength > 0 && targetOriginal == NULL)) {
+        return -2;
+    }
+    try {
+        if (prepared->queryLength == 0 || targetLength == 0) {
+            const int distance = max(prepared->queryLength, targetLength);
+            return dynamicK || distance <= requestedK ? distance : -1;
+        }
+        if (!dynamicK &&
+            abs(prepared->queryLength - targetLength) > requestedK) {
+            return -1;
+        }
+
+        thread_local vector<Block> blocks;
+        blocks.resize(static_cast<size_t>(prepared->maxNumBlocks));
+        static const array<unsigned char, MAX_UCHAR + 1> dnaCodeMap = [] {
+            array<unsigned char, MAX_UCHAR + 1> map;
+            map.fill(static_cast<unsigned char>(MAX_UCHAR));
+            map[static_cast<unsigned char>('A')] = 0;
+            map[static_cast<unsigned char>('C')] = 1;
+            map[static_cast<unsigned char>('G')] = 2;
+            map[static_cast<unsigned char>('T')] = 3;
+            return map;
+        }();
+
+        int currentK = dynamicK ? WORD_SIZE : requestedK;
+        const int maxK = max(prepared->queryLength, targetLength);
+        while (true) {
+            int distance = -1;
+            int position = -1;
+            AlignmentData* alignData = NULL;
+            const int status = myersCalcEditDistanceNW(
+                prepared->peq.data(), prepared->W, prepared->maxNumBlocks,
+                prepared->queryLength,
+                reinterpret_cast<const unsigned char*>(targetOriginal),
+                targetLength, currentK, &distance, &position, false,
+                &alignData, -1, blocks.data(), dnaCodeMap.data());
+            if (status != EDLIB_STATUS_OK) return -2;
+            if (distance >= 0 || !dynamicK) return distance;
+            if (currentK >= maxK) return -2;
+            currentK = min(maxK, currentK > maxK / 2
+                                     ? maxK
+                                     : currentK * 2);
+        }
+    } catch (...) {
+        return -2;
+    }
+}
+
+extern "C" int edlibDnaPreparedBoundedDistance(
+        const EdlibDnaPrepared* const prepared,
+        const char* const targetOriginal, const int targetLength,
+        const int k) {
+    return edlibDnaPreparedDistanceImpl(
+        prepared, targetOriginal, targetLength, k, false);
+}
+
+extern "C" int edlibDnaPreparedDistance(
+        const EdlibDnaPrepared* const prepared,
+        const char* const targetOriginal, const int targetLength) {
+    return edlibDnaPreparedDistanceImpl(
+        prepared, targetOriginal, targetLength, -1, true);
+}
+
+extern "C" void edlibDnaPreparedFree(EdlibDnaPrepared* const prepared) {
+    delete prepared;
 }
 
 extern "C" char* edlibAlignmentToCigar(const unsigned char* const alignment, const int alignmentLength,
@@ -732,7 +872,9 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
                                    const unsigned char* const target, const int targetLength,
                                    int k, int* const bestScore_,
                                    int* const position_, const bool findAlignment,
-                                   AlignmentData** const alignData, const int targetStopPosition) {
+                                   AlignmentData** const alignData, const int targetStopPosition,
+                                   Block* const blockWorkspace,
+                                   const unsigned char* const targetCodeMap) {
     if (targetStopPosition > -1 && findAlignment) {
         // They can not be both set at the same time!
         return EDLIB_STATUS_ERROR;
@@ -753,7 +895,9 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
     int firstBlock = 0;
     // This is optimal now, by my formula.
     int lastBlock = min(maxNumBlocks, ceilDiv(min(k, (k + queryLength - targetLength) / 2) + 1, WORD_SIZE)) - 1;
-    Block* blocks = new Block[maxNumBlocks];
+    Block* blocks =
+        blockWorkspace != NULL ? blockWorkspace : new Block[maxNumBlocks];
+    const bool ownsBlocks = blockWorkspace == NULL;
 
     // Initialize P, M and score
     for (int b = 0; b <= lastBlock; b++) {
@@ -773,7 +917,15 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
     int bl = 0; // Current block index
     const unsigned char* targetChar = target;
     for (int c = 0; c < targetLength; c++) { // for each column
-        const Word* Peq_c = Peq + *targetChar * maxNumBlocks;
+        const unsigned char targetCode =
+            targetCodeMap == NULL ? *targetChar : targetCodeMap[*targetChar];
+        if (targetCodeMap != NULL &&
+            targetCode == static_cast<unsigned char>(MAX_UCHAR)) {
+            *bestScore_ = *position_ = -1;
+            if (ownsBlocks) delete[] blocks;
+            return EDLIB_STATUS_ERROR;
+        }
+        const Word* Peq_c = Peq + targetCode * maxNumBlocks;
 
         //----------------------- Calculate column -------------------------//
         int hout = 1;
@@ -873,7 +1025,7 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
         // If band stops to exist finish
         if (lastBlock < firstBlock) {
             *bestScore_ = *position_ = -1;
-            delete[] blocks;
+            if (ownsBlocks) delete[] blocks;
             return EDLIB_STATUS_OK;
         }
         //------------------------------------------------------------------//
@@ -903,7 +1055,7 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
             (*alignData)->lastBlocks[0] = lastBlock;
             *bestScore_ = -1;
             *position_ = targetStopPosition;
-            delete[] blocks;
+            if (ownsBlocks) delete[] blocks;
             return EDLIB_STATUS_OK;
         }
         //----------------------------------------------------//
@@ -917,13 +1069,13 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
         if (bestScore <= k) {
             *bestScore_ = bestScore;
             *position_ = targetLength - 1;
-            delete[] blocks;
+            if (ownsBlocks) delete[] blocks;
             return EDLIB_STATUS_OK;
         }
     }
 
     *bestScore_ = *position_ = -1;
-    delete[] blocks;
+    if (ownsBlocks) delete[] blocks;
     return EDLIB_STATUS_OK;
 }
 

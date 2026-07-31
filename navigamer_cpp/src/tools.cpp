@@ -7,6 +7,7 @@
 #include <limits>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 namespace navigamer {
 
@@ -130,6 +131,75 @@ int compute_distance_bounded_edlib(const std::string& a, const std::string& b,
   const int distance = result.editDistance < 0 ? tau + 1 : result.editDistance;
   edlibFreeAlignResult(result);
   return distance <= tau ? distance : tau + 1;
+}
+
+PreparedEdlibDnaPattern::~PreparedEdlibDnaPattern() {
+  if (handle) {
+    edlibDnaPreparedFree(static_cast<EdlibDnaPrepared*>(handle));
+  }
+}
+
+PreparedEdlibDnaPattern::PreparedEdlibDnaPattern(
+    PreparedEdlibDnaPattern&& other) noexcept
+    : pattern(std::move(other.pattern)), handle(other.handle) {
+  other.handle = nullptr;
+}
+
+PreparedEdlibDnaPattern& PreparedEdlibDnaPattern::operator=(
+    PreparedEdlibDnaPattern&& other) noexcept {
+  if (this == &other) return *this;
+  if (handle) {
+    edlibDnaPreparedFree(static_cast<EdlibDnaPrepared*>(handle));
+  }
+  pattern = std::move(other.pattern);
+  handle = other.handle;
+  other.handle = nullptr;
+  return *this;
+}
+
+PreparedEdlibDnaPattern prepare_edlib_dna_pattern(
+    const std::string& pattern) {
+  PreparedEdlibDnaPattern prepared;
+  prepared.pattern = pattern;
+  EdlibDnaPrepared* handle = edlibDnaPrepare(
+      prepared.pattern.data(), static_cast<int>(prepared.pattern.size()));
+  if (handle) {
+    prepared.handle = handle;
+  }
+  return prepared;
+}
+
+int compute_distance_bounded_edlib_prepared(
+    const PreparedEdlibDnaPattern& pattern,
+    const std::string& text,
+    int tau) {
+  if (tau < 0) {
+    throw std::invalid_argument(
+        "edit-distance threshold must be non-negative");
+  }
+  if (!pattern.handle) {
+    return compute_distance_bounded_edlib(pattern.pattern, text, tau);
+  }
+  const int distance = edlibDnaPreparedBoundedDistance(
+      static_cast<const EdlibDnaPrepared*>(pattern.handle),
+      text.data(), static_cast<int>(text.size()), tau);
+  if (distance >= 0) return distance;
+  if (distance == -1) return tau + 1;
+  return compute_distance_bounded_edlib(pattern.pattern, text, tau);
+}
+
+int compute_distance_edlib_prepared(
+    const PreparedEdlibDnaPattern& pattern,
+    const std::string& text) {
+  if (!pattern.handle) {
+    return compute_distance_edlib(pattern.pattern, text);
+  }
+  const int distance = edlibDnaPreparedDistance(
+      static_cast<const EdlibDnaPrepared*>(pattern.handle),
+      text.data(), static_cast<int>(text.size()));
+  return distance >= 0
+             ? distance
+             : compute_distance_edlib(pattern.pattern, text);
 }
 
 namespace {

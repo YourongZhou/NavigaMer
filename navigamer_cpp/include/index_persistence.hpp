@@ -36,7 +36,7 @@ struct IndexBuildManifest {
   size_t phase1_qgram_min_fanout = 64;
   size_t phase1_qgram_max_touched = 250000;
   bool phase2_qgram_postfilter = false;
-  bool leaf_qgram_postfilter = true;
+  bool leaf_qgram_postfilter = false;
   size_t sequence_count = 0;
   size_t world_node_count = 0;
   size_t edge_count = 0;

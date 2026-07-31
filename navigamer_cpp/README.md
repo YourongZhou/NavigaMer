@@ -159,11 +159,12 @@ periodic heartbeats but retains phase start/finish reports. `build-scale` can
 persist a reference-window index with `--index <file>` when exactly one prefix
 length is requested. Multiple prefixes with one output index are rejected.
 
-Indexed leaf attachment applies `--leaf-qgram-postfilter on` by default. The
-filter runs after range candidate generation and before bounded exact
-verification, using a safe q-gram L1 necessary condition to reduce leaf exact
-distance calls without changing accepted links. Use
-`--leaf-qgram-postfilter off` for direct verify-after-candidate comparisons.
+Indexed leaf attachment directly verifies range candidates by default. Use
+`--leaf-qgram-postfilter on` to apply a safe q-gram L1 necessary condition
+before bounded exact verification. This can reduce exact calls for unusually
+broad candidate sets, but its signature-building overhead is slower on the
+default prepared-DNA distance path. Either setting is no-false-negative:
+accepted links are still determined by bounded exact edit distance.
 
 `query-benchmark` fixes the baseline profile to MBB scan, legacy string
 visited mode, the `original` compatibility label (which uses the same canonical

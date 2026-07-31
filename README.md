@@ -162,10 +162,12 @@ the q-gram helper, and `--phase1-qgram-max-touched` controls conservative
 fallback when q-gram candidate expansion is too broad. These knobs do not skip
 bounded exact verification.
 
-Indexed leaf attachment also uses `--leaf-qgram-postfilter on` by default. It
-runs a safe q-gram L1 postfilter after range candidate generation and before
-bounded exact verification, reducing leaf exact distance calls without changing
-accepted links.
+Indexed leaf attachment directly verifies range candidates by default. The
+optional `--leaf-qgram-postfilter on` applies a safe q-gram L1 condition before
+bounded exact verification. It can reduce exact calls for unusually broad
+candidate sets, but its signature-building overhead is slower on the default
+prepared-DNA distance path. Either setting is no-false-negative: accepted links
+are still determined by bounded exact edit distance.
 
 Auto construction accepts pigeonhole candidates when their count is at most
 `4096`; if the seed union grows beyond that threshold, it early-aborts the

@@ -1,5 +1,6 @@
 #include "phase2_distance_verifier.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 namespace navigamer {
@@ -18,17 +19,49 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
     Phase2DistanceBatchResult result;
     result.accepted_pair_indices.reserve(pairs.size());
 
+    bool prepare_parent = false;
+    if (distance_mode_ == DistanceMode::Edlib && !pairs.empty()) {
+      size_t parent_runs = 1;
+      size_t child_runs = 1;
+      for (size_t pair_idx = 1; pair_idx < pairs.size(); ++pair_idx) {
+        parent_runs +=
+            pairs[pair_idx].parent_idx != pairs[pair_idx - 1].parent_idx;
+        child_runs +=
+            pairs[pair_idx].child_idx != pairs[pair_idx - 1].child_idx;
+      }
+      prepare_parent = parent_runs <= child_runs;
+    }
+    size_t prepared_idx = std::numeric_limits<size_t>::max();
+    PreparedEdlibDnaPattern prepared;
+
     for (size_t pair_idx = 0; pair_idx < pairs.size(); ++pair_idx) {
       const auto& pair = pairs[pair_idx];
       if (pair.parent_idx >= parent_sequences.size() ||
           pair.child_idx >= child_sequences.size()) {
         throw std::out_of_range("phase2 distance pair index out of range");
       }
-      const int dist = compute_distance_bounded_with_mode(
-          parent_sequences[pair.parent_idx],
-          child_sequences[pair.child_idx],
-          pair.tau,
-          distance_mode_);
+      int dist = 0;
+      if (distance_mode_ == DistanceMode::Edlib) {
+        const size_t pattern_idx =
+            prepare_parent ? pair.parent_idx : pair.child_idx;
+        if (pattern_idx != prepared_idx) {
+          prepared = prepare_edlib_dna_pattern(
+              prepare_parent ? parent_sequences[pair.parent_idx]
+                             : child_sequences[pair.child_idx]);
+          prepared_idx = pattern_idx;
+        }
+        dist = compute_distance_bounded_edlib_prepared(
+            prepared,
+            prepare_parent ? child_sequences[pair.child_idx]
+                           : parent_sequences[pair.parent_idx],
+            pair.tau);
+      } else {
+        dist = compute_distance_bounded_with_mode(
+            parent_sequences[pair.parent_idx],
+            child_sequences[pair.child_idx],
+            pair.tau,
+            distance_mode_);
+      }
       if (dist <= pair.tau) result.accepted_pair_indices.push_back(pair_idx);
     }
     return result;

@@ -21,7 +21,7 @@ Used by all pipelines that build the index:
 | `--link-mode` | `indexed` | Phase-2 rebinding: `full` or exact `indexed` range join |
 | `--leaf-attach-mode` | `indexed` | Leaf attachment: `full` or exact `indexed` range join |
 | `--leaf-attach-direction` | `auto` | Indexed leaf attachment direction: `auto`, `seq-to-world`, or `world-to-seq`; `auto` uses `world-to-seq` when finest worlds are fewer than unique sequences |
-| `--leaf-qgram-postfilter` | `on` | Safe q-gram L1 postfilter for indexed leaf attachment candidates before bounded exact verification |
+| `--leaf-qgram-postfilter` | `off` | Optional safe q-gram L1 postfilter for indexed leaf attachment candidates before bounded exact verification |
 | `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
 | `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full` |
@@ -86,12 +86,12 @@ candidate ratio; `--auto-pigeonhole-max-ratio` is retained only so older
 command lines still parse. Full candidate mode returns every
 length-compatible item.
 
-Indexed leaf attachment additionally applies `--leaf-qgram-postfilter on` by
-default after range candidate generation and before bounded exact verification.
-It uses the same no-false-negative q-gram L1 condition and only reduces exact
-distance calls; accepted leaf links are still determined by bounded edit
-distance. Use `--leaf-qgram-postfilter off` to reproduce the earlier direct
-verify-after-candidate behavior.
+Indexed leaf attachment directly verifies range candidates by default. With
+`--leaf-qgram-postfilter on`, it applies the same no-false-negative q-gram L1
+condition before bounded exact verification. This can reduce exact calls for
+unusually broad candidate sets, but its signature-building overhead is slower
+on the default prepared-DNA distance path. Accepted leaf links are determined
+by bounded edit distance in either mode.
 
 Old seed-length-only auto behavior can be reproduced with a permissive
 candidate-count threshold such as

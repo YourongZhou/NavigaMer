@@ -72,6 +72,11 @@ struct RangeJoinQueryResult {
 
 struct RangeJoinQueryWorkspace {
   QGramQueryWorkspace qgram;
+  std::vector<uint32_t> seed_seen_epoch;
+  std::vector<uint32_t> seed_touched;
+  uint32_t seed_epoch = 1;
+
+  void reset_seed(size_t item_count);
 };
 
 class ExactRangeJoinIndex {
@@ -88,28 +93,34 @@ class ExactRangeJoinIndex {
       RangeJoinQueryWorkspace* workspace) const;
 
  private:
-  using PostingLists = std::unordered_map<uint64_t, std::vector<size_t>>;
+  using PostingLists16 =
+      std::unordered_map<uint64_t, std::vector<uint16_t>>;
+  using PostingLists = std::unordered_map<uint64_t, std::vector<uint32_t>>;
 
   RangeJoinConfig config_;
   std::vector<RangeJoinItem> items_;
-  std::unordered_map<size_t, size_t> item_lengths_by_id_;
+  std::unordered_map<int, PostingLists16> postings16_by_seed_len_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
-  std::unordered_map<int, std::vector<size_t>>
+  std::unordered_map<int, std::vector<uint16_t>>
+      unindexable_items16_by_seed_len_;
+  std::unordered_map<int, std::vector<uint32_t>>
       unindexable_items_by_seed_len_;
+  bool seed_index_capacity_ = true;
+  bool seed_index_uses_16bit_ = true;
   mutable QGramCountIndex qgram_index_;
   mutable bool qgram_ready_ = false;
   bool defer_qgram_build_ = false;
   mutable std::shared_ptr<std::mutex> deferred_qgram_mutex_;
 
   const QGramCountIndex& ensure_qgram_index() const;
-  const PostingLists& postings_for_seed_len(int seed_len);
-  const PostingLists* find_postings_for_seed_len(int seed_len) const;
+  void prepare_postings_for_seed_len(int seed_len);
   bool query_needs_seed_postings(int seed_len) const;
   RangeJoinQueryResult full_scan(
       const std::string& query_sequence, int tau, bool fallback) const;
   RangeJoinQueryResult pigeonhole_query(
       const std::string& query_sequence, int tau, int block_len, int seed_len,
-      size_t early_abort_candidate_limit) const;
+      size_t early_abort_candidate_limit,
+      RangeJoinQueryWorkspace* workspace) const;
   RangeJoinQueryResult qgram_query(
       const std::string& query_sequence, int tau,
       RangeJoinQueryWorkspace* workspace) const;

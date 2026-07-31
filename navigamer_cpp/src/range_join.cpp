@@ -6,7 +6,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
-#include <unordered_set>
+#include <type_traits>
 #include <utility>
 
 namespace navigamer {
@@ -122,6 +122,20 @@ RangeCandidateMode parse_range_candidate_mode(const std::string& value) {
       "range candidate mode must be auto, pigeonhole, qgram, hybrid, or full");
 }
 
+void RangeJoinQueryWorkspace::reset_seed(size_t item_count) {
+  if (seed_seen_epoch.size() != item_count) {
+    seed_seen_epoch.assign(item_count, 0);
+    seed_epoch = 0;
+  }
+  seed_touched.clear();
+  if (seed_epoch == std::numeric_limits<uint32_t>::max()) {
+    std::fill(seed_seen_epoch.begin(), seed_seen_epoch.end(), 0);
+    seed_epoch = 1;
+  } else {
+    seed_epoch++;
+  }
+}
+
 ExactRangeJoinIndex::ExactRangeJoinIndex(
     RangeJoinConfig config, bool defer_qgram_build)
     : config_(config),
@@ -147,15 +161,20 @@ ExactRangeJoinIndex::ExactRangeJoinIndex(
 
 void ExactRangeJoinIndex::build(std::vector<RangeJoinItem> items) {
   items_ = std::move(items);
-  item_lengths_by_id_.clear();
-  item_lengths_by_id_.reserve(items_.size());
+  postings16_by_seed_len_.clear();
   postings_by_seed_len_.clear();
+  unindexable_items16_by_seed_len_.clear();
   unindexable_items_by_seed_len_.clear();
+  seed_index_capacity_ =
+      items_.size() <= static_cast<size_t>(
+                           std::numeric_limits<uint32_t>::max());
+  seed_index_uses_16bit_ =
+      items_.size() <= static_cast<size_t>(
+                           std::numeric_limits<uint16_t>::max());
   qgram_ready_ = false;
   std::vector<QGramCountIndex::ItemView> qgram_items;
   if (!defer_qgram_build_) qgram_items.reserve(items_.size());
   for (const auto& item : items_) {
-    item_lengths_by_id_[item.item_id] = item.sequence.size();
     if (!defer_qgram_build_) {
       qgram_items.push_back({item.item_id, &item.sequence});
     }
@@ -190,63 +209,81 @@ void ExactRangeJoinIndex::prepare_qgram() {
   (void)ensure_qgram_index();
 }
 
-const ExactRangeJoinIndex::PostingLists&
-ExactRangeJoinIndex::postings_for_seed_len(int seed_len) {
-  auto existing = postings_by_seed_len_.find(seed_len);
-  if (existing != postings_by_seed_len_.end()) return existing->second;
-
-  PostingLists postings;
-  std::vector<size_t> unindexable_items;
-  std::vector<uint64_t> item_codes;
-  for (const auto& item : items_) {
-    if (item.sequence.size() < static_cast<size_t>(seed_len)) continue;
-    if (seed_len > 32 || !is_acgt_sequence(item.sequence)) {
-      unindexable_items.push_back(item.item_id);
-      continue;
-    }
-    item_codes.clear();
-    item_codes.reserve(
-        item.sequence.size() - static_cast<size_t>(seed_len) + 1);
-    const size_t last = item.sequence.size() - static_cast<size_t>(seed_len);
-    const uint64_t mask =
-        seed_len == 32
-            ? std::numeric_limits<uint64_t>::max()
-            : (uint64_t{1} << (2 * seed_len)) - 1;
-    uint64_t code = 0;
-    for (int offset = 0; offset < seed_len; ++offset) {
-      code = (code << 2) |
-             dna_base_bits(item.sequence[static_cast<size_t>(offset)]);
-    }
-    item_codes.push_back(code);
-    for (size_t pos = 1; pos <= last; ++pos) {
-      const size_t next = pos + static_cast<size_t>(seed_len) - 1;
-      code = ((code << 2) | dna_base_bits(item.sequence[next])) & mask;
-      item_codes.push_back(code);
-    }
-    std::sort(item_codes.begin(), item_codes.end());
-    item_codes.erase(std::unique(item_codes.begin(), item_codes.end()),
-                     item_codes.end());
-    for (uint64_t code : item_codes) {
-      postings[code].push_back(item.item_id);
-    }
+void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
+  if (seed_index_uses_16bit_) {
+    if (postings16_by_seed_len_.count(seed_len)) return;
+  } else if (postings_by_seed_len_.count(seed_len)) {
+    return;
   }
-  unindexable_items_by_seed_len_[seed_len] =
-      std::move(unindexable_items);
-  return postings_by_seed_len_.emplace(seed_len, std::move(postings)).first->second;
-}
+  if (!seed_index_capacity_) {
+    postings_by_seed_len_.emplace(seed_len, PostingLists{});
+    return;
+  }
 
-const ExactRangeJoinIndex::PostingLists*
-ExactRangeJoinIndex::find_postings_for_seed_len(int seed_len) const {
-  auto existing = postings_by_seed_len_.find(seed_len);
-  if (existing == postings_by_seed_len_.end()) return nullptr;
-  return &existing->second;
+  const auto populate = [&](auto& postings, auto& unindexable_items) {
+    using CompactIndex =
+        typename std::decay_t<decltype(unindexable_items)>::value_type;
+    std::vector<uint64_t> item_codes;
+    for (size_t item_idx = 0; item_idx < items_.size(); ++item_idx) {
+      const auto& item = items_[item_idx];
+      const auto& sequence = item.sequence;
+      const CompactIndex compact_idx =
+          static_cast<CompactIndex>(item_idx);
+      if (sequence.size() < static_cast<size_t>(seed_len)) continue;
+      if (seed_len > 32 || !is_acgt_sequence(sequence)) {
+        unindexable_items.push_back(compact_idx);
+        continue;
+      }
+      item_codes.clear();
+      item_codes.reserve(
+          sequence.size() - static_cast<size_t>(seed_len) + 1);
+      const size_t last = sequence.size() - static_cast<size_t>(seed_len);
+      const uint64_t mask =
+          seed_len == 32
+              ? std::numeric_limits<uint64_t>::max()
+              : (uint64_t{1} << (2 * seed_len)) - 1;
+      uint64_t code = 0;
+      for (int offset = 0; offset < seed_len; ++offset) {
+        code = (code << 2) |
+               dna_base_bits(sequence[static_cast<size_t>(offset)]);
+      }
+      item_codes.push_back(code);
+      for (size_t pos = 1; pos <= last; ++pos) {
+        const size_t next = pos + static_cast<size_t>(seed_len) - 1;
+        code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
+        item_codes.push_back(code);
+      }
+      std::sort(item_codes.begin(), item_codes.end());
+      item_codes.erase(std::unique(item_codes.begin(), item_codes.end()),
+                       item_codes.end());
+      for (uint64_t item_code : item_codes) {
+        postings[item_code].push_back(compact_idx);
+      }
+    }
+  };
+
+  if (seed_index_uses_16bit_) {
+    PostingLists16 postings;
+    std::vector<uint16_t> unindexable_items;
+    populate(postings, unindexable_items);
+    postings16_by_seed_len_.emplace(seed_len, std::move(postings));
+    unindexable_items16_by_seed_len_.emplace(
+        seed_len, std::move(unindexable_items));
+  } else {
+    PostingLists postings;
+    std::vector<uint32_t> unindexable_items;
+    populate(postings, unindexable_items);
+    postings_by_seed_len_.emplace(seed_len, std::move(postings));
+    unindexable_items_by_seed_len_.emplace(
+        seed_len, std::move(unindexable_items));
+  }
 }
 
 void ExactRangeJoinIndex::prepare_seed_lengths(
     const std::vector<int>& seed_lengths) {
   for (int seed_len : seed_lengths) {
     if (seed_len >= config_.min_seed_len) {
-      (void)postings_for_seed_len(seed_len);
+      prepare_postings_for_seed_len(seed_len);
     }
   }
 }
@@ -310,13 +347,13 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
 
   if (config_.candidate_mode == RangeCandidateMode::PigeonholeOnly) {
     return pigeonhole_query(query_sequence, tau, block_len, seed_len,
-                            std::numeric_limits<size_t>::max());
+                            std::numeric_limits<size_t>::max(), workspace);
   }
 
   if (config_.candidate_mode == RangeCandidateMode::Hybrid) {
     auto pigeonhole =
         pigeonhole_query(query_sequence, tau, block_len, seed_len,
-                         std::numeric_limits<size_t>::max());
+                         std::numeric_limits<size_t>::max(), workspace);
     auto qgram = qgram_query(query_sequence, tau, workspace);
     return hybrid_result(pigeonhole, qgram);
   }
@@ -329,10 +366,16 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
     qgram.auto_final_candidate_pairs = qgram.candidate_item_ids.size();
     return qgram;
   }
+  if (!seed_index_capacity_) {
+    auto result = full_scan(query_sequence, tau, true);
+    result.block_len = block_len;
+    result.seed_len = seed_len;
+    return result;
+  }
 
   auto pigeonhole =
       pigeonhole_query(query_sequence, tau, block_len, seed_len,
-                       config_.auto_pigeonhole_max_candidates);
+                       config_.auto_pigeonhole_max_candidates, workspace);
   if (pigeonhole.pigeonhole_early_abort_count > 0) {
     auto qgram = qgram_query(query_sequence, tau, workspace);
     merge_range_timing(qgram, pigeonhole);
@@ -387,8 +430,9 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
   {
     ScopedTimer length_timer(&result.range_length_filter_ms);
     for (const auto& item : items_) {
+      const auto& sequence = item.sequence;
       if (std::abs(static_cast<long long>(query_sequence.size()) -
-                   static_cast<long long>(item.sequence.size())) <= tau) {
+                   static_cast<long long>(sequence.size())) <= tau) {
         result.candidate_item_ids.push_back(item.item_id);
       } else {
         result.length_filtered_items++;
@@ -407,32 +451,79 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
 
 RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
     const std::string& query_sequence, int tau, int block_len, int seed_len,
-    size_t early_abort_candidate_limit) const {
+    size_t early_abort_candidate_limit,
+    RangeJoinQueryWorkspace* workspace) const {
   if (seed_len < config_.min_seed_len) {
     auto result = full_scan(query_sequence, tau, true);
     result.block_len = block_len;
     result.seed_len = seed_len;
     return result;
   }
+  if (!seed_index_capacity_) {
+    auto result = full_scan(query_sequence, tau, true);
+    result.block_len = block_len;
+    result.seed_len = seed_len;
+    return result;
+  }
+
+  RangeJoinQueryWorkspace local_workspace;
+  if (!workspace) workspace = &local_workspace;
+  workspace->reset_seed(items_.size());
+  auto add_candidate = [&](uint32_t item_idx) {
+    if (item_idx >= workspace->seed_seen_epoch.size() ||
+        workspace->seed_seen_epoch[item_idx] == workspace->seed_epoch) {
+      return false;
+    }
+    workspace->seed_seen_epoch[item_idx] = workspace->seed_epoch;
+    workspace->seed_touched.push_back(item_idx);
+    return true;
+  };
 
   RangeJoinQueryResult result;
   result.mode_used = RangeCandidateMode::PigeonholeOnly;
   result.block_len = block_len;
   result.seed_len = seed_len;
+  const PostingLists16* postings16_ptr = nullptr;
   const PostingLists* postings_ptr = nullptr;
   {
     ScopedTimer timer(&result.range_posting_lookup_ms);
-    postings_ptr = find_postings_for_seed_len(result.seed_len);
+    if (seed_index_uses_16bit_) {
+      const auto existing =
+          postings16_by_seed_len_.find(result.seed_len);
+      if (existing != postings16_by_seed_len_.end()) {
+        postings16_ptr = &existing->second;
+      }
+    } else {
+      const auto existing = postings_by_seed_len_.find(result.seed_len);
+      if (existing != postings_by_seed_len_.end()) {
+        postings_ptr = &existing->second;
+      }
+    }
   }
-  if (!postings_ptr) {
+  if (!postings16_ptr && !postings_ptr) {
     auto fallback = full_scan(query_sequence, tau, true);
     merge_range_timing(fallback, result);
     fallback.block_len = block_len;
     fallback.seed_len = seed_len;
     return fallback;
   }
-  const auto& postings = *postings_ptr;
-  std::unordered_set<size_t> candidates;
+  const auto consume_indices = [&](const auto& indices) {
+    for (auto compact_idx : indices) {
+      add_candidate(static_cast<uint32_t>(compact_idx));
+      if (workspace->seed_touched.size() >
+          early_abort_candidate_limit) {
+        result.seed_candidate_pairs_before_length_filter =
+            workspace->seed_touched.size();
+        result.pigeonhole_candidate_count =
+            workspace->seed_touched.size();
+        result.pigeonhole_early_abort_count = 1;
+        result.final_candidate_pairs = 0;
+        return false;
+      }
+    }
+    return true;
+  };
+
   const int block_count = tau + 1;
   for (int block_idx = 0; block_idx < block_count; ++block_idx) {
     const size_t block_start =
@@ -446,57 +537,61 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
       fallback.seed_len = seed_len;
       return fallback;
     }
-    PostingLists::const_iterator posting;
-    {
-      ScopedTimer timer(&result.range_posting_lookup_ms);
-      posting = postings.find(seed);
-    }
-    if (posting == postings.end()) continue;
-    {
-      ScopedTimer timer(&result.range_seed_union_ms);
-      for (size_t item_id : posting->second) {
-        candidates.insert(item_id);
-        if (candidates.size() > early_abort_candidate_limit) {
-          result.seed_candidate_pairs_before_length_filter = candidates.size();
-          result.pigeonhole_candidate_count = candidates.size();
-          result.pigeonhole_early_abort_count = 1;
-          result.final_candidate_pairs = 0;
-          return result;
-        }
+    if (postings16_ptr) {
+      PostingLists16::const_iterator posting;
+      {
+        ScopedTimer timer(&result.range_posting_lookup_ms);
+        posting = postings16_ptr->find(seed);
+      }
+      if (posting != postings16_ptr->end()) {
+        ScopedTimer timer(&result.range_seed_union_ms);
+        if (!consume_indices(posting->second)) return result;
+      }
+    } else {
+      PostingLists::const_iterator posting;
+      {
+        ScopedTimer timer(&result.range_posting_lookup_ms);
+        posting = postings_ptr->find(seed);
+      }
+      if (posting != postings_ptr->end()) {
+        ScopedTimer timer(&result.range_seed_union_ms);
+        if (!consume_indices(posting->second)) return result;
       }
     }
   }
-  auto unindexable_it =
-      unindexable_items_by_seed_len_.find(result.seed_len);
-  if (unindexable_it != unindexable_items_by_seed_len_.end()) {
-    ScopedTimer timer(&result.range_seed_union_ms);
-    for (size_t item_id : unindexable_it->second) {
-      candidates.insert(item_id);
-      if (candidates.size() > early_abort_candidate_limit) {
-        result.seed_candidate_pairs_before_length_filter = candidates.size();
-        result.pigeonhole_candidate_count = candidates.size();
-        result.pigeonhole_early_abort_count = 1;
-        result.final_candidate_pairs = 0;
-        return result;
-      }
+  if (seed_index_uses_16bit_) {
+    const auto unindexable_it =
+        unindexable_items16_by_seed_len_.find(result.seed_len);
+    if (unindexable_it != unindexable_items16_by_seed_len_.end()) {
+      ScopedTimer timer(&result.range_seed_union_ms);
+      if (!consume_indices(unindexable_it->second)) return result;
+    }
+  } else {
+    const auto unindexable_it =
+        unindexable_items_by_seed_len_.find(result.seed_len);
+    if (unindexable_it != unindexable_items_by_seed_len_.end()) {
+      ScopedTimer timer(&result.range_seed_union_ms);
+      if (!consume_indices(unindexable_it->second)) return result;
     }
   }
 
-  result.seed_candidate_pairs_before_length_filter = candidates.size();
+  result.seed_candidate_pairs_before_length_filter =
+      workspace->seed_touched.size();
   {
     ScopedTimer timer(&result.range_length_filter_ms);
-    for (size_t item_id : candidates) {
-      auto length_it = item_lengths_by_id_.find(item_id);
-      if (length_it == item_lengths_by_id_.end()) {
+    for (uint32_t item_idx : workspace->seed_touched) {
+      if (item_idx >= items_.size()) {
         auto fallback = full_scan(query_sequence, tau, true);
         merge_range_timing(fallback, result);
         fallback.block_len = block_len;
         fallback.seed_len = seed_len;
         return fallback;
       }
+      const auto& item = items_[item_idx];
+      const auto& sequence = item.sequence;
       if (std::abs(static_cast<long long>(query_sequence.size()) -
-                   static_cast<long long>(length_it->second)) <= tau) {
-        result.candidate_item_ids.push_back(item_id);
+                   static_cast<long long>(sequence.size())) <= tau) {
+        result.candidate_item_ids.push_back(item.item_id);
       } else {
         result.length_filtered_items++;
         result.seed_length_pruned_candidates++;
