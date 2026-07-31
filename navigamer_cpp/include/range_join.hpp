@@ -30,7 +30,7 @@ const char* range_candidate_mode_name(RangeCandidateMode mode);
 RangeCandidateMode parse_range_candidate_mode(const std::string& value);
 
 struct RangeJoinConfig {
-  int min_seed_len = 8;
+  int min_seed_len = 6;
   int max_seed_len = 20;
   int qgram_q = 5;
   RangeCandidateMode candidate_mode = RangeCandidateMode::Auto;

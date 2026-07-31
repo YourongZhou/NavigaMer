@@ -25,7 +25,7 @@ struct IndexBuildManifest {
   std::string build_distance_mode;
   std::string phase1_candidate_mode;
   std::string range_candidate_mode;
-  int range_min_seed_len = 8;
+  int range_min_seed_len = 6;
   int range_max_seed_len = 20;
   int qgram_q = 5;
   size_t auto_pigeonhole_max_candidates = 4096;
