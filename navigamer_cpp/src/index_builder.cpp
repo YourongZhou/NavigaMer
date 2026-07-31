@@ -3243,8 +3243,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         throw std::runtime_error(
             "child distance array does not match child/beacon dimensions");
       }
-      view.child_beacon_dists.insert(
-          view.child_beacon_dists.end(),
+      view.child_beacon_dists.append(
           node.child_beacon_dists.begin(),
           node.child_beacon_dists.end());
 
@@ -3256,8 +3255,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         throw std::runtime_error(
             "flat leaf beacon array does not match leaf/beacon dimensions");
       }
-      view.leaf_beacon_dists.insert(
-          view.leaf_beacon_dists.end(),
+      view.leaf_beacon_dists.append(
           node.leaf_beacon_dists.begin(),
           node.leaf_beacon_dists.end());
     }

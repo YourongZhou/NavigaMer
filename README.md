@@ -37,7 +37,7 @@ without rescanning the reference. No per-window
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 13 stores the shared
+edit distance fits in one byte. Persisted format version 14 stores the shared
 reference as exact chunked 2-bit ACGT plus verbatim non-ACGT exceptions, and
 keeps long literal inputs in the manifest only as content fingerprints. It
 stores one child-center-to-beacon distance per MBB cell instead of separate
@@ -57,6 +57,10 @@ per-edge distance vector is allocated before finalization.
 Repeated reference positions use one pair for a singleton duplicate, while
 larger duplicate groups share one group offset and a flat 32-bit position
 array.
+All finalized node, edge, beacon, MBB, and leaf arrays are aligned in the
+persisted file and loaded as read-only memory mappings. Loading an index does
+not allocate or copy those arrays; only pages reached by validation and queries
+need to become resident.
 
 ## Installation
 

@@ -65,6 +65,27 @@ void assert_loaded_search_matches_built() {
   navigamer::LoadedIndex loaded = navigamer::load_index(path);
   assert(loaded.builder.validate_integer_ids());
   assert(loaded.builder.validate_search_graph_view());
+  const auto& built_mbb =
+      built.search_graph_view().child_beacon_dists;
+  const auto& loaded_mbb =
+      loaded.builder.search_graph_view().child_beacon_dists;
+  assert(loaded_mbb.size() == built_mbb.size());
+  assert(std::equal(
+      built_mbb.begin(), built_mbb.end(), loaded_mbb.begin()));
+#if defined(__unix__) || defined(__APPLE__)
+  const auto assert_mapped = [](const auto& array) {
+    if (!array.empty()) assert(array.is_mapped());
+  };
+  const auto& loaded_view = loaded.builder.search_graph_view();
+  assert_mapped(loaded_view.node_records);
+  assert_mapped(loaded_view.child_ids);
+  assert_mapped(loaded_view.leaf_ids);
+  assert_mapped(loaded_view.beacon_deltas8);
+  assert_mapped(loaded_view.beacon_deltas16);
+  assert_mapped(loaded_view.beacon_ids32);
+  assert_mapped(loaded_view.child_beacon_dists);
+  assert_mapped(loaded_view.leaf_beacon_dists);
+#endif
   assert(loaded.manifest.signature == manifest.signature);
   assert(loaded.manifest.primary_radii == manifest.primary_radii);
 
@@ -106,7 +127,21 @@ void assert_loaded_search_matches_built() {
     assert(sequence_ids(built_hits) == sequence_ids(rect_hits));
   }
 
+  const std::string copied_path =
+      "/tmp/navigamer_test_mapped_copy.navidx";
+  std::remove(copied_path.c_str());
+  navigamer::save_index(
+      copied_path, loaded.builder, loaded.manifest);
+  auto copied = navigamer::load_index(copied_path);
+  assert(copied.builder.validate_integer_ids());
+  assert(copied.builder.validate_search_graph_view());
+  assert(std::equal(
+      copied.builder.search_graph_view().child_beacon_dists.begin(),
+      copied.builder.search_graph_view().child_beacon_dists.end(),
+      built_mbb.begin()));
+
   std::remove(path.c_str());
+  std::remove(copied_path.c_str());
 }
 
 void assert_manifest_matching_detects_reusable_index() {
@@ -281,7 +316,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 13);
+  assert(loaded.manifest.format_version == 14);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

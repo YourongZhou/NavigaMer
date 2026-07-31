@@ -13,13 +13,66 @@
 #include <tuple>
 #include <type_traits>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '3'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '4'};
 constexpr size_t kReferenceChunkBases = size_t{1} << 20;
 constexpr size_t kMaxStoredInputDescriptor = 4096;
+
+#if defined(__unix__) || defined(__APPLE__)
+class MappedIndexFile {
+ public:
+  MappedIndexFile(void* address, size_t size)
+      : address_(address), size_(size) {}
+  ~MappedIndexFile() {
+    if (address_ && size_ != 0) munmap(address_, size_);
+  }
+
+  const uint8_t* data() const {
+    return static_cast<const uint8_t*>(address_);
+  }
+  size_t size() const { return size_; }
+
+ private:
+  void* address_ = nullptr;
+  size_t size_ = 0;
+};
+
+std::shared_ptr<MappedIndexFile> map_index_file(
+    const std::string& path) {
+  const int fd = open(path.c_str(), O_RDONLY);
+  if (fd < 0) return {};
+  struct stat status {};
+  if (fstat(fd, &status) != 0 || status.st_size <= 0 ||
+      static_cast<uint64_t>(status.st_size) >
+          static_cast<uint64_t>(
+              std::numeric_limits<size_t>::max())) {
+    close(fd);
+    return {};
+  }
+  const size_t size = static_cast<size_t>(status.st_size);
+  void* address = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if (address == MAP_FAILED) return {};
+  return std::make_shared<MappedIndexFile>(address, size);
+}
+#else
+class MappedIndexFile {};
+
+std::shared_ptr<MappedIndexFile> map_index_file(
+    const std::string&) {
+  return {};
+}
+#endif
 
 template <typename T>
 void write_pod(std::ostream& out, const T& value) {
@@ -265,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 13) {
+  if (manifest.format_version != 14) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -387,54 +440,8 @@ class IndexPersistenceAccess {
 
 namespace {
 
-template <typename T>
-void write_numeric_vector(std::ostream& out,
-                          const std::vector<T>& values,
-                          const char* field) {
-  static_assert(std::is_arithmetic<T>::value,
-                "numeric vector requires arithmetic elements");
-  write_size(out, values.size());
-  if (values.empty()) return;
-  const size_t byte_count = values.size() * sizeof(T);
-  if (byte_count > static_cast<size_t>(
-                       std::numeric_limits<std::streamsize>::max())) {
-    throw std::runtime_error(std::string(field) +
-                             " exceeds stream size range");
-  }
-  out.write(reinterpret_cast<const char*>(values.data()),
-            static_cast<std::streamsize>(byte_count));
-  if (!out) {
-    throw std::runtime_error(std::string("failed to write index field: ") +
-                             field);
-  }
-}
-
-template <typename T>
-std::vector<T> read_numeric_vector(std::istream& in,
-                                   const char* field) {
-  static_assert(std::is_arithmetic<T>::value,
-                "numeric vector requires arithmetic elements");
-  const size_t count = read_size(in, field);
-  if (count > static_cast<size_t>(
-                  std::numeric_limits<std::streamsize>::max()) /
-                  sizeof(T)) {
-    throw std::runtime_error(std::string(field) +
-                             " exceeds stream size range");
-  }
-  std::vector<T> values(count);
-  if (values.empty()) return values;
-  const size_t byte_count = count * sizeof(T);
-  in.read(reinterpret_cast<char*>(values.data()),
-          static_cast<std::streamsize>(byte_count));
-  if (!in) {
-    throw std::runtime_error(std::string("failed to read index field: ") +
-                             field);
-  }
-  return values;
-}
-
-void write_u8_vector(std::ostream& out,
-                     const std::vector<uint8_t>& values) {
+template <typename Values>
+void write_u8_vector(std::ostream& out, const Values& values) {
   write_size(out, values.size());
   if (values.empty()) return;
   const size_t byte_count = values.size() * sizeof(uint8_t);
@@ -465,6 +472,128 @@ std::vector<uint8_t> read_u8_vector(
     throw std::runtime_error(std::string("failed to read index field: ") +
                              field);
   }
+  return values;
+}
+
+void align_write_position(std::ostream& out, size_t alignment) {
+  const std::streampos position = out.tellp();
+  if (position < std::streampos(0)) {
+    throw std::runtime_error("failed to locate index output position");
+  }
+  const uint64_t offset =
+      static_cast<uint64_t>(static_cast<std::streamoff>(position));
+  const size_t padding =
+      static_cast<size_t>((alignment - offset % alignment) % alignment);
+  static constexpr std::array<char, 8> zeros{};
+  out.write(zeros.data(), static_cast<std::streamsize>(padding));
+  if (!out) throw std::runtime_error("failed to align index output");
+}
+
+void align_read_position(std::istream& in, size_t alignment) {
+  const std::streampos position = in.tellg();
+  if (position < std::streampos(0)) {
+    throw std::runtime_error("failed to locate index input position");
+  }
+  const uint64_t offset =
+      static_cast<uint64_t>(static_cast<std::streamoff>(position));
+  const size_t padding =
+      static_cast<size_t>((alignment - offset % alignment) % alignment);
+  std::array<char, 8> bytes{};
+  in.read(bytes.data(), static_cast<std::streamsize>(padding));
+  if (!in) throw std::runtime_error("failed to read index alignment");
+  for (size_t idx = 0; idx < padding; ++idx) {
+    if (bytes[idx] != 0) {
+      throw std::runtime_error("index alignment padding is not zero");
+    }
+  }
+}
+
+template <typename T>
+void write_final_array(std::ostream& out,
+                       const FinalArray<T>& values,
+                       const char* field) {
+  static_assert(std::is_trivially_copyable<T>::value,
+                "mapped final arrays require trivial elements");
+  static_assert(alignof(T) <= 8,
+                "index alignment buffer supports up to 8-byte alignment");
+  write_size(out, values.size());
+  if (values.empty()) return;
+  if (values.size() >
+      static_cast<size_t>(
+          std::numeric_limits<std::streamsize>::max()) /
+          sizeof(T)) {
+    throw std::runtime_error(std::string(field) +
+                             " exceeds stream size range");
+  }
+  align_write_position(out, alignof(T));
+  const size_t byte_count = values.size() * sizeof(T);
+  out.write(reinterpret_cast<const char*>(values.data()),
+            static_cast<std::streamsize>(byte_count));
+  if (!out) {
+    throw std::runtime_error(std::string("failed to write index field: ") +
+                             field);
+  }
+}
+
+template <typename T>
+FinalArray<T> read_final_array(
+    std::istream& in,
+    const std::shared_ptr<MappedIndexFile>& mapping,
+    const char* field) {
+  static_assert(std::is_trivially_copyable<T>::value,
+                "mapped final arrays require trivial elements");
+  static_assert(alignof(T) <= 8,
+                "index alignment buffer supports up to 8-byte alignment");
+  const size_t count = read_size(in, field);
+  FinalArray<T> values;
+  if (count == 0) return values;
+  if (count >
+      static_cast<size_t>(
+          std::numeric_limits<std::streamoff>::max()) /
+          sizeof(T)) {
+    throw std::runtime_error(std::string(field) +
+                             " exceeds stream offset range");
+  }
+  align_read_position(in, alignof(T));
+  const size_t byte_count = count * sizeof(T);
+#if defined(__unix__) || defined(__APPLE__)
+  if (mapping) {
+    const std::streampos position = in.tellg();
+    if (position < std::streampos(0)) {
+      throw std::runtime_error(std::string("failed to locate index field: ") +
+                               field);
+    }
+    const uint64_t offset =
+        static_cast<uint64_t>(static_cast<std::streamoff>(position));
+    if (offset > mapping->size() ||
+        byte_count >
+            mapping->size() - static_cast<size_t>(offset)) {
+      throw std::runtime_error(std::string(field) +
+                               " exceeds mapped index range");
+    }
+    values.set_mapped(
+        mapping,
+        reinterpret_cast<const T*>(
+            mapping->data() + static_cast<size_t>(offset)),
+        count);
+    in.seekg(static_cast<std::streamoff>(byte_count), std::ios::cur);
+    if (!in) {
+      throw std::runtime_error(std::string("failed to skip index field: ") +
+                               field);
+    }
+    return values;
+  }
+#else
+  (void)mapping;
+#endif
+  std::vector<T> owned(count);
+  in.read(reinterpret_cast<char*>(owned.data()),
+          static_cast<std::streamsize>(byte_count));
+  if (!in) {
+    throw std::runtime_error(std::string("failed to read index field: ") +
+                             field);
+  }
+  values.set_owned(std::move(owned));
   return values;
 }
 
@@ -776,74 +905,46 @@ SequenceStore read_sequence_store(std::istream& in) {
   return store;
 }
 
-void write_node_records(
-    std::ostream& out,
-    const std::vector<WorldNodeRecord>& records) {
-  write_size(out, records.size());
-  for (const auto& record : records) {
-    write_pod<uint32_t>(out, record.center_sequence_id);
-    write_pod<uint32_t>(out, record.child_begin);
-    write_pod<uint32_t>(out, record.child_count);
-    write_pod<uint32_t>(out, record.leaf_begin);
-    write_pod<uint32_t>(out, record.leaf_count);
-    write_pod<uint32_t>(out, record.beacon_begin);
-    write_pod<uint32_t>(out, record.beacon_count_and_storage);
-    write_pod<uint32_t>(out, record.mbb_begin);
-  }
-}
-
-std::vector<WorldNodeRecord> read_node_records(std::istream& in) {
-  const size_t count = read_size(in, "node_records.count");
-  std::vector<WorldNodeRecord> records(count);
-  for (auto& record : records) {
-    record.center_sequence_id =
-        read_pod<uint32_t>(in, "node.center_sequence_id");
-    record.child_begin = read_pod<uint32_t>(in, "node.child_begin");
-    record.child_count = read_pod<uint32_t>(in, "node.child_count");
-    record.leaf_begin = read_pod<uint32_t>(in, "node.leaf_begin");
-    record.leaf_count = read_pod<uint32_t>(in, "node.leaf_count");
-    record.beacon_begin = read_pod<uint32_t>(in, "node.beacon_begin");
-    record.beacon_count_and_storage =
-        read_pod<uint32_t>(in, "node.beacon_count_and_storage");
-    record.mbb_begin = read_pod<uint32_t>(in, "node.mbb_begin");
-  }
-  return records;
-}
-
 void write_search_graph_view(std::ostream& out,
                              const SearchGraphView& view) {
   write_sequence_store(out, view.sequences);
-  write_node_records(out, view.node_records);
+  write_final_array(out, view.node_records, "node_records");
   write_u32_vector(out, view.layer_begin);
   write_u32_vector(out, view.layer_end);
-  write_u32_vector(out, view.child_ids);
-  write_u32_vector(out, view.leaf_ids);
-  write_numeric_vector(
-      out, view.beacon_deltas8, "beacon_deltas8");
-  write_numeric_vector(
-      out, view.beacon_deltas16, "beacon_deltas16");
-  write_u32_vector(out, view.beacon_ids32);
-  write_u8_vector(out, view.child_beacon_dists);
-  write_u8_vector(out, view.leaf_beacon_dists);
+  write_final_array(out, view.child_ids, "child_ids");
+  write_final_array(out, view.leaf_ids, "leaf_ids");
+  write_final_array(out, view.beacon_deltas8, "beacon_deltas8");
+  write_final_array(out, view.beacon_deltas16, "beacon_deltas16");
+  write_final_array(out, view.beacon_ids32, "beacon_ids32");
+  write_final_array(
+      out, view.child_beacon_dists, "child_beacon_dists");
+  write_final_array(
+      out, view.leaf_beacon_dists, "leaf_beacon_dists");
 }
 
-SearchGraphView read_search_graph_view(std::istream& in) {
+SearchGraphView read_search_graph_view(
+    std::istream& in,
+    const std::shared_ptr<MappedIndexFile>& mapping) {
   SearchGraphView view;
   view.sequences = read_sequence_store(in);
-  view.node_records = read_node_records(in);
+  view.node_records = read_final_array<WorldNodeRecord>(
+      in, mapping, "node_records");
   view.layer_begin = read_u32_vector(in, "layer_begin");
   view.layer_end = read_u32_vector(in, "layer_end");
-  view.child_ids = read_u32_vector(in, "child_ids");
-  view.leaf_ids = read_u32_vector(in, "leaf_ids");
+  view.child_ids =
+      read_final_array<NodeId>(in, mapping, "child_ids");
+  view.leaf_ids =
+      read_final_array<LeafId>(in, mapping, "leaf_ids");
   view.beacon_deltas8 =
-      read_numeric_vector<int8_t>(in, "beacon_deltas8");
+      read_final_array<int8_t>(in, mapping, "beacon_deltas8");
   view.beacon_deltas16 =
-      read_numeric_vector<int16_t>(in, "beacon_deltas16");
-  view.beacon_ids32 = read_u32_vector(in, "beacon_ids32");
+      read_final_array<int16_t>(in, mapping, "beacon_deltas16");
+  view.beacon_ids32 =
+      read_final_array<LeafId>(in, mapping, "beacon_ids32");
   view.child_beacon_dists =
-      read_u8_vector(in, "child_beacon_dists");
+      read_final_array<uint8_t>(in, mapping, "child_beacon_dists");
   view.leaf_beacon_dists =
-      read_u8_vector(in, "leaf_beacon_dists");
+      read_final_array<uint8_t>(in, mapping, "leaf_beacon_dists");
   return view;
 }
 
@@ -917,7 +1018,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 13) {
+  if (manifest.format_version != 14) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -961,7 +1062,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 13;
+  stored.format_version = 14;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -978,11 +1079,12 @@ void save_index(const std::string& path,
 }
 
 LoadedIndex load_index(const std::string& path) {
+  const auto mapping = map_index_file(path);
   std::ifstream in(path, std::ios::binary);
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 13) {
+  if (manifest.format_version != 14) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -997,7 +1099,7 @@ LoadedIndex load_index(const std::string& path) {
       HierarchyConfig(manifest.primary_radii, manifest.auxiliary_radii),
       range_config);
 
-  SearchGraphView view = read_search_graph_view(in);
+  SearchGraphView view = read_search_graph_view(in, mapping);
   if (view.sequences.size() != manifest.sequence_count ||
       view.node_records.size() != manifest.world_node_count ||
       view.child_ids.size() != manifest.edge_count ||
