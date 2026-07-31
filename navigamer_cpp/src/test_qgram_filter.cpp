@@ -40,7 +40,7 @@ std::string mutate_with_indels(std::string value, int edits, std::mt19937& gen) 
   return value;
 }
 
-bool contains(const std::vector<size_t>& ids, size_t id) {
+bool contains(const std::vector<navigamer::QGramItemId>& ids, size_t id) {
   return std::binary_search(ids.begin(), ids.end(), id);
 }
 
@@ -183,18 +183,18 @@ void test_qgram_index_reuses_sparse_workspace() {
   auto first = index.query(items[0].sequence, 2, &first_stats, &workspace);
   assert(contains(first, 0));
   assert(workspace.shared.empty());
-  assert(workspace.shared16.size() == items.size());
+  assert(workspace.shared_compact.size() == items.size());
   assert(workspace.seen_epoch.empty());
   assert(workspace.seen_epoch16.size() == items.size());
-  const auto* shared_storage = workspace.shared16.data();
+  const auto* shared_storage = workspace.shared_compact.data();
   const auto* seen_storage = workspace.seen_epoch16.data();
 
   navigamer::QGramCountIndex::QueryStats second_stats;
   auto second = index.query(items[1].sequence, 2, &second_stats, &workspace);
   assert(contains(second, 1));
-  assert(workspace.shared16.data() == shared_storage);
+  assert(workspace.shared_compact.data() == shared_storage);
   assert(workspace.seen_epoch16.data() == seen_storage);
-  assert(workspace.shared16.size() == items.size());
+  assert(workspace.shared_compact.size() == items.size());
   assert(workspace.seen_epoch16.size() == items.size());
 
   workspace.epoch16 = std::numeric_limits<uint16_t>::max();
@@ -224,7 +224,7 @@ void test_qgram_index_sorts_nonmonotonic_item_ids() {
   navigamer::QGramCountIndex index(5);
   index.build(items);
   const auto candidates = index.query("ACGTACGTACGT", 0);
-  assert((candidates == std::vector<size_t>{3, 9}));
+  assert((candidates == std::vector<navigamer::QGramItemId>{3, 9}));
 }
 
 void test_qgram_dense_postings_use_wide_fallbacks() {
@@ -244,7 +244,7 @@ void test_qgram_dense_postings_use_wide_fallbacks() {
   assert(many_candidates.front() == 0);
   assert(many_candidates.back() == item_count - 1);
   assert(many_workspace.shared.empty());
-  assert(many_workspace.shared16.size() == item_count);
+  assert(many_workspace.shared_compact.size() == item_count);
   assert(many_workspace.seen_epoch.size() == item_count);
   assert(many_workspace.seen_epoch16.empty());
 
@@ -255,11 +255,37 @@ void test_qgram_dense_postings_use_wide_fallbacks() {
   navigamer::QGramQueryWorkspace long_workspace;
   const auto long_candidates =
       long_index.query(long_sequence, 0, nullptr, &long_workspace);
-  assert((long_candidates == std::vector<size_t>{7}));
+  assert((long_candidates == std::vector<navigamer::QGramItemId>{7}));
   assert(long_workspace.shared.size() == 1);
-  assert(long_workspace.shared16.empty());
+  assert(long_workspace.shared_compact.empty());
   assert(long_workspace.seen_epoch.empty());
   assert(long_workspace.seen_epoch16.size() == 1);
+}
+
+void test_qgram_rejects_unrepresentable_item_ids() {
+  navigamer::QGramCountIndex index(5);
+  bool rejected = false;
+  try {
+    index.build({{
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1,
+        "ACGTA"}});
+  } catch (const std::length_error&) {
+    rejected = true;
+  }
+  assert(rejected);
+}
+
+void test_qgram_compact_workspace_uses_two_bytes_for_wide_counts() {
+  const std::string a_sequence(300, 'A');
+  const std::string c_sequence(300, 'C');
+  navigamer::QGramCountIndex index(5);
+  index.build({{7, a_sequence}, {9, c_sequence}});
+  navigamer::QGramQueryWorkspace workspace;
+  const auto candidates =
+      index.query(a_sequence, 0, nullptr, &workspace);
+  assert((candidates == std::vector<navigamer::QGramItemId>{7}));
+  assert(workspace.shared.empty());
+  assert(workspace.shared_compact.size() == 4);
 }
 
 }  // namespace
@@ -274,6 +300,8 @@ int main() {
   test_qgram_index_reuses_sparse_workspace();
   test_qgram_index_sorts_nonmonotonic_item_ids();
   test_qgram_dense_postings_use_wide_fallbacks();
+  test_qgram_rejects_unrepresentable_item_ids();
+  test_qgram_compact_workspace_uses_two_bytes_for_wide_counts();
   std::cout << "qgram filter tests passed\n";
   return 0;
 }

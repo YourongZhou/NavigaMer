@@ -212,13 +212,26 @@ void QGramQueryWorkspace::reset_seen(size_t item_count) {
   }
 }
 
-void QGramQueryWorkspace::reset(size_t item_count, bool compact_shared) {
-  if (compact_shared) {
-    if (shared16.size() != item_count) shared16.assign(item_count, 0);
+void QGramQueryWorkspace::reset(
+    size_t item_count, bool compact_shared, bool byte_shared) {
+  if (byte_shared) {
+    if (shared_compact.size() != item_count) {
+      shared_compact.assign(item_count, 0);
+    }
+    if (!shared.empty()) std::vector<size_t>().swap(shared);
+  } else if (compact_shared) {
+    if (item_count > std::numeric_limits<size_t>::max() / 2) {
+      throw std::length_error("q-gram workspace size overflow");
+    }
+    if (shared_compact.size() != item_count * 2) {
+      shared_compact.assign(item_count * 2, 0);
+    }
     if (!shared.empty()) std::vector<size_t>().swap(shared);
   } else {
     if (shared.size() != item_count) shared.assign(item_count, 0);
-    if (!shared16.empty()) std::vector<uint16_t>().swap(shared16);
+    if (!shared_compact.empty()) {
+      std::vector<uint8_t>().swap(shared_compact);
+    }
   }
   reset_seen(item_count);
 }
@@ -261,7 +274,7 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
           total <= std::numeric_limits<uint16_t>::max();
     }
     const size_t code_count = size_t{1} << (2 * q_);
-    if (byte_counts && !compact_item_ids && byte_packable_item_ids) {
+    if (byte_counts && byte_packable_item_ids) {
       dense_byte_packed_postings_.resize(code_count);
     } else if (compact_counts && compact_item_ids) {
       dense_packed_postings_.resize(code_count);
@@ -270,12 +283,24 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
     }
   }
   item_ids_strictly_increasing_ = true;
+  if (items.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    throw std::length_error("q-gram index exceeds 32-bit item capacity");
+  }
   items_.reserve(items.size());
   const bool posting_index_capacity =
       items.size() <= static_cast<size_t>(
                           std::numeric_limits<uint32_t>::max());
 
   for (const auto& item : items) {
+    if (item.item_id >
+        static_cast<size_t>(std::numeric_limits<QGramItemId>::max())) {
+      throw std::length_error("q-gram item ID exceeds 32-bit capacity");
+    }
+    if (item.sequence.size() >
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+      throw std::length_error("q-gram sequence exceeds 32-bit length capacity");
+    }
     const size_t internal_idx = items_.size();
     if (internal_idx > 0 &&
         item.item_id <= items_[internal_idx - 1].item_id) {
@@ -285,9 +310,10 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
     QGramSignature signature = compute_qgram_signature(sequence, q_);
     const bool qgram_indexable =
         posting_index_capacity && signature.safe_for_pruning;
-    items_.push_back(
-        {item.item_id, sequence.size(), signature.total_qgrams,
-         qgram_indexable});
+    items_.push_back({
+        static_cast<QGramItemId>(item.item_id),
+        static_cast<uint32_t>(sequence.size()),
+        static_cast<uint32_t>(signature.total_qgrams), qgram_indexable});
     if (!qgram_indexable) continue;
     for (const auto& entry : signature.entries) {
       if (!dense_byte_packed_postings_.empty()) {
@@ -309,7 +335,7 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
   }
 }
 
-std::vector<size_t> QGramCountIndex::query(
+std::vector<QGramItemId> QGramCountIndex::query(
     std::string_view query_sequence, int tau, QueryStats* stats,
     QGramQueryWorkspace* workspace) const {
   if (tau < 0) throw std::invalid_argument("q-gram threshold must be non-negative");
@@ -326,7 +352,8 @@ std::vector<size_t> QGramCountIndex::query(
   const bool compact_shared =
       !dense_byte_packed_postings_.empty() ||
       !dense_packed_postings_.empty();
-  ws->reset(items_.size(), compact_shared);
+  const bool byte_shared = !dense_byte_packed_postings_.empty();
+  ws->reset(items_.size(), compact_shared, byte_shared);
   const bool compact_seen =
       items_.size() <=
       static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
@@ -352,17 +379,31 @@ std::vector<size_t> QGramCountIndex::query(
           } else {
             seen32[internal_idx] = current_epoch;
           }
-          if (compact_shared) {
-            ws->shared16[internal_idx] = 0;
+          if (byte_shared) {
+            ws->shared_compact[internal_idx] = 0;
+          } else if (compact_shared) {
+            const size_t offset = static_cast<size_t>(internal_idx) * 2;
+            ws->shared_compact[offset] = 0;
+            ws->shared_compact[offset + 1] = 0;
           } else {
             ws->shared[internal_idx] = 0;
           }
         }
         const uint32_t contribution =
             std::min(query_entry.count, count);
-        if (compact_shared) {
-          ws->shared16[internal_idx] = static_cast<uint16_t>(
-              ws->shared16[internal_idx] + contribution);
+        if (byte_shared) {
+          ws->shared_compact[internal_idx] = static_cast<uint8_t>(
+              ws->shared_compact[internal_idx] + contribution);
+        } else if (compact_shared) {
+          const size_t offset = static_cast<size_t>(internal_idx) * 2;
+          const uint16_t current = static_cast<uint16_t>(
+              ws->shared_compact[offset] |
+              (static_cast<uint16_t>(ws->shared_compact[offset + 1]) << 8));
+          const uint16_t updated =
+              static_cast<uint16_t>(current + contribution);
+          ws->shared_compact[offset] = static_cast<uint8_t>(updated);
+          ws->shared_compact[offset + 1] =
+              static_cast<uint8_t>(updated >> 8);
         } else {
           ws->shared[internal_idx] += contribution;
         }
@@ -398,7 +439,7 @@ std::vector<size_t> QGramCountIndex::query(
     }
   }
 
-  std::vector<size_t> candidates;
+  std::vector<QGramItemId> candidates;
   candidates.reserve(items_.size());
   const long long query_length = static_cast<long long>(query_sequence.size());
   const long long max_l1 = 2LL * static_cast<long long>(q_) * tau;
@@ -435,9 +476,17 @@ std::vector<size_t> QGramCountIndex::query(
         (compact_seen
              ? seen16[internal_idx] == current_epoch
              : seen32[internal_idx] == current_epoch)
-            ? (compact_shared
-                   ? static_cast<size_t>(ws->shared16[internal_idx])
-                   : ws->shared[internal_idx])
+            ? (byte_shared
+                   ? static_cast<size_t>(
+                         ws->shared_compact[internal_idx])
+                   : compact_shared
+                         ? static_cast<size_t>(
+                               ws->shared_compact[internal_idx * 2] |
+                               (static_cast<uint16_t>(
+                                    ws->shared_compact[
+                                        internal_idx * 2 + 1])
+                                << 8))
+                         : ws->shared[internal_idx])
             : 0;
     if (shared_count >= required_shared) {
       candidates.push_back(item.item_id);

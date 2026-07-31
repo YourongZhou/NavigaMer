@@ -165,34 +165,46 @@ ExactRangeJoinIndex::ExactRangeJoinIndex(
 }
 
 void ExactRangeJoinIndex::build(std::vector<RangeJoinItem> items) {
-  owned_items_ = std::move(items);
-  std::vector<OwnedItemRef> item_refs;
-  item_refs.reserve(owned_items_.size());
-  for (size_t item_idx = 0; item_idx < owned_items_.size(); ++item_idx) {
-    item_refs.push_back(
-        {owned_items_[item_idx].item_id, item_idx});
+  if (items.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    throw std::length_error("range-join index exceeds 32-bit item capacity");
   }
-  item_storage_ = std::move(item_refs);
+  for (const auto& item : items) {
+    if (item.item_id >
+        static_cast<size_t>(std::numeric_limits<RangeJoinItemId>::max())) {
+      throw std::length_error("range-join item ID exceeds 32-bit capacity");
+    }
+  }
+  owned_items_ = std::move(items);
+  item_storage_ = std::monostate{};
   external_item_ids_.clear();
   external_item_ids_.shrink_to_fit();
   reset_after_items_changed();
 }
 
 void ExactRangeJoinIndex::build_views(std::vector<RangeJoinItemView> items) {
+  if (items.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    throw std::length_error("range-join index exceeds 32-bit item capacity");
+  }
   owned_items_.clear();
   owned_items_.shrink_to_fit();
   external_item_ids_.clear();
   bool identity_item_ids = true;
   for (size_t item_idx = 0; item_idx < items.size(); ++item_idx) {
+    if (items[item_idx].item_id >
+        static_cast<size_t>(std::numeric_limits<RangeJoinItemId>::max())) {
+      throw std::length_error("range-join item ID exceeds 32-bit capacity");
+    }
     if (items[item_idx].item_id != item_idx) {
       identity_item_ids = false;
-      break;
     }
   }
   if (!identity_item_ids) {
     external_item_ids_.reserve(items.size());
     for (const auto& item : items) {
-      external_item_ids_.push_back(item.item_id);
+      external_item_ids_.push_back(
+          static_cast<RangeJoinItemId>(item.item_id));
     }
   } else {
     external_item_ids_.shrink_to_fit();
@@ -213,17 +225,17 @@ size_t ExactRangeJoinIndex::item_count() const {
     case 1:
       return std::get<1>(item_storage_).size();
     case 2:
-      return std::get<2>(item_storage_).size();
+      return owned_items_.size();
   }
   return 0;
 }
 
-size_t ExactRangeJoinIndex::item_id(size_t item_idx) const {
+RangeJoinItemId ExactRangeJoinIndex::item_id(size_t item_idx) const {
   if (item_storage_.index() == 2) {
-    return std::get<2>(item_storage_)[item_idx].item_id;
+    return static_cast<RangeJoinItemId>(owned_items_[item_idx].item_id);
   }
   return external_item_ids_.empty()
-             ? item_idx
+             ? static_cast<RangeJoinItemId>(item_idx)
              : external_item_ids_[item_idx];
 }
 
@@ -238,8 +250,7 @@ std::string_view ExactRangeJoinIndex::item_sequence(
   if (item_storage_.index() == 1) {
     return std::get<1>(item_storage_)[item_idx];
   }
-  const auto& item_ref = std::get<2>(item_storage_)[item_idx];
-  return owned_items_[item_ref.owned_item_idx].sequence;
+  return owned_items_[item_idx].sequence;
 }
 
 void ExactRangeJoinIndex::reset_after_items_changed() {
@@ -771,6 +782,13 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
   ScopedTimer full_timer(&result.range_full_scan_ms);
   result.mode_used = RangeCandidateMode::FullScan;
   result.used_full_scan = fallback;
+  const auto query_length = static_cast<long long>(query_sequence.size());
+  if (std::llabs(query_length -
+                 static_cast<long long>(min_item_sequence_length_)) <= tau &&
+      std::llabs(query_length -
+                 static_cast<long long>(max_item_sequence_length_)) <= tau) {
+    result.candidate_item_ids.reserve(item_count());
+  }
   {
     ScopedTimer length_timer(&result.range_length_filter_ms);
     for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
@@ -1110,6 +1128,16 @@ RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
       const bool posting_index_capacity =
           item_count() <= static_cast<size_t>(
                                std::numeric_limits<uint32_t>::max());
+      const auto query_length =
+          static_cast<long long>(query_sequence.size());
+      if (std::llabs(
+              query_length -
+              static_cast<long long>(min_item_sequence_length_)) <= tau &&
+          std::llabs(
+              query_length -
+              static_cast<long long>(max_item_sequence_length_)) <= tau) {
+        result.candidate_item_ids.reserve(item_count());
+      }
       for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
         const size_t item_length =
             item_sequence(item_idx).size();
@@ -1157,6 +1185,10 @@ RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
 void ExactRangeJoinIndex::build_uniform_identity_views(
     std::vector<const char*> sequence_data,
     size_t sequence_length) {
+  if (sequence_data.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    throw std::length_error("range-join index exceeds 32-bit item capacity");
+  }
   owned_items_.clear();
   owned_items_.shrink_to_fit();
   item_storage_ = std::move(sequence_data);

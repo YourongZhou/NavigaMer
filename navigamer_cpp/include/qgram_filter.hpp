@@ -10,6 +10,8 @@
 
 namespace navigamer {
 
+using QGramItemId = uint32_t;
+
 using QGramCounts = std::unordered_map<std::string, size_t>;
 
 QGramCounts compute_qgram_counts(std::string_view sequence, int q);
@@ -38,14 +40,16 @@ bool qgram_can_prune_edit_distance(
 
 struct QGramQueryWorkspace {
   std::vector<size_t> shared;
-  std::vector<uint16_t> shared16;
+  // One byte per item when totals fit uint8_t, otherwise two little-endian
+  // bytes per item when totals fit uint16_t.
+  std::vector<uint8_t> shared_compact;
   std::vector<uint32_t> seen_epoch;
   std::vector<uint16_t> seen_epoch16;
   uint32_t epoch = 1;
   uint16_t epoch16 = 1;
 
   void reset_seen(size_t item_count);
-  void reset(size_t item_count, bool compact_shared);
+  void reset(size_t item_count, bool compact_shared, bool byte_shared);
 };
 
 class QGramCountIndex {
@@ -73,7 +77,7 @@ class QGramCountIndex {
 
   void build(const std::vector<Item>& items);
   void build_views(const std::vector<ItemView>& items);
-  std::vector<size_t> query(
+  std::vector<QGramItemId> query(
       std::string_view query_sequence, int tau,
       QueryStats* stats = nullptr,
       QGramQueryWorkspace* workspace = nullptr) const;
@@ -83,11 +87,13 @@ class QGramCountIndex {
 
  private:
   struct StoredItem {
-    size_t item_id = 0;
-    size_t sequence_length = 0;
-    size_t total_qgrams = 0;
+    QGramItemId item_id = 0;
+    uint32_t sequence_length = 0;
+    uint32_t total_qgrams = 0;
     bool qgram_indexable = false;
   };
+  static_assert(sizeof(StoredItem) == 16,
+                "q-gram item metadata must remain 16 bytes");
 
   struct Posting {
     uint32_t internal_idx = 0;

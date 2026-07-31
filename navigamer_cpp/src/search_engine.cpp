@@ -1159,7 +1159,7 @@ BioGeometrySearchEngine::get_mbb_surviving_children(
   }
 }
 
-std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices(
+std::vector<uint32_t> BioGeometrySearchEngine::safe_child_router_candidate_indices(
     const std::shared_ptr<WorldNode>& node,
     const BioSequence& query_seq,
     const std::vector<int>& query_beacon_dists,
@@ -1187,14 +1187,14 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
     return true;
   };
 
-  auto accept_mbb_candidates = [&]() -> std::vector<size_t> {
+  auto accept_mbb_candidates = [&]() -> std::vector<uint32_t> {
     if (!mbb_router_ready()) {
       stats.children_actually_processed += child_count;
       stats.safe_child_router_fallback_count++;
       return {};
     }
 
-    std::vector<size_t> candidates;
+    std::vector<uint32_t> candidates;
     candidates.reserve(child_count);
     bool used_rect_index = false;
     const bool rect_index_ready =
@@ -1219,7 +1219,7 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
             break;
           }
           seen[child_idx] = 1;
-          candidates.push_back(static_cast<size_t>(child_idx));
+          candidates.push_back(child_idx);
         }
         used_rect_index = !candidates.empty() || rect_candidates.empty();
       } catch (...) {
@@ -1231,7 +1231,7 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
       for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
         const auto& row = node->child_beacon_mbbs[child_idx];
         if (!mbb_prunable_row(row, query_beacon_dists, tolerance)) {
-          candidates.push_back(child_idx);
+          candidates.push_back(static_cast<uint32_t>(child_idx));
         }
       }
     }
@@ -1291,7 +1291,7 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
   stats.safe_child_router_invoked_count++;
   stats.child_count_before_router += child_count;
   RangeJoinQueryWorkspace workspace;
-  std::vector<size_t> candidates;
+  std::vector<uint32_t> candidates;
   for (const auto& bucket : index_it->second.radius_buckets) {
     const int tau = tolerance + bucket.radius;
     auto result = bucket.range_index.query(query_seq.seq, tau, &workspace);
@@ -1306,7 +1306,7 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
                    candidates.end());
   candidates.erase(
       std::remove_if(candidates.begin(), candidates.end(),
-                     [child_count](size_t idx) { return idx >= child_count; }),
+                     [child_count](uint32_t idx) { return idx >= child_count; }),
       candidates.end());
 
   const double ratio = child_count == 0
@@ -1352,7 +1352,7 @@ std::vector<size_t> BioGeometrySearchEngine::safe_child_router_candidate_indices
   return candidates;
 }
 
-std::vector<size_t>
+std::vector<uint32_t>
 BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
     NodeId node_id,
     const BioSequence& query_seq,
@@ -1402,13 +1402,13 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
               beacon_count * child_count <=
           view.child_beacon_dists.size();
 
-  auto accept_mbb_candidates = [&]() -> std::vector<size_t> {
+  auto accept_mbb_candidates = [&]() -> std::vector<uint32_t> {
     if (!mbb_ready) {
       stats.children_actually_processed += child_count;
       stats.safe_child_router_fallback_count++;
       return {};
     }
-    std::vector<size_t> candidates;
+    std::vector<uint32_t> candidates;
     candidates.reserve(child_count);
     for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
       bool prunable = false;
@@ -1424,7 +1424,9 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
           break;
         }
       }
-      if (!prunable) candidates.push_back(child_idx);
+      if (!prunable) {
+        candidates.push_back(static_cast<uint32_t>(child_idx));
+      }
     }
 
     const double ratio =
@@ -1476,7 +1478,7 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
   stats.safe_child_router_invoked_count++;
   stats.child_count_before_router += child_count;
   RangeJoinQueryWorkspace workspace;
-  std::vector<size_t> candidates;
+  std::vector<uint32_t> candidates;
   for (const auto& bucket : index_it->second.radius_buckets) {
     const int tau = tolerance + bucket.radius;
     auto result = bucket.range_index.query(query_seq.seq, tau, &workspace);
@@ -1489,7 +1491,7 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
                    candidates.end());
   candidates.erase(
       std::remove_if(candidates.begin(), candidates.end(),
-                     [child_count](size_t idx) {
+                     [child_count](uint32_t idx) {
                        return idx >= child_count;
                      }),
       candidates.end());
@@ -1549,7 +1551,7 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
 std::vector<std::shared_ptr<WorldNode>>
 BioGeometrySearchEngine::scan_mbb_surviving_child_indices(
     const std::shared_ptr<WorldNode>& node,
-    const std::vector<size_t>& child_indices,
+    const std::vector<uint32_t>& child_indices,
     const std::vector<int>& query_beacon_dists,
     int tolerance,
     SearchStats& stats) const {
@@ -1786,7 +1788,7 @@ std::vector<std::string> BioGeometrySearchEngine::debug_safe_child_router_candid
     child_indices.clear();
     child_indices.reserve(view.child_count(parent_id));
     for (size_t i = 0; i < view.child_count(parent_id); ++i) {
-      child_indices.push_back(i);
+      child_indices.push_back(static_cast<uint32_t>(i));
     }
   }
   out.reserve(child_indices.size());
@@ -3243,7 +3245,7 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
 
 std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
     NodeId node_id,
-    const std::vector<size_t>& child_offsets,
+    const std::vector<uint32_t>& child_offsets,
     const std::vector<int>& query_beacon_dists,
     int child_radius,
     int tolerance,
@@ -3333,6 +3335,7 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
   return surviving;
 }
 
+NAVIGAMER_QUERY_HOT_ALIGN
 void BioGeometrySearchEngine::process_node_adaptive_view(
     NodeId node_id, int current_layer,
     const BioSequence& query_seq, int tolerance,

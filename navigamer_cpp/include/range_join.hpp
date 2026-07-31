@@ -16,6 +16,8 @@
 
 namespace navigamer {
 
+using RangeJoinItemId = uint32_t;
+
 enum class RangeCandidateMode {
   Auto,
   PigeonholeOnly,
@@ -48,7 +50,7 @@ struct RangeJoinItemView {
 };
 
 struct RangeJoinQueryResult {
-  std::vector<size_t> candidate_item_ids;
+  std::vector<RangeJoinItemId> candidate_item_ids;
   bool used_full_scan = false;
   RangeCandidateMode mode_used = RangeCandidateMode::FullScan;
   int block_len = 0;
@@ -105,13 +107,6 @@ class ExactRangeJoinIndex {
       RangeJoinQueryWorkspace* workspace) const;
 
  private:
-  struct OwnedItemRef {
-    size_t item_id = 0;
-    size_t owned_item_idx = 0;
-  };
-  static_assert(sizeof(OwnedItemRef) == 2 * sizeof(size_t),
-                "owned range-join item references must remain two words");
-
   using PostingLists16 =
       std::unordered_map<uint64_t, std::vector<uint16_t>>;
   using PostingLists = std::unordered_map<uint64_t, std::vector<uint32_t>>;
@@ -125,13 +120,14 @@ class ExactRangeJoinIndex {
   using ItemStorage = std::variant<
       std::vector<const char*>,
       std::vector<std::string_view>,
-      std::vector<OwnedItemRef>>;
+      std::monostate>;
   // Fixed-length reference sequences are the production/query-side common
   // case, so keep their compact pointers in the first variant alternative.
   ItemStorage item_storage_ = std::vector<const char*>{};
-  // External view IDs are implicit when they are exactly 0..N-1. Owned IDs
-  // live in the compact OwnedItemRef alternative above.
-  std::vector<size_t> external_item_ids_;
+  // Item IDs are 32-bit throughout the production graph. External view IDs
+  // are implicit when they are exactly 0..N-1; owned IDs already live in
+  // owned_items_ and need no second per-item table.
+  std::vector<RangeJoinItemId> external_item_ids_;
   std::unordered_map<int, PostingLists16> postings16_by_seed_len_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
   std::unordered_map<int, PositionalPostingLists>
@@ -156,7 +152,7 @@ class ExactRangeJoinIndex {
   mutable std::shared_ptr<std::mutex> deferred_qgram_mutex_;
 
   size_t item_count() const;
-  size_t item_id(size_t item_idx) const;
+  RangeJoinItemId item_id(size_t item_idx) const;
   std::string_view item_sequence(size_t item_idx) const;
   void reset_after_items_changed();
   bool qgram_bound_is_vacuous(

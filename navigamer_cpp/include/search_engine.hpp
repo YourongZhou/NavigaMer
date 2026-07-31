@@ -347,14 +347,14 @@ class BioGeometrySearchEngine {
       const std::vector<int>& query_beacon_dists,
       int tolerance,
       SearchStats& stats) const;
-  std::vector<size_t> safe_child_router_candidate_indices(
+  std::vector<uint32_t> safe_child_router_candidate_indices(
       const std::shared_ptr<WorldNode>& node,
       const BioSequence& query_seq,
       const std::vector<int>& query_beacon_dists,
       int tolerance,
       SearchStats& stats,
       bool* used_router) const;
-  std::vector<size_t> safe_child_router_candidate_indices_view(
+  std::vector<uint32_t> safe_child_router_candidate_indices_view(
       NodeId node_id,
       const BioSequence& query_seq,
       const std::vector<int>& query_beacon_dists,
@@ -364,7 +364,7 @@ class BioGeometrySearchEngine {
       bool* used_router) const;
   std::vector<std::shared_ptr<WorldNode>> scan_mbb_surviving_child_indices(
       const std::shared_ptr<WorldNode>& node,
-      const std::vector<size_t>& child_indices,
+      const std::vector<uint32_t>& child_indices,
       const std::vector<int>& query_beacon_dists,
       int tolerance,
       SearchStats& stats) const;
@@ -462,7 +462,7 @@ class BioGeometrySearchEngine {
       SearchStats& stats) const;
   std::vector<NodeId> scan_mbb_surviving_child_ids_view(
       NodeId node_id,
-      const std::vector<size_t>& child_offsets,
+      const std::vector<uint32_t>& child_offsets,
       const std::vector<int>& query_beacon_dists,
       int child_radius,
       int tolerance,

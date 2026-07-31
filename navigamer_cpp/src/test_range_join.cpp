@@ -51,13 +51,14 @@ std::string mutate_with_indels(std::string value, int edits, std::mt19937& gen) 
   return value;
 }
 
-bool contains(const std::vector<size_t>& ids, size_t id) {
+bool contains(const std::vector<navigamer::RangeJoinItemId>& ids, size_t id) {
   return std::binary_search(ids.begin(), ids.end(), id);
 }
 
-std::vector<size_t> intersection(
-    const std::vector<size_t>& lhs, const std::vector<size_t>& rhs) {
-  std::vector<size_t> out;
+std::vector<navigamer::RangeJoinItemId> intersection(
+    const std::vector<navigamer::RangeJoinItemId>& lhs,
+    const std::vector<navigamer::RangeJoinItemId>& rhs) {
+  std::vector<navigamer::RangeJoinItemId> out;
   std::set_intersection(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
                         std::back_inserter(out));
   return out;
@@ -107,13 +108,13 @@ void test_parallel_range_join_queries_are_deterministic() {
   std::vector<std::string> queries = bases;
   queries.push_back("ACGTACGTACGTACGTACGTACGTACGTAAAA");
 
-  std::vector<std::vector<size_t>> serial;
+  std::vector<std::vector<navigamer::RangeJoinItemId>> serial;
   for (const auto& query : queries) {
     navigamer::RangeJoinQueryWorkspace workspace;
     serial.push_back(index.query(query, 3, &workspace).candidate_item_ids);
   }
 
-  std::vector<std::vector<size_t>> parallel(queries.size());
+  std::vector<std::vector<navigamer::RangeJoinItemId>> parallel(queries.size());
 #pragma omp parallel for schedule(dynamic, 1)
   for (size_t i = 0; i < queries.size(); ++i) {
     navigamer::RangeJoinQueryWorkspace workspace;
@@ -174,22 +175,23 @@ void test_vacuous_qgram_bound_skips_deferred_postings() {
   assert(vacuous.mode_used == navigamer::RangeCandidateMode::QGramOnly);
   assert(!vacuous.used_full_scan);
   assert(vacuous.candidate_item_ids ==
-         (std::vector<size_t>{10, 20, 30, 40}));
+      (std::vector<navigamer::RangeJoinItemId>{10, 20, 30, 40}));
   assert(vacuous.required_shared_nonpositive == items.size());
   assert(workspace.qgram.shared.empty());
-  assert(workspace.qgram.shared16.empty());
+  assert(workspace.qgram.shared_compact.empty());
   assert(workspace.qgram.seen_epoch.empty());
   assert(workspace.qgram.seen_epoch16.empty());
 
   const auto selective = index.query(items[0].sequence, 0, &workspace);
-  assert(selective.candidate_item_ids == (std::vector<size_t>{10}));
-  assert(!workspace.qgram.shared16.empty());
+  assert(selective.candidate_item_ids ==
+         (std::vector<navigamer::RangeJoinItemId>{10}));
+  assert(!workspace.qgram.shared_compact.empty());
   assert(!workspace.qgram.seen_epoch16.empty());
 
   const auto unsafe = index.query(std::string(100, 'N'), 0);
   assert(unsafe.used_full_scan);
   assert(unsafe.candidate_item_ids ==
-         (std::vector<size_t>{10, 20, 30, 40}));
+      (std::vector<navigamer::RangeJoinItemId>{10, 20, 30, 40}));
 }
 
 void test_external_views_preserve_sparse_item_ids() {
@@ -209,10 +211,11 @@ void test_external_views_preserve_sparse_item_ids() {
   index.build_views(std::move(views));
 
   const auto selective = index.query(sequences[1], 0);
-  assert(selective.candidate_item_ids == (std::vector<size_t>{7}));
+  assert(selective.candidate_item_ids ==
+         (std::vector<navigamer::RangeJoinItemId>{7}));
   const auto vacuous = index.query(sequences[1], 8);
   assert(vacuous.candidate_item_ids ==
-         (std::vector<size_t>{7, 42, 90}));
+      (std::vector<navigamer::RangeJoinItemId>{7, 42, 90}));
 
   navigamer::ExactRangeJoinIndex copied = index;
   assert(copied.query(sequences[1], 0).candidate_item_ids ==
@@ -307,7 +310,8 @@ void test_positional_postings_are_recall_safe() {
       long_config, true, false, true);
   long_index.build({{7, long_sequence}});
   const auto long_result = long_index.query(long_sequence, 0);
-  assert((long_result.candidate_item_ids == std::vector<size_t>{7}));
+  assert((long_result.candidate_item_ids ==
+          std::vector<navigamer::RangeJoinItemId>{7}));
 }
 
 }  // namespace
@@ -544,6 +548,17 @@ int main() {
   assert(selected_pigeonhole.auto_pigeonhole_accepted == 1);
   assert(selected_pigeonhole.auto_qgram_invoked == 0);
   assert(selected_pigeonhole.auto_hybrid_invoked == 0);
+
+  bool rejected_wide_id = false;
+  try {
+    ExactRangeJoinIndex wide_id_index;
+    wide_id_index.build({{
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1,
+        "ACGTACGT"}});
+  } catch (const std::length_error&) {
+    rejected_wide_id = true;
+  }
+  assert(rejected_wide_id);
 
   std::cout << "range join tests passed\n";
   return 0;
