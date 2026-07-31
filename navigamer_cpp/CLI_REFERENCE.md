@@ -257,6 +257,11 @@ plus construction counters to CSV. With `--index <file>`, exactly one prefix
 must be requested and the resulting reference-window index is serialized.
 Reference windows use one stored reference sequence plus representative
 offsets; they are not materialized as independent `std::string` objects.
+FASTA contig boundaries are retained, cross-contig windows are never created,
+and windows containing characters outside A/C/G/T are counted as invalid and
+skipped. Repeated valid windows use a sparse occurrence array for direct
+contig-local output-coordinate lookup; occurrences between stride-selected
+window starts are retained as well.
 
 **Required:** `--ref`, `--prefix-lengths`, `--out`
 
@@ -667,7 +672,7 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 `length`, `stride_mode`, `num_index_seqs`, `error_rate`, `error_edits`, `tolerance_rate`, `tolerance_edits`, `query_count`, `source_recovery_rate`, `any_hit_rate`, `avg_hit_count`, `avg_dist_calcs`, `avg_leaf_verify_count`, `avg_candidate_count_for_prune`, `avg_beacon_prune_count`, `avg_pruning_rate`, `bf_sample_count`, `bf_source_recovery_rate`, `bf_agreement_rate`, `bf_source_mismatch_count`
 
 **`build-scale`:**
-`prefix_len`, `window_count`, `unique_count`, `world_node_count`,
+`prefix_len`, `window_count`, `invalid_window_count`, `unique_count`, `world_node_count`,
 `finest_world_count`, `total_build_ms`, `phase0_dedup_ms`,
 `phase1_sketch_ms`, `phase2_rebinding_ms`, `phase2_index_build_ms`,
 `phase2_candidate_query_ms`, `phase2_exact_verify_ms`,

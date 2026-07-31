@@ -615,12 +615,15 @@ void run_build_scale(const std::string& ref_input,
         "build-scale --leaf-attach-direction must be auto, seq-to-world, or world-to-seq");
   }
 
-  auto [ref_id, ref_seq] = load_reference(ref_input);
+  auto reference = load_reference_genome(ref_input);
+  const std::string& ref_id = reference.id;
+  const std::string& ref_seq = reference.sequence;
   if (ref_seq.empty()) throw std::runtime_error("build-scale reference is empty");
 
   const std::vector<std::string> columns = {
       "prefix_len",
       "window_count",
+      "invalid_window_count",
       "unique_count",
       "world_node_count",
       "finest_world_count",
@@ -689,11 +692,22 @@ void run_build_scale(const std::string& ref_input,
   for (size_t requested_prefix : prefix_lengths) {
     const size_t actual_prefix = std::min(requested_prefix, ref_seq.size());
     std::string prefix_seq = ref_seq.substr(0, actual_prefix);
-    const size_t window_count =
-        actual_prefix < static_cast<size_t>(window_size)
-            ? 0
-            : 1 + (actual_prefix - static_cast<size_t>(window_size)) /
-                      static_cast<size_t>(stride);
+    std::vector<ReferenceContig> prefix_contigs;
+    size_t window_count = 0;
+    for (const auto& contig : reference.contigs) {
+      if (contig.begin >= actual_prefix) break;
+      ReferenceContig prefix_contig = contig;
+      prefix_contig.end = static_cast<uint32_t>(
+          std::min<size_t>(contig.end, actual_prefix));
+      prefix_contigs.push_back(std::move(prefix_contig));
+      const size_t contig_length =
+          prefix_contigs.back().end - prefix_contigs.back().begin;
+      if (contig_length >= static_cast<size_t>(window_size)) {
+        window_count +=
+            1 + (contig_length - static_cast<size_t>(window_size)) /
+                    static_cast<size_t>(stride);
+      }
+    }
     std::cerr << "build-scale: prefix_len=" << actual_prefix
               << " requested=" << requested_prefix
               << " windows=" << window_count
@@ -703,7 +717,8 @@ void run_build_scale(const std::string& ref_input,
     BioGeometryIndexBuilder builder(config, range_config);
     builder.build_reference_windows(
         ref_id, std::move(prefix_seq),
-        static_cast<size_t>(window_size), static_cast<size_t>(stride));
+        static_cast<size_t>(window_size), static_cast<size_t>(stride),
+        std::move(prefix_contigs));
     if (!index_path.empty()) {
       IndexBuildManifest manifest = make_reference_window_index_manifest(
           ref_input, actual_prefix, window_size, stride, config, range_config);
@@ -724,6 +739,7 @@ void run_build_scale(const std::string& ref_input,
     write_row({
         std::to_string(actual_prefix),
         std::to_string(window_count),
+        std::to_string(stats.invalid_reference_windows),
         std::to_string(stats.unique_sequences),
         std::to_string(builder.num_world_nodes()),
         std::to_string(finest_count),
@@ -792,11 +808,17 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
   BioSequence q("query", query_seq);
   const auto& sequences = builder.sequence_store();
   const auto print_hit = [&](LeafId sequence_id) {
-    const std::string display_id =
-        !sequences.reference_backed
-            ? sequences.at(sequence_id).id
-            : sequences.reference_id + "_" +
-                  std::to_string(sequences.source_position(sequence_id));
+    std::string display_id;
+    if (!sequences.reference_backed) {
+      display_id = sequences.at(sequence_id).id;
+    } else {
+      const size_t source_pos =
+          sequences.source_position(sequence_id);
+      const auto& contig =
+          sequences.contig_for_position(source_pos);
+      display_id = contig.id + "_" +
+                   std::to_string(source_pos - contig.begin);
+    }
     std::cout << "  " << display_id << " dist="
               << compute_distance(
                      query_seq, sequences.sequence(sequence_id))
@@ -1472,23 +1494,24 @@ void run_query_index_batch(const std::string& index_path,
         const BioSequence* output_hit = nullptr;
         if (sequence_store.reference_backed) {
           materialized_hit = sequence_store.materialize(hit_id);
-          size_t occurrence = sequence_store.reference_sequence.find(
-              materialized_hit.seq);
-          while (occurrence != std::string::npos) {
-            if (occurrence >
+          const auto add_occurrence = [&](uint32_t occurrence) {
+            const auto& contig =
+                sequence_store.contig_for_position(occurrence);
+            const size_t local_start =
+                static_cast<size_t>(occurrence - contig.begin);
+            if (local_start >
                 static_cast<size_t>(std::numeric_limits<int>::max()) -
                     hit_sequence.size()) {
               throw std::runtime_error(
                   "reference occurrence exceeds RefPosition integer range");
             }
             materialized_hit.add_occurrence(
-                sequence_store.reference_id,
-                static_cast<int>(occurrence),
-                static_cast<int>(occurrence + hit_sequence.size()),
+                contig.id,
+                static_cast<int>(local_start),
+                static_cast<int>(local_start + hit_sequence.size()),
                 "+");
-            occurrence = sequence_store.reference_sequence.find(
-                materialized_hit.seq, occurrence + 1);
-          }
+          };
+          sequence_store.for_each_occurrence(hit_id, add_occurrence);
           output_hit = &materialized_hit;
         } else {
           output_hit = &sequence_store.at(hit_id);

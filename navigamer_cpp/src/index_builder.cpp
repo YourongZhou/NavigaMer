@@ -26,6 +26,11 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+bool is_acgt(char base) {
+  return base == 'A' || base == 'C' || base == 'G' || base == 'T' ||
+         base == 'a' || base == 'c' || base == 'g' || base == 't';
+}
+
 double elapsed_ms_since(Clock::time_point start) {
   return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
@@ -1448,15 +1453,74 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
         view.sequences.reference_records.size() != sequence_count_) {
       return false;
     }
+    uint32_t previous_contig_end = 0;
+    for (const auto& contig : view.sequences.reference_contigs) {
+      if (contig.id.empty() || contig.begin != previous_contig_end ||
+          contig.end < contig.begin ||
+          contig.end > view.sequences.reference_sequence.size()) {
+        return false;
+      }
+      previous_contig_end = contig.end;
+    }
+    if ((!view.sequences.reference_sequence.empty() &&
+         view.sequences.reference_contigs.empty()) ||
+        previous_contig_end != view.sequences.reference_sequence.size()) {
+      return false;
+    }
+    const auto is_valid_reference_window =
+        [&](uint32_t source_pos) {
+          if (source_pos >=
+                  view.sequences.reference_sequence.size() ||
+              view.sequences.fixed_sequence_length >
+                  view.sequences.reference_sequence.size() - source_pos) {
+            return false;
+          }
+          const auto contig = std::upper_bound(
+              view.sequences.reference_contigs.begin(),
+              view.sequences.reference_contigs.end(), source_pos,
+              [](uint32_t position, const ReferenceContig& candidate) {
+                return position < candidate.begin;
+              });
+          if (contig == view.sequences.reference_contigs.begin()) {
+            return false;
+          }
+          const auto& containing_contig = *std::prev(contig);
+          return source_pos >= containing_contig.begin &&
+                 static_cast<size_t>(source_pos) +
+                         view.sequences.fixed_sequence_length <=
+                     containing_contig.end;
+        };
     for (const auto& record : view.sequences.reference_records) {
-      if (record.source_pos > view.sequences.reference_sequence.size() ||
-          view.sequences.fixed_sequence_length >
-              view.sequences.reference_sequence.size() - record.source_pos) {
+      if (!is_valid_reference_window(record.source_pos)) {
         return false;
       }
     }
+    LeafId previous_sequence_id = 0;
+    uint32_t previous_source_pos = 0;
+    bool first_occurrence = true;
+    for (const auto& occurrence :
+         view.sequences.additional_occurrences) {
+      if (occurrence.sequence_id >= sequence_count_ ||
+          occurrence.source_pos ==
+              view.sequences.reference_records[
+                  occurrence.sequence_id].source_pos ||
+          !is_valid_reference_window(occurrence.source_pos) ||
+          (!first_occurrence &&
+           (occurrence.sequence_id < previous_sequence_id ||
+            (occurrence.sequence_id == previous_sequence_id &&
+             occurrence.source_pos <= previous_source_pos)))) {
+        return false;
+      }
+      previous_sequence_id = occurrence.sequence_id;
+      previous_source_pos = occurrence.source_pos;
+      first_occurrence = false;
+    }
   } else {
-    if (!view.sequences.reference_records.empty()) return false;
+    if (!view.sequences.reference_records.empty() ||
+        !view.sequences.additional_occurrences.empty() ||
+        !view.sequences.reference_contigs.empty()) {
+      return false;
+    }
     for (size_t sequence_id = 0; sequence_id < view.sequences.size();
          ++sequence_id) {
       if (view.sequences.records[sequence_id].sequence_id != sequence_id) {
@@ -1634,6 +1698,8 @@ void BioGeometryIndexBuilder::initialize_sequence_store(
   auto& store = search_graph_view_.sequences;
   store.reference_backed = false;
   store.reference_records.clear();
+  store.additional_occurrences.clear();
+  store.reference_contigs.clear();
   store.reference_id.clear();
   store.reference_sequence.clear();
   store.fixed_sequence_length = 0;
@@ -1662,6 +1728,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
     std::string reference_sequence,
     size_t window_length,
     size_t stride,
+    std::vector<ReferenceContig> reference_contigs,
     BuildProgressReporter* progress) {
   if (window_length == 0) {
     throw std::invalid_argument("reference window length must be positive");
@@ -1676,6 +1743,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
   store.fixed_sequence_length = window_length;
   store.reference_backed = true;
   store.records.clear();
+  store.additional_occurrences.clear();
 
   if (store.reference_sequence.size() >=
       static_cast<size_t>(UINT32_MAX)) {
@@ -1683,10 +1751,33 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
         "reference-backed index requires reference coordinates below 2^32");
   }
 
-  const size_t window_count =
-      store.reference_sequence.size() < window_length
-          ? 0
-          : 1 + (store.reference_sequence.size() - window_length) / stride;
+  if (reference_contigs.empty() && !store.reference_sequence.empty()) {
+    reference_contigs.push_back(
+        {store.reference_id, 0,
+         static_cast<uint32_t>(store.reference_sequence.size())});
+  }
+  uint32_t expected_begin = 0;
+  size_t window_count = 0;
+  for (const auto& contig : reference_contigs) {
+    if (contig.id.empty() || contig.begin != expected_begin ||
+        contig.end < contig.begin ||
+        contig.end > store.reference_sequence.size()) {
+      throw std::invalid_argument(
+          "reference contigs must be ordered, contiguous, and in bounds");
+    }
+    const size_t contig_length =
+        static_cast<size_t>(contig.end - contig.begin);
+    if (contig_length >= window_length) {
+      window_count +=
+          1 + (contig_length - window_length) / stride;
+    }
+    expected_begin = contig.end;
+  }
+  if (expected_begin != store.reference_sequence.size()) {
+    throw std::invalid_argument(
+        "reference contigs do not cover the flattened reference");
+  }
+  store.reference_contigs = std::move(reference_contigs);
   if (window_count > static_cast<size_t>(INVALID_LEAF_ID - 1)) {
     throw std::runtime_error(
         "too many reference windows for 32-bit LeafId");
@@ -1696,28 +1787,85 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
   store.reference_records.reserve(window_count);
   std::unordered_map<std::string_view, LeafId> sequence_ids;
   sequence_ids.reserve(window_count);
-  for (size_t window_idx = 0, start = 0;
-       window_idx < window_count;
-       ++window_idx, start += stride) {
-    stats_.added_sequences++;
-    const std::string_view sequence(
-        store.reference_sequence.data() + start, window_length);
-    const auto existing = sequence_ids.find(sequence);
-    if (existing != sequence_ids.end()) {
-      stats_.deduplicated++;
-    } else {
-      const LeafId sequence_id =
-          static_cast<LeafId>(store.reference_records.size());
-      store.reference_records.push_back(
-          {static_cast<uint32_t>(start), UINT32_MAX, UINT32_MAX});
-      sequence_ids.emplace(sequence, sequence_id);
-    }
-    if (progress &&
-        ((window_idx + 1) % 65536 == 0 ||
-         window_idx + 1 == window_count)) {
-      progress->set_completed(window_idx + 1);
+  size_t processed_windows = 0;
+  for (const auto& contig : store.reference_contigs) {
+    const size_t contig_begin = contig.begin;
+    const size_t contig_end = contig.end;
+    if (contig_end - contig_begin < window_length) continue;
+    size_t next_invalid = contig_begin;
+    for (size_t start = contig_begin;
+         start + window_length <= contig_end;
+         start += stride) {
+      stats_.added_sequences++;
+      processed_windows++;
+      if (next_invalid < start) next_invalid = start;
+      while (next_invalid < contig_end &&
+             is_acgt(store.reference_sequence[next_invalid])) {
+        next_invalid++;
+      }
+      if (next_invalid < start + window_length) {
+        stats_.invalid_reference_windows++;
+      } else {
+        const std::string_view sequence(
+            store.reference_sequence.data() + start, window_length);
+        const auto existing = sequence_ids.find(sequence);
+        if (existing != sequence_ids.end()) {
+          stats_.deduplicated++;
+          if (stride == 1) {
+            store.additional_occurrences.push_back(
+                {existing->second, static_cast<uint32_t>(start)});
+          }
+        } else {
+          const LeafId sequence_id =
+              static_cast<LeafId>(store.reference_records.size());
+          store.reference_records.push_back(
+              {static_cast<uint32_t>(start), UINT32_MAX, UINT32_MAX});
+          sequence_ids.emplace(sequence, sequence_id);
+        }
+      }
+      if (progress &&
+          (processed_windows % 65536 == 0 ||
+           processed_windows == window_count)) {
+        progress->set_completed(processed_windows);
+      }
     }
   }
+  // A sampled leaf represents its sequence at every valid reference
+  // occurrence, including positions that are not themselves stride-selected.
+  // For stride 1 the first pass already collected exactly this set.
+  if (stride != 1) {
+    for (const auto& contig : store.reference_contigs) {
+      const size_t contig_begin = contig.begin;
+      const size_t contig_end = contig.end;
+      if (contig_end - contig_begin < window_length) continue;
+      size_t next_invalid = contig_begin;
+      for (size_t start = contig_begin;
+           start + window_length <= contig_end; ++start) {
+        if (next_invalid < start) next_invalid = start;
+        while (next_invalid < contig_end &&
+               is_acgt(store.reference_sequence[next_invalid])) {
+          next_invalid++;
+        }
+        if (next_invalid < start + window_length) continue;
+        const std::string_view sequence(
+            store.reference_sequence.data() + start, window_length);
+        const auto existing = sequence_ids.find(sequence);
+        if (existing == sequence_ids.end()) continue;
+        if (store.reference_records[existing->second].source_pos != start) {
+          store.additional_occurrences.push_back(
+              {existing->second, static_cast<uint32_t>(start)});
+        }
+      }
+    }
+  }
+  std::sort(
+      store.additional_occurrences.begin(),
+      store.additional_occurrences.end(),
+      [](const ReferenceOccurrence& left,
+         const ReferenceOccurrence& right) {
+        return std::tie(left.sequence_id, left.source_pos) <
+               std::tie(right.sequence_id, right.source_pos);
+      });
   sequence_count_ = store.reference_records.size();
   stats_.unique_sequences = sequence_count_;
 }
@@ -3219,19 +3367,20 @@ void BioGeometryIndexBuilder::print_summary() const {
 
 void BioGeometryIndexBuilder::build(
     const std::vector<std::shared_ptr<BioSequence>>& raw_sequences) {
-  build_impl(raw_sequences, false, {}, {}, 0, 0);
+  build_impl(raw_sequences, false, {}, {}, 0, 0, {});
 }
 
 void BioGeometryIndexBuilder::build(
     std::vector<std::shared_ptr<BioSequence>>&& raw_sequences) {
-  build_impl(std::move(raw_sequences), true, {}, {}, 0, 0);
+  build_impl(std::move(raw_sequences), true, {}, {}, 0, 0, {});
 }
 
 void BioGeometryIndexBuilder::build_reference_windows(
     std::string reference_id,
     std::string reference_sequence,
     size_t window_length,
-    size_t stride) {
+    size_t stride,
+    std::vector<ReferenceContig> reference_contigs) {
   if (window_length == 0) {
     throw std::invalid_argument("reference window length must be positive");
   }
@@ -3240,7 +3389,7 @@ void BioGeometryIndexBuilder::build_reference_windows(
   }
   build_impl(
       {}, false, std::move(reference_id), std::move(reference_sequence),
-      window_length, stride);
+      window_length, stride, std::move(reference_contigs));
 }
 
 void BioGeometryIndexBuilder::build_impl(
@@ -3249,15 +3398,31 @@ void BioGeometryIndexBuilder::build_impl(
     std::string reference_id,
     std::string reference_sequence,
     size_t reference_window_length,
-    size_t reference_stride) {
+    size_t reference_stride,
+    std::vector<ReferenceContig> reference_contigs) {
   const auto build_start = Clock::now();
   const bool build_from_reference = reference_window_length != 0;
-  const size_t raw_sequence_count =
-      build_from_reference &&
-              reference_sequence.size() >= reference_window_length
-          ? 1 + (reference_sequence.size() - reference_window_length) /
-                    reference_stride
-          : raw_sequences.size();
+  size_t raw_sequence_count = raw_sequences.size();
+  if (build_from_reference) {
+    raw_sequence_count = 0;
+    if (reference_contigs.empty()) {
+      if (reference_sequence.size() >= reference_window_length) {
+        raw_sequence_count =
+            1 + (reference_sequence.size() - reference_window_length) /
+                    reference_stride;
+      }
+    } else {
+      for (const auto& contig : reference_contigs) {
+        const size_t contig_length =
+            static_cast<size_t>(contig.end - contig.begin);
+        if (contig_length >= reference_window_length) {
+          raw_sequence_count +=
+              1 + (contig_length - reference_window_length) /
+                      reference_stride;
+        }
+      }
+    }
+  }
   BuildProgressReporter progress(range_config_.progress_interval_seconds);
   stats_ = Statistics{};
   stats_.created_primary_nodes.assign(static_cast<size_t>(num_primary_layers()), 0);
@@ -3281,7 +3446,8 @@ void BioGeometryIndexBuilder::build_impl(
     if (build_from_reference) {
       initialize_reference_sequence_store(
           std::move(reference_id), std::move(reference_sequence),
-          reference_window_length, reference_stride, &progress);
+          reference_window_length, reference_stride,
+          std::move(reference_contigs), &progress);
       unique_sequence_count = search_graph_view_.sequences.size();
     } else {
       unique_seqs = deduplicate(std::move(raw_sequences));
@@ -3293,7 +3459,12 @@ void BioGeometryIndexBuilder::build_impl(
   progress.finish_phase();
   std::cerr << "    " << raw_sequence_count << " -> "
             << unique_sequence_count << " unique ("
-            << stats_.deduplicated << " merged)\n";
+            << stats_.deduplicated << " merged";
+  if (build_from_reference) {
+    std::cerr << ", " << stats_.invalid_reference_windows
+              << " invalid windows skipped";
+  }
+  std::cerr << ")\n";
 
   std::cerr << "  Phase 1: Extended hierarchy sketch (top-down)...\n";
   std::cerr << "    Primary radii: ";

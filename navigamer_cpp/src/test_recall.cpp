@@ -158,26 +158,48 @@ TestResult run_reference_backed_test() {
   constexpr int kTolerance = 2;
   constexpr size_t kQueryCount = 100;
   std::mt19937 gen(8128);
-  const std::string reference = random_dna(700, gen);
+  const std::string contig1 = random_dna(380, gen);
+  std::string contig2 = random_dna(340, gen);
+  contig2.replace(117, 6, "NNNNNN");
+  const std::string reference = contig1 + contig2;
+  const std::vector<navigamer::ReferenceContig> contigs = {
+      {"contig1", 0, static_cast<uint32_t>(contig1.size())},
+      {"contig2", static_cast<uint32_t>(contig1.size()),
+       static_cast<uint32_t>(reference.size())}};
 
   navigamer::BioGeometryIndexBuilder builder(
       navigamer::HierarchyConfig({12, 6, 3}));
   builder.build_reference_windows(
-      "synthetic", reference, kSequenceLength, 1);
+      "contig1", reference, kSequenceLength, 1, contigs);
   assert(builder.sequence_store().reference_backed);
   assert(builder.sequence_store().records.empty());
   assert(!builder.sequence_store().reference_records.empty());
+  assert(builder.get_statistics().invalid_reference_windows > 0);
+  for (size_t sequence_idx = 0;
+       sequence_idx < builder.sequence_store().size(); ++sequence_idx) {
+    const auto sequence_id =
+        static_cast<navigamer::LeafId>(sequence_idx);
+    const auto sequence = builder.sequence_store().sequence(sequence_id);
+    assert(sequence.find('N') == std::string_view::npos);
+    const size_t start =
+        builder.sequence_store().source_position(sequence_id);
+    const auto& contig =
+        builder.sequence_store().contig_for_position(start);
+    assert(start + kSequenceLength <= contig.end);
+  }
 
   navigamer::BioGeometrySearchEngine engine(builder);
-  std::uniform_int_distribution<size_t> start_pick(
-      0, reference.size() - kSequenceLength);
+  std::uniform_int_distribution<size_t> sequence_pick(
+      0, builder.sequence_store().size() - 1);
   TestResult result{};
   result.total_queries = kQueryCount;
   for (size_t query_idx = 0; query_idx < kQueryCount; ++query_idx) {
-    const size_t start = start_pick(gen);
+    const auto sequence_id = static_cast<navigamer::LeafId>(
+        sequence_pick(gen));
     navigamer::BioSequence query(
         "reference_query_" + std::to_string(query_idx),
-        mutate(reference.substr(start, kSequenceLength), kTolerance, gen));
+        mutate(std::string(builder.sequence_store().sequence(sequence_id)),
+               kTolerance, gen));
     const auto [bf_res, bf_stats] =
         engine.search_brute_force(query, kTolerance);
     const auto [adaptive_res, adaptive_stats] =
@@ -261,7 +283,7 @@ int main() {
 
   std::cerr << "Test " << (configs.size() + 1) << "/"
             << (configs.size() + 1)
-            << ": reference-backed stride-1 windows ... ";
+            << ": multi-contig reference-backed valid windows ... ";
   const auto reference_result = run_reference_backed_test();
   if (reference_result.passed) {
     std::cerr << "PASS";

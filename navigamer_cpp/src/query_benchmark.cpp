@@ -705,11 +705,7 @@ std::vector<std::string> result_ids(
   std::vector<std::string> ids;
   ids.reserve(results.size());
   for (LeafId result : results) {
-    ids.push_back(sequence_store.reference_backed
-                      ? sequence_store.reference_id + "_" +
-                            std::to_string(
-                                sequence_store.source_position(result))
-                      : sequence_store.at(result).id);
+    ids.push_back(sequence_store.identifier(result));
   }
   return sorted_unique(std::move(ids));
 }
@@ -1497,11 +1493,7 @@ std::vector<std::string> search_result_ids(
   std::vector<std::string> ids;
   ids.reserve(hits.size());
   for (LeafId hit : hits) {
-    ids.push_back(sequence_store.reference_backed
-                      ? sequence_store.reference_id + "_" +
-                            std::to_string(
-                                sequence_store.source_position(hit))
-                      : sequence_store.at(hit).id);
+    ids.push_back(sequence_store.identifier(hit));
   }
   return sorted_unique(std::move(ids));
 }

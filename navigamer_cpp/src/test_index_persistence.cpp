@@ -1,10 +1,12 @@
 #include "index_builder.hpp"
 #include "index_persistence.hpp"
+#include "io_utils.hpp"
 #include "search_engine.hpp"
 #include "structure.hpp"
 
 #include <cassert>
 #include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <set>
@@ -221,6 +223,104 @@ void assert_reference_backed_index_round_trip() {
   std::remove(path.c_str());
 }
 
+void assert_multicontig_invalid_base_and_occurrence_round_trip() {
+  const std::string fasta_path =
+      "/tmp/navigamer_test_multicontig.fa";
+  const std::string index_path =
+      "/tmp/navigamer_test_multicontig.navidx";
+  {
+    std::ofstream fasta(fasta_path);
+    fasta << ">chr1 description\n"
+          << "aaaaccccgggg\n"
+          << ">chr2\n"
+          << "ttttaaaaNaaaacccc\n";
+  }
+  auto reference = navigamer::load_reference_genome(fasta_path);
+  assert(reference.id == "chr1");
+  assert(reference.sequence ==
+         "AAAACCCCGGGGTTTTAAAANAAAACCCC");
+  assert(reference.contigs.size() == 2);
+  assert(reference.contigs[0].id == "chr1");
+  assert(reference.contigs[0].begin == 0);
+  assert(reference.contigs[0].end == 12);
+  assert(reference.contigs[1].id == "chr2");
+  assert(reference.contigs[1].begin == 12);
+  assert(reference.contigs[1].end == reference.sequence.size());
+
+  navigamer::BuildRangeConfig build_config;
+  navigamer::HierarchyConfig hierarchy({8, 4, 2});
+  navigamer::BioGeometryIndexBuilder built(hierarchy, build_config);
+  built.build_reference_windows(
+      reference.id, reference.sequence, 4, 2, reference.contigs);
+  const auto stats = built.get_statistics();
+  assert(stats.added_sequences == 12);
+  assert(stats.invalid_reference_windows == 2);
+  assert(built.validate_integer_ids());
+
+  const auto& store = built.sequence_store();
+  navigamer::LeafId aaaa_id = navigamer::INVALID_LEAF_ID;
+  for (size_t sequence_idx = 0; sequence_idx < store.size();
+       ++sequence_idx) {
+    const auto id = static_cast<navigamer::LeafId>(sequence_idx);
+    const auto sequence = store.sequence(id);
+    assert(sequence.find('N') == std::string_view::npos);
+    if (sequence == "AAAA") aaaa_id = id;
+    const size_t global_start = store.source_position(id);
+    const auto& contig = store.contig_for_position(global_start);
+    assert(global_start + store.fixed_sequence_length <= contig.end);
+  }
+  assert(aaaa_id != navigamer::INVALID_LEAF_ID);
+  assert(store.identifier(aaaa_id) == "chr1_0");
+  assert(store.occurrence_positions(aaaa_id) ==
+         std::vector<uint32_t>({0, 16, 21}));
+
+  auto manifest = navigamer::make_reference_window_index_manifest(
+      fasta_path, reference.sequence.size(), 4, 2,
+      hierarchy, build_config);
+  navigamer::save_index(index_path, built, manifest);
+  auto loaded = navigamer::load_index(index_path);
+  const auto& loaded_store = loaded.builder.sequence_store();
+  assert(loaded.manifest.format_version == 5);
+  assert(loaded_store.reference_contigs.size() == 2);
+  assert(loaded_store.additional_occurrences ==
+         store.additional_occurrences);
+  assert(loaded_store.occurrence_positions(aaaa_id) ==
+         std::vector<uint32_t>({0, 16, 21}));
+
+  navigamer::BioGeometrySearchEngine engine(loaded.builder);
+  navigamer::BioSequence query("q", "AAAA");
+  const auto [adaptive, adaptive_stats] =
+      engine.search_adaptive(query, 0);
+  const auto [brute_force, brute_stats] =
+      engine.search_brute_force(query, 0);
+  (void)adaptive_stats;
+  (void)brute_stats;
+  assert(sequence_ids(adaptive) == sequence_ids(brute_force));
+  assert(sequence_ids(adaptive).count(aaaa_id) == 1);
+
+  navigamer::BioGeometryIndexBuilder unsampled_first(
+      navigamer::HierarchyConfig({8, 4, 2}), build_config);
+  unsampled_first.build_reference_windows(
+      "order", "CAAAACAAAA", 4, 2);
+  navigamer::LeafId ordered_id = navigamer::INVALID_LEAF_ID;
+  for (size_t sequence_idx = 0;
+       sequence_idx < unsampled_first.sequence_store().size();
+       ++sequence_idx) {
+    const auto id = static_cast<navigamer::LeafId>(sequence_idx);
+    if (unsampled_first.sequence_store().sequence(id) == "AAAA") {
+      ordered_id = id;
+      break;
+    }
+  }
+  assert(ordered_id != navigamer::INVALID_LEAF_ID);
+  assert(unsampled_first.sequence_store().source_position(ordered_id) == 6);
+  assert(unsampled_first.sequence_store().occurrence_positions(ordered_id) ==
+         std::vector<uint32_t>({1, 6}));
+
+  std::remove(fasta_path.c_str());
+  std::remove(index_path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -228,6 +328,7 @@ int main() {
   assert_manifest_matching_detects_reusable_index();
   assert_reference_window_manifest_tracks_slicing_parameters();
   assert_reference_backed_index_round_trip();
+  assert_multicontig_invalid_base_and_occurrence_round_trip();
   std::cout << "index persistence tests passed\n";
   return 0;
 }

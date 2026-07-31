@@ -9,7 +9,14 @@
 
 namespace navigamer {
 
+struct LoadedReference {
+  std::string id;
+  std::string sequence;
+  std::vector<ReferenceContig> contigs;
+};
+
 // Load a reference: existing paths are parsed as FASTA, otherwise literal DNA.
+LoadedReference load_reference_genome(const std::string& path_or_string);
 std::pair<std::string, std::string> load_reference(const std::string& path_or_string);
 
 // Load reads: existing paths are parsed as FASTQ, otherwise one literal read.

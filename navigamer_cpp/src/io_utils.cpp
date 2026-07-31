@@ -29,30 +29,72 @@ static bool parse_source_pos(const std::string& header, size_t* source_pos) {
   return true;
 }
 
-std::pair<std::string, std::string> load_reference(const std::string& path_or_string) {
+LoadedReference load_reference_genome(const std::string& path_or_string) {
   if (!is_file(path_or_string)) {
     std::string s = path_or_string;
     auto end = std::find_if(s.begin(), s.end(), [](char c) { return c == '\n' || c == '\r'; });
     s = std::string(s.begin(), end);
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(0, 1);
-    return {"ref", s};
+    if (s.size() >= static_cast<size_t>(UINT32_MAX)) {
+      throw std::runtime_error(
+          "reference length exceeds 32-bit coordinate storage");
+    }
+    for (char& c : s) {
+      c = static_cast<char>(
+          std::toupper(static_cast<unsigned char>(c)));
+    }
+    return {"ref", s,
+            {{"ref", 0, static_cast<uint32_t>(s.size())}}};
   }
   std::ifstream f(path_or_string);
-  std::string ref_id = "ref";
-  std::string line, seq;
+  LoadedReference reference;
+  std::string line;
+  std::string current_id;
+  size_t current_begin = 0;
+  auto finish_contig = [&]() {
+    if (current_id.empty()) return;
+    if (reference.sequence.size() >= static_cast<size_t>(UINT32_MAX)) {
+      throw std::runtime_error(
+          "reference length exceeds 32-bit coordinate storage");
+    }
+    reference.contigs.push_back(
+        {current_id, static_cast<uint32_t>(current_begin),
+         static_cast<uint32_t>(reference.sequence.size())});
+  };
   while (std::getline(f, line)) {
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
     if (line.empty()) continue;
     if (line[0] == '>') {
-      ref_id = line.substr(1);
-      size_t sp = ref_id.find_first_of(" \t");
-      if (sp != std::string::npos) ref_id = ref_id.substr(0, sp);
+      finish_contig();
+      current_id = line.substr(1);
+      size_t sp = current_id.find_first_of(" \t");
+      if (sp != std::string::npos) current_id = current_id.substr(0, sp);
+      if (current_id.empty()) current_id = "ref";
+      if (reference.id.empty()) reference.id = current_id;
+      current_begin = reference.sequence.size();
     } else {
-      seq += line;
+      if (current_id.empty()) {
+        current_id = "ref";
+        reference.id = current_id;
+        current_begin = reference.sequence.size();
+      }
+      for (char c : line) {
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        reference.sequence.push_back(static_cast<char>(
+            std::toupper(static_cast<unsigned char>(c))));
+      }
     }
   }
-  return {ref_id, seq};
+  finish_contig();
+  if (reference.id.empty()) reference.id = "ref";
+  return reference;
+}
+
+std::pair<std::string, std::string> load_reference(
+    const std::string& path_or_string) {
+  auto reference = load_reference_genome(path_or_string);
+  return {std::move(reference.id), std::move(reference.sequence)};
 }
 
 std::vector<std::shared_ptr<BioSequence>> load_reads(

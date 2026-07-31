@@ -284,12 +284,16 @@ and writes phase timing, substep timing, construction counters, range candidate
 mode, and q-gram length to CSV. With one prefix and `--index`, it also writes a
 loadable persisted index whose manifest includes the reference fingerprint,
 actual prefix length, window length, and stride. Reference windows are
-reference-backed: each unique window stores a 12-byte record containing a
-32-bit representative offset and two reserved 32-bit SA interval endpoints. Its
+reference-backed and contig-aware: only all-ACGT windows contained in one
+contig are indexed. Each unique window stores a 12-byte record containing a
+32-bit representative offset and two reserved 32-bit SA interval endpoints;
+repeated windows add sorted 8-byte `(LeafId, source offset)` records for all
+valid occurrences, including positions between sampled stride starts. Its
 `BioSequence` identity and sequence are implicit in the array index and the
-fixed window length. All construction/search kernels consume
-`std::string_view` values into the single stored reference instead of owning
-one object or string per window.
+fixed window length. Query output resolves all occurrences directly from these
+records and reports contig-local coordinates without scanning the reference.
+All construction/search kernels consume `std::string_view` values into the
+single stored reference instead of owning one object or string per window.
 
 ## Parameter sweeps
 

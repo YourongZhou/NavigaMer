@@ -5,9 +5,12 @@
 #include "tools.hpp"
 #include "range_join.hpp"
 #include "phase2_distance_verifier.hpp"
+#include <algorithm>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace navigamer {
@@ -97,12 +100,28 @@ struct ReferenceSequenceRecord {
 static_assert(sizeof(ReferenceSequenceRecord) == 12,
               "reference leaf record must remain a compact 12-byte value");
 
+struct ReferenceOccurrence {
+  LeafId sequence_id = INVALID_LEAF_ID;
+  uint32_t source_pos = 0;
+
+  bool operator==(const ReferenceOccurrence& other) const {
+    return sequence_id == other.sequence_id &&
+           source_pos == other.source_pos;
+  }
+};
+static_assert(sizeof(ReferenceOccurrence) == 8,
+              "reference occurrence must remain an 8-byte value");
+
 // Canonical, pointer-free sequence storage for a finalized index. SequenceId is
 // implicit from the position in records/reference_records, so nodes, beacons,
 // leaf links, and search results only need a 32-bit integer reference.
 struct SequenceStore {
   std::vector<BioSequence> records;
   std::vector<ReferenceSequenceRecord> reference_records;
+  // Every non-representative occurrence is stored. Sorted by
+  // (sequence_id, source_pos), so unique windows pay no side-array cost.
+  std::vector<ReferenceOccurrence> additional_occurrences;
+  std::vector<ReferenceContig> reference_contigs;
   std::string reference_id;
   std::string reference_sequence;
   size_t fixed_sequence_length = 0;
@@ -144,11 +163,75 @@ struct SequenceStore {
     return {static_cast<int64_t>(record.sa_begin),
             static_cast<int64_t>(record.sa_end)};
   }
+  const ReferenceContig& contig_for_position(size_t source_pos) const {
+    const auto it = std::upper_bound(
+        reference_contigs.begin(), reference_contigs.end(), source_pos,
+        [](size_t position, const ReferenceContig& contig) {
+          return position < contig.begin;
+        });
+    if (it == reference_contigs.begin()) {
+      throw std::out_of_range("reference position has no contig");
+    }
+    const auto& contig = *std::prev(it);
+    if (source_pos < contig.begin || source_pos >= contig.end) {
+      throw std::out_of_range("reference position lies outside contigs");
+    }
+    return contig;
+  }
+  std::vector<uint32_t> occurrence_positions(LeafId id) const {
+    std::vector<uint32_t> positions;
+    const auto range = additional_occurrence_range(id);
+    positions.reserve(
+        static_cast<size_t>(std::distance(range.first, range.second)) + 1);
+    for_each_occurrence(
+        id, [&](uint32_t source_pos) {
+          positions.push_back(source_pos);
+        });
+    return positions;
+  }
+  template <typename Visitor>
+  void for_each_occurrence(LeafId id, Visitor&& visit) const {
+    const uint32_t representative =
+        static_cast<uint32_t>(source_position(id));
+    const auto range = additional_occurrence_range(id);
+    bool emitted_representative = false;
+    for (auto it = range.first; it != range.second; ++it) {
+      if (!emitted_representative &&
+          representative < it->source_pos) {
+        visit(representative);
+        emitted_representative = true;
+      }
+      visit(it->source_pos);
+    }
+    if (!emitted_representative) visit(representative);
+  }
+  std::pair<std::vector<ReferenceOccurrence>::const_iterator,
+            std::vector<ReferenceOccurrence>::const_iterator>
+  additional_occurrence_range(LeafId id) const {
+    const auto first = std::lower_bound(
+        additional_occurrences.begin(), additional_occurrences.end(), id,
+        [](const ReferenceOccurrence& occurrence, LeafId sequence_id) {
+          return occurrence.sequence_id < sequence_id;
+        });
+    const auto last = std::upper_bound(
+        first, additional_occurrences.end(), id,
+        [](LeafId sequence_id, const ReferenceOccurrence& occurrence) {
+          return sequence_id < occurrence.sequence_id;
+        });
+    return {first, last};
+  }
+  std::string identifier(LeafId id) const {
+    if (!reference_backed) return records.at(static_cast<size_t>(id)).id;
+    const size_t global_pos = source_position(id);
+    const auto& contig = contig_for_position(global_pos);
+    return contig.id + "_" +
+           std::to_string(global_pos - contig.begin);
+  }
   BioSequence materialize(LeafId id) const {
     if (!reference_backed) return records.at(static_cast<size_t>(id));
     const auto sequence_view = sequence(id);
     BioSequence sequence_record(
-        reference_id + "_" + std::to_string(source_position(id)),
+        identifier(id),
         std::string(sequence_view));
     sequence_record.sequence_id = id;
     sequence_record.has_source_pos = true;
@@ -229,12 +312,14 @@ class BioGeometryIndexBuilder {
       std::string reference_id,
       std::string reference_sequence,
       size_t window_length,
-      size_t stride);
+      size_t stride,
+      std::vector<ReferenceContig> reference_contigs = {});
 
   struct Statistics {
     size_t added_sequences = 0;
     size_t unique_sequences = 0;
     size_t deduplicated = 0;
+    size_t invalid_reference_windows = 0;
     size_t created_auxiliary_nodes = 0;
     std::vector<size_t> created_primary_nodes;
     double compression_ratio = 0.0;
@@ -395,6 +480,7 @@ class BioGeometryIndexBuilder {
       std::string reference_sequence,
       size_t window_length,
       size_t stride,
+      std::vector<ReferenceContig> reference_contigs,
       BuildProgressReporter* progress);
   void build_impl(
       std::vector<std::shared_ptr<BioSequence>> raw_sequences,
@@ -402,7 +488,8 @@ class BioGeometryIndexBuilder {
       std::string reference_id,
       std::string reference_sequence,
       size_t reference_window_length,
-      size_t reference_stride);
+      size_t reference_stride,
+      std::vector<ReferenceContig> reference_contigs = {});
 
   void phase1_build_extended_sketch(BuildProgressReporter* progress);
   void phase2_inter_tier_rebinding(BuildProgressReporter* progress);

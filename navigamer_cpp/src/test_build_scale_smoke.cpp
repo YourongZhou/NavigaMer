@@ -62,6 +62,7 @@ int main() {
 
   for (const std::string& required : {
            "prefix_len",
+           "invalid_window_count",
            "total_build_ms",
            "phase0_dedup_ms",
            "phase2_candidate_query_ms",
@@ -103,6 +104,7 @@ int main() {
     assert(phase2_verify_worker_ms >= 0.0);
     assert(phase3_distance_ms >= 0.0);
     assert(leaf_beacon_ms >= 0.0);
+    assert(row[column.at("invalid_window_count")] == "0");
     assert(row[column.at("leaf_attach_direction_used")] == "world_to_seq");
     row_count++;
   }
@@ -195,13 +197,18 @@ int main() {
   std::string batch_row;
   bool saw_read0 = false;
   bool saw_read1 = false;
+  size_t read0_rows = 0;
   while (std::getline(batch_in, batch_row)) {
-    if (batch_row.find("read0\t") == 0) saw_read0 = true;
+    if (batch_row.find("read0\t") == 0) {
+      saw_read0 = true;
+      read0_rows++;
+    }
     if (batch_row.find("read1\t") == 0) saw_read1 = true;
     assert(batch_row.find("\ttrue\t") != std::string::npos);
   }
   assert(saw_read0);
   assert(saw_read1);
+  assert(read0_rows == 7);
 
   std::ifstream trace_in(batch_trace);
   assert(trace_in.good());
@@ -293,6 +300,75 @@ int main() {
       std::istreambuf_iterator<char>());
   assert(rejected_text.find("--index requires exactly one prefix length") !=
          std::string::npos);
+
+  const std::string multicontig_fasta =
+      "/tmp/navigamer_build_scale_multicontig.fa";
+  const std::string multicontig_index =
+      "/tmp/navigamer_build_scale_multicontig.navidx";
+  const std::string multicontig_csv =
+      "/tmp/navigamer_build_scale_multicontig.csv";
+  const std::string multicontig_reads =
+      "/tmp/navigamer_build_scale_multicontig.fq";
+  const std::string multicontig_tsv =
+      "/tmp/navigamer_build_scale_multicontig.tsv";
+  {
+    std::ofstream fasta(multicontig_fasta);
+    fasta << ">chr1\nAAAACCCC\n>chr2\nAAAANAAAA\n";
+    std::ofstream reads(multicontig_reads);
+    reads << "@exact\nAAAA\n+\nIIII\n";
+  }
+  const std::string multicontig_build_command =
+      "./navigamer build-scale --ref " + multicontig_fasta +
+      " --window 4 --stride 1 --prefix-lengths 17 "
+      "--primary-radii 8,4,2 --progress-interval-seconds 0 "
+      "--index " + multicontig_index + " --out " + multicontig_csv +
+      " >/tmp/navigamer_multicontig_build.stdout "
+      "2>/tmp/navigamer_multicontig_build.stderr";
+  assert(std::system(multicontig_build_command.c_str()) == 0);
+  {
+    std::ifstream csv(multicontig_csv);
+    std::string multicontig_header_line;
+    std::string multicontig_row_line;
+    assert(static_cast<bool>(std::getline(csv, multicontig_header_line)));
+    assert(static_cast<bool>(std::getline(csv, multicontig_row_line)));
+    const auto multicontig_header =
+        split_csv_line(multicontig_header_line);
+    const auto multicontig_row = split_csv_line(multicontig_row_line);
+    std::map<std::string, size_t> multicontig_columns;
+    for (size_t i = 0; i < multicontig_header.size(); ++i) {
+      multicontig_columns[multicontig_header[i]] = i;
+    }
+    assert(multicontig_row[
+               multicontig_columns.at("invalid_window_count")] == "4");
+  }
+  const std::string multicontig_query_command =
+      "./navigamer query-index-batch --index " + multicontig_index +
+      " --reads " + multicontig_reads +
+      " --tolerance 0 --out " + multicontig_tsv +
+      " >/tmp/navigamer_multicontig_query.stdout "
+      "2>/tmp/navigamer_multicontig_query.stderr";
+  assert(std::system(multicontig_query_command.c_str()) == 0);
+  {
+    std::ifstream tsv(multicontig_tsv);
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    const auto output_header = split_tsv_line(line);
+    std::map<std::string, size_t> output_columns;
+    for (size_t i = 0; i < output_header.size(); ++i) {
+      output_columns[output_header[i]] = i;
+    }
+    std::vector<std::string> locations;
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      locations.push_back(
+          row[output_columns.at("ref_id")] + ":" +
+          row[output_columns.at("reference_start")]);
+    }
+    assert(locations ==
+           std::vector<std::string>(
+               {"chr1:0", "chr2:0", "chr2:5"}));
+  }
 
   std::cout << "build-scale smoke tests passed\n";
   return 0;

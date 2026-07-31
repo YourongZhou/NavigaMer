@@ -7,12 +7,13 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 
 namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '4'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '5'};
 
 template <typename T>
 void write_pod(std::ostream& out, const T& value) {
@@ -239,7 +240,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 4) {
+  if (manifest.format_version != 5) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -401,19 +402,24 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
     write_string(out, store.reference_id);
     write_string(out, store.reference_sequence);
     write_size(out, store.fixed_sequence_length);
+    write_size(out, store.reference_contigs.size());
+    for (const auto& contig : store.reference_contigs) {
+      write_string(out, contig.id);
+      write_pod<uint32_t>(out, contig.begin);
+      write_pod<uint32_t>(out, contig.end);
+    }
   }
   write_size(out, store.size());
   if (store.reference_backed) {
     for (const auto& sequence : store.reference_records) {
-      write_size(out, sequence.source_pos);
-      const int64_t sa_begin = sequence.has_sa_interval()
-                                   ? static_cast<int64_t>(sequence.sa_begin)
-                                   : -1;
-      const int64_t sa_end = sequence.has_sa_interval()
-                                 ? static_cast<int64_t>(sequence.sa_end)
-                                 : -1;
-      write_pod<int64_t>(out, sa_begin);
-      write_pod<int64_t>(out, sa_end);
+      write_pod<uint32_t>(out, sequence.source_pos);
+      write_pod<uint32_t>(out, sequence.sa_begin);
+      write_pod<uint32_t>(out, sequence.sa_end);
+    }
+    write_size(out, store.additional_occurrences.size());
+    for (const auto& occurrence : store.additional_occurrences) {
+      write_pod<uint32_t>(out, occurrence.sequence_id);
+      write_pod<uint32_t>(out, occurrence.source_pos);
     }
     return;
   }
@@ -450,6 +456,33 @@ SequenceStore read_sequence_store(std::istream& in) {
       throw std::runtime_error(
           "reference-backed sequence store has zero sequence length");
     }
+    const size_t contig_count =
+        read_size(in, "sequence_store.contig_count");
+    store.reference_contigs.reserve(contig_count);
+    uint32_t expected_begin = 0;
+    for (size_t contig_idx = 0; contig_idx < contig_count;
+         ++contig_idx) {
+      ReferenceContig contig;
+      contig.id = read_string(in, "reference_contig.id");
+      contig.begin =
+          read_pod<uint32_t>(in, "reference_contig.begin");
+      contig.end =
+          read_pod<uint32_t>(in, "reference_contig.end");
+      if (contig.id.empty() || contig.begin != expected_begin ||
+          contig.end < contig.begin ||
+          contig.end > store.reference_sequence.size()) {
+        throw std::runtime_error(
+            "reference-backed index has invalid contig layout");
+      }
+      expected_begin = contig.end;
+      store.reference_contigs.push_back(std::move(contig));
+    }
+    if ((!store.reference_sequence.empty() &&
+         store.reference_contigs.empty()) ||
+        expected_begin != store.reference_sequence.size()) {
+      throw std::runtime_error(
+          "reference-backed index contigs do not cover reference");
+    }
   }
   const size_t count = read_size(in, "sequence_store.count");
   if (store.reference_backed) {
@@ -459,34 +492,27 @@ SequenceStore read_sequence_store(std::istream& in) {
   }
   for (size_t i = 0; i < count; ++i) {
     if (store.reference_backed) {
-      const size_t source_pos =
-          read_size(in, "sequence.source_pos");
-      const int64_t sa_begin =
-          read_pod<int64_t>(in, "sequence.bwt_start");
-      const int64_t sa_end =
-          read_pod<int64_t>(in, "sequence.bwt_end");
-      if (source_pos >= static_cast<size_t>(UINT32_MAX)) {
-        throw std::runtime_error(
-            "reference-backed sequence coordinate exceeds 32-bit storage");
-      }
-      if ((sa_begin < 0) != (sa_end < 0) ||
-          sa_begin > static_cast<int64_t>(UINT32_MAX - 1) ||
-          sa_end > static_cast<int64_t>(UINT32_MAX - 1) ||
-          (sa_begin >= 0 && sa_end < sa_begin)) {
+      ReferenceSequenceRecord sequence;
+      sequence.source_pos =
+          read_pod<uint32_t>(in, "sequence.source_pos");
+      sequence.sa_begin =
+          read_pod<uint32_t>(in, "sequence.bwt_start");
+      sequence.sa_end =
+          read_pod<uint32_t>(in, "sequence.bwt_end");
+      if ((sequence.sa_begin == UINT32_MAX) !=
+              (sequence.sa_end == UINT32_MAX) ||
+          (sequence.sa_begin != UINT32_MAX &&
+           sequence.sa_end < sequence.sa_begin)) {
         throw std::runtime_error(
             "reference-backed sequence has invalid 32-bit SA interval");
       }
-      if (source_pos > store.reference_sequence.size() ||
+      if (sequence.source_pos >
+              store.reference_sequence.size() ||
           store.fixed_sequence_length >
-              store.reference_sequence.size() - source_pos) {
+              store.reference_sequence.size() -
+                  sequence.source_pos) {
         throw std::runtime_error(
             "reference-backed sequence lies outside stored reference");
-      }
-      ReferenceSequenceRecord sequence;
-      sequence.source_pos = static_cast<uint32_t>(source_pos);
-      if (sa_begin >= 0) {
-        sequence.sa_begin = static_cast<uint32_t>(sa_begin);
-        sequence.sa_end = static_cast<uint32_t>(sa_end);
       }
       store.reference_records.push_back(sequence);
       continue;
@@ -520,6 +546,32 @@ SequenceStore read_sequence_store(std::istream& in) {
       sequence.ref_positions.push_back(std::move(pos));
     }
     store.records.push_back(std::move(sequence));
+  }
+  if (store.reference_backed) {
+    const size_t occurrence_count =
+        read_size(in, "sequence_store.additional_occurrence_count");
+    store.additional_occurrences.reserve(occurrence_count);
+    ReferenceOccurrence previous;
+    bool first = true;
+    for (size_t occurrence_idx = 0;
+         occurrence_idx < occurrence_count; ++occurrence_idx) {
+      ReferenceOccurrence occurrence;
+      occurrence.sequence_id =
+          read_pod<uint32_t>(in, "reference_occurrence.sequence_id");
+      occurrence.source_pos =
+          read_pod<uint32_t>(in, "reference_occurrence.source_pos");
+      if (occurrence.sequence_id >= store.reference_records.size() ||
+          occurrence.source_pos >= store.reference_sequence.size() ||
+          (!first &&
+           std::tie(occurrence.sequence_id, occurrence.source_pos) <=
+               std::tie(previous.sequence_id, previous.source_pos))) {
+        throw std::runtime_error(
+            "reference-backed index has invalid occurrence ordering");
+      }
+      store.additional_occurrences.push_back(occurrence);
+      previous = occurrence;
+      first = false;
+    }
   }
   return store;
 }
@@ -665,7 +717,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 4) {
+  if (manifest.format_version != 5) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -709,7 +761,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 4;
+  stored.format_version = 5;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -730,7 +782,7 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 4) {
+  if (manifest.format_version != 5) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
