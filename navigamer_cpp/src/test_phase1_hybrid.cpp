@@ -98,7 +98,7 @@ LinkMap leaf_links(const navigamer::BioGeometryIndexBuilder& builder) {
     auto& leaves = links[view.sequences[world.center_sequence_id].seq];
     for (uint32_t offset = 0; offset < view.leaf_count(world_id); ++offset) {
       leaves.insert(
-          view.sequences[view.leaf_ids[world.leaf_begin() + offset]].seq);
+          view.sequences[view.leaf_id(world_id, offset)].seq);
     }
   }
   return links;

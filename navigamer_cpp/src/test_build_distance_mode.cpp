@@ -41,7 +41,7 @@ std::vector<std::set<std::string>> edge_signature(
         row.insert(
             "leaf:" +
             view.sequences[
-                view.leaf_ids[node.leaf_begin() + offset]].id);
+                view.leaf_id(node_id, offset)].id);
       }
     } else {
       for (uint32_t offset = 0; offset < view.child_count(node_id); ++offset) {

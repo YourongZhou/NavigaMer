@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '2'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '3'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -873,6 +873,10 @@ void write_search_graph_view(std::ostream& out,
   write_final_array(
       out, view.child_id_deltas16, "child_id_deltas16");
   write_final_array(out, view.child_ids, "child_ids");
+  write_final_array(
+      out, view.leaf_id_deltas8, "leaf_id_deltas8");
+  write_final_array(
+      out, view.leaf_id_deltas16, "leaf_id_deltas16");
   write_final_array(out, view.leaf_ids, "leaf_ids");
   write_final_array(out, view.beacon_deltas8, "beacon_deltas8");
   write_final_array(out, view.beacon_deltas16, "beacon_deltas16");
@@ -902,6 +906,10 @@ SearchGraphView read_search_graph_view(
           in, mapping, "child_id_deltas16");
   view.child_ids =
       read_final_array<NodeId>(in, mapping, "child_ids");
+  view.leaf_id_deltas8 =
+      read_final_array<int8_t>(in, mapping, "leaf_id_deltas8");
+  view.leaf_id_deltas16 =
+      read_final_array<int16_t>(in, mapping, "leaf_id_deltas16");
   view.leaf_ids =
       read_final_array<LeafId>(in, mapping, "leaf_ids");
   view.beacon_deltas8 =

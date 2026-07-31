@@ -82,6 +82,8 @@ void assert_loaded_search_matches_built() {
   assert_mapped(loaded_view.node_count_overflows);
   assert_mapped(loaded_view.child_id_deltas16);
   assert_mapped(loaded_view.child_ids);
+  assert_mapped(loaded_view.leaf_id_deltas8);
+  assert_mapped(loaded_view.leaf_id_deltas16);
   assert_mapped(loaded_view.leaf_ids);
   assert_mapped(loaded_view.beacon_deltas8);
   assert_mapped(loaded_view.beacon_deltas16);

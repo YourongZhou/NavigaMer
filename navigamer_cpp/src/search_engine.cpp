@@ -2582,11 +2582,26 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
   const uint32_t leaf_begin = node.leaf_begin();
   const size_t leaf_count = view.leaf_count(node_id);
   const size_t beacon_count = view.beacon_count(node_id);
+  const auto prefetch_leaf_code = [&](size_t leaf_offset) {
+    switch (node.link_storage()) {
+      case WorldNodeRecord::LinkStorage::Delta8:
+        prefetch_read(
+            view.leaf_id_deltas8.data() + leaf_begin + leaf_offset);
+        break;
+      case WorldNodeRecord::LinkStorage::Delta16:
+        prefetch_read(
+            view.leaf_id_deltas16.data() + leaf_begin + leaf_offset);
+        break;
+      case WorldNodeRecord::LinkStorage::Absolute32:
+        prefetch_read(view.leaf_ids.data() + leaf_begin + leaf_offset);
+        break;
+    }
+  };
 
   std::vector<int> V_Q;
   const bool has_leaf_sieve =
       beacon_count > 0 &&
-      node.leaf_begin() +
+      node.mbb_begin +
               beacon_count * leaf_count <=
           view.leaf_beacon_dists.size();
   if (has_leaf_sieve) {
@@ -2600,10 +2615,10 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     ScopedSearchTimer leaf_filter_timer(stats.query_profile_enabled,
                                         &stats.leaf_mbb_filter_ms);
     LeafBeaconFilterSimdStats simd_stats;
-    const uint32_t offset = node.leaf_begin();
+    const uint32_t offset = node.mbb_begin;
     if (config_.search_prefetch) {
       prefetch_read(view.leaf_beacon_dists.data() + offset);
-      prefetch_read(view.leaf_ids.data() + leaf_begin);
+      if (leaf_count != 0) prefetch_leaf_code(0);
     }
     survivor_offsets = filter_leaf_beacon_survivors(
         view.leaf_beacon_dists.data() + offset,
@@ -2626,63 +2641,95 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     survivor_offsets.reserve(leaf_count);
     for (size_t leaf_idx = 0; leaf_idx < leaf_count; ++leaf_idx) {
       if (config_.search_prefetch && leaf_idx + 1 < leaf_count) {
-        prefetch_read(&view.leaf_ids[leaf_begin + leaf_idx + 1]);
+        prefetch_leaf_code(leaf_idx + 1);
       }
       survivor_offsets.push_back(static_cast<uint32_t>(leaf_idx));
     }
   }
 
-  for (size_t survivor_idx = 0; survivor_idx < survivor_offsets.size();
-       ++survivor_idx) {
-    const uint32_t leaf_offset = survivor_offsets[survivor_idx];
-    if (leaf_offset >= leaf_count) {
-      throw std::runtime_error("SIMD leaf beacon filter returned offset out of range");
-    }
-    if (config_.search_prefetch && survivor_idx + 1 < survivor_offsets.size()) {
-      const uint32_t next_offset = survivor_offsets[survivor_idx + 1];
-      if (next_offset < leaf_count) {
-        const LeafId next_leaf_id = view.leaf_ids[leaf_begin + next_offset];
-        if (next_leaf_id < view.sequences.size()) {
-          const auto& next_sequence =
-              view.sequences.sequence(next_leaf_id);
-          if (!next_sequence.empty()) {
-            prefetch_read(next_sequence.data());
+  const auto verify_survivors = [&](const auto& leaf_id_at) {
+    for (size_t survivor_idx = 0;
+         survivor_idx < survivor_offsets.size(); ++survivor_idx) {
+      const uint32_t leaf_offset = survivor_offsets[survivor_idx];
+      if (leaf_offset >= leaf_count) {
+        throw std::runtime_error(
+            "SIMD leaf beacon filter returned offset out of range");
+      }
+      if (config_.search_prefetch &&
+          survivor_idx + 1 < survivor_offsets.size()) {
+        const uint32_t next_offset = survivor_offsets[survivor_idx + 1];
+        if (next_offset < leaf_count) {
+          const LeafId next_leaf_id = leaf_id_at(next_offset);
+          if (next_leaf_id < view.sequences.size()) {
+            const auto& next_sequence =
+                view.sequences.sequence(next_leaf_id);
+            if (!next_sequence.empty()) {
+              prefetch_read(next_sequence.data());
+            }
           }
         }
       }
+      if (!leaf_sieve_ready) stats.node_access_count++;
+      const LeafId leaf_id = leaf_id_at(leaf_offset);
+      if (leaf_id >= view.sequences.size()) {
+        throw std::runtime_error("view leaf id has no sequence record");
+      }
+      if (near_query_triangle_prunes_leaf(
+              this, leaf_id, tolerance, stats)) {
+        continue;
+      }
+      ScopedSearchTimer leaf_verify_timer(
+          stats.query_profile_enabled, &stats.leaf_verify_ms);
+      stats.candidate_count++;
+      stats.raw_candidate_count++;
+      stats.candidate_verify_count++;
+      stats.leaf_exact_distance_call_count++;
+      const bool cache_leaf_distance =
+          active_path_reuse_context(this) &&
+          active_path_reuse_context(this)->enabled;
+      const int distance_bound = leaf_distance_cache_bound(
+          config_, tolerance, cache_leaf_distance);
+      int leaf_dist = compute_query_distance_with_mode(
+          query_seq.seq, view.sequences.sequence(leaf_id), distance_bound,
+          config_.distance_mode);
+      if (auto* reuse = active_path_reuse_context(this);
+          reuse && reuse->enabled) {
+        reuse->next.leaf_dist_by_sequence_id[leaf_id] = leaf_dist;
+      }
+      stats.dist_calc_count++;
+      stats.leaf_verify_count++;
+      if (config_.trace_paths) {
+        stats.leaf_trace.push_back(leaf_id);
+      }
+      if (leaf_dist <= tolerance) unique_results.insert(leaf_id);
     }
-    if (!leaf_sieve_ready) stats.node_access_count++;
-    const LeafId leaf_id = view.leaf_ids[leaf_begin + leaf_offset];
-    if (leaf_id >= view.sequences.size()) {
-      throw std::runtime_error("view leaf id has no sequence record");
+  };
+
+  switch (node.link_storage()) {
+    case WorldNodeRecord::LinkStorage::Delta8: {
+      const int8_t* deltas =
+          view.leaf_id_deltas8.data() + leaf_begin;
+      verify_survivors([&](uint32_t offset) {
+        return node.center_sequence_id + deltas[offset];
+      });
+      break;
     }
-    if (near_query_triangle_prunes_leaf(this, leaf_id, tolerance, stats)) {
-      continue;
+    case WorldNodeRecord::LinkStorage::Delta16: {
+      const int16_t* deltas =
+          view.leaf_id_deltas16.data() + leaf_begin;
+      verify_survivors([&](uint32_t offset) {
+        return node.center_sequence_id + deltas[offset];
+      });
+      break;
     }
-    ScopedSearchTimer leaf_verify_timer(stats.query_profile_enabled,
-                                        &stats.leaf_verify_ms);
-    stats.candidate_count++;
-    stats.raw_candidate_count++;
-    stats.candidate_verify_count++;
-    stats.leaf_exact_distance_call_count++;
-    const bool cache_leaf_distance =
-        active_path_reuse_context(this) &&
-        active_path_reuse_context(this)->enabled;
-    const int distance_bound =
-        leaf_distance_cache_bound(config_, tolerance, cache_leaf_distance);
-    int leaf_dist = compute_query_distance_with_mode(
-        query_seq.seq, view.sequences.sequence(leaf_id), distance_bound,
-        config_.distance_mode);
-    if (auto* reuse = active_path_reuse_context(this);
-        reuse && reuse->enabled) {
-      reuse->next.leaf_dist_by_sequence_id[leaf_id] = leaf_dist;
+    case WorldNodeRecord::LinkStorage::Absolute32: {
+      const LeafId* leaf_ids = view.leaf_ids.data() + leaf_begin;
+      verify_survivors(
+          [&](uint32_t offset) { return leaf_ids[offset]; });
+      break;
     }
-    stats.dist_calc_count++;
-    stats.leaf_verify_count++;
-    if (config_.trace_paths) {
-      stats.leaf_trace.push_back(leaf_id);
-    }
-    if (leaf_dist <= tolerance) unique_results.insert(leaf_id);
+    default:
+      throw std::runtime_error("view leaf ID encoding is invalid");
   }
 }
 

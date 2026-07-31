@@ -55,11 +55,11 @@ differ by at most `child_radius + tolerance`. Leaf distances are also flat
 bytes, and finest-layer nodes reuse their cleared child buffer for leaf IDs.
 Finalized nodes remain cache-friendly 20-byte records containing only the
 center ID and shared array offsets plus one packed count/encoding word. The
-common case stores a 24-bit child-or-leaf count, a 6-bit beacon count, and the
-2-bit beacon-ID encoding inline; an exact side table handles the rare count
+common case stores a 24-bit child-or-leaf count, a 4-bit beacon count, the
+2-bit beacon-ID encoding, and the 2-bit link encoding inline; an exact side
+table handles the rare count
 overflow instead of imposing a build limit. Layer arrays imply both the layer
-ID and its radii, while
-`leaf_begin` also addresses the aligned leaf-distance array. Parent beacon IDs
+ID and its radii. Parent beacon IDs
 use the narrowest exact per-node representation: signed 8-bit or 16-bit deltas
 from the node center, with full 32-bit IDs only when needed. A finest-layer
 node's sole beacon is its center and occupies no side-array element. No
@@ -69,6 +69,8 @@ that parent is representable; a flag packed into the node record selects the
 compact array, and any parent outside the range falls back to full 32-bit child IDs.
 This changes neither node IDs nor graph connectivity and never truncates an
 edge.
+Leaf IDs likewise use signed 8-bit or 16-bit deltas from the node center when
+the complete leaf list fits, with an exact 32-bit fallback.
 Repeated reference positions use one pair for a singleton duplicate, while
 larger duplicate groups share one group offset and a flat 32-bit position
 array.

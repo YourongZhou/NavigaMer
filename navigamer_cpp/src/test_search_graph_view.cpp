@@ -55,9 +55,7 @@ void assert_view_equivalent_to_original() {
       const uint32_t beacon_count = view.beacon_count(node_id);
       assert(record.center_sequence_id < view.sequences.size());
       if (layer + 1 == view.layer_begin.size()) {
-        assert(record.leaf_begin() + link_count <=
-               view.leaf_ids.size());
-        assert(record.leaf_begin() +
+        assert(record.mbb_begin +
                    static_cast<size_t>(link_count) * beacon_count <=
                view.leaf_beacon_dists.size());
       } else {
@@ -273,6 +271,45 @@ void assert_child_id_encodings_are_exact() {
   assert(view.edge_count() == 4);
 }
 
+void assert_leaf_id_encodings_are_exact() {
+  navigamer::SearchGraphView view;
+  view.node_records.resize(3);
+  view.leaf_id_deltas8 = {-120, 127};
+  view.leaf_id_deltas16 = {-30000, 30000};
+  view.leaf_ids = {17, UINT32_MAX - 1};
+
+  auto& delta8 = view.node_records[0];
+  delta8.center_sequence_id = 200;
+  delta8.link_begin = 0;
+  delta8.set_link_storage(
+      navigamer::WorldNodeRecord::LinkStorage::Delta8);
+  view.set_node_counts(
+      0, 2, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  assert(view.leaf_id(0, 0) == 80);
+  assert(view.leaf_id(0, 1) == 327);
+
+  auto& delta16 = view.node_records[1];
+  delta16.center_sequence_id = 40000;
+  delta16.link_begin = 0;
+  delta16.set_link_storage(
+      navigamer::WorldNodeRecord::LinkStorage::Delta16);
+  view.set_node_counts(
+      1, 2, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  assert(view.leaf_id(1, 0) == 10000);
+  assert(view.leaf_id(1, 1) == 70000);
+
+  auto& absolute32 = view.node_records[2];
+  absolute32.center_sequence_id = 0;
+  absolute32.link_begin = 0;
+  view.set_node_counts(
+      2, 2, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  assert(view.leaf_id(2, 0) == 17);
+  assert(view.leaf_id(2, 1) == UINT32_MAX - 1);
+}
+
 }  // namespace
 
 int main() {
@@ -282,6 +319,7 @@ int main() {
   assert_all_beacon_id_encodings_are_exact();
   assert_node_count_overflow_is_exact();
   assert_child_id_encodings_are_exact();
+  assert_leaf_id_encodings_are_exact();
   std::cout << "search graph view tests passed\n";
   return 0;
 }

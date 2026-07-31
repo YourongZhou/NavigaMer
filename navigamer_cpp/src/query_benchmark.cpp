@@ -882,14 +882,13 @@ bool node_subtree_has_hit(
   if (node_id >= view.node_records.size() || hit_ids.empty()) return false;
   auto memo_it = memo.find(node_id);
   if (memo_it != memo.end()) return memo_it->second;
-  const auto& node = view.node_records[node_id];
   const bool is_finest =
       !view.layer_begin.empty() &&
       node_id >= view.layer_begin.back();
   if (is_finest) {
     for (uint32_t offset = 0; offset < view.leaf_count(node_id); ++offset) {
       const LeafId leaf_id =
-          view.leaf_ids[node.leaf_begin() + offset];
+          view.leaf_id(node_id, offset);
       if (leaf_id < view.sequences.size() &&
           hit_ids.count(view.sequences[leaf_id].id)) {
         memo[node_id] = true;

@@ -358,9 +358,9 @@ child radius plus query tolerance. Leaf distances remain flat bytes, avoiding
 a separate heap allocation for every child or leaf row. Finest-layer
 construction also reuses the cleared child-ID buffer for leaf IDs. Finalized
 nodes remain 20 bytes and are addressed directly by array index;
-layer offsets imply the layer ID and both radii, while the aligned leaf-distance
-array reuses the leaf ID offset. A packed 32-bit word stores the common
-24-bit child-or-leaf count, 6-bit beacon count, and 2-bit beacon encoding;
+layer offsets imply the layer ID and both radii. A packed 32-bit word stores
+the common 24-bit child-or-leaf count, 4-bit beacon count, 2-bit beacon
+encoding, and 2-bit link encoding;
 rare overflows use an exact side-table record with full 32-bit counts. Beacon
 IDs use the narrowest exact per-node
 encoding: signed 8-bit or 16-bit deltas from the node center, falling back to a
@@ -370,6 +370,8 @@ Each parent uses 16-bit forward deltas for child node IDs when its complete
 child range fits. A flag packed into each node record selects that compact array;
 parents with any larger delta use the exact 32-bit child-ID array instead, so
 there is no truncation or additional graph-size limit.
+Leaf IDs use signed 8-bit or 16-bit deltas from the node center when the whole
+leaf list fits, with exact 32-bit IDs as the fallback.
 Repeated reference positions use one pair for a singleton duplicate, while
 larger duplicate groups share one group offset and a flat 32-bit position
 array.

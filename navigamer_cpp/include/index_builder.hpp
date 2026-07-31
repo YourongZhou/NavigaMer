@@ -554,6 +554,11 @@ struct WorldNodeRecord {
     Absolute32 = 2,
     ImplicitCenter = 3,
   };
+  enum class LinkStorage : uint32_t {
+    Absolute32 = 0,
+    Delta16 = 1,
+    Delta8 = 2,
+  };
   static constexpr uint32_t LINK_COUNT_BITS = 24;
   static constexpr uint32_t BEACON_COUNT_BITS = 4;
   static constexpr uint32_t LINK_COUNT_MASK =
@@ -563,17 +568,17 @@ struct WorldNodeRecord {
   static constexpr uint32_t BEACON_COUNT_SHIFT = LINK_COUNT_BITS;
   static constexpr uint32_t STORAGE_SHIFT = 28;
   static constexpr uint32_t STORAGE_MASK = 3;
-  static constexpr uint32_t CHILD_DELTA16_SHIFT = 30;
-  static constexpr uint32_t CHILD_DELTA16_MASK =
-      uint32_t{1} << CHILD_DELTA16_SHIFT;
+  static constexpr uint32_t LINK_STORAGE_SHIFT = 30;
+  static constexpr uint32_t LINK_STORAGE_MASK =
+      uint32_t{3} << LINK_STORAGE_SHIFT;
   static constexpr uint32_t COUNT_OVERFLOW_CODE = BEACON_COUNT_MASK;
 
   LeafId center_sequence_id = INVALID_LEAF_ID;
 
   // Non-finest nodes address child_id_deltas16 or child_ids; finest nodes
-  // address leaf_ids.
-  // Primary layers are explicit, so the two mutually exclusive ranges share
-  // one offset/count pair without a tag or query-time branch.
+  // address leaf_id_deltas8, leaf_id_deltas16, or leaf_ids.
+  // Primary layers are explicit, so child and leaf ranges share one
+  // offset/count pair; the packed link encoding selects the exact array.
   uint32_t link_begin = 0;
   uint32_t beacon_begin = 0;
   uint32_t packed_counts = 0;
@@ -596,11 +601,14 @@ struct WorldNodeRecord {
     return static_cast<BeaconStorage>(
         (packed_counts >> STORAGE_SHIFT) & STORAGE_MASK);
   }
-  bool child_ids_delta16() const {
-    return (packed_counts & CHILD_DELTA16_MASK) != 0;
+  LinkStorage link_storage() const {
+    return static_cast<LinkStorage>(
+        packed_counts >> LINK_STORAGE_SHIFT);
   }
-  void set_child_ids_delta16() {
-    packed_counts |= CHILD_DELTA16_MASK;
+  void set_link_storage(LinkStorage storage) {
+    packed_counts =
+        (packed_counts & ~LINK_STORAGE_MASK) |
+        (static_cast<uint32_t>(storage) << LINK_STORAGE_SHIFT);
   }
   void set_inline_counts(uint32_t link_count, uint32_t beacon_count,
                          BeaconStorage storage) {
@@ -608,7 +616,7 @@ struct WorldNodeRecord {
         beacon_count >= COUNT_OVERFLOW_CODE) {
       throw std::length_error("node counts exceed inline packed range");
     }
-    packed_counts = (packed_counts & CHILD_DELTA16_MASK) |
+    packed_counts = (packed_counts & LINK_STORAGE_MASK) |
                     link_count |
                     (beacon_count << BEACON_COUNT_SHIFT) |
                     (static_cast<uint32_t>(storage) << STORAGE_SHIFT);
@@ -618,7 +626,7 @@ struct WorldNodeRecord {
     if (overflow_index > LINK_COUNT_MASK) {
       throw std::length_error("too many node-count overflow records");
     }
-    packed_counts = (packed_counts & CHILD_DELTA16_MASK) |
+    packed_counts = (packed_counts & LINK_STORAGE_MASK) |
                     overflow_index |
                     (COUNT_OVERFLOW_CODE << BEACON_COUNT_SHIFT) |
                     (static_cast<uint32_t>(storage) << STORAGE_SHIFT);
@@ -667,6 +675,8 @@ struct SearchGraphView {
   // The representation bit is packed into WorldNodeRecord::packed_counts.
   FinalArray<uint16_t> child_id_deltas16;
   FinalArray<NodeId> child_ids;
+  FinalArray<int8_t> leaf_id_deltas8;
+  FinalArray<int16_t> leaf_id_deltas16;
   FinalArray<LeafId> leaf_ids;
 
   FinalArray<uint8_t> child_beacon_dists;
@@ -720,10 +730,12 @@ struct SearchGraphView {
   }
 
   bool child_ids_are_delta16(NodeId node_id) const {
-    return node_records[node_id].child_ids_delta16();
+    return node_records[node_id].link_storage() ==
+           WorldNodeRecord::LinkStorage::Delta16;
   }
   void set_child_ids_delta16(NodeId node_id) {
-    node_records[node_id].set_child_ids_delta16();
+    node_records[node_id].set_link_storage(
+        WorldNodeRecord::LinkStorage::Delta16);
   }
   NodeId child_id(NodeId node_id, uint32_t child_offset) const {
     const auto& node = node_records[node_id];
@@ -735,6 +747,21 @@ struct SearchGraphView {
   }
   size_t edge_count() const {
     return child_id_deltas16.size() + child_ids.size();
+  }
+
+  LeafId leaf_id(NodeId node_id, uint32_t leaf_offset) const {
+    const auto& node = node_records[node_id];
+    switch (node.link_storage()) {
+      case WorldNodeRecord::LinkStorage::Delta8:
+        return node.center_sequence_id +
+               leaf_id_deltas8[node.leaf_begin() + leaf_offset];
+      case WorldNodeRecord::LinkStorage::Delta16:
+        return node.center_sequence_id +
+               leaf_id_deltas16[node.leaf_begin() + leaf_offset];
+      case WorldNodeRecord::LinkStorage::Absolute32:
+        return leaf_ids[node.leaf_begin() + leaf_offset];
+    }
+    return INVALID_LEAF_ID;
   }
 
   LeafId beacon_sequence_id(NodeId node_id,
