@@ -51,6 +51,11 @@ class QGramCountIndex {
     std::string sequence;
   };
 
+  struct ItemView {
+    size_t item_id = 0;
+    const std::string* sequence = nullptr;
+  };
+
   struct QueryStats {
     size_t total_items = 0;
     size_t length_filtered_items = 0;
@@ -63,6 +68,7 @@ class QGramCountIndex {
   explicit QGramCountIndex(int q = 5);
 
   void build(const std::vector<Item>& items);
+  void build_views(const std::vector<ItemView>& items);
   std::vector<size_t> query(
       const std::string& query_sequence, int tau,
       QueryStats* stats = nullptr,
@@ -80,8 +86,8 @@ class QGramCountIndex {
   };
 
   struct Posting {
-    size_t internal_idx = 0;
-    size_t count = 0;
+    uint32_t internal_idx = 0;
+    uint32_t count = 0;
   };
 
   int q_;

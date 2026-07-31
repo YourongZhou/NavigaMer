@@ -7,6 +7,7 @@
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 
 namespace navigamer {
 
@@ -144,35 +145,35 @@ ExactRangeJoinIndex::ExactRangeJoinIndex(
   }
 }
 
-void ExactRangeJoinIndex::build(const std::vector<RangeJoinItem>& items) {
-  items_ = items;
+void ExactRangeJoinIndex::build(std::vector<RangeJoinItem> items) {
+  items_ = std::move(items);
   item_lengths_by_id_.clear();
-  item_lengths_by_id_.reserve(items.size());
+  item_lengths_by_id_.reserve(items_.size());
   postings_by_seed_len_.clear();
   unindexable_items_by_seed_len_.clear();
   qgram_ready_ = false;
-  std::vector<QGramCountIndex::Item> qgram_items;
-  if (!defer_qgram_build_) qgram_items.reserve(items.size());
-  for (const auto& item : items) {
+  std::vector<QGramCountIndex::ItemView> qgram_items;
+  if (!defer_qgram_build_) qgram_items.reserve(items_.size());
+  for (const auto& item : items_) {
     item_lengths_by_id_[item.item_id] = item.sequence.size();
     if (!defer_qgram_build_) {
-      qgram_items.push_back({item.item_id, item.sequence});
+      qgram_items.push_back({item.item_id, &item.sequence});
     }
   }
   if (!defer_qgram_build_) {
-    qgram_index_.build(qgram_items);
+    qgram_index_.build_views(qgram_items);
     qgram_ready_ = true;
   }
 }
 
 const QGramCountIndex& ExactRangeJoinIndex::ensure_qgram_index() const {
   const auto build_qgram = [this]() {
-    std::vector<QGramCountIndex::Item> qgram_items;
+    std::vector<QGramCountIndex::ItemView> qgram_items;
     qgram_items.reserve(items_.size());
     for (const auto& item : items_) {
-      qgram_items.push_back({item.item_id, item.sequence});
+      qgram_items.push_back({item.item_id, &item.sequence});
     }
-    qgram_index_.build(qgram_items);
+    qgram_index_.build_views(qgram_items);
     qgram_ready_ = true;
   };
 

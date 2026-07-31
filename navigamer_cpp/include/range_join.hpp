@@ -79,7 +79,7 @@ class ExactRangeJoinIndex {
   explicit ExactRangeJoinIndex(
       RangeJoinConfig config = {}, bool defer_qgram_build = false);
 
-  void build(const std::vector<RangeJoinItem>& items);
+  void build(std::vector<RangeJoinItem> items);
   void prepare_qgram();
   void prepare_seed_lengths(const std::vector<int>& seed_lengths);
   RangeJoinQueryResult query(const std::string& query_sequence, int tau);

@@ -167,19 +167,39 @@ QGramCountIndex::QGramCountIndex(int q) : q_(q) {
 }
 
 void QGramCountIndex::build(const std::vector<Item>& items) {
+  std::vector<ItemView> views;
+  views.reserve(items.size());
+  for (const auto& item : items) {
+    views.push_back({item.item_id, &item.sequence});
+  }
+  build_views(views);
+}
+
+void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
   items_.clear();
   postings_.clear();
   items_.reserve(items.size());
+  const bool posting_index_capacity =
+      items.size() <= static_cast<size_t>(
+                          std::numeric_limits<uint32_t>::max());
 
   for (const auto& item : items) {
     const size_t internal_idx = items_.size();
-    QGramSignature signature = compute_qgram_signature(item.sequence, q_);
+    if (!item.sequence) {
+      items_.push_back({item.item_id, 0, 0, false});
+      continue;
+    }
+    const std::string& sequence = *item.sequence;
+    QGramSignature signature = compute_qgram_signature(sequence, q_);
+    const bool qgram_indexable =
+        posting_index_capacity && signature.safe_for_pruning;
     items_.push_back(
-        {item.item_id, item.sequence.size(), signature.total_qgrams,
-         signature.safe_for_pruning});
-    if (!signature.safe_for_pruning) continue;
+        {item.item_id, sequence.size(), signature.total_qgrams,
+         qgram_indexable});
+    if (!qgram_indexable) continue;
     for (const auto& entry : signature.entries) {
-      postings_[entry.code].push_back({internal_idx, entry.count});
+      postings_[entry.code].push_back(
+          {static_cast<uint32_t>(internal_idx), entry.count});
     }
   }
 }
@@ -209,7 +229,7 @@ std::vector<size_t> QGramCountIndex::query(
           ws->touched.push_back(posting.internal_idx);
         }
         ws->shared[posting.internal_idx] +=
-            std::min(static_cast<size_t>(query_entry.count), posting.count);
+            std::min(query_entry.count, posting.count);
       }
     }
   }

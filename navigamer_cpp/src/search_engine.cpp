@@ -6,6 +6,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <omp.h>
 
 namespace navigamer {
@@ -696,7 +697,7 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
         ParentSafeChildRouterIndex::RadiusBucket bucket;
         bucket.radius = radius;
         bucket.range_index = ExactRangeJoinIndex(safe_child_config);
-        bucket.range_index.build(items);
+        bucket.range_index.build(std::move(items));
         bucket.range_index.prepare_qgram();
         if (safe_child_config.candidate_mode != RangeCandidateMode::FullScan) {
           bucket.range_index.prepare_seed_lengths(seed_lengths);
@@ -747,7 +748,7 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
           {child_idx, view.sequences[child.center_sequence_id].seq});
     }
     if (items.size() < 2) continue;
-    parent_index.range_index.build(items);
+    parent_index.range_index.build(std::move(items));
     parent_index.range_index.prepare_qgram();
     parent_index.range_index.prepare_seed_lengths(seed_lengths);
     parent_router_hint_indexes_.emplace(
