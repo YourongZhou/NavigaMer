@@ -1819,7 +1819,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
           const LeafId sequence_id =
               static_cast<LeafId>(store.reference_records.size());
           store.reference_records.push_back(
-              {static_cast<uint32_t>(start), UINT32_MAX, UINT32_MAX});
+              {static_cast<uint32_t>(start)});
           sequence_ids.emplace(sequence, sequence_id);
         }
       }

@@ -84,21 +84,12 @@ struct BuildRangeConfig {
 };
 
 // A reference-backed leaf needs no BioSequence object. The fixed k-mer is a
-// view of reference_sequence at source_pos, while [sa_begin, sa_end) identifies
-// all of its suffix-array occurrences when an interval has been attached.
-// UINT32_MAX is the invalid SA endpoint sentinel.
+// view of reference_sequence at source_pos.
 struct ReferenceSequenceRecord {
   uint32_t source_pos = 0;
-  uint32_t sa_begin = UINT32_MAX;
-  uint32_t sa_end = UINT32_MAX;
-
-  bool has_sa_interval() const {
-    return sa_begin != UINT32_MAX && sa_end != UINT32_MAX &&
-           sa_end >= sa_begin;
-  }
 };
-static_assert(sizeof(ReferenceSequenceRecord) == 12,
-              "reference leaf record must remain a compact 12-byte value");
+static_assert(sizeof(ReferenceSequenceRecord) == 4,
+              "reference leaf record must remain a compact 4-byte value");
 
 struct ReferenceOccurrence {
   LeafId sequence_id = INVALID_LEAF_ID;
@@ -157,11 +148,8 @@ struct SequenceStore {
     if (!reference_backed) {
       return records.at(static_cast<size_t>(id)).bwt_interval;
     }
-    const auto& record =
-        reference_records.at(static_cast<size_t>(id));
-    if (!record.has_sa_interval()) return {};
-    return {static_cast<int64_t>(record.sa_begin),
-            static_cast<int64_t>(record.sa_end)};
+    (void)id;
+    return {};
   }
   const ReferenceContig& contig_for_position(size_t source_pos) const {
     const auto it = std::upper_bound(

@@ -13,7 +13,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '5'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '6'};
 
 template <typename T>
 void write_pod(std::ostream& out, const T& value) {
@@ -240,7 +240,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 5) {
+  if (manifest.format_version != 6) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -413,8 +413,6 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
   if (store.reference_backed) {
     for (const auto& sequence : store.reference_records) {
       write_pod<uint32_t>(out, sequence.source_pos);
-      write_pod<uint32_t>(out, sequence.sa_begin);
-      write_pod<uint32_t>(out, sequence.sa_end);
     }
     write_size(out, store.additional_occurrences.size());
     for (const auto& occurrence : store.additional_occurrences) {
@@ -495,17 +493,6 @@ SequenceStore read_sequence_store(std::istream& in) {
       ReferenceSequenceRecord sequence;
       sequence.source_pos =
           read_pod<uint32_t>(in, "sequence.source_pos");
-      sequence.sa_begin =
-          read_pod<uint32_t>(in, "sequence.bwt_start");
-      sequence.sa_end =
-          read_pod<uint32_t>(in, "sequence.bwt_end");
-      if ((sequence.sa_begin == UINT32_MAX) !=
-              (sequence.sa_end == UINT32_MAX) ||
-          (sequence.sa_begin != UINT32_MAX &&
-           sequence.sa_end < sequence.sa_begin)) {
-        throw std::runtime_error(
-            "reference-backed sequence has invalid 32-bit SA interval");
-      }
       if (sequence.source_pos >
               store.reference_sequence.size() ||
           store.fixed_sequence_length >
@@ -717,7 +704,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 5) {
+  if (manifest.format_version != 6) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -761,7 +748,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 5;
+  stored.format_version = 6;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -782,7 +769,7 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 5) {
+  if (manifest.format_version != 6) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }

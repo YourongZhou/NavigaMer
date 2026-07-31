@@ -28,16 +28,15 @@ does not allocate a temporary `WorldNode` pointer graph. Edit distance is in
 Reference-window builds flatten the input while retaining contig boundaries.
 Only all-ACGT windows contained entirely in one contig are indexed; windows
 containing ambiguous bases and cross-contig windows are excluded. The store
-keeps one reference string plus one 12-byte compact record per unique window:
-a 32-bit representative source offset and a reserved 32-bit half-open SA
-interval pair. Repeated windows add only sorted 8-byte `(LeafId, source offset)`
+keeps one reference string plus one 4-byte representative source offset per
+unique window. Repeated windows add only sorted 8-byte `(LeafId, source offset)`
 entries after their representative occurrence, including occurrences between
 stride-selected starts, so query output resolves every contig-local coordinate
 without rescanning the reference. No per-window
 `BioSequence`, identifier, occurrence vector, or sequence string is allocated.
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
-Persisted format version 5 stores this representation directly.
+Persisted format version 6 stores this representation directly.
 
 ## Installation
 

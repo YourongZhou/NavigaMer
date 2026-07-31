@@ -1,6 +1,6 @@
 # NavigaMer — C++ reference implementation
 
-This directory contains the **C++17 v8** reference indexer and CLI (`navigamer`) used for the paper implementation. The build pipeline follows a **top-down extended hierarchy**, **inter-tier DAG wiring**, **auxiliary-tier collapse with beacon sequences and MBBs**, and **leaf attachment** to the finest primary layer. Construction stores nodes in a `BuildWorldNodeRecord` array and all relationships as integer IDs, without allocating a `WorldNode` pointer graph. The finalized index uses `WorldNodeRecord` arrays plus flat child, leaf, beacon, MBB, and leaf-beacon arrays. Generic inputs use a `BioSequence` array; reference-backed inputs instead use one shared reference and a 12-byte compact record per unique window. Adaptive search returns 32-bit `LeafId` values.
+This directory contains the **C++17 v8** reference indexer and CLI (`navigamer`) used for the paper implementation. The build pipeline follows a **top-down extended hierarchy**, **inter-tier DAG wiring**, **auxiliary-tier collapse with beacon sequences and MBBs**, and **leaf attachment** to the finest primary layer. Construction stores nodes in a `BuildWorldNodeRecord` array and all relationships as integer IDs, without allocating a `WorldNode` pointer graph. The finalized index uses `WorldNodeRecord` arrays plus flat child, leaf, beacon, MBB, and leaf-beacon arrays. Generic inputs use a `BioSequence` array; reference-backed inputs instead use one shared reference and a 4-byte source offset per unique window. Adaptive search returns 32-bit `LeafId` values.
 
 ## Build
 
@@ -285,8 +285,7 @@ mode, and q-gram length to CSV. With one prefix and `--index`, it also writes a
 loadable persisted index whose manifest includes the reference fingerprint,
 actual prefix length, window length, and stride. Reference windows are
 reference-backed and contig-aware: only all-ACGT windows contained in one
-contig are indexed. Each unique window stores a 12-byte record containing a
-32-bit representative offset and two reserved 32-bit SA interval endpoints;
+contig are indexed. Each unique window stores one 4-byte representative offset;
 repeated windows add sorted 8-byte `(LeafId, source offset)` records for all
 valid occurrences, including positions between sampled stride starts. Its
 `BioSequence` identity and sequence are implicit in the array index and the
