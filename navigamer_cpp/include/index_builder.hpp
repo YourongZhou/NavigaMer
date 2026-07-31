@@ -306,7 +306,11 @@ struct SequenceStore {
   FinalArray<uint32_t> grouped_occurrence_positions;
   std::vector<ReferenceContig> reference_contigs;
   std::string reference_id;
+  // Builds own the reference string. Persisted indexes map the same raw bases
+  // directly from the index file so loading does not allocate or eagerly
+  // fault the entire reference into RAM.
   std::string reference_sequence;
+  FinalArray<char> mapped_reference_sequence;
   size_t fixed_sequence_length = 0;
   bool reference_backed = false;
 
@@ -314,6 +318,14 @@ struct SequenceStore {
     return reference_backed ? reference_sequence_count : records.size();
   }
   bool empty() const { return size() == 0; }
+  std::string_view reference_view() const {
+    if (!mapped_reference_sequence.empty()) {
+      return std::string_view(
+          mapped_reference_sequence.data(),
+          mapped_reference_sequence.size());
+    }
+    return reference_sequence;
+  }
   const BioSequence& at(LeafId id) const {
     return records.at(static_cast<size_t>(id));
   }
@@ -322,8 +334,9 @@ struct SequenceStore {
   }
   std::string_view sequence(LeafId id) const {
     if (reference_backed) {
+      const std::string_view reference = reference_view();
       return std::string_view(
-          reference_sequence.data() + source_position(id),
+          reference.data() + source_position(id),
           fixed_sequence_length);
     }
     return records[static_cast<size_t>(id)].seq;

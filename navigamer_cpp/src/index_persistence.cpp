@@ -24,8 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '0'};
-constexpr size_t kReferenceChunkBases = size_t{1} << 20;
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '1'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -318,7 +317,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 21) {
+  if (manifest.format_version != 22) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -439,41 +438,6 @@ class IndexPersistenceAccess {
 };
 
 namespace {
-
-template <typename Values>
-void write_u8_vector(std::ostream& out, const Values& values) {
-  write_size(out, values.size());
-  if (values.empty()) return;
-  const size_t byte_count = values.size() * sizeof(uint8_t);
-  if (byte_count > static_cast<size_t>(
-                       std::numeric_limits<std::streamsize>::max())) {
-    throw std::runtime_error("u8 vector exceeds stream size range");
-  }
-  out.write(reinterpret_cast<const char*>(values.data()),
-            static_cast<std::streamsize>(byte_count));
-  if (!out) throw std::runtime_error("failed to write u8 vector");
-}
-
-std::vector<uint8_t> read_u8_vector(
-    std::istream& in, const char* field) {
-  const size_t count = read_size(in, field);
-  if (count > static_cast<size_t>(
-                  std::numeric_limits<std::streamsize>::max()) /
-                  sizeof(uint8_t)) {
-    throw std::runtime_error(std::string(field) +
-                             " exceeds stream size range");
-  }
-  std::vector<uint8_t> values(count);
-  if (values.empty()) return values;
-  const size_t byte_count = count * sizeof(uint8_t);
-  in.read(reinterpret_cast<char*>(values.data()),
-          static_cast<std::streamsize>(byte_count));
-  if (!in) {
-    throw std::runtime_error(std::string("failed to read index field: ") +
-                             field);
-  }
-  return values;
-}
 
 void align_write_position(std::ostream& out, size_t alignment) {
   const std::streampos position = out.tellp();
@@ -597,122 +561,28 @@ FinalArray<T> read_final_array(
   return values;
 }
 
-uint8_t packed_base_code(char base, bool* canonical) {
-  *canonical = true;
-  switch (base) {
-    case 'A': return 0;
-    case 'C': return 1;
-    case 'G': return 2;
-    case 'T': return 3;
-    default:
-      *canonical = false;
-      return 0;
-  }
-}
-
-void write_packed_reference(std::ostream& out,
-                            const std::string& reference) {
+void write_mapped_reference(std::ostream& out,
+                            std::string_view reference) {
   write_size(out, reference.size());
-  const size_t chunk_count =
-      reference.size() / kReferenceChunkBases +
-      (reference.size() % kReferenceChunkBases != 0);
-  write_size(out, chunk_count);
-  for (size_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
-    const size_t chunk_begin = chunk_idx * kReferenceChunkBases;
-    const size_t chunk_bases = std::min(
-        kReferenceChunkBases, reference.size() - chunk_begin);
-    std::vector<uint8_t> packed((chunk_bases + 3) / 4, 0);
-    std::vector<uint8_t> exception_mask((chunk_bases + 7) / 8, 0);
-    std::vector<uint8_t> exceptions;
-    for (size_t offset = 0; offset < chunk_bases; ++offset) {
-      bool canonical = false;
-      const char base = reference[chunk_begin + offset];
-      const uint8_t code = packed_base_code(base, &canonical);
-      packed[offset / 4] |=
-          static_cast<uint8_t>(code << (2 * (offset % 4)));
-      if (!canonical) {
-        exception_mask[offset / 8] |=
-            static_cast<uint8_t>(uint8_t{1} << (offset % 8));
-        exceptions.push_back(static_cast<uint8_t>(base));
-      }
-    }
-    if (exceptions.empty()) exception_mask.clear();
-    write_size(out, chunk_bases);
-    write_u8_vector(out, packed);
-    write_u8_vector(out, exception_mask);
-    write_u8_vector(out, exceptions);
-  }
-}
-
-std::string read_packed_reference(std::istream& in) {
-  const size_t reference_size =
-      read_size(in, "sequence_store.reference_size");
-  const size_t chunk_count =
-      read_size(in, "sequence_store.reference_chunk_count");
-  const size_t expected_chunk_count =
-      reference_size / kReferenceChunkBases +
-      (reference_size % kReferenceChunkBases != 0);
-  if (chunk_count != expected_chunk_count) {
+  if (reference.empty()) return;
+  if (reference.size() > static_cast<size_t>(
+                             std::numeric_limits<std::streamsize>::max())) {
     throw std::runtime_error(
-        "reference-backed index has invalid packed chunk count");
+        "reference sequence exceeds stream size range");
   }
-
-  static constexpr std::array<char, 4> kBases = {'A', 'C', 'G', 'T'};
-  std::string reference(reference_size, '\0');
-  size_t chunk_begin = 0;
-  for (size_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
-    const size_t expected_chunk_bases = std::min(
-        kReferenceChunkBases, reference_size - chunk_begin);
-    const size_t chunk_bases =
-        read_size(in, "sequence_store.reference_chunk_bases");
-    if (chunk_bases != expected_chunk_bases) {
-      throw std::runtime_error(
-          "reference-backed index has invalid packed chunk length");
-    }
-    const auto packed =
-        read_u8_vector(in, "sequence_store.reference_packed_bases");
-    const auto exception_mask =
-        read_u8_vector(in, "sequence_store.reference_exception_mask");
-    const auto exceptions =
-        read_u8_vector(in, "sequence_store.reference_exceptions");
-    if (packed.size() != (chunk_bases + 3) / 4 ||
-        (!exception_mask.empty() &&
-         exception_mask.size() != (chunk_bases + 7) / 8) ||
-        (exception_mask.empty() && !exceptions.empty())) {
-      throw std::runtime_error(
-          "reference-backed index has invalid packed reference arrays");
-    }
-
-    size_t exception_idx = 0;
-    for (size_t offset = 0; offset < chunk_bases; ++offset) {
-      const uint8_t code = static_cast<uint8_t>(
-          (packed[offset / 4] >> (2 * (offset % 4))) & 3);
-      char base = kBases[code];
-      if (!exception_mask.empty() &&
-          (exception_mask[offset / 8] &
-           static_cast<uint8_t>(uint8_t{1} << (offset % 8)))) {
-        if (exception_idx >= exceptions.size()) {
-          throw std::runtime_error(
-              "reference-backed index has truncated reference exceptions");
-        }
-        base = static_cast<char>(exceptions[exception_idx++]);
-      }
-      reference[chunk_begin + offset] = base;
-    }
-    if (exception_idx != exceptions.size()) {
-      throw std::runtime_error(
-          "reference-backed index has excess reference exceptions");
-    }
-    chunk_begin += chunk_bases;
+  out.write(reference.data(),
+            static_cast<std::streamsize>(reference.size()));
+  if (!out) {
+    throw std::runtime_error(
+        "failed to write mapped reference sequence");
   }
-  return reference;
 }
 
 void write_sequence_store(std::ostream& out, const SequenceStore& store) {
   write_bool(out, store.reference_backed);
   if (store.reference_backed) {
     write_string(out, store.reference_id);
-    write_packed_reference(out, store.reference_sequence);
+    write_mapped_reference(out, store.reference_view());
     write_size(out, store.fixed_sequence_length);
     write_size(out, store.reference_contigs.size());
     for (const auto& contig : store.reference_contigs) {
@@ -765,13 +635,16 @@ SequenceStore read_sequence_store(
     const std::shared_ptr<MappedIndexFile>& mapping,
     IndexLoadValidation validation) {
   SequenceStore store;
+  std::string_view reference;
   store.reference_backed =
       read_bool(in, "sequence_store.reference_backed");
   if (store.reference_backed) {
     store.reference_id =
         read_string(in, "sequence_store.reference_id");
-    store.reference_sequence =
-        read_packed_reference(in);
+    store.mapped_reference_sequence =
+        read_final_array<char>(
+            in, mapping, "sequence_store.reference_sequence");
+    reference = store.reference_view();
     store.fixed_sequence_length =
         read_size(in, "sequence_store.fixed_sequence_length");
     if (store.fixed_sequence_length == 0) {
@@ -794,7 +667,7 @@ SequenceStore read_sequence_store(
           read_pod<uint32_t>(in, "reference_contig.source_begin");
       if (contig.id.empty() || contig.begin != expected_begin ||
           contig.end < contig.begin ||
-          contig.end > store.reference_sequence.size()) {
+          contig.end > reference.size()) {
         throw std::runtime_error(
             "reference-backed index has invalid contig layout");
       }
@@ -808,9 +681,9 @@ SequenceStore read_sequence_store(
       expected_begin = contig.end;
       store.reference_contigs.push_back(std::move(contig));
     }
-    if ((!store.reference_sequence.empty() &&
+    if ((!reference.empty() &&
          store.reference_contigs.empty()) ||
-        expected_begin != store.reference_sequence.size()) {
+        expected_begin != reference.size()) {
       throw std::runtime_error(
           "reference-backed index contigs do not cover reference");
     }
@@ -898,9 +771,9 @@ SequenceStore read_sequence_store(
         const uint32_t source_pos = static_cast<uint32_t>(
             store.source_position(static_cast<LeafId>(sequence_idx)));
         if (source_pos >
-                store.reference_sequence.size() ||
+                reference.size() ||
             store.fixed_sequence_length >
-                store.reference_sequence.size() -
+                reference.size() -
                     source_pos ||
             (sequence_idx != 0 && source_pos <= previous_position)) {
           throw std::runtime_error(
@@ -954,7 +827,7 @@ SequenceStore read_sequence_store(
       bool first = true;
       for (const auto& occurrence : store.singleton_occurrences) {
         if (occurrence.sequence_id >= store.size() ||
-            occurrence.source_pos >= store.reference_sequence.size() ||
+            occurrence.source_pos >= reference.size() ||
             (!first &&
              occurrence.sequence_id <= previous.sequence_id)) {
           throw std::runtime_error(
@@ -1143,7 +1016,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 21) {
+  if (manifest.format_version != 22) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1187,7 +1060,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 21;
+  stored.format_version = 22;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
@@ -1211,7 +1084,7 @@ LoadedIndex load_index(
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 21) {
+  if (manifest.format_version != 22) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }

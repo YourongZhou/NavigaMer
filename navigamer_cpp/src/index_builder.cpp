@@ -1733,6 +1733,8 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
     return false;
   }
   if (view.sequences.reference_backed) {
+    const std::string_view reference =
+        view.sequences.reference_view();
     if (!view.sequences.records.empty() ||
         view.sequences.reference_sequence_count != sequence_count_ ||
         view.sequences.reference_position_blocks.size() !=
@@ -1744,22 +1746,22 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
     for (const auto& contig : view.sequences.reference_contigs) {
       if (contig.id.empty() || contig.begin != previous_contig_end ||
           contig.end < contig.begin ||
-          contig.end > view.sequences.reference_sequence.size()) {
+          contig.end > reference.size()) {
         return false;
       }
       previous_contig_end = contig.end;
     }
-    if ((!view.sequences.reference_sequence.empty() &&
+    if ((!reference.empty() &&
          view.sequences.reference_contigs.empty()) ||
-        previous_contig_end != view.sequences.reference_sequence.size()) {
+        previous_contig_end != reference.size()) {
       return false;
     }
     const auto is_valid_reference_window =
         [&](uint32_t source_pos) {
           if (source_pos >=
-                  view.sequences.reference_sequence.size() ||
+                  reference.size() ||
               view.sequences.fixed_sequence_length >
-                  view.sequences.reference_sequence.size() - source_pos) {
+                  reference.size() - source_pos) {
             return false;
           }
           const auto contig = std::upper_bound(
@@ -1863,6 +1865,7 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
         !view.sequences.singleton_occurrences.empty() ||
         !view.sequences.occurrence_groups.empty() ||
         !view.sequences.grouped_occurrence_positions.empty() ||
+        !view.sequences.mapped_reference_sequence.empty() ||
         !view.sequences.reference_contigs.empty()) {
       return false;
     }
@@ -2160,6 +2163,7 @@ void BioGeometryIndexBuilder::initialize_sequence_store(
   store.reference_contigs.clear();
   store.reference_id.clear();
   store.reference_sequence.clear();
+  store.mapped_reference_sequence.clear();
   store.fixed_sequence_length = 0;
   store.records.resize(sequence_count_);
   for (size_t sequence_idx = 0; sequence_idx < unique_seqs.size();
@@ -2207,6 +2211,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
   auto& store = search_graph_view_.sequences;
   store.reference_id = std::move(reference_id);
   store.reference_sequence = std::move(reference_sequence);
+  store.mapped_reference_sequence.clear();
   store.fixed_sequence_length = window_length;
   store.reference_backed = true;
   store.records.clear();

@@ -233,7 +233,7 @@ void assert_reference_backed_index_round_trip() {
   const auto& loaded_store = loaded.builder.sequence_store();
   assert(loaded_store.reference_backed);
   assert(loaded_store.reference_id == "synthetic_ref");
-  assert(loaded_store.reference_sequence == reference);
+  assert(loaded_store.reference_view() == reference);
   assert(loaded_store.fixed_sequence_length == kWindowLength);
   assert(loaded_store.size() == built_store.size());
   for (size_t sequence_idx = 0;
@@ -332,7 +332,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 21);
+  assert(loaded.manifest.format_version == 22);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);
@@ -417,9 +417,9 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   std::remove(index_path.c_str());
 }
 
-void assert_chunked_reference_encoding_is_exact() {
+void assert_mapped_reference_encoding_is_exact() {
   const std::string index_path =
-      "/tmp/navigamer_test_chunked_reference.navidx";
+      "/tmp/navigamer_test_mapped_reference.navidx";
   std::remove(index_path.c_str());
 
   constexpr size_t kChunkBoundary = size_t{1} << 20;
@@ -433,19 +433,21 @@ void assert_chunked_reference_encoding_is_exact() {
   navigamer::HierarchyConfig hierarchy({8, 4, 2});
   navigamer::BioGeometryIndexBuilder built(hierarchy, build_config);
   built.build_reference_windows(
-      "chunked", reference, 4, reference.size());
+      "mapped", reference, 4, reference.size());
   auto manifest = navigamer::make_reference_window_index_manifest(
       reference, reference.size(), 4,
       static_cast<int>(reference.size()), hierarchy, build_config);
   assert(manifest.ref_input.size() < reference.size());
   navigamer::save_index(index_path, built, manifest);
 
-  std::ifstream stored(index_path, std::ios::binary | std::ios::ate);
-  assert(stored);
-  assert(static_cast<size_t>(stored.tellg()) < reference.size());
-
   const auto loaded = navigamer::load_index(index_path);
-  assert(loaded.builder.sequence_store().reference_sequence == reference);
+  const auto& loaded_store = loaded.builder.sequence_store();
+  assert(loaded_store.reference_sequence.empty());
+  assert(loaded_store.mapped_reference_sequence.is_mapped());
+  assert(loaded_store.mapped_reference_sequence.size() == reference.size());
+  assert(loaded_store.reference_view() == reference);
+  assert(loaded_store.reference_view().data() ==
+         loaded_store.mapped_reference_sequence.data());
   assert(loaded.builder.validate_integer_ids());
   const auto reconstructed_manifest =
       navigamer::make_reference_window_index_manifest(
@@ -569,7 +571,7 @@ int main() {
   assert_reference_window_manifest_tracks_slicing_parameters();
   assert_reference_backed_index_round_trip();
   assert_multicontig_invalid_base_and_occurrence_round_trip();
-  assert_chunked_reference_encoding_is_exact();
+  assert_mapped_reference_encoding_is_exact();
   assert_reference_position_encodings_are_exact();
   std::cout << "index persistence tests passed\n";
   return 0;

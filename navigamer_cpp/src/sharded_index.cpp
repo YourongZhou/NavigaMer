@@ -348,7 +348,7 @@ bool load_reusable_shard(
     if (!store.reference_backed ||
         store.reference_id != reference_id ||
         store.fixed_sequence_length != window_length ||
-        store.reference_sequence != reference_slice ||
+        store.reference_view() != reference_slice ||
         store.reference_contigs.size() != 1) {
       return false;
     }

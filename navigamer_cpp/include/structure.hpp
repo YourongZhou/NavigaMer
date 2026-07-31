@@ -38,7 +38,7 @@ struct BwtInterval {
 };
 
 // One contig embedded in a flattened reference string. Coordinates are
-// half-open global offsets into SequenceStore::reference_sequence.
+// half-open global offsets into SequenceStore::reference_view().
 struct ReferenceContig {
   std::string id;
   uint32_t begin = 0;
