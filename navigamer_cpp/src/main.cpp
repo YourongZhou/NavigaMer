@@ -1046,36 +1046,34 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
       }
       BioSequence query("query", query_seq);
       const auto route = shard_router.select(query.seq, tolerance);
-      std::vector<uint8_t> search_shard(
-          shards.size(), route.enabled ? 0 : 1);
-      for (uint32_t shard_id : route.shard_ids) {
-        search_shard[shard_id] = 1;
-      }
+      const size_t active_shard_count =
+          route.enabled ? route.shard_ids.size() : shards.size();
       std::vector<std::pair<SearchResult, SearchStats>>
-          shard_results(shards.size());
-      std::vector<std::exception_ptr> shard_errors(shards.size());
+          shard_results(active_shard_count);
+      std::vector<std::exception_ptr> shard_errors(active_shard_count);
       const auto query_start =
           std::chrono::high_resolution_clock::now();
-#pragma omp parallel for schedule(static) if(engines.size() > 1)
-      for (size_t shard_idx = 0;
-           shard_idx < engines.size(); ++shard_idx) {
-        if (!search_shard[shard_idx]) continue;
+#pragma omp parallel for schedule(static) if(active_shard_count > 1)
+      for (size_t active_idx = 0;
+           active_idx < active_shard_count; ++active_idx) {
+        const size_t shard_idx =
+            route.enabled ? route.shard_ids[active_idx] : active_idx;
         try {
           if (mode == "greedy") {
-            shard_results[shard_idx] =
+            shard_results[active_idx] =
                 engines[shard_idx]->search_greedy(
                     query, tolerance);
           } else if (mode == "exhaustive") {
-            shard_results[shard_idx] =
+            shard_results[active_idx] =
                 engines[shard_idx]->search_exhaustive(
                     query, tolerance);
           } else {
-            shard_results[shard_idx] =
+            shard_results[active_idx] =
                 engines[shard_idx]->search_adaptive(
                     query, tolerance);
           }
         } catch (...) {
-          shard_errors[shard_idx] =
+          shard_errors[active_idx] =
               std::current_exception();
         }
       }
@@ -1092,14 +1090,16 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
       std::vector<DisplayHit> hits;
       std::unordered_map<std::string, size_t> hit_by_sequence;
       size_t distance_calculations = 0;
-      for (size_t shard_idx = 0;
-           shard_idx < shard_results.size(); ++shard_idx) {
+      for (size_t active_idx = 0;
+           active_idx < shard_results.size(); ++active_idx) {
+        const size_t shard_idx =
+            route.enabled ? route.shard_ids[active_idx] : active_idx;
         distance_calculations +=
-            shard_results[shard_idx].second.dist_calc_count;
+            shard_results[active_idx].second.dist_calc_count;
         const auto& store =
             shards[shard_idx].builder.sequence_store();
         for (LeafId hit_id :
-             shard_results[shard_idx].first) {
+             shard_results[active_idx].first) {
           std::string sequence(store.sequence(hit_id));
           auto inserted = hit_by_sequence.emplace(
               sequence, hits.size());
@@ -1122,8 +1122,7 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
                     : "Adaptive";
       std::cout << mode_label << " hits: " << hits.size()
                 << " (shards="
-                << (route.enabled ? route.shard_ids.size()
-                                  : shards.size())
+                << active_shard_count
                 << "/" << shards.size()
                 << " dist_calcs=" << distance_calculations
                 << " query_time_ms="
@@ -1628,7 +1627,6 @@ void run_query_index_batch(const std::string& index_path,
     }
     size_t routed_queries = 0;
     size_t searched_shards = 0;
-    std::vector<uint8_t> search_shard(engines.size(), 1);
 
     const std::vector<std::string> columns = {
         "query_id", "hit_id", "distance", "ref_positions", "read_id",
@@ -1650,29 +1648,24 @@ void run_query_index_batch(const std::string& index_path,
       auto query_start =
           std::chrono::high_resolution_clock::now();
       const auto route = shard_router.select(read->seq, tolerance);
-      std::fill(
-          search_shard.begin(), search_shard.end(),
-          route.enabled ? 0 : 1);
-      for (uint32_t shard_id : route.shard_ids) {
-        search_shard[shard_id] = 1;
-      }
+      const size_t active_shard_count =
+          route.enabled ? route.shard_ids.size() : engines.size();
       if (route.enabled) ++routed_queries;
-      searched_shards += route.enabled
-                             ? route.shard_ids.size()
-                             : engines.size();
+      searched_shards += active_shard_count;
       std::vector<std::pair<SearchResult, SearchStats>>
-          shard_results(engines.size());
-      std::vector<std::exception_ptr> shard_errors(engines.size());
-#pragma omp parallel for schedule(static) if(engines.size() > 1)
-      for (size_t shard_idx = 0;
-           shard_idx < engines.size(); ++shard_idx) {
-        if (!search_shard[shard_idx]) continue;
+          shard_results(active_shard_count);
+      std::vector<std::exception_ptr> shard_errors(active_shard_count);
+#pragma omp parallel for schedule(static) if(active_shard_count > 1)
+      for (size_t active_idx = 0;
+           active_idx < active_shard_count; ++active_idx) {
+        const size_t shard_idx =
+            route.enabled ? route.shard_ids[active_idx] : active_idx;
         try {
-          shard_results[shard_idx] =
+          shard_results[active_idx] =
               engines[shard_idx]->search_adaptive(
                   *read, tolerance);
         } catch (...) {
-          shard_errors[shard_idx] = std::current_exception();
+          shard_errors[active_idx] = std::current_exception();
         }
       }
       for (const auto& error : shard_errors) {
@@ -1722,11 +1715,13 @@ void run_query_index_batch(const std::string& index_path,
 
       std::vector<BioSequence> combined_hits;
       std::unordered_map<std::string, size_t> hit_by_sequence;
-      for (size_t shard_idx = 0;
-           shard_idx < shard_results.size(); ++shard_idx) {
+      for (size_t active_idx = 0;
+           active_idx < shard_results.size(); ++active_idx) {
+        const size_t shard_idx =
+            route.enabled ? route.shard_ids[active_idx] : active_idx;
         const auto& sequence_store =
             loaded_shards[shard_idx].builder.sequence_store();
-        for (LeafId hit_id : shard_results[shard_idx].first) {
+        for (LeafId hit_id : shard_results[active_idx].first) {
           const std::string_view hit_sequence =
               sequence_store.sequence(hit_id);
           auto inserted = hit_by_sequence.emplace(
