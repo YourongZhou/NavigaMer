@@ -62,6 +62,10 @@ DistanceMode to_distance_mode(BuildDistanceMode mode);
 
 constexpr size_t kPhase1ParallelScanMinFanout = 512;
 constexpr size_t kPhase2DistanceBatchFlushPairs = 65536;
+// Any beacon subset preserves the triangle-inequality lower bound. Capping the
+// subset bounds the otherwise quadratic child-by-beacon matrix and also bounds
+// the number of query-to-beacon distances evaluated at each world.
+constexpr size_t kMaxBuildBeaconsPerNode = 16;
 constexpr size_t kMaxCompactSequenceLength =
     std::numeric_limits<uint8_t>::max();
 
@@ -3090,10 +3094,19 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
         std::vector<NodeId> auxiliary_nodes = node.child_or_leaf_ids;
         {
           ScopedTimer timer(&collect_ms[static_cast<size_t>(tid)]);
-          geometry.beacon_ids.reserve(auxiliary_nodes.size());
-          for (NodeId aux_id : auxiliary_nodes) {
+          const size_t beacon_count = std::min(
+              auxiliary_nodes.size(), kMaxBuildBeaconsPerNode);
+          geometry.beacon_ids.reserve(beacon_count);
+          for (size_t beacon_idx = 0; beacon_idx < beacon_count;
+               ++beacon_idx) {
+            const size_t auxiliary_idx =
+                beacon_count <= 1
+                    ? 0
+                    : beacon_idx * (auxiliary_nodes.size() - 1) /
+                          (beacon_count - 1);
             geometry.beacon_ids.push_back(
-                build_nodes_[aux_id].center_sequence_id);
+                build_nodes_[auxiliary_nodes[auxiliary_idx]]
+                    .center_sequence_id);
           }
         }
 
