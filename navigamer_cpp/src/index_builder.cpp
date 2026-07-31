@@ -965,30 +965,6 @@ std::vector<int> make_auxiliary_radii(const std::vector<int>& primary_radii) {
   return out;
 }
 
-std::vector<int> leaf_beacon_distances(
-    std::string_view leaf,
-    const std::vector<LeafId>& beacons,
-    const SequenceStore& sequences,
-    int center_dist,
-    BuildDistanceMode distance_mode) {
-  std::vector<int> dists;
-  dists.reserve(beacons.size());
-  for (size_t i = 0; i < beacons.size(); ++i) {
-    if (beacons[i] >= sequences.size()) {
-      dists.push_back(0);
-    } else if (i == 0) {
-      dists.push_back(center_dist);
-    } else {
-      dists.push_back(distance_mode == BuildDistanceMode::Edlib
-                          ? compute_distance_edlib(
-                                leaf, sequences.sequence(beacons[i]))
-                          : compute_distance(
-                                leaf, sequences.sequence(beacons[i])));
-    }
-  }
-  return dists;
-}
-
 int build_distance(std::string_view a, std::string_view b,
                    BuildDistanceMode mode) {
   return mode == BuildDistanceMode::Edlib ? compute_distance_edlib(a, b)
@@ -1240,22 +1216,6 @@ void merge_phase2_local_stats(BioGeometryIndexBuilder::Statistics& target,
   target.phase2_distance_batches += local.phase2_distance_batches;
 }
 
-std::vector<int> leaf_beacon_distances_timed(
-    std::string_view leaf,
-    const std::vector<LeafId>& beacons,
-    const SequenceStore& sequences,
-    int center_dist,
-    BuildDistanceMode distance_mode,
-    double* target_ms) {
-  if (beacons.size() <= 1) {
-    return leaf_beacon_distances(
-        leaf, beacons, sequences, center_dist, distance_mode);
-  }
-  ScopedTimer timer(target_ms);
-  return leaf_beacon_distances(
-      leaf, beacons, sequences, center_dist, distance_mode);
-}
-
 void validate_range_config(const BuildRangeConfig& config) {
   if (config.range_join.min_seed_len <= 0) {
     throw std::invalid_argument("range-join min seed length must be positive");
@@ -1322,6 +1282,11 @@ void HierarchyConfig::validate() const {
   }
   if (auxiliary_radii.size() != primary_radii.size() - 1) {
     throw std::invalid_argument("HierarchyConfig auxiliary_radii must have size K-1");
+  }
+  if (primary_radii.front() >
+      static_cast<int>(std::numeric_limits<uint16_t>::max())) {
+    throw std::invalid_argument(
+        "HierarchyConfig radii exceed 16-bit stored distance range");
   }
   for (size_t i = 0; i + 1 < primary_radii.size(); ++i) {
     if (primary_radii[i] <= primary_radii[i + 1]) {
@@ -1927,7 +1892,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
       if (layer_idx == 0) {
         candidates = &extended_layers_[0];
       } else if (parent != INVALID_NODE_ID) {
-        candidates = &build_nodes_[parent].child_ids;
+        candidates = &build_nodes_[parent].child_or_leaf_ids;
         candidate_group = parent;
       }
 
@@ -2078,7 +2043,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
         extended_layers_[static_cast<size_t>(layer_idx)].push_back(
             new_node_id);
         if (parent != INVALID_NODE_ID) {
-          build_nodes_[parent].child_ids.push_back(new_node_id);
+          build_nodes_[parent].child_or_leaf_ids.push_back(new_node_id);
         }
         if (is_primary) {
           stats_.created_primary_nodes[static_cast<size_t>(primary_idx)]++;
@@ -2159,7 +2124,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
     auto& children = extended_layers_[static_cast<size_t>(layer_idx + 1)];
     stats_.phase2_total_possible_pairs += parents.size() * children.size();
     for (NodeId parent_id : parents) {
-      build_nodes_[parent_id].child_ids.clear();
+      build_nodes_[parent_id].child_or_leaf_ids.clear();
     }
 
     std::vector<std::string_view> parent_sequences(parents.size());
@@ -2203,7 +2168,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
           const auto& pair = verify_pairs[accepted_idx];
           {
             ScopedTimer timer(&stats_.phase2_edge_insert_ms);
-            parent.child_ids.push_back(children[pair.child_idx]);
+            parent.child_or_leaf_ids.push_back(children[pair.child_idx]);
           }
           stats_.phase2_edges_added++;
         }
@@ -2410,7 +2375,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
     {
       ScopedTimer timer(&stats_.phase2_edge_insert_ms);
       for (const auto& edge : edges) {
-        build_nodes_[parents[edge.parent_idx]].child_ids.push_back(
+        build_nodes_[parents[edge.parent_idx]].child_or_leaf_ids.push_back(
             children[edge.child_idx]);
       }
     }
@@ -2456,7 +2421,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
       auto& node = build_nodes_[node_id];
       reset_node_metadata(node, primary_idx * 2, true, primary_idx);
       node.beacon_ids.clear();
-      node.child_beacon_mbbs.clear();
+      node.child_mbb_bounds.clear();
       node.leaf_beacon_dists.clear();
     }
   }
@@ -2467,7 +2432,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
     const bool is_finest = (primary_idx == finest_primary_layer_index());
     if (is_finest) {
       for (NodeId node_id : current_layer) {
-        build_nodes_[node_id].child_ids.clear();
+        build_nodes_[node_id].child_or_leaf_ids.clear();
       }
       continue;
     }
@@ -2480,7 +2445,8 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
     std::vector<double> collect_ms(static_cast<size_t>(thread_capacity), 0.0);
     std::vector<double> collapse_ms(static_cast<size_t>(thread_capacity), 0.0);
     std::vector<double> distance_ms(static_cast<size_t>(thread_capacity), 0.0);
-    std::vector<double> rect_ms(static_cast<size_t>(thread_capacity), 0.0);
+    std::vector<uint8_t> distance_overflow(
+        static_cast<size_t>(thread_capacity), 0);
     int actual_threads = 1;
 
 #pragma omp parallel if(thread_capacity > 1) num_threads(thread_capacity)
@@ -2493,7 +2459,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
 #pragma omp for schedule(dynamic, 1)
       for (size_t node_idx = 0; node_idx < current_layer.size(); ++node_idx) {
         auto& node = build_nodes_[current_layer[node_idx]];
-        std::vector<NodeId> auxiliary_nodes = node.child_ids;
+        std::vector<NodeId> auxiliary_nodes = node.child_or_leaf_ids;
         {
           ScopedTimer timer(&collect_ms[static_cast<size_t>(tid)]);
           node.beacon_ids.reserve(auxiliary_nodes.size());
@@ -2507,22 +2473,25 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
         {
           ScopedTimer timer(&collapse_ms[static_cast<size_t>(tid)]);
           for (NodeId aux_id : auxiliary_nodes) {
-            for (NodeId child : build_nodes_[aux_id].child_ids) {
+            for (NodeId child : build_nodes_[aux_id].child_or_leaf_ids) {
               if (std::find(direct_children.begin(), direct_children.end(),
                             child) == direct_children.end()) {
                 direct_children.push_back(child);
               }
             }
           }
-          node.child_ids = std::move(direct_children);
+          node.child_or_leaf_ids = std::move(direct_children);
         }
 
         {
           ScopedTimer timer(&distance_ms[static_cast<size_t>(tid)]);
-          node.child_beacon_mbbs.assign(node.child_ids.size(), {});
-          for (size_t child_idx = 0; child_idx < node.child_ids.size();
-               ++child_idx) {
-            const auto& child = build_nodes_[node.child_ids[child_idx]];
+          const size_t child_count = node.child_or_leaf_ids.size();
+          const size_t beacon_count = node.beacon_ids.size();
+          const size_t mbb_cell_count = child_count * beacon_count;
+          node.child_mbb_bounds.assign(mbb_cell_count, 0);
+          for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
+            const auto& child =
+                build_nodes_[node.child_or_leaf_ids[child_idx]];
             const auto& child_sequence =
                 search_graph_view_.sequences.sequence(
                     child.center_sequence_id);
@@ -2532,9 +2501,8 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
               prepared_child = prepare_edlib_dna_pattern(child_sequence);
               prepared_child_ptr = &prepared_child;
             }
-            node.child_beacon_mbbs[child_idx].reserve(
-                node.beacon_ids.size());
-            for (LeafId beacon_id : node.beacon_ids) {
+            for (size_t dim = 0; dim < beacon_count; ++dim) {
+              const LeafId beacon_id = node.beacon_ids[dim];
               const auto& beacon =
                   search_graph_view_.sequences.sequence(beacon_id);
               int dist = prepared_child_ptr
@@ -2543,63 +2511,44 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
                              : build_distance(
                                    child_sequence, beacon,
                                    range_config_.distance_mode);
-              MBB mbb;
-              mbb.min_dist = std::max(0, dist - child.radius);
-              mbb.max_dist = dist + child.radius;
-              node.child_beacon_mbbs[child_idx].push_back(mbb);
+              const size_t flat = dim * child_count + child_idx;
+              const int64_t lower_value =
+                  std::max<int64_t>(
+                      0, static_cast<int64_t>(dist) - child.radius);
+              const int64_t upper_value =
+                  static_cast<int64_t>(dist) + child.radius;
+              if (lower_value >
+                      static_cast<int>(
+                          std::numeric_limits<uint16_t>::max()) ||
+                  upper_value >
+                      static_cast<int>(
+                          std::numeric_limits<uint16_t>::max())) {
+                distance_overflow[static_cast<size_t>(tid)] = 1;
+                continue;
+              }
+              const uint16_t lower =
+                  static_cast<uint16_t>(lower_value);
+              const uint16_t upper =
+                  static_cast<uint16_t>(upper_value);
+              node.child_mbb_bounds[flat] =
+                  static_cast<uint32_t>(lower) |
+                  (static_cast<uint32_t>(upper) << 16);
             }
           }
         }
 
-        if (node.child_ids.size() >=
-                range_config_.min_rect_index_fanout &&
-            node.child_ids.size() <=
-                std::numeric_limits<uint32_t>::max() &&
-            !node.beacon_ids.empty() &&
-            node.child_beacon_mbbs.size() == node.child_ids.size()) {
-          try {
-            ScopedTimer timer(&rect_ms[static_cast<size_t>(tid)]);
-            std::vector<MBBRectIndex::Rect> rects;
-            rects.reserve(node.child_ids.size());
-            bool valid = true;
-            for (size_t child_idx = 0; child_idx < node.child_ids.size();
-                 ++child_idx) {
-              const auto& row = node.child_beacon_mbbs[child_idx];
-              if (row.size() != node.beacon_ids.size()) {
-                valid = false;
-                break;
-              }
-              MBBRectIndex::Rect rect;
-              rect.child_id = static_cast<uint32_t>(child_idx);
-              rect.lo.reserve(row.size());
-              rect.hi.reserve(row.size());
-              for (const auto& mbb : row) {
-                rect.lo.push_back(mbb.min_dist);
-                rect.hi.push_back(mbb.max_dist);
-              }
-              rects.push_back(std::move(rect));
-            }
-            if (valid) {
-              auto rect_index = std::make_shared<MBBRectIndex>();
-              rect_index->build(rects);
-              if (rect_index->size() == node.child_ids.size() &&
-                  rect_index->dim() == node.beacon_ids.size()) {
-                // The finalized array search builds its rectangle router from
-                // the flat MBB arrays. This construction-time validation index
-                // is intentionally discarded instead of retained per node.
-              }
-            }
-          } catch (...) {
-            // Rectangle routing is an optional acceleration. The MBB rows
-            // remain canonical and recall-safe when index construction fails.
-          }
-        }
         if (progress && node_idx % 64 == 63) progress->advance(64);
       }
     }
 
     phase_completed += current_layer.size();
     if (progress) progress->set_completed(phase_completed);
+    if (std::find(
+            distance_overflow.begin(), distance_overflow.end(),
+            static_cast<uint8_t>(1)) != distance_overflow.end()) {
+      throw std::runtime_error(
+          "MBB bounds exceed 16-bit stored distance range");
+    }
 
     stats_.phase3_parallel_threads = std::max(
         stats_.phase3_parallel_threads, static_cast<size_t>(actual_threads));
@@ -2608,7 +2557,6 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
       stats_.phase3_collect_beacons_ms += collect_ms[idx];
       stats_.phase3_collapse_children_ms += collapse_ms[idx];
       stats_.phase3_child_mbb_distance_ms += distance_ms[idx];
-      stats_.phase3_rect_index_build_ms += rect_ms[idx];
     }
   }
   if (progress) progress->finish_phase();
@@ -2621,10 +2569,9 @@ void BioGeometryIndexBuilder::attach_leaves(
   stats_.total_possible_leaf_pairs = finest_layer.size() * sequences.size();
   for (NodeId node_id : finest_layer) {
     auto& node = build_nodes_[node_id];
-    node.leaf_ids.clear();
+    node.child_or_leaf_ids.clear();
     node.beacon_ids.clear();
     node.leaf_beacon_dists.clear();
-    node.beacon_ids.push_back(node.center_sequence_id);
   }
 
   LeafAttachDirection actual_direction = range_config_.leaf_attach_direction;
@@ -2646,9 +2593,7 @@ void BioGeometryIndexBuilder::attach_leaves(
   if (range_config_.leaf_attach_mode == BuildRangeMode::Full) {
     const int thread_count = std::max(1, omp_get_max_threads());
     std::vector<double> thread_exact_ms(static_cast<size_t>(thread_count), 0.0);
-    std::vector<double> thread_beacon_ms(static_cast<size_t>(thread_count), 0.0);
     std::vector<double> thread_tuple_ms(static_cast<size_t>(thread_count), 0.0);
-    std::vector<double> thread_populate_ms(static_cast<size_t>(thread_count), 0.0);
     std::vector<size_t> thread_exact_calls(
         static_cast<size_t>(thread_count), 0);
     #pragma omp parallel for schedule(dynamic)
@@ -2675,29 +2620,20 @@ void BioGeometryIndexBuilder::attach_leaves(
               center, sequence, node.radius, range_config_.distance_mode,
               prepared_center_ptr);
           if (dist <= node.radius) {
-            auto beacon_dists = leaf_beacon_distances_timed(
-                sequence, node.beacon_ids, sequences, dist,
-                range_config_.distance_mode,
-                &thread_beacon_ms[timer_idx]);
             {
               ScopedTimer timer(&thread_tuple_ms[timer_idx]);
-              node.leaf_ids.push_back(sequence_id);
-              node.leaf_beacon_dists.push_back(std::move(beacon_dists));
+              node.child_or_leaf_ids.push_back(sequence_id);
+              node.leaf_beacon_dists.push_back(
+                  static_cast<uint16_t>(dist));
             }
           }
         }
-      }
-      {
-        ScopedTimer timer(&thread_populate_ms[timer_idx]);
-        node.data_count = static_cast<int>(node.leaf_ids.size());
       }
       if (progress && layer_idx % 256 == 255) progress->advance(256);
     }
     if (progress) progress->set_completed(finest_layer.size());
     for (double value : thread_exact_ms) stats_.leaf_exact_verify_ms += value;
-    for (double value : thread_beacon_ms) stats_.leaf_beacon_distance_ms += value;
     for (double value : thread_tuple_ms) stats_.leaf_tuple_emit_ms += value;
-    for (double value : thread_populate_ms) stats_.leaf_populate_ms += value;
     for (size_t value : thread_exact_calls) {
       stats_.leaf_exact_distance_calls += value;
     }
@@ -2802,14 +2738,11 @@ void BioGeometryIndexBuilder::attach_leaves(
                 sequence, center, world.radius,
                 range_config_.distance_mode, prepared_sequence_ptr);
             if (dist <= world.radius) {
-              auto beacon_dists = leaf_beacon_distances_timed(
-                  sequence, world.beacon_ids, sequences, dist,
-                  range_config_.distance_mode,
-                  &stats_.leaf_beacon_distance_ms);
               {
                 ScopedTimer timer(&stats_.leaf_tuple_emit_ms);
-                world.leaf_ids.push_back(sequence_id);
-                world.leaf_beacon_dists.push_back(std::move(beacon_dists));
+                world.child_or_leaf_ids.push_back(sequence_id);
+                world.leaf_beacon_dists.push_back(
+                    static_cast<uint16_t>(dist));
               }
             }
           }
@@ -2820,15 +2753,10 @@ void BioGeometryIndexBuilder::attach_leaves(
       {
         ScopedTimer timer(&stats_.leaf_tuple_merge_sort_ms);
       }
-      for (NodeId node_id : finest_layer) {
-        ScopedTimer timer(&stats_.leaf_populate_ms);
-        auto& node = build_nodes_[node_id];
-        node.data_count = static_cast<int>(node.leaf_ids.size());
-      }
     } else {
       struct LeafAttachTuple {
         size_t seq_idx = 0;
-        std::vector<int> beacon_dists;
+        uint16_t beacon_dist = 0;
       };
 
       std::vector<RangeJoinItemView> items;
@@ -2943,13 +2871,10 @@ void BioGeometryIndexBuilder::attach_leaves(
                   center, sequence, world.radius,
                   range_config_.distance_mode, prepared_center_ptr);
               if (dist <= world.radius) {
-                auto beacon_dists = leaf_beacon_distances_timed(
-                    sequence, world.beacon_ids, sequences, dist,
-                    range_config_.distance_mode,
-                    &local_stats.leaf_beacon_distance_ms);
                 ScopedTimer timer(&local_stats.leaf_tuple_emit_ms);
                 world_tuples.push_back(
-                    {seq_idx, std::move(beacon_dists)});
+                    {seq_idx,
+                     static_cast<uint16_t>(dist)});
               }
             }
           }
@@ -2977,12 +2902,11 @@ void BioGeometryIndexBuilder::attach_leaves(
              ++world_idx) {
           auto& world = build_nodes_[finest_layer[world_idx]];
           for (auto& tuple : tuples_by_world[world_idx]) {
-            world.leaf_ids.push_back(
+            world.child_or_leaf_ids.push_back(
                 static_cast<LeafId>(tuple.seq_idx));
             world.leaf_beacon_dists.push_back(
-                std::move(tuple.beacon_dists));
+                tuple.beacon_dist);
           }
-          world.data_count = static_cast<int>(world.leaf_ids.size());
         }
       }
     }
@@ -2990,7 +2914,7 @@ void BioGeometryIndexBuilder::attach_leaves(
 
   size_t total_links = 0;
   for (NodeId node_id : finest_layer) {
-    total_links += build_nodes_[node_id].leaf_ids.size();
+    total_links += build_nodes_[node_id].child_or_leaf_ids.size();
   }
   stats_.leaf_attachments_added = total_links;
   double avg_links =
@@ -3026,23 +2950,45 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     }
     return static_cast<uint32_t>(value);
   };
-  auto to_u16_distance = [](int value, const char* field) -> uint16_t {
-    if (value < 0 ||
-        value > static_cast<int>(std::numeric_limits<uint16_t>::max())) {
-      throw std::runtime_error(
-          std::string(field) + " exceeds 16-bit stored distance range");
-    }
-    return static_cast<uint16_t>(value);
-  };
-
   SearchGraphView view;
   view.sequences = std::move(search_graph_view_.sequences);
   view.node_records.assign(world_node_count_, WorldNodeRecord{});
   view.layer_begin.assign(static_cast<size_t>(num_primary_layers()), 0);
   view.layer_end.assign(static_cast<size_t>(num_primary_layers()), 0);
+  size_t total_child_ids = 0;
+  size_t total_leaf_ids = 0;
+  size_t total_beacon_ids = 0;
+  size_t total_mbb_cells = 0;
+  size_t total_leaf_beacon_cells = 0;
+  for (size_t layer_idx = 0;
+       layer_idx < primary_layers_.size(); ++layer_idx) {
+    const bool is_finest =
+        layer_idx + 1 == primary_layers_.size();
+    for (NodeId build_node_id : primary_layers_[layer_idx]) {
+      const auto& node = build_nodes_[build_node_id];
+      if (is_finest) {
+        total_leaf_ids += node.child_or_leaf_ids.size();
+        total_beacon_ids += 1;
+        total_leaf_beacon_cells +=
+            node.leaf_beacon_dists.size();
+      } else {
+        total_child_ids += node.child_or_leaf_ids.size();
+        total_beacon_ids += node.beacon_ids.size();
+        total_mbb_cells += node.child_mbb_bounds.size();
+      }
+    }
+  }
+  view.child_ids.reserve(total_child_ids);
+  view.leaf_ids.reserve(total_leaf_ids);
+  view.beacon_ids.reserve(total_beacon_ids);
+  view.mbb_lo.reserve(total_mbb_cells);
+  view.mbb_hi.reserve(total_mbb_cells);
+  view.leaf_beacon_dists.reserve(total_leaf_beacon_cells);
 
   for (size_t layer_idx = 0; layer_idx < primary_layers_.size(); ++layer_idx) {
     const auto& layer = primary_layers_[layer_idx];
+    const bool is_finest =
+        layer_idx + 1 == primary_layers_.size();
     view.layer_begin[layer_idx] =
         layer.empty() ? to_u32(world_node_count_, "layer_begin")
                       : final_node_ids_[layer.front()];
@@ -3064,89 +3010,76 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       record.primary_layer_index = node.primary_layer_index;
 
       record.child_begin = to_u32(view.child_ids.size(), "child_ids");
-      for (NodeId child_id : node.child_ids) {
-        if (child_id >= final_node_ids_.size() ||
-            final_node_ids_[child_id] >= world_node_count_) {
-          throw std::runtime_error("cannot build search graph view with invalid child id");
+      if (!is_finest) {
+        for (NodeId child_id : node.child_or_leaf_ids) {
+          if (child_id >= final_node_ids_.size() ||
+              final_node_ids_[child_id] >= world_node_count_) {
+            throw std::runtime_error(
+                "cannot build search graph view with invalid child id");
+          }
+          view.child_ids.push_back(final_node_ids_[child_id]);
         }
-        view.child_ids.push_back(final_node_ids_[child_id]);
       }
       record.child_count =
           to_u32(view.child_ids.size(), "child_ids") - record.child_begin;
 
       record.leaf_begin = to_u32(view.leaf_ids.size(), "leaf_ids");
-      for (LeafId leaf_id : node.leaf_ids) {
-        if (leaf_id >= sequence_count_) {
-          throw std::runtime_error("cannot build search graph view with invalid leaf id");
+      if (is_finest) {
+        for (LeafId leaf_id : node.child_or_leaf_ids) {
+          if (leaf_id >= sequence_count_) {
+            throw std::runtime_error(
+                "cannot build search graph view with invalid leaf id");
+          }
+          view.leaf_ids.push_back(leaf_id);
         }
-        view.leaf_ids.push_back(leaf_id);
       }
       record.leaf_count =
           to_u32(view.leaf_ids.size(), "leaf_ids") - record.leaf_begin;
 
       record.beacon_begin = to_u32(view.beacon_ids.size(), "beacon_ids");
-      for (LeafId beacon_id : node.beacon_ids) {
-        if (beacon_id >= sequence_count_) {
-          throw std::runtime_error("cannot build search graph view with invalid beacon id");
+      if (is_finest) {
+        view.beacon_ids.push_back(node.center_sequence_id);
+      } else {
+        for (LeafId beacon_id : node.beacon_ids) {
+          if (beacon_id >= sequence_count_) {
+            throw std::runtime_error(
+                "cannot build search graph view with invalid beacon id");
+          }
+          view.beacon_ids.push_back(beacon_id);
         }
-        view.beacon_ids.push_back(beacon_id);
       }
       record.beacon_count =
           to_u32(view.beacon_ids.size(), "beacon_ids") - record.beacon_begin;
 
-      const size_t child_count = node.child_ids.size();
-      const size_t mbb_dim = node.beacon_ids.size();
+      const size_t child_count =
+          is_finest ? 0 : node.child_or_leaf_ids.size();
+      const size_t mbb_dim =
+          is_finest ? 1 : node.beacon_ids.size();
       record.mbb_begin = to_u32(view.mbb_lo.size(), "mbb arrays");
       const size_t mbb_cells = child_count * mbb_dim;
-      view.mbb_lo.resize(view.mbb_lo.size() + mbb_cells, 0);
-      view.mbb_hi.resize(view.mbb_hi.size() + mbb_cells, 0);
-      if (!node.child_beacon_mbbs.empty()) {
-        if (node.child_beacon_mbbs.size() != child_count) {
-          throw std::runtime_error("child MBB rows are not aligned with child nodes");
-        }
-        for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
-          if (node.child_beacon_mbbs[child_idx].size() != mbb_dim) {
-            throw std::runtime_error("child MBB row dimension mismatch");
-          }
-          for (size_t dim = 0; dim < mbb_dim; ++dim) {
-            const size_t flat = record.mbb_begin +
-                                dim * child_count + child_idx;
-            view.mbb_lo[flat] =
-                to_u16_distance(
-                    node.child_beacon_mbbs[child_idx][dim].min_dist,
-                    "MBB lower bound");
-            view.mbb_hi[flat] =
-                to_u16_distance(
-                    node.child_beacon_mbbs[child_idx][dim].max_dist,
-                    "MBB upper bound");
-          }
-        }
+      if (node.child_mbb_bounds.size() != mbb_cells) {
+        throw std::runtime_error(
+            "packed child MBB array does not match child/beacon dimensions");
+      }
+      for (uint32_t bounds : node.child_mbb_bounds) {
+        view.mbb_lo.push_back(static_cast<uint16_t>(bounds));
+        view.mbb_hi.push_back(static_cast<uint16_t>(bounds >> 16));
       }
 
-      const size_t leaf_count = node.leaf_ids.size();
-      const size_t leaf_dim = node.beacon_ids.size();
+      const size_t leaf_count =
+          is_finest ? node.child_or_leaf_ids.size() : 0;
+      const size_t leaf_dim = is_finest ? 1 : 0;
       record.leaf_beacon_begin =
           to_u32(view.leaf_beacon_dists.size(), "leaf_beacon_dists");
       const size_t leaf_cells = leaf_count * leaf_dim;
-      view.leaf_beacon_dists.resize(view.leaf_beacon_dists.size() + leaf_cells, 0);
-      if (!node.leaf_beacon_dists.empty()) {
-        if (node.leaf_beacon_dists.size() != leaf_count) {
-          throw std::runtime_error("leaf beacon rows are not aligned with leaves");
-        }
-        for (size_t leaf_idx = 0; leaf_idx < leaf_count; ++leaf_idx) {
-          if (node.leaf_beacon_dists[leaf_idx].size() != leaf_dim) {
-            throw std::runtime_error("leaf beacon row dimension mismatch");
-          }
-          for (size_t dim = 0; dim < leaf_dim; ++dim) {
-            const size_t flat = record.leaf_beacon_begin +
-                                dim * leaf_count + leaf_idx;
-            view.leaf_beacon_dists[flat] =
-                to_u16_distance(
-                    node.leaf_beacon_dists[leaf_idx][dim],
-                    "leaf beacon distance");
-          }
-        }
+      if (node.leaf_beacon_dists.size() != leaf_cells) {
+        throw std::runtime_error(
+            "flat leaf beacon array does not match leaf/beacon dimensions");
       }
+      view.leaf_beacon_dists.insert(
+          view.leaf_beacon_dists.end(),
+          node.leaf_beacon_dists.begin(),
+          node.leaf_beacon_dists.end());
     }
     view.layer_end[layer_idx] =
         layer.empty() ? view.layer_begin[layer_idx]

@@ -9,6 +9,14 @@
 #include <utility>
 #include <omp.h>
 
+// Keep the three dominant array-query entry points on stable instruction-cache
+// boundaries even when construction-only object code changes size.
+#if defined(__GNUC__) || defined(__clang__)
+#define NAVIGAMER_QUERY_HOT_ALIGN __attribute__((aligned(256)))
+#else
+#define NAVIGAMER_QUERY_HOT_ALIGN
+#endif
+
 namespace navigamer {
 namespace {
 
@@ -2370,6 +2378,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates(
   }
 }
 
+NAVIGAMER_QUERY_HOT_ALIGN
 void BioGeometrySearchEngine::verify_leaf_candidates_view(
     NodeId node_id,
     const BioSequence& query_seq,
@@ -2926,6 +2935,7 @@ bool BioGeometrySearchEngine::flat_mark_visited(
   return visited_nodes->insert(node_key(node_id)).second;
 }
 
+NAVIGAMER_QUERY_HOT_ALIGN
 std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
     NodeId node_id,
     const std::vector<int>& query_beacon_dists,
@@ -3344,6 +3354,7 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
   }
 }
 
+NAVIGAMER_QUERY_HOT_ALIGN
 std::pair<SearchResult, SearchStats>
 BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int tolerance) {
   ActiveMyersQueryContext myers_context;
@@ -3799,3 +3810,5 @@ BioGeometrySearchEngine::search_brute_force(
 }
 
 }  // namespace navigamer
+
+#undef NAVIGAMER_QUERY_HOT_ALIGN

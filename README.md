@@ -38,7 +38,10 @@ Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
 MBB bounds and leaf-beacon distances use checked 16-bit storage; values above
 65,535 are rejected rather than truncated. Persisted format version 7 stores
-this representation directly.
+this representation directly. Construction uses the same compact values:
+child MBB lower/upper bounds share one packed 32-bit array, leaf distances are
+flat 16-bit values, and finest-layer nodes reuse their cleared child buffer for
+leaf IDs. No per-edge distance vector is allocated before finalization.
 
 ## Installation
 

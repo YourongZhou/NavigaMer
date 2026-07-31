@@ -295,6 +295,9 @@ All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Finalized MBB bounds and leaf-beacon distances use checked 16-bit values;
 distances above 65,535 fail explicitly instead of being truncated.
+Construction stores MBB pairs in one packed array and leaf distances in one
+flat array, avoiding a separate heap allocation for every child or leaf row.
+Finest-layer construction also reuses the cleared child-ID buffer for leaf IDs.
 
 ## Parameter sweeps
 

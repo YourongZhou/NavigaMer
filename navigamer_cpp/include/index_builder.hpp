@@ -258,12 +258,16 @@ struct BuildWorldNodeRecord {
   int primary_layer_index = -1;
   bool is_primary = false;
 
-  std::vector<NodeId> child_ids;
-  std::vector<LeafId> leaf_ids;
+  // Phase 1-3 child NodeIds. Finest-layer nodes reuse the same uint32_t
+  // storage for LeafIds after their child list is cleared.
+  std::vector<NodeId> child_or_leaf_ids;
   std::vector<LeafId> beacon_ids;
-  std::vector<std::vector<MBB>> child_beacon_mbbs;
-  std::vector<std::vector<int>> leaf_beacon_dists;
-  int data_count = 0;
+  // Dimension-major, matching SearchGraphView directly:
+  // [beacon_index * child_count + child_index].
+  // Each uint32_t packs lower in bits 0..15 and upper in bits 16..31.
+  std::vector<uint32_t> child_mbb_bounds;
+  // Dimension-major: [beacon_index * leaf_count + leaf_index].
+  std::vector<uint16_t> leaf_beacon_dists;
 };
 
 struct SearchGraphView {

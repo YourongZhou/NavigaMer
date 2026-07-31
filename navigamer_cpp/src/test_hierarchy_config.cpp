@@ -74,6 +74,7 @@ int main() {
   expect_invalid_config({10});
   expect_invalid_config({10, 10});
   expect_invalid_config({8, 12});
+  expect_invalid_config({65536, 1});
 
   validate_primary_layout({20, 8});
   validate_primary_layout({30, 15, 5});
