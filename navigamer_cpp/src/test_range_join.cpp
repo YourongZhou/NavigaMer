@@ -140,6 +140,11 @@ void test_seed_and_qgram_queries_share_workspace_safely() {
   index.build(items);
   index.prepare_seed_lengths({12});
   navigamer::RangeJoinQueryWorkspace shared_workspace;
+  const auto compact_seed =
+      index.query(items[0].sequence, 1, &shared_workspace);
+  assert(!compact_seed.candidate_item_ids.empty());
+  assert(shared_workspace.seed_touched.empty());
+  assert(!shared_workspace.seed_touched16.empty());
   for (int tau : {1, 10, 1, 10}) {
     const auto reused =
         index.query(items[0].sequence, tau, &shared_workspace);
@@ -147,6 +152,10 @@ void test_seed_and_qgram_queries_share_workspace_safely() {
     assert(reused.candidate_item_ids == fresh.candidate_item_ids);
     assert(reused.mode_used == fresh.mode_used);
   }
+
+  shared_workspace.reset_seed(
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 2);
+  assert(shared_workspace.seed_touched16.empty());
 }
 
 void test_shifted_window_postings_match_standard_index() {

@@ -184,17 +184,24 @@ void test_qgram_index_reuses_sparse_workspace() {
   assert(contains(first, 0));
   assert(workspace.shared.empty());
   assert(workspace.shared16.size() == items.size());
-  assert(workspace.seen_epoch.size() == items.size());
+  assert(workspace.seen_epoch.empty());
+  assert(workspace.seen_epoch16.size() == items.size());
   const auto* shared_storage = workspace.shared16.data();
-  const auto* seen_storage = workspace.seen_epoch.data();
+  const auto* seen_storage = workspace.seen_epoch16.data();
 
   navigamer::QGramCountIndex::QueryStats second_stats;
   auto second = index.query(items[1].sequence, 2, &second_stats, &workspace);
   assert(contains(second, 1));
   assert(workspace.shared16.data() == shared_storage);
-  assert(workspace.seen_epoch.data() == seen_storage);
+  assert(workspace.seen_epoch16.data() == seen_storage);
   assert(workspace.shared16.size() == items.size());
-  assert(workspace.seen_epoch.size() == items.size());
+  assert(workspace.seen_epoch16.size() == items.size());
+
+  workspace.epoch16 = std::numeric_limits<uint16_t>::max();
+  auto after_epoch_wrap =
+      index.query(items[1].sequence, 2, nullptr, &workspace);
+  assert(after_epoch_wrap == second);
+  assert(workspace.epoch16 == 1);
 
   navigamer::QGramCountIndex::QueryStats short_stats;
   auto short_candidates = index.query("A", 0, &short_stats, &workspace);
@@ -238,6 +245,8 @@ void test_qgram_dense_postings_use_wide_fallbacks() {
   assert(many_candidates.back() == item_count - 1);
   assert(many_workspace.shared.size() == item_count);
   assert(many_workspace.shared16.empty());
+  assert(many_workspace.seen_epoch.size() == item_count);
+  assert(many_workspace.seen_epoch16.empty());
 
   const std::string long_sequence(
       static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 8, 'A');
@@ -249,6 +258,8 @@ void test_qgram_dense_postings_use_wide_fallbacks() {
   assert((long_candidates == std::vector<size_t>{7}));
   assert(long_workspace.shared.size() == 1);
   assert(long_workspace.shared16.empty());
+  assert(long_workspace.seen_epoch.empty());
+  assert(long_workspace.seen_epoch16.size() == 1);
 }
 
 }  // namespace

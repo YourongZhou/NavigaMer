@@ -80,6 +80,7 @@ struct RangeJoinQueryResult {
 struct RangeJoinQueryWorkspace {
   QGramQueryWorkspace qgram;
   std::vector<uint32_t> seed_touched;
+  std::vector<uint16_t> seed_touched16;
 
   void reset_seed(size_t item_count);
 };

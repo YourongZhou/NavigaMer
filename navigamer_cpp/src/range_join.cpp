@@ -125,7 +125,16 @@ RangeCandidateMode parse_range_candidate_mode(const std::string& value) {
 
 void RangeJoinQueryWorkspace::reset_seed(size_t item_count) {
   qgram.reset_seen(item_count);
-  seed_touched.clear();
+  if (item_count <=
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1) {
+    seed_touched16.clear();
+    if (!seed_touched.empty()) std::vector<uint32_t>().swap(seed_touched);
+  } else {
+    seed_touched.clear();
+    if (!seed_touched16.empty()) {
+      std::vector<uint16_t>().swap(seed_touched16);
+    }
+  }
 }
 
 ExactRangeJoinIndex::ExactRangeJoinIndex(
@@ -678,13 +687,37 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   RangeJoinQueryWorkspace local_workspace;
   if (!workspace) workspace = &local_workspace;
   workspace->reset_seed(items_.size());
+  const bool compact_seen =
+      items_.size() <=
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
+  uint16_t* seen16 =
+      compact_seen ? workspace->qgram.seen_epoch16.data() : nullptr;
+  uint32_t* seen32 =
+      compact_seen ? nullptr : workspace->qgram.seen_epoch.data();
+  const uint32_t current_epoch =
+      compact_seen ? workspace->qgram.epoch16 : workspace->qgram.epoch;
+  const auto touched_size = [&]() {
+    return compact_seen ? workspace->seed_touched16.size()
+                        : workspace->seed_touched.size();
+  };
   auto add_candidate = [&](uint32_t item_idx) {
-    if (item_idx >= workspace->qgram.seen_epoch.size() ||
-        workspace->qgram.seen_epoch[item_idx] == workspace->qgram.epoch) {
+    if (item_idx >= items_.size() ||
+        (compact_seen
+             ? seen16[item_idx] == current_epoch
+             : seen32[item_idx] == current_epoch)) {
       return false;
     }
-    workspace->qgram.seen_epoch[item_idx] = workspace->qgram.epoch;
-    workspace->seed_touched.push_back(item_idx);
+    if (compact_seen) {
+      seen16[item_idx] = static_cast<uint16_t>(current_epoch);
+    } else {
+      seen32[item_idx] = current_epoch;
+    }
+    if (compact_seen) {
+      workspace->seed_touched16.push_back(
+          static_cast<uint16_t>(item_idx));
+    } else {
+      workspace->seed_touched.push_back(item_idx);
+    }
     return true;
   };
 
@@ -735,12 +768,11 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   const auto consume_indices = [&](const auto& indices) {
     for (auto compact_idx : indices) {
       add_candidate(static_cast<uint32_t>(compact_idx));
-      if (workspace->seed_touched.size() >
-          early_abort_candidate_limit) {
+      if (touched_size() > early_abort_candidate_limit) {
         result.seed_candidate_pairs_before_length_filter =
-            workspace->seed_touched.size();
+            touched_size();
         result.pigeonhole_candidate_count =
-            workspace->seed_touched.size();
+            touched_size();
         result.pigeonhole_early_abort_count = 1;
         result.final_candidate_pairs = 0;
         return false;
@@ -767,12 +799,11 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
           if (std::llabs(static_cast<long long>(position) -
                          static_cast<long long>(block_start)) <= tau) {
             add_candidate(item_idx);
-            if (workspace->seed_touched.size() >
-                early_abort_candidate_limit) {
+            if (touched_size() > early_abort_candidate_limit) {
               result.seed_candidate_pairs_before_length_filter =
-                  workspace->seed_touched.size();
+                  touched_size();
               result.pigeonhole_candidate_count =
-                  workspace->seed_touched.size();
+                  touched_size();
               result.pigeonhole_early_abort_count = 1;
               result.final_candidate_pairs = 0;
               return false;
@@ -864,28 +895,41 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   }
 
   result.seed_candidate_pairs_before_length_filter =
-      workspace->seed_touched.size();
-  result.candidate_item_ids.reserve(workspace->seed_touched.size());
+      touched_size();
+  result.candidate_item_ids.reserve(touched_size());
+  bool valid_touched_ids = true;
   {
     ScopedTimer timer(&result.range_length_filter_ms);
-    for (uint32_t item_idx : workspace->seed_touched) {
-      if (item_idx >= items_.size()) {
-        auto fallback = full_scan(query_sequence, tau, true);
-        merge_range_timing(fallback, result);
-        fallback.block_len = block_len;
-        fallback.seed_len = seed_len;
-        return fallback;
+    const auto append_compatible = [&](const auto& touched) {
+      for (auto compact_idx : touched) {
+        const uint32_t item_idx = static_cast<uint32_t>(compact_idx);
+        if (item_idx >= items_.size()) {
+          valid_touched_ids = false;
+          return;
+        }
+        const auto& item = items_[item_idx];
+        const auto& sequence = item_sequence(item);
+        if (std::abs(static_cast<long long>(query_sequence.size()) -
+                     static_cast<long long>(sequence.size())) <= tau) {
+          result.candidate_item_ids.push_back(item.item_id);
+        } else {
+          result.length_filtered_items++;
+          result.seed_length_pruned_candidates++;
+        }
       }
-      const auto& item = items_[item_idx];
-      const auto& sequence = item_sequence(item);
-      if (std::abs(static_cast<long long>(query_sequence.size()) -
-                   static_cast<long long>(sequence.size())) <= tau) {
-        result.candidate_item_ids.push_back(item.item_id);
-      } else {
-        result.length_filtered_items++;
-        result.seed_length_pruned_candidates++;
-      }
+    };
+    if (compact_seen) {
+      append_compatible(workspace->seed_touched16);
+    } else {
+      append_compatible(workspace->seed_touched);
     }
+  }
+  if (!valid_touched_ids) {
+    auto fallback = full_scan(query_sequence, tau, true);
+    merge_range_timing(fallback, result);
+    fallback.block_len = block_len;
+    fallback.seed_len = seed_len;
+    return fallback;
   }
 
   std::sort(result.candidate_item_ids.begin(), result.candidate_item_ids.end());

@@ -186,12 +186,29 @@ bool qgram_can_prune_edit_distance(
 }
 
 void QGramQueryWorkspace::reset_seen(size_t item_count) {
-  if (seen_epoch.size() != item_count) seen_epoch.assign(item_count, 0);
-  if (epoch == std::numeric_limits<uint32_t>::max()) {
-    std::fill(seen_epoch.begin(), seen_epoch.end(), 0);
-    epoch = 1;
+  const bool compact =
+      item_count <=
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
+  if (compact) {
+    if (seen_epoch16.size() != item_count) {
+      seen_epoch16.assign(item_count, 0);
+    }
+    if (!seen_epoch.empty()) std::vector<uint32_t>().swap(seen_epoch);
+    if (epoch16 == std::numeric_limits<uint16_t>::max()) {
+      std::fill(seen_epoch16.begin(), seen_epoch16.end(), 0);
+      epoch16 = 1;
+    } else {
+      epoch16++;
+    }
   } else {
-    epoch++;
+    if (seen_epoch.size() != item_count) seen_epoch.assign(item_count, 0);
+    if (!seen_epoch16.empty()) std::vector<uint16_t>().swap(seen_epoch16);
+    if (epoch == std::numeric_limits<uint32_t>::max()) {
+      std::fill(seen_epoch.begin(), seen_epoch.end(), 0);
+      epoch = 1;
+    } else {
+      epoch++;
+    }
   }
 }
 
@@ -294,13 +311,31 @@ std::vector<size_t> QGramCountIndex::query(
   // UINT16_MAX q-grams. Shared counts cannot exceed the item's total.
   const bool compact_shared = !dense_packed_postings_.empty();
   ws->reset(items_.size(), compact_shared);
+  const bool compact_seen =
+      items_.size() <=
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
+  uint16_t* seen16 =
+      compact_seen ? ws->seen_epoch16.data() : nullptr;
+  uint32_t* seen32 =
+      compact_seen ? nullptr : ws->seen_epoch.data();
+  const uint32_t current_epoch =
+      compact_seen ? ws->epoch16 : ws->epoch;
 
   if (query_signature.safe_for_pruning) {
     for (const auto& query_entry : query_signature.entries) {
       const auto consume_posting = [&](uint32_t internal_idx,
                                        uint32_t count) {
-        if (ws->seen_epoch[internal_idx] != ws->epoch) {
-          ws->seen_epoch[internal_idx] = ws->epoch;
+        const bool newly_seen =
+            compact_seen
+                ? seen16[internal_idx] != current_epoch
+                : seen32[internal_idx] != current_epoch;
+        if (newly_seen) {
+          if (compact_seen) {
+            seen16[internal_idx] =
+                static_cast<uint16_t>(current_epoch);
+          } else {
+            seen32[internal_idx] = current_epoch;
+          }
           if (compact_shared) {
             ws->shared16[internal_idx] = 0;
           } else {
@@ -374,7 +409,9 @@ std::vector<size_t> QGramCountIndex::query(
     const size_t required_shared =
         static_cast<size_t>((numerator + 1) / 2);
     const size_t shared_count =
-        ws->seen_epoch[internal_idx] == ws->epoch
+        (compact_seen
+             ? seen16[internal_idx] == current_epoch
+             : seen32[internal_idx] == current_epoch)
             ? (compact_shared
                    ? static_cast<size_t>(ws->shared16[internal_idx])
                    : ws->shared[internal_idx])

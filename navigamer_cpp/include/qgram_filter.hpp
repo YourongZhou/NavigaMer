@@ -40,7 +40,9 @@ struct QGramQueryWorkspace {
   std::vector<size_t> shared;
   std::vector<uint16_t> shared16;
   std::vector<uint32_t> seen_epoch;
+  std::vector<uint16_t> seen_epoch16;
   uint32_t epoch = 1;
+  uint16_t epoch16 = 1;
 
   void reset_seen(size_t item_count);
   void reset(size_t item_count, bool compact_shared);
