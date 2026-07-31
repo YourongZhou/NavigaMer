@@ -164,11 +164,11 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> build_windows_and_index(
   return windows;
 }
 
-std::shared_ptr<navigamer::BioSequence> find_sequence(
+const navigamer::BioSequence* find_sequence(
     const navigamer::BioGeometryIndexBuilder& builder,
     const std::string& seq) {
-  for (const auto& entry : builder.unique_sequences) {
-    if (entry.second && entry.second->seq == seq) return entry.second;
+  for (const auto& sequence : builder.sequence_store().records) {
+    if (sequence.seq == seq) return &sequence;
   }
   return nullptr;
 }

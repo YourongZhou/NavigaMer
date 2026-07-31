@@ -206,12 +206,23 @@ std::vector<std::string> difference(const std::vector<std::string>& left,
   return out;
 }
 
+const BioSequence* sequence_pointer(
+    const std::shared_ptr<BioSequence>& sequence) {
+  return sequence.get();
+}
+
+const BioSequence* sequence_pointer(const BioSequence& sequence) {
+  return &sequence;
+}
+
+template <typename SequenceContainer>
 std::vector<std::string> exact_hit_ids(
     const std::string& query,
-    const std::vector<std::shared_ptr<BioSequence>>& unique_sequences,
+    const SequenceContainer& unique_sequences,
     int tolerance) {
   std::vector<std::string> ids;
-  for (const auto& sequence : unique_sequences) {
+  for (const auto& stored : unique_sequences) {
+    const BioSequence* sequence = sequence_pointer(stored);
     if (sequence && compute_distance(query, sequence->seq) <= tolerance) {
       ids.push_back(sequence->id);
     }
@@ -688,8 +699,9 @@ std::vector<std::shared_ptr<BioSequence>> build_reference_windows(
   return out;
 }
 
+template <typename SequencePointer>
 std::vector<std::string> result_ids(
-    const std::vector<std::shared_ptr<BioSequence>>& results) {
+    const std::vector<SequencePointer>& results) {
   std::vector<std::string> ids;
   ids.reserve(results.size());
   for (const auto& result : results) {
@@ -755,12 +767,18 @@ std::vector<std::string> unique_anchor_sequences(
   return out;
 }
 
-void append_node_anchors(const std::shared_ptr<WorldNode>& node,
+void append_node_anchors(const SearchGraphView& view, NodeId node_id,
                          std::vector<std::string>& anchors) {
-  if (!node) return;
-  if (node->center_ptr) anchors.push_back(node->center_ptr->seq);
-  for (const auto& beacon : node->beacons) {
-    if (beacon) anchors.push_back(beacon->seq);
+  if (node_id >= view.node_records.size()) return;
+  const auto& node = view.node_records[node_id];
+  if (node.center_sequence_id < view.sequences.size()) {
+    anchors.push_back(view.sequences[node.center_sequence_id].seq);
+  }
+  for (uint32_t offset = 0; offset < node.beacon_count; ++offset) {
+    const LeafId beacon_id = view.beacon_ids[node.beacon_begin + offset];
+    if (beacon_id < view.sequences.size()) {
+      anchors.push_back(view.sequences[beacon_id].seq);
+    }
   }
 }
 
@@ -818,8 +836,9 @@ struct ProximalOracleContext {
   bool enabled = false;
   std::vector<size_t> k_values;
   std::vector<std::string> global_anchors;
-  std::unordered_map<std::string, std::shared_ptr<WorldNode>> nodes_by_id;
-  std::vector<std::shared_ptr<WorldNode>> nodes;
+  const SearchGraphView* view = nullptr;
+  std::unordered_map<std::string, NodeId> nodes_by_id;
+  std::vector<NodeId> nodes;
 };
 
 ProximalOracleContext build_proximal_oracle_context(
@@ -829,13 +848,13 @@ ProximalOracleContext build_proximal_oracle_context(
   context.enabled = config.proximal_oracle_enabled;
   context.k_values = normalized_proximal_k_values(config.proximal_oracle_k_values);
   if (!context.enabled) return context;
-  for (const auto& layer : builder.primary_layers()) {
-    for (const auto& node : layer) {
-      if (!node || context.nodes_by_id.count(node->node_id)) continue;
-      context.nodes_by_id[node->node_id] = node;
-      context.nodes.push_back(node);
-      append_node_anchors(node, context.global_anchors);
-    }
+  context.view = &builder.search_graph_view();
+  for (NodeId node_id = 0; node_id < context.view->node_records.size();
+       ++node_id) {
+    const std::string id = std::to_string(node_id);
+    context.nodes_by_id[id] = node_id;
+    context.nodes.push_back(node_id);
+    append_node_anchors(*context.view, node_id, context.global_anchors);
   }
   context.global_anchors = unique_anchor_sequences(context.global_anchors);
   return context;
@@ -847,31 +866,38 @@ std::vector<std::string> collect_anchors_for_node_ids(
   std::vector<std::string> anchors;
   for (const auto& node_id : node_ids) {
     auto it = context.nodes_by_id.find(node_id);
-    if (it != context.nodes_by_id.end()) append_node_anchors(it->second, anchors);
+    if (it != context.nodes_by_id.end() && context.view) {
+      append_node_anchors(*context.view, it->second, anchors);
+    }
   }
   return unique_anchor_sequences(anchors);
 }
 
 bool node_subtree_has_hit(
-    const std::shared_ptr<WorldNode>& node,
+    const SearchGraphView& view,
+    NodeId node_id,
     const std::unordered_set<std::string>& hit_ids,
-    std::unordered_map<std::string, bool>& memo) {
-  if (!node || hit_ids.empty()) return false;
-  auto memo_it = memo.find(node->node_id);
+    std::unordered_map<NodeId, bool>& memo) {
+  if (node_id >= view.node_records.size() || hit_ids.empty()) return false;
+  auto memo_it = memo.find(node_id);
   if (memo_it != memo.end()) return memo_it->second;
-  for (const auto& leaf : node->child_leaves) {
-    if (leaf && hit_ids.count(leaf->id)) {
-      memo[node->node_id] = true;
+  const auto& node = view.node_records[node_id];
+  for (uint32_t offset = 0; offset < node.leaf_count; ++offset) {
+    const LeafId leaf_id = view.leaf_ids[node.leaf_begin + offset];
+    if (leaf_id < view.sequences.size() &&
+        hit_ids.count(view.sequences[leaf_id].id)) {
+      memo[node_id] = true;
       return true;
     }
   }
-  for (const auto& child : node->child_nodes) {
-    if (node_subtree_has_hit(child, hit_ids, memo)) {
-      memo[node->node_id] = true;
+  for (uint32_t offset = 0; offset < node.child_count; ++offset) {
+    if (node_subtree_has_hit(
+            view, view.child_ids[node.child_begin + offset], hit_ids, memo)) {
+      memo[node_id] = true;
       return true;
     }
   }
-  memo[node->node_id] = false;
+  memo[node_id] = false;
   return false;
 }
 
@@ -881,9 +907,12 @@ std::vector<std::string> collect_true_path_anchors(
   std::vector<std::string> anchors;
   std::unordered_set<std::string> hit_ids(brute_force_ids.begin(),
                                           brute_force_ids.end());
-  std::unordered_map<std::string, bool> memo;
-  for (const auto& node : context.nodes) {
-    if (node_subtree_has_hit(node, hit_ids, memo)) append_node_anchors(node, anchors);
+  std::unordered_map<NodeId, bool> memo;
+  if (!context.view) return anchors;
+  for (NodeId node_id : context.nodes) {
+    if (node_subtree_has_hit(*context.view, node_id, hit_ids, memo)) {
+      append_node_anchors(*context.view, node_id, anchors);
+    }
   }
   return unique_anchor_sequences(anchors);
 }
@@ -1128,9 +1157,10 @@ ProximalAnchorSetDiagnostics compute_proximal_anchor_set_diagnostics(
   return out;
 }
 
-std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
+template <typename SequenceContainer>
+std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries_impl(
     const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
-    const std::vector<std::shared_ptr<BioSequence>>& unique_sequences,
+    const SequenceContainer& unique_sequences,
     int query_length,
     int tolerance,
     unsigned seed,
@@ -1246,6 +1276,30 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
   append_by_hit_count(QueryClass::MultiHit, 2,
                       std::numeric_limits<size_t>::max());
   return out;
+}
+
+std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
+    const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
+    const std::vector<std::shared_ptr<BioSequence>>& unique_sequences,
+    int query_length,
+    int tolerance,
+    unsigned seed,
+    size_t queries_per_class) {
+  return generate_benchmark_queries_impl(
+      index_sequences, unique_sequences, query_length, tolerance, seed,
+      queries_per_class);
+}
+
+std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
+    const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
+    const SequenceStore& unique_sequences,
+    int query_length,
+    int tolerance,
+    unsigned seed,
+    size_t queries_per_class) {
+  return generate_benchmark_queries_impl(
+      index_sequences, unique_sequences.records, query_length, tolerance, seed,
+      queries_per_class);
 }
 
 LocalityBenchmarkQuerySets generate_locality_benchmark_queries(
@@ -1433,8 +1487,9 @@ LocalityBenchmarkQuerySets generate_locality_benchmark_queries(
   return out;
 }
 
+template <typename SequencePointer>
 std::vector<std::string> search_result_ids(
-    const std::vector<std::shared_ptr<BioSequence>>& hits) {
+    const std::vector<SequencePointer>& hits) {
   std::vector<std::string> ids;
   ids.reserve(hits.size());
   for (const auto& hit : hits) {
@@ -1536,11 +1591,9 @@ struct FanoutSummary {
 
 FanoutSummary compute_fanout_summary(const BioGeometryIndexBuilder& builder) {
   std::vector<double> fanouts;
-  for (const auto& layer : builder.primary_layers()) {
-    for (const auto& node : layer) {
-      if (!node || node->child_nodes.empty()) continue;
-      fanouts.push_back(static_cast<double>(node->child_nodes.size()));
-    }
+  for (const auto& node : builder.search_graph_view().node_records) {
+    if (node.child_count == 0) continue;
+    fanouts.push_back(static_cast<double>(node.child_count));
   }
   if (fanouts.empty()) return {};
   FanoutSummary summary;
@@ -1650,8 +1703,7 @@ LocalityBenchmarkRow run_locality_profile(
 	  size_t near_query_leaf_triangle_pruned_total = 0;
 	  size_t near_query_leaf_distance_reused_total = 0;
 	  size_t near_query_leaf_bound_fallback_total = 0;
-  std::unordered_map<std::string, std::vector<std::shared_ptr<BioSequence>>>
-      exact_result_cache;
+  std::unordered_map<std::string, SearchResult> exact_result_cache;
   exact_result_cache.reserve(queries.size());
   const bool enable_exact_result_cache = profile != "baseline";
 
@@ -1670,7 +1722,7 @@ LocalityBenchmarkRow run_locality_profile(
                         std::to_string(queries.size()));
     }
     auto one_start = std::chrono::high_resolution_clock::now();
-    std::vector<std::shared_ptr<BioSequence>> hits;
+    SearchResult hits;
     SearchStats stats(static_cast<size_t>(builder.num_primary_layers()));
     bool used_exact_result_cache = false;
     const std::string cache_key = exact_result_cache_key(query.seq, tolerance);
@@ -1678,7 +1730,7 @@ LocalityBenchmarkRow run_locality_profile(
       auto cache_it = exact_result_cache.find(cache_key);
       if (cache_it != exact_result_cache.end()) {
         bool cache_valid = true;
-        std::vector<std::shared_ptr<BioSequence>> cached_hits;
+        SearchResult cached_hits;
         cached_hits.reserve(cache_it->second.size());
         for (const auto& hit : cache_it->second) {
           if (!hit) {
@@ -2428,13 +2480,9 @@ QueryBenchmarkRunResult run_query_benchmark(
   const MemorySnapshot after_build = memory_snapshot();
   const auto build_stats = builder.get_statistics();
 
-  std::vector<std::shared_ptr<BioSequence>> unique_sequences;
-  unique_sequences.reserve(builder.unique_sequences.size());
-  for (const auto& entry : builder.unique_sequences) {
-    unique_sequences.push_back(entry.second);
-  }
   auto queries = generate_benchmark_queries(
-      index_sequences, unique_sequences, config.query_length, config.tolerance,
+      index_sequences, builder.sequence_store(), config.query_length,
+      config.tolerance,
       config.seed, config.queries_per_class);
   if (optimized_search_config.path_reuse_enabled) {
     std::stable_sort(queries.begin(), queries.end(),

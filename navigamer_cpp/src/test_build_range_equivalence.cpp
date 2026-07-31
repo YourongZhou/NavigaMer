@@ -67,11 +67,18 @@ using OrderedLinkMap = std::map<std::string, std::vector<std::string>>;
 
 LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
   LinkMap edges;
+  const auto& view = builder.search_graph_view();
   for (int layer_idx = 0; layer_idx + 1 < builder.num_primary_layers(); ++layer_idx) {
-    for (const auto& parent : builder.primary_layer(layer_idx)) {
-      auto& children = edges[parent->get_center_sequence()];
-      for (const auto& child : parent->child_nodes) {
-        children.insert(child->get_center_sequence());
+    const size_t layer = static_cast<size_t>(layer_idx);
+    for (uint32_t parent_id = view.layer_begin[layer];
+         parent_id < view.layer_end[layer]; ++parent_id) {
+      const auto& parent = view.node_records[parent_id];
+      auto& children =
+          edges[view.sequences[parent.center_sequence_id].seq];
+      for (uint32_t offset = 0; offset < parent.child_count; ++offset) {
+        const auto& child =
+            view.node_records[view.child_ids[parent.child_begin + offset]];
+        children.insert(view.sequences[child.center_sequence_id].seq);
       }
     }
   }
@@ -81,14 +88,21 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
 OrderedLinkMap ordered_primary_edges(
     const navigamer::BioGeometryIndexBuilder& builder) {
   OrderedLinkMap edges;
+  const auto& view = builder.search_graph_view();
   for (int layer_idx = 0; layer_idx + 1 < builder.num_primary_layers();
        ++layer_idx) {
-    for (const auto& parent : builder.primary_layer(layer_idx)) {
+    const size_t layer = static_cast<size_t>(layer_idx);
+    for (uint32_t parent_id = view.layer_begin[layer];
+         parent_id < view.layer_end[layer]; ++parent_id) {
+      const auto& parent = view.node_records[parent_id];
       std::string key =
-          std::to_string(layer_idx) + ":" + parent->get_center_sequence();
+          std::to_string(layer_idx) + ":" +
+          view.sequences[parent.center_sequence_id].seq;
       auto& children = edges[key];
-      for (const auto& child : parent->child_nodes) {
-        children.push_back(child->get_center_sequence());
+      for (uint32_t offset = 0; offset < parent.child_count; ++offset) {
+        const auto& child =
+            view.node_records[view.child_ids[parent.child_begin + offset]];
+        children.push_back(view.sequences[child.center_sequence_id].seq);
       }
     }
   }
@@ -97,10 +111,17 @@ OrderedLinkMap ordered_primary_edges(
 
 LinkMap leaf_links(const navigamer::BioGeometryIndexBuilder& builder) {
   LinkMap links;
-  for (const auto& world :
-       builder.primary_layer(builder.finest_primary_layer_index())) {
-    auto& leaves = links[world->get_center_sequence()];
-    for (const auto& leaf : world->child_leaves) leaves.insert(leaf->seq);
+  const auto& view = builder.search_graph_view();
+  const size_t layer =
+      static_cast<size_t>(builder.finest_primary_layer_index());
+  for (uint32_t world_id = view.layer_begin[layer];
+       world_id < view.layer_end[layer]; ++world_id) {
+    const auto& world = view.node_records[world_id];
+    auto& leaves = links[view.sequences[world.center_sequence_id].seq];
+    for (uint32_t offset = 0; offset < world.leaf_count; ++offset) {
+      leaves.insert(
+          view.sequences[view.leaf_ids[world.leaf_begin + offset]].seq);
+    }
   }
   return links;
 }
@@ -183,27 +204,41 @@ Phase3BuildResult build_and_collect_phase3(
 
   Phase3BuildResult result;
   result.stats = builder.get_statistics();
+  const auto& view = builder.search_graph_view();
   for (int layer_idx = 0; layer_idx < builder.num_primary_layers();
        ++layer_idx) {
-    for (const auto& parent : builder.primary_layer(layer_idx)) {
+    const size_t layer = static_cast<size_t>(layer_idx);
+    for (uint32_t parent_id = view.layer_begin[layer];
+         parent_id < view.layer_end[layer]; ++parent_id) {
+      const auto& parent = view.node_records[parent_id];
       std::ostringstream row;
-      row << layer_idx << ':' << parent->get_center_sequence() << "|b=";
-      for (const auto& beacon : parent->beacons) {
-        row << (beacon ? beacon->seq : std::string("<null>")) << ';';
-      }
-      row << "|c=";
-      for (const auto& child : parent->child_nodes) {
-        row << (child ? child->get_center_sequence() : std::string("<null>"))
+      row << layer_idx << ':'
+          << view.sequences[parent.center_sequence_id].seq << "|b=";
+      for (uint32_t offset = 0; offset < parent.beacon_count; ++offset) {
+        row << view.sequences[
+                   view.beacon_ids[parent.beacon_begin + offset]]
+                   .seq
             << ';';
       }
+      row << "|c=";
+      for (uint32_t offset = 0; offset < parent.child_count; ++offset) {
+        const auto& child =
+            view.node_records[view.child_ids[parent.child_begin + offset]];
+        row << view.sequences[child.center_sequence_id].seq << ';';
+      }
       row << "|m=";
-      for (const auto& mbb_row : parent->child_beacon_mbbs) {
-        for (const auto& mbb : mbb_row) {
-          row << mbb.min_dist << ',' << mbb.max_dist << ';';
+      for (uint32_t child = 0; child < parent.child_count; ++child) {
+        for (uint32_t dim = 0; dim < parent.beacon_count; ++dim) {
+          const size_t flat = parent.mbb_begin +
+                              static_cast<size_t>(dim) *
+                                  parent.child_count +
+                              child;
+          row << view.mbb_lo[flat] << ',' << view.mbb_hi[flat] << ';';
         }
         row << '/';
       }
-      row << "|r=" << (parent->mbb_rect_index ? 1 : 0);
+      row << "|r="
+          << (parent.child_count >= config.min_rect_index_fanout ? 1 : 0);
       result.signature.push_back(row.str());
     }
   }

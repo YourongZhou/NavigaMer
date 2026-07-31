@@ -119,9 +119,6 @@ TestResult run_test(const TestConfig& cfg) {
 
   navigamer::BioGeometrySearchEngine engine(builder);
 
-  std::vector<std::shared_ptr<navigamer::BioSequence>> unique_list;
-  for (const auto& p : builder.unique_sequences) unique_list.push_back(p.second);
-
   std::vector<navigamer::BioSequence> queries;
   std::uniform_int_distribution<size_t> seq_pick(0, seqs.size() - 1);
   for (size_t i = 0; i < cfg.num_queries; ++i) {
@@ -136,7 +133,7 @@ TestResult run_test(const TestConfig& cfg) {
   TestResult result{};
   result.total_queries = queries.size();
 
-  auto check_results = [&](const std::vector<std::shared_ptr<navigamer::BioSequence>>& candidates,
+  auto check_results = [&](const navigamer::SearchResult& candidates,
                            const navigamer::BioSequence& query, int tolerance,
                            size_t& violation_count, const std::string& method_name) {
     for (const auto& cand : candidates) {
@@ -161,7 +158,7 @@ TestResult run_test(const TestConfig& cfg) {
     auto [ex_res, ex_st] = engine.search_exhaustive(q, cfg.tolerance);
     check_results(ex_res, q, cfg.tolerance, result.violations_exhaustive, "exhaustive");
 
-    auto [bf_res, bf_st] = engine.search_brute_force(q, cfg.tolerance, unique_list);
+    auto [bf_res, bf_st] = engine.search_brute_force(q, cfg.tolerance);
     check_results(bf_res, q, cfg.tolerance, result.violations_brute_force, "brute_force");
 
     auto [gr_res, gr_st] = engine.search_greedy(q, cfg.tolerance);

@@ -18,7 +18,12 @@
 | **Leaf beacon refinement** | `BioGeometryIndexBuilder::attach_leaves()` precomputes finest-layer leaf-to-beacon distances; `BioGeometrySearchEngine::verify_leaf_candidates()` applies the final local beacon sieve before exact verification |
 | **Hierarchical multilateration search** | `BioGeometrySearchEngine::search_adaptive()` — `navigamer_cpp/src/search_engine.cpp` (MBB-based pruning plus finest-layer leaf refinement via triangle inequality) |
 
-Data structures (`WorldNode`, `MBB`, `BioSequence`) are in `navigamer_cpp/include/structure.hpp`. Edit distance is in `navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in `navigamer_cpp/src/io_utils.cpp`.
+The finalized index uses `SequenceStore`, `WorldNodeRecord`, and flat ID/data
+arrays declared in `navigamer_cpp/include/index_builder.hpp`. Construction also
+uses an array of `BuildWorldNodeRecord` values and integer relationships; it
+does not allocate a temporary `WorldNode` pointer graph. Edit distance is in
+`navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in
+`navigamer_cpp/src/io_utils.cpp`.
 
 ## Installation
 
@@ -124,10 +129,10 @@ loads that persisted `.navidx` once and calls `navigamer query-index-batch`;
 without it, the bridge falls back to `navigamer benchmark` on reference windows.
 
 The C++ `build` and `query` commands support explicit persisted indexes with
-`--index <file>`. The index file stores a manifest with input fingerprints and
-construction parameters plus the collapsed primary DAG, unique sequences,
-reference positions, optional BWT/SA intervals, beacons, MBB rows, leaf links,
-and leaf-beacon distances. `query --index <file> --query <seq>` and
+`--index <file>`. The v3 index file stores a manifest with input fingerprints
+and construction parameters plus the canonical sequence, node, child, leaf,
+beacon, MBB, and leaf-beacon arrays. Older pointer-graph index files must be
+rebuilt. `query --index <file> --query <seq>` and
 `query-index --index <file> --query <seq>` load the index directly. When
 `query` is given both `--reads` and `--index`, it compares the requested build
 manifest with the stored manifest and reuses the file only on an exact
@@ -284,7 +289,7 @@ Query-side optimization work follows this safety contract:
 
 Adaptive child-world traversal also supports the optional
 `--search-prefetch on`, which issues best-effort lookahead prefetch hints for
-flat child/MBB/leaf data without changing pruning or verification semantics.
+array child/MBB/leaf data without changing pruning or verification semantics.
 It is experimental and intended for locality A/B measurements. It also supports
 `query-index-batch --path-trace-out <tsv>` for locality diagnostics: the trace
 TSV records per-input-read world node IDs evaluated, leaf sequence IDs exactly

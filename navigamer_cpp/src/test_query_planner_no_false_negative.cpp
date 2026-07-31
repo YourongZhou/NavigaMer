@@ -26,7 +26,7 @@ std::vector<SequencePtr> make_sequences() {
   };
 }
 
-std::set<std::string> ids(const std::vector<SequencePtr>& hits) {
+std::set<std::string> ids(const navigamer::SearchResult& hits) {
   std::set<std::string> out;
   for (const auto& hit : hits) {
     if (hit) out.insert(hit->id);

@@ -22,12 +22,16 @@ void assert_bounded_semantics(const std::string& a, const std::string& b,
                               int tau) {
   const int full = navigamer::compute_distance(a, b);
   const int myers = navigamer::compute_distance_bounded_myers(a, b, tau);
+  const int prepared = navigamer::compute_distance_bounded_myers_prepared(
+      navigamer::prepare_myers_pattern(a), b, tau);
   const int edlib = navigamer::compute_distance_bounded_edlib(a, b, tau);
   if (full <= tau) {
     assert(myers == full);
+    assert(prepared == full);
     assert(edlib == full);
   } else {
     assert(myers > tau);
+    assert(prepared > tau);
     assert(edlib > tau);
   }
 }
@@ -36,7 +40,10 @@ void assert_matches_dp_fallback(const std::string& a, const std::string& b,
                                 int tau) {
   const int dp = navigamer::compute_distance_bounded_dp(a, b, tau);
   const int myers = navigamer::compute_distance_bounded_myers(a, b, tau);
+  const int prepared = navigamer::compute_distance_bounded_myers_prepared(
+      navigamer::prepare_myers_pattern(a), b, tau);
   assert(myers == dp);
+  assert(prepared == dp);
 }
 
 void test_parse_and_names() {
@@ -139,7 +146,7 @@ void test_mode_wrapper() {
            navigamer::compute_distance_bounded_edlib(a, b, tau));
     assert(navigamer::compute_distance_bounded_with_mode(
                a, b, tau, navigamer::DistanceMode::Auto) ==
-           navigamer::compute_distance_bounded_dp(a, b, tau));
+           navigamer::compute_distance_bounded_myers(a, b, tau));
   }
 }
 

@@ -29,7 +29,7 @@ Used by all pipelines that build the index:
 | `--auto-pigeonhole-max-candidates` | `4096` | Auto accepts pigeonhole when its candidate count is at most this value |
 | `--auto-pigeonhole-max-ratio` | `0.25` | Compatibility no-op; parsed and validated, but auto no longer computes or uses a candidate ratio |
 | `--auto-hybrid-on-large-candidates` | `true` | Compatibility flag; normal auto early-aborts oversized seed unions and uses q-gram safe fallback |
-| `--build-distance-mode` | `edlib` | Index construction edit-distance backend: default `edlib`, reference `dp`, or conservative `auto` (currently DP) |
+| `--build-distance-mode` | `edlib` | Index construction edit-distance backend: default `edlib`, reference `dp`, or `auto` (Myers when supported, otherwise Edlib) |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
 | `--phase1-metric-min-fanout` | `64` | Minimum Phase1 parent-local candidate fanout before building/querying the metric helper instead of scanning |
 | `--phase1-qgram-min-fanout` | `64` | Minimum Phase1 parent-local candidate fanout before using the q-gram helper instead of the metric helper |
@@ -37,9 +37,9 @@ Used by all pipelines that build the index:
 | `--progress-interval-seconds` | `600` | Timestamped build heartbeat interval on stderr; `0` disables periodic heartbeats but keeps phase-boundary reports |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 | `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
-| `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
+| `--graph-view` | `flat` | Array traversal mode; `original` is accepted as a compatibility alias for `flat` |
 | `--simd-mode` | `auto` | Flat child-MBB and leaf-beacon filter backend: `auto`, `scalar`, `avx2`, or `avx512`; unsupported SIMD falls back to scalar |
-| `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or conservative `auto` (currently DP) |
+| `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or `auto` (Myers when supported, otherwise Edlib) |
 | `--search-prefetch` | `off` | Best-effort adaptive traversal prefetch hints: `off` or `on`; affects only memory-access hints, not pruning or verification semantics |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
@@ -230,10 +230,12 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 ### `build`
 
 Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
-provided, writes a persisted binary index with a manifest signature, build
-parameters, input fingerprints, unique sequences, `ref_positions`, optional
-BWT/SA intervals, collapsed DAG links, beacons, MBB rows, leaf links, and
-leaf-beacon distance rows.
+provided, writes an array-format v3 binary index with a manifest signature,
+build parameters, input fingerprints, sequence records, layer ranges,
+child/leaf/beacon ID arrays, MBB rows, and leaf-beacon distance rows. Older
+pointer-graph index formats are rejected and must be rebuilt.
+The in-memory construction path also uses node arrays and integer IDs; it does
+not construct an intermediate `WorldNode` pointer graph.
 
 **Required:** `--ref`, `--reads`
 
@@ -459,9 +461,10 @@ Builds one shared in-memory index, deterministically generates six query
 classes (`random_region`, `ordinary_region`, `low_complexity_region`,
 `no_hit`, `single_hit`, and `multi_hit`), and compares:
 
-- baseline: fixed `scan` MBB filtering, legacy `string` visited mode,
-  `original` graph traversal, scalar MBB filtering, `dp` distance mode, and
-  search q-gram disabled, `best-first` disabled
+- baseline: fixed `scan` MBB filtering, legacy `string` visited mode, the
+  `original` compatibility label (same canonical array traversal), scalar MBB
+  filtering, `dp` distance mode, search q-gram disabled, and `best-first`
+  disabled
 - optimized: `--mbb-filter-mode`, `--visited-mode`, `--graph-view`,
   `--simd-mode`, `--distance-mode`, `--search-qgram-prefilter`,
   `--search-qgram-q`, `--router-hints`, `--local-router`,

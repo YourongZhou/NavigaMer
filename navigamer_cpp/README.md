@@ -1,6 +1,6 @@
 # NavigaMer — C++ reference implementation
 
-This directory contains the **C++17 v8** reference indexer and CLI (`navigamer`) used for the paper implementation. The build pipeline follows a **top-down extended hierarchy**, **inter-tier DAG wiring**, **auxiliary-tier collapse with beacon sequences and MBBs**, and **leaf attachment** to the finest primary layer. Adaptive search uses **precomputed per-edge MBB rows** (`WorldNode::child_beacon_mbbs`) for hierarchy pruning and **finest-layer leaf beacon rows** (`WorldNode::leaf_beacon_dists`) for the final local refinement step before exact verification.
+This directory contains the **C++17 v8** reference indexer and CLI (`navigamer`) used for the paper implementation. The build pipeline follows a **top-down extended hierarchy**, **inter-tier DAG wiring**, **auxiliary-tier collapse with beacon sequences and MBBs**, and **leaf attachment** to the finest primary layer. Construction stores nodes in a `BuildWorldNodeRecord` array and all relationships as integer IDs, without allocating a `WorldNode` pointer graph. The finalized index is stored as `WorldNodeRecord` and `BioSequence` arrays plus flat child, leaf, beacon, MBB, and leaf-beacon arrays, which adaptive search uses directly.
 
 ## Build
 
@@ -38,9 +38,9 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 **Full syntax and defaults:** [`CLI_REFERENCE.md`](CLI_REFERENCE.md).
 
 All adaptive-search commands accept `--mbb-filter-mode scan|rect` and
-`--min-rect-index-fanout N` (default `64`). Rect mode performs exact
-all-dimension MBB rectangle intersection and falls back to the original scan
-path for small fanout, missing indexes, dimension mismatches, or exceptions.
+`--min-rect-index-fanout N` (default `64`). Both modes apply exact
+all-dimension filtering over the flat MBB arrays; `rect` retains its fanout
+threshold and reporting counters and falls back for small fanout.
 They also accept `--visited-mode string|epoch` (default `epoch`),
 `--graph-view original|flat` (default `flat`),
 `--simd-mode auto|scalar|avx2|avx512` (default `auto`),
@@ -50,9 +50,9 @@ They also accept `--visited-mode string|epoch` (default `epoch`),
 `--search-qgram-prefilter off|on` (default `off`), and `--search-qgram-q N`
 (default `5`). `string` keeps the legacy per-query string visited set for
 regression comparisons; `epoch` uses integer node IDs and a reused epoch array.
-`original` traverses the existing `WorldNode` pointer vectors; `flat` traverses
-the generated continuous query view. SIMD mode applies to flat child-MBB
-rectangle filtering and flat leaf-beacon filtering; unsupported modes
+`original` remains accepted as a compatibility label, but both values traverse
+the canonical array index. SIMD mode applies to flat child-MBB and leaf-beacon
+filtering; unsupported modes
 conservatively fall back to scalar and keep the same survivor set. The search q is independent from
 construction `--qgram-q`. Enabled search-side filtering runs only on
 MBB-surviving child-world centers before bounded exact center verification;
@@ -166,8 +166,9 @@ distance calls without changing accepted links. Use
 `--leaf-qgram-postfilter off` for direct verify-after-candidate comparisons.
 
 `query-benchmark` fixes the baseline profile to MBB scan, legacy string
-visited mode, original graph traversal, `dp` distance mode, and search q-gram
-disabled. It compares that with the profile selected by `--mbb-filter-mode`,
+visited mode, the `original` compatibility label (which uses the same canonical
+array traversal), `dp` distance mode, and search q-gram disabled. It compares
+that with the profile selected by `--mbb-filter-mode`,
 `--visited-mode`, `--graph-view`, `--simd-mode`, `--distance-mode`,
 `--search-qgram-prefilter`, `--search-qgram-q`, `--router-hints`,
 `--local-router`, `--best-first`, `--safe-child-router`, `--path-reuse`, and
@@ -203,14 +204,14 @@ quality-audit time only.
 
 | Header / source | Purpose |
 | --------------- | ------- |
-| `include/structure.hpp`, `src/structure.cpp` | `BioSequence`, `WorldNode`, `MBB`, finest-layer leaf beacon caches, default radii `R_SW` / `R_MW` / `R_LW` |
+| `include/structure.hpp`, `src/structure.cpp` | `BioSequence`, `MBB`, legacy `WorldNode` declaration, and default radii |
 | `include/tools.hpp`, `src/tools.cpp` | Levenshtein `compute_distance`, helpers |
 | `include/qgram_filter.hpp`, `src/qgram_filter.cpp` | Exact q-gram multiset count filter and inverted index |
 | `include/range_join.hpp`, `src/range_join.cpp` | Exact full, adaptive-pigeonhole, q-gram, hybrid, and auto candidate generation |
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
-| `include/index_builder.hpp`, `src/index_builder.cpp` | `BioGeometryIndexBuilder`: dedup → phase1 extended sketch → phase2 rebinding → phase3 auxiliary collapse + MBB → leaves |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Binary index persistence, manifest signatures, save/load, and load-time graph reconstruction |
+| `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v3 binary persistence and manifest signatures |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
 | `include/io_utils.hpp`, `src/io_utils.cpp` | FASTA/FASTQ load, TSV output |
@@ -222,10 +223,10 @@ quality-audit time only.
 
 **Note:** `build` and `query` can persist and reuse an index with
 `--index <file>`. The binary file stores a manifest signature derived from input
-fingerprints and construction parameters, followed by the collapsed primary DAG,
-unique sequences, `ref_positions`, optional BWT/SA intervals, beacons, MBB rows,
-leaf links, and leaf-beacon rows. Load reconstructs pointer links,
-`SearchGraphView`, and any eligible MBB rectangle indexes. `query-index` is the
+fingerprints and construction parameters, followed by the sequence store, node
+records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
+Format v3 loads those arrays directly; v1/v2 files must be rebuilt.
+`query-index` is the
 pure load-and-search command for one query, so repeated invocations include
 index load time each time. Use `locality-benchmark --index <navidx> --ref
 <fasta> --out <tsv>` or the alias `query-locality-benchmark` to load once and

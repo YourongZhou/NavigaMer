@@ -36,7 +36,7 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> build_clustered_sequences()
 }
 
 std::set<std::string> ids(
-    const std::vector<std::shared_ptr<navigamer::BioSequence>>& hits) {
+    const navigamer::SearchResult& hits) {
   std::set<std::string> out;
   for (const auto& hit : hits) out.insert(hit->id);
   return out;
@@ -48,25 +48,22 @@ void assert_integer_ids_unique() {
   builder.build(build_sequences());
 
   assert(builder.num_world_nodes() > 0);
-  assert(builder.num_sequences() == builder.unique_sequences.size());
+  assert(builder.num_sequences() == builder.sequence_store().size());
   assert(builder.validate_integer_ids());
 
   std::vector<bool> seen_nodes(builder.num_world_nodes(), false);
-  for (const auto& layer : builder.primary_layers()) {
-    for (const auto& node : layer) {
-      assert(node->integer_id < builder.num_world_nodes());
-      assert(!seen_nodes[node->integer_id]);
-      seen_nodes[node->integer_id] = true;
-    }
+  for (navigamer::NodeId node_id = 0;
+       node_id < builder.search_graph_view().node_records.size(); ++node_id) {
+    assert(!seen_nodes[node_id]);
+    seen_nodes[node_id] = true;
   }
   for (bool seen : seen_nodes) assert(seen);
 
   std::vector<bool> seen_sequences(builder.num_sequences(), false);
-  for (const auto& entry : builder.unique_sequences) {
-    const auto& sequence = entry.second;
-    assert(sequence->sequence_id < builder.num_sequences());
-    assert(!seen_sequences[sequence->sequence_id]);
-    seen_sequences[sequence->sequence_id] = true;
+  for (const auto& sequence : builder.sequence_store().records) {
+    assert(sequence.sequence_id < builder.num_sequences());
+    assert(!seen_sequences[sequence.sequence_id]);
+    seen_sequences[sequence.sequence_id] = true;
   }
   for (bool seen : seen_sequences) assert(seen);
 }

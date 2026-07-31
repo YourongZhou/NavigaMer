@@ -7,7 +7,6 @@
 #include "phase2_distance_verifier.hpp"
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace navigamer {
@@ -80,29 +79,75 @@ struct BuildRangeConfig {
   int progress_interval_seconds = 600;
 };
 
-struct SearchGraphView {
-  std::vector<std::shared_ptr<WorldNode>> nodes;
-  std::vector<std::shared_ptr<BioSequence>> leaves;
+// Canonical, pointer-free sequence storage for a finalized index. SequenceId is
+// the position in records, so nodes, beacons, and leaf links only need a 32-bit
+// integer reference.
+struct SequenceStore {
+  std::vector<BioSequence> records;
+
+  size_t size() const { return records.size(); }
+  bool empty() const { return records.empty(); }
+  const BioSequence& at(LeafId id) const {
+    return records.at(static_cast<size_t>(id));
+  }
+  const BioSequence& operator[](LeafId id) const {
+    return records[static_cast<size_t>(id)];
+  }
+};
+
+// One fixed-size world record. Variable-length relationships live in the
+// global arrays in SearchGraphView and are addressed by offset + count.
+struct WorldNodeRecord {
+  LeafId center_sequence_id = INVALID_LEAF_ID;
+  int radius = 0;
+  int expanded_layer_index = -1;
+  int primary_layer_index = -1;
+
+  uint32_t child_begin = 0;
+  uint32_t child_count = 0;
+  uint32_t leaf_begin = 0;
+  uint32_t leaf_count = 0;
+  uint32_t beacon_begin = 0;
+  uint32_t beacon_count = 0;
+  uint32_t mbb_begin = 0;
+  uint32_t leaf_beacon_begin = 0;
+};
+
+// Mutable construction record. It intentionally contains only integer
+// references: no WorldNode objects are allocated while building the hierarchy.
+// The per-node vectors are flattened into SearchGraphView after all build
+// phases have produced the same node/edge sets as the original algorithm.
+struct BuildWorldNodeRecord {
+  LeafId center_sequence_id = INVALID_LEAF_ID;
+  int radius = 0;
+  int expanded_layer_index = -1;
+  int primary_layer_index = -1;
+  bool is_primary = false;
 
   std::vector<NodeId> child_ids;
-  std::vector<uint32_t> child_begin;
-  std::vector<uint32_t> child_end;
-
   std::vector<LeafId> leaf_ids;
-  std::vector<uint32_t> leaf_begin;
-  std::vector<uint32_t> leaf_end;
+  std::vector<LeafId> beacon_ids;
+  std::vector<std::vector<MBB>> child_beacon_mbbs;
+  std::vector<std::vector<int>> leaf_beacon_dists;
+  int data_count = 0;
+};
+
+struct SearchGraphView {
+  // Canonical array representation. NodeId and LeafId are positions in
+  // node_records and sequences respectively.
+  std::vector<WorldNodeRecord> node_records;
+  SequenceStore sequences;
+  std::vector<uint32_t> layer_begin;
+  std::vector<uint32_t> layer_end;
+
+  std::vector<NodeId> child_ids;
+  std::vector<LeafId> leaf_ids;
 
   std::vector<int32_t> mbb_lo;
   std::vector<int32_t> mbb_hi;
-  std::vector<uint32_t> mbb_begin;
-  std::vector<uint32_t> mbb_dim;
   std::vector<LeafId> beacon_ids;
-  std::vector<uint32_t> beacon_begin;
-  std::vector<uint32_t> beacon_end;
 
   std::vector<int32_t> leaf_beacon_dists;
-  std::vector<uint32_t> leaf_beacon_begin;
-  std::vector<uint32_t> leaf_beacon_dim;
 };
 
 class BioGeometryIndexBuilder {
@@ -116,8 +161,6 @@ class BioGeometryIndexBuilder {
                           const BuildRangeConfig& range_config);
 
   void build(const std::vector<std::shared_ptr<BioSequence>>& raw_sequences);
-
-  std::unordered_map<std::string, std::shared_ptr<BioSequence>> unique_sequences;
 
   struct Statistics {
     size_t added_sequences = 0;
@@ -241,20 +284,18 @@ class BioGeometryIndexBuilder {
   int num_expanded_layers() const { return hierarchy_.num_expanded_layers(); }
   int coarsest_primary_layer_index() const { return 0; }
   int finest_primary_layer_index() const { return std::max(0, num_primary_layers() - 1); }
-  const std::vector<std::shared_ptr<WorldNode>>& primary_layer(int idx) const;
-  const std::vector<std::vector<std::shared_ptr<WorldNode>>>& primary_layers() const {
-    return primary_layers_;
-  }
   size_t num_world_nodes() const { return world_node_count_; }
   size_t num_sequences() const { return sequence_count_; }
+  size_t primary_layer_size(int idx) const;
+  const SequenceStore& sequence_store() const {
+    return search_graph_view_.sequences;
+  }
+  SequenceStore& sequence_store() {
+    return search_graph_view_.sequences;
+  }
   bool validate_integer_ids() const;
   const SearchGraphView& search_graph_view() const { return search_graph_view_; }
   bool validate_search_graph_view() const;
-
-  std::vector<std::shared_ptr<WorldNode>> find_neighbors(
-      const BioSequence& query_seq,
-      const std::vector<std::shared_ptr<WorldNode>>& candidates,
-      int radius) const;
 
  private:
   Statistics stats_;
@@ -264,11 +305,15 @@ class BioGeometryIndexBuilder {
   size_t sequence_count_ = 0;
   SearchGraphView search_graph_view_;
   std::vector<int> expanded_radii_;
-  std::vector<std::vector<std::shared_ptr<WorldNode>>> extended_layers_;
-  std::vector<std::vector<std::shared_ptr<WorldNode>>> primary_layers_;
+  std::vector<BuildWorldNodeRecord> build_nodes_;
+  std::vector<NodeId> final_node_ids_;
+  std::vector<std::vector<NodeId>> extended_layers_;
+  std::vector<std::vector<NodeId>> primary_layers_;
 
   std::vector<std::shared_ptr<BioSequence>> deduplicate(
       const std::vector<std::shared_ptr<BioSequence>>& raw);
+  void initialize_sequence_store(
+      const std::vector<std::shared_ptr<BioSequence>>& unique_seqs);
 
   void phase1_build_extended_sketch(
       const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
@@ -281,6 +326,7 @@ class BioGeometryIndexBuilder {
       BuildProgressReporter* progress);
   void assign_integer_ids();
   void build_search_graph_view();
+  void release_build_arrays();
 
   void print_summary() const;
 };

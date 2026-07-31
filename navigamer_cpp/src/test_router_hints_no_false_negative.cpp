@@ -61,7 +61,7 @@ build_wide_fanout_sequences() {
 }
 
 std::vector<std::string> ids(
-    const std::vector<std::shared_ptr<navigamer::BioSequence>>& hits) {
+    const navigamer::SearchResult& hits) {
   std::vector<std::string> out;
   for (const auto& hit : hits) {
     if (hit) out.push_back(hit->id);

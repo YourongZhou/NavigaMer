@@ -166,24 +166,42 @@ uint64_t valid_block_mask(size_t block, size_t pattern_length) {
   return (uint64_t{1} << tail_bits) - 1;
 }
 
-int compute_distance_bounded_myers_single_word(const std::string& pattern,
-                                               const std::string& text,
-                                               int tau) {
+PreparedMyersPattern prepare_myers_pattern_impl(
+    const std::string& pattern) {
+  PreparedMyersPattern prepared;
+  prepared.pattern = pattern;
   const size_t m = pattern.size();
-  std::array<uint64_t, 4> peq = {0, 0, 0, 0};
-  for (size_t i = 0; i < m; ++i) {
-    const int base = dna_base_index(pattern[i]);
-    peq[static_cast<size_t>(base)] |= (uint64_t{1} << i);
+  if (m > kMyersMaxPatternBits) return prepared;
+  prepared.block_count = (m + 63) / 64;
+  for (size_t block = 0; block < prepared.block_count; ++block) {
+    prepared.masks[block] = valid_block_mask(block, m);
   }
+  for (size_t i = 0; i < m; ++i) {
+    const size_t block = i / 64;
+    const size_t bit = i % 64;
+    const int base = dna_base_index(pattern[i]);
+    if (base < 0) return prepared;
+    prepared.peq[block][static_cast<size_t>(base)] |=
+        (uint64_t{1} << bit);
+  }
+  prepared.supported = true;
+  return prepared;
+}
 
-  const uint64_t valid_mask = m == 64 ? ~uint64_t{0} : ((uint64_t{1} << m) - 1);
+int compute_distance_bounded_myers_single_word(
+    const PreparedMyersPattern& pattern,
+    const std::string& text,
+    int tau) {
+  const size_t m = pattern.pattern.size();
+  const uint64_t valid_mask = pattern.masks[0];
   const uint64_t top_bit = uint64_t{1} << (m - 1);
   uint64_t vp = valid_mask;
   uint64_t vn = 0;
   int score = static_cast<int>(m);
 
   for (char c : text) {
-    const uint64_t eq = peq[static_cast<size_t>(dna_base_index(c))];
+    const uint64_t eq =
+        pattern.peq[0][static_cast<size_t>(dna_base_index(c))];
     const uint64_t x = eq | vn;
     const uint64_t d0 = (((x & vp) + vp) ^ vp) | x;
     uint64_t hp = vn | ~(d0 | vp);
@@ -206,13 +224,12 @@ int compute_distance_bounded_myers_single_word(const std::string& pattern,
   return score <= tau ? score : tau + 1;
 }
 
-int compute_distance_bounded_myers_multiword(const std::string& pattern,
-                                             const std::string& text,
-                                             int tau) {
-  const size_t m = pattern.size();
-  const size_t block_count = (m + 63) / 64;
-  std::array<std::array<uint64_t, 4>, 4> peq = {};
-  std::array<uint64_t, 4> masks = {};
+int compute_distance_bounded_myers_multiword(
+    const PreparedMyersPattern& pattern,
+    const std::string& text,
+    int tau) {
+  const size_t m = pattern.pattern.size();
+  const size_t block_count = pattern.block_count;
   std::array<uint64_t, 4> pv = {};
   std::array<uint64_t, 4> mv = {};
   std::array<uint64_t, 4> xv = {};
@@ -221,14 +238,7 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
   std::array<uint64_t, 4> mh = {};
 
   for (size_t block = 0; block < block_count; ++block) {
-    masks[block] = valid_block_mask(block, m);
-    pv[block] = masks[block];
-  }
-  for (size_t i = 0; i < m; ++i) {
-    const size_t block = i / 64;
-    const size_t bit = i % 64;
-    const int base = dna_base_index(pattern[i]);
-    peq[block][static_cast<size_t>(base)] |= (uint64_t{1} << bit);
+    pv[block] = pattern.masks[block];
   }
 
   const size_t last_block = block_count - 1;
@@ -239,7 +249,7 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
     const size_t base = static_cast<size_t>(dna_base_index(c));
     uint64_t carry = 0;
     for (size_t block = 0; block < block_count; ++block) {
-      xv[block] = peq[block][base] | mv[block];
+      xv[block] = pattern.peq[block][base] | mv[block];
       const uint64_t addend = xv[block] & pv[block];
       const unsigned __int128 sum =
           static_cast<unsigned __int128>(addend) + pv[block] + carry;
@@ -249,9 +259,10 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
 
     for (size_t block = 0; block < block_count; ++block) {
       const uint64_t xh = ((sum_words[block] ^ pv[block]) | xv[block]) &
-                          masks[block];
-      ph[block] = (mv[block] | ~(xh | pv[block])) & masks[block];
-      mh[block] = (pv[block] & xh) & masks[block];
+                          pattern.masks[block];
+      ph[block] =
+          (mv[block] | ~(xh | pv[block])) & pattern.masks[block];
+      mh[block] = (pv[block] & xh) & pattern.masks[block];
     }
 
     if (ph[last_block] & top_bit) {
@@ -265,15 +276,19 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
     for (size_t block = 0; block < block_count; ++block) {
       const uint64_t next_ph_carry = ph[block] >> 63;
       const uint64_t next_mh_carry = mh[block] >> 63;
-      ph[block] = ((ph[block] << 1) | ph_carry) & masks[block];
-      mh[block] = ((mh[block] << 1) | mh_carry) & masks[block];
+      ph[block] =
+          ((ph[block] << 1) | ph_carry) & pattern.masks[block];
+      mh[block] =
+          ((mh[block] << 1) | mh_carry) & pattern.masks[block];
       ph_carry = next_ph_carry;
       mh_carry = next_mh_carry;
     }
 
     for (size_t block = 0; block < block_count; ++block) {
-      mv[block] = (ph[block] & xv[block]) & masks[block];
-      pv[block] = (mh[block] | ~(ph[block] | xv[block])) & masks[block];
+      mv[block] =
+          (ph[block] & xv[block]) & pattern.masks[block];
+      pv[block] =
+          (mh[block] | ~(ph[block] | xv[block])) & pattern.masks[block];
     }
   }
 
@@ -281,6 +296,33 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
 }
 
 }  // namespace
+
+PreparedMyersPattern prepare_myers_pattern(const std::string& pattern) {
+  return prepare_myers_pattern_impl(pattern);
+}
+
+int compute_distance_bounded_myers_prepared(
+    const PreparedMyersPattern& pattern,
+    const std::string& text,
+    int tau) {
+  if (tau < 0) {
+    throw std::invalid_argument(
+        "edit-distance threshold must be non-negative");
+  }
+
+  const int m = static_cast<int>(pattern.pattern.size());
+  const int n = static_cast<int>(text.size());
+  if (std::abs(m - n) > tau) return tau + 1;
+  if (m == 0) return n <= tau ? n : tau + 1;
+  if (n == 0) return m <= tau ? m : tau + 1;
+  if (!pattern.supported || !is_acgt_string(text)) {
+    return compute_distance_bounded_dp(pattern.pattern, text, tau);
+  }
+  if (pattern.pattern.size() <= 64) {
+    return compute_distance_bounded_myers_single_word(pattern, text, tau);
+  }
+  return compute_distance_bounded_myers_multiword(pattern, text, tau);
+}
 
 bool compute_distance_bounded_myers_supported(const std::string& a,
                                               const std::string& b) {
@@ -307,10 +349,12 @@ int compute_distance_bounded_myers(const std::string& a, const std::string& b,
   if (!compute_distance_bounded_myers_supported(a, b)) {
     return compute_distance_bounded_dp(a, b, tau);
   }
+  const PreparedMyersPattern prepared =
+      prepare_myers_pattern_impl(*pattern);
   if (m <= 64) {
-    return compute_distance_bounded_myers_single_word(*pattern, *text, tau);
+    return compute_distance_bounded_myers_single_word(prepared, *text, tau);
   }
-  return compute_distance_bounded_myers_multiword(*pattern, *text, tau);
+  return compute_distance_bounded_myers_multiword(prepared, *text, tau);
 }
 
 int compute_distance_bounded_with_mode(const std::string& a,
@@ -324,7 +368,10 @@ int compute_distance_bounded_with_mode(const std::string& a,
     case DistanceMode::Edlib:
       return compute_distance_bounded_edlib(a, b, tau);
     case DistanceMode::Auto:
-      return compute_distance_bounded_dp(a, b, tau);
+      if (compute_distance_bounded_myers_supported(a, b)) {
+        return compute_distance_bounded_myers(a, b, tau);
+      }
+      return compute_distance_bounded_edlib(a, b, tau);
   }
   return compute_distance_bounded_dp(a, b, tau);
 }

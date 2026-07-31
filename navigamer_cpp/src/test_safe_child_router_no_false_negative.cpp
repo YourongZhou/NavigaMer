@@ -40,7 +40,7 @@ std::vector<SequencePtr> make_sequences() {
   };
 }
 
-std::set<std::string> ids(const std::vector<SequencePtr>& hits) {
+std::set<std::string> ids(const navigamer::SearchResult& hits) {
   std::set<std::string> out;
   for (const auto& hit : hits) {
     if (hit) out.insert(hit->id);
@@ -75,15 +75,18 @@ navigamer::SearchConfig safe_mbb_config() {
   return config;
 }
 
-std::shared_ptr<navigamer::WorldNode> first_parent_with_children(
+navigamer::NodeId first_parent_with_children(
     const navigamer::BioGeometryIndexBuilder& builder) {
+  const auto& view = builder.search_graph_view();
   for (int layer = builder.coarsest_primary_layer_index();
        layer < builder.finest_primary_layer_index(); ++layer) {
-    for (const auto& node : builder.primary_layer(layer)) {
-      if (node && !node->child_nodes.empty()) return node;
+    const size_t layer_id = static_cast<size_t>(layer);
+    for (uint32_t node_id = view.layer_begin[layer_id];
+         node_id < view.layer_end[layer_id]; ++node_id) {
+      if (view.node_records[node_id].child_count > 0) return node_id;
     }
   }
-  return nullptr;
+  return navigamer::INVALID_NODE_ID;
 }
 
 }  // namespace
@@ -146,20 +149,24 @@ int main() {
   assert(invoked > 0);
 
   auto parent = first_parent_with_children(builder);
-  assert(parent);
+  assert(parent != navigamer::INVALID_NODE_ID);
   bool used_router = false;
   auto candidate_ids = safe.debug_safe_child_router_candidate_ids(
-      parent->node_id, queries[0], 2, &used_router);
+      std::to_string(parent), queries[0], 2, &used_router);
   assert(used_router);
   std::set<std::string> candidate_set(candidate_ids.begin(), candidate_ids.end());
-  for (const auto& child : parent->child_nodes) {
-    assert(child && child->center_ptr);
-    const int tau = 2 + child->radius;
+  const auto& view = builder.search_graph_view();
+  const auto& parent_record = view.node_records[parent];
+  for (uint32_t offset = 0; offset < parent_record.child_count; ++offset) {
+    const auto child_id =
+        view.child_ids[parent_record.child_begin + offset];
+    const auto& child = view.node_records[child_id];
+    const int tau = 2 + child.radius;
     const int dist = navigamer::compute_distance_bounded_with_mode(
-        queries[0].seq, child->center_ptr->seq, tau,
+        queries[0].seq, view.sequences[child.center_sequence_id].seq, tau,
         navigamer::DistanceMode::Myers);
     if (dist <= tau) {
-      assert(candidate_set.count(child->node_id) == 1);
+      assert(candidate_set.count(std::to_string(child_id)) == 1);
     }
   }
 

@@ -42,20 +42,23 @@ void validate_primary_layout(const std::vector<int>& primary_radii) {
   assert(builder.finest_primary_layer_index() == static_cast<int>(primary_radii.size() - 1));
 
   for (int i = 0; i < builder.num_primary_layers(); ++i) {
-    const auto& layer = builder.primary_layer(i);
+    const auto& view = builder.search_graph_view();
+    const size_t layer = static_cast<size_t>(i);
     if (i == builder.finest_primary_layer_index()) {
-      for (const auto& node : layer) {
-        assert(node->child_nodes.empty());
-        assert(!node->child_leaves.empty());
+      for (uint32_t node_id = view.layer_begin[layer];
+           node_id < view.layer_end[layer]; ++node_id) {
+        const auto& node = view.node_records[node_id];
+        assert(node.child_count == 0);
+        assert(node.leaf_count > 0);
       }
     } else {
       bool saw_child = false;
-      for (const auto& node : layer) {
-        assert(node->is_primary);
-        assert(node->primary_layer_index == i);
-        assert(!node->beacons.empty());
-        assert(node->child_nodes.size() == node->child_beacon_mbbs.size());
-        if (!node->child_nodes.empty()) saw_child = true;
+      for (uint32_t node_id = view.layer_begin[layer];
+           node_id < view.layer_end[layer]; ++node_id) {
+        const auto& node = view.node_records[node_id];
+        assert(node.primary_layer_index == i);
+        assert(node.beacon_count > 0);
+        if (node.child_count > 0) saw_child = true;
       }
       assert(saw_child && "expected at least one folded child edge in non-finest layer");
     }

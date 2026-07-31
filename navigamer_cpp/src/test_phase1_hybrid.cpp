@@ -68,12 +68,19 @@ std::vector<SequencePtr> make_sliding_sequences() {
 
 LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
   LinkMap edges;
+  const auto& view = builder.search_graph_view();
   for (int layer_idx = 0; layer_idx + 1 < builder.num_primary_layers();
        ++layer_idx) {
-    for (const auto& parent : builder.primary_layer(layer_idx)) {
-      auto& children = edges[parent->get_center_sequence()];
-      for (const auto& child : parent->child_nodes) {
-        children.insert(child->get_center_sequence());
+    const size_t layer = static_cast<size_t>(layer_idx);
+    for (uint32_t parent_id = view.layer_begin[layer];
+         parent_id < view.layer_end[layer]; ++parent_id) {
+      const auto& parent = view.node_records[parent_id];
+      auto& children =
+          edges[view.sequences[parent.center_sequence_id].seq];
+      for (uint32_t offset = 0; offset < parent.child_count; ++offset) {
+        const auto& child =
+            view.node_records[view.child_ids[parent.child_begin + offset]];
+        children.insert(view.sequences[child.center_sequence_id].seq);
       }
     }
   }
@@ -82,10 +89,17 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
 
 LinkMap leaf_links(const navigamer::BioGeometryIndexBuilder& builder) {
   LinkMap links;
-  for (const auto& world :
-       builder.primary_layer(builder.finest_primary_layer_index())) {
-    auto& leaves = links[world->get_center_sequence()];
-    for (const auto& leaf : world->child_leaves) leaves.insert(leaf->seq);
+  const auto& view = builder.search_graph_view();
+  const size_t layer =
+      static_cast<size_t>(builder.finest_primary_layer_index());
+  for (uint32_t world_id = view.layer_begin[layer];
+       world_id < view.layer_end[layer]; ++world_id) {
+    const auto& world = view.node_records[world_id];
+    auto& leaves = links[view.sequences[world.center_sequence_id].seq];
+    for (uint32_t offset = 0; offset < world.leaf_count; ++offset) {
+      leaves.insert(
+          view.sequences[view.leaf_ids[world.leaf_begin + offset]].seq);
+    }
   }
   return links;
 }
@@ -170,8 +184,11 @@ int main() {
   sliding_scan_builder.build(sliding_sequences);
   sliding_hybrid_builder.build(sliding_sequences);
 
-  assert(sliding_scan_builder.primary_layer(0).front()->get_center_sequence() ==
-         sliding_sequences.front()->seq);
+  const auto& sliding_view = sliding_scan_builder.search_graph_view();
+  assert(sliding_view.sequences[
+             sliding_view.node_records[sliding_view.layer_begin[0]]
+                 .center_sequence_id]
+             .seq == sliding_sequences.front()->seq);
   assert(primary_edges(sliding_scan_builder) ==
          primary_edges(sliding_hybrid_builder));
   assert(leaf_links(sliding_scan_builder) ==

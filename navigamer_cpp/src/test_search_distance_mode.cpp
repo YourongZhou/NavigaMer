@@ -28,7 +28,7 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> build_sequences() {
 }
 
 std::set<std::string> ids(
-    const std::vector<std::shared_ptr<navigamer::BioSequence>>& hits) {
+    const navigamer::SearchResult& hits) {
   std::set<std::string> out;
   for (const auto& hit : hits) out.insert(hit->id);
   return out;

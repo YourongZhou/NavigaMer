@@ -2,9 +2,11 @@
 #define NAVIGAMER_TOOLS_HPP
 
 #include "structure.hpp"
-#include <vector>
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace navigamer {
 
@@ -30,6 +32,21 @@ bool compute_distance_bounded_myers_supported(const std::string& a,
                                               const std::string& b);
 int compute_distance_bounded_myers(const std::string& a, const std::string& b,
                                    int tau);
+
+struct PreparedMyersPattern {
+  std::string pattern;
+  std::array<std::array<uint64_t, 4>, 4> peq{};
+  std::array<uint64_t, 4> masks{};
+  size_t block_count = 0;
+  bool supported = false;
+};
+
+PreparedMyersPattern prepare_myers_pattern(const std::string& pattern);
+int compute_distance_bounded_myers_prepared(
+    const PreparedMyersPattern& pattern,
+    const std::string& text,
+    int tau);
+
 int compute_distance_bounded_with_mode(const std::string& a,
                                        const std::string& b, int tau,
                                        DistanceMode mode);

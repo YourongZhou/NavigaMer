@@ -102,7 +102,7 @@ void verify_occurrence(const std::string& read_id,
   }
 }
 
-std::vector<std::shared_ptr<BioSequence>> search_candidates(
+SearchResult search_candidates(
     BioGeometrySearchEngine& engine,
     const BioSequence& query,
     int candidate_tolerance,
@@ -194,25 +194,26 @@ class SeqanFmLocator final : public OccurrenceLocator {
       : ref_id_(std::move(ref_id)),
         genome_(to_dna4_vector(ref_seq)),
         index_(genome_) {
-    for (auto& entry : builder.unique_sequences) {
-      auto& seq = entry.second;
+    for (auto& seq : builder.sequence_store().records) {
       auto cursor = index_.cursor();
-      if (!cursor.extend_right(to_dna4_vector(seq->seq))) {
-        throw std::runtime_error("SeqAn FM-index could not locate indexed 150-mer: " + seq->id);
+      if (!cursor.extend_right(to_dna4_vector(seq.seq))) {
+        throw std::runtime_error("SeqAn FM-index could not locate indexed 150-mer: " + seq.id);
       }
 
       auto interval = cursor.suffix_array_interval();
-      seq->set_sa_interval(static_cast<int64_t>(interval.begin_position),
-                           static_cast<int64_t>(interval.end_position));
+      seq.set_sa_interval(static_cast<int64_t>(interval.begin_position),
+                          static_cast<int64_t>(interval.end_position));
 
       std::vector<RefPosition> positions;
       for (auto const& pos : cursor.locate()) {
         if (pos.first != 0) continue;
         int start = static_cast<int>(pos.second);
-        positions.push_back({ref_id_, start, start + static_cast<int>(seq->seq.size()), "+"});
+        positions.push_back(
+            {ref_id_, start, start + static_cast<int>(seq.seq.size()), "+"});
       }
       sort_and_deduplicate_positions(positions);
-      interval_occurrences_[interval_key(seq->bwt_interval)] = std::move(positions);
+      interval_occurrences_[interval_key(seq.bwt_interval)] =
+          std::move(positions);
     }
   }
 

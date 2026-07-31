@@ -4,6 +4,8 @@
 #include "qgram_filter.hpp"
 
 #include <cstddef>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -73,9 +75,11 @@ struct RangeJoinQueryWorkspace {
 
 class ExactRangeJoinIndex {
  public:
-  explicit ExactRangeJoinIndex(RangeJoinConfig config = {});
+  explicit ExactRangeJoinIndex(
+      RangeJoinConfig config = {}, bool defer_qgram_build = false);
 
   void build(const std::vector<RangeJoinItem>& items);
+  void prepare_qgram();
   void prepare_seed_lengths(const std::vector<int>& seed_lengths);
   RangeJoinQueryResult query(const std::string& query_sequence, int tau);
   RangeJoinQueryResult query(
@@ -89,8 +93,12 @@ class ExactRangeJoinIndex {
   std::vector<RangeJoinItem> items_;
   std::unordered_map<size_t, size_t> item_lengths_by_id_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
-  QGramCountIndex qgram_index_;
+  mutable QGramCountIndex qgram_index_;
+  mutable bool qgram_ready_ = false;
+  bool defer_qgram_build_ = false;
+  mutable std::shared_ptr<std::mutex> deferred_qgram_mutex_;
 
+  const QGramCountIndex& ensure_qgram_index() const;
   const PostingLists& postings_for_seed_len(int seed_len);
   const PostingLists* find_postings_for_seed_len(int seed_len) const;
   bool query_needs_seed_postings(int seed_len) const;

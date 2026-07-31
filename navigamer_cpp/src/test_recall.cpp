@@ -113,9 +113,6 @@ TestResult run_test(const TestConfig& cfg) {
 
   navigamer::BioGeometrySearchEngine engine(builder);
 
-  std::vector<std::shared_ptr<navigamer::BioSequence>> unique_list;
-  for (const auto& p : builder.unique_sequences) unique_list.push_back(p.second);
-
   // Generate queries by mutating randomly selected indexed sequences.
   std::vector<navigamer::BioSequence> queries;
   std::uniform_int_distribution<size_t> seq_pick(0, seqs.size() - 1);
@@ -133,7 +130,7 @@ TestResult run_test(const TestConfig& cfg) {
   result.total_queries = queries.size();
 
   for (const auto& q : queries) {
-    auto [bf_res, bf_st] = engine.search_brute_force(q, cfg.tolerance, unique_list);
+    auto [bf_res, bf_st] = engine.search_brute_force(q, cfg.tolerance);
     auto [ad_res, ad_st] = engine.search_adaptive(q, cfg.tolerance);
 
     std::unordered_set<std::string> ad_ids;

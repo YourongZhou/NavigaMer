@@ -1,23 +1,18 @@
 #include "index_persistence.hpp"
 
-#include "mbb_rect_index.hpp"
-
-#include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
-#include <unordered_map>
 
 namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '1'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '3'};
 
 template <typename T>
 void write_pod(std::ostream& out, const T& value) {
@@ -244,7 +239,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version < 1 || manifest.format_version > 2) {
+  if (manifest.format_version != 3) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -295,187 +290,123 @@ void read_magic(std::istream& in) {
   std::array<char, 8> magic{};
   in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
   if (!in) throw std::runtime_error("failed to read index magic");
-  if (magic != kMagic) throw std::runtime_error("not a NavigaMer index file");
-}
-
-std::vector<std::shared_ptr<BioSequence>> sequences_by_id(
-    const BioGeometryIndexBuilder& builder) {
-  std::vector<std::shared_ptr<BioSequence>> sequences(builder.num_sequences());
-  for (const auto& entry : builder.unique_sequences) {
-    const auto& sequence = entry.second;
-    if (!sequence || sequence->sequence_id >= sequences.size()) {
-      throw std::runtime_error("cannot persist index with invalid sequence ids");
-    }
-    sequences[sequence->sequence_id] = sequence;
+  if (magic != kMagic) {
+    throw std::runtime_error(
+        "unsupported NavigaMer index format; rebuild the array index");
   }
-  for (const auto& sequence : sequences) {
-    if (!sequence) throw std::runtime_error("cannot persist sparse sequence id table");
-  }
-  return sequences;
-}
-
-std::vector<std::shared_ptr<WorldNode>> nodes_by_id(
-    const std::vector<std::vector<std::shared_ptr<WorldNode>>>& layers,
-    size_t node_count) {
-  std::vector<std::shared_ptr<WorldNode>> nodes(node_count);
-  for (const auto& layer : layers) {
-    for (const auto& node : layer) {
-      if (!node || node->integer_id >= node_count) {
-        throw std::runtime_error("cannot persist index with invalid node ids");
-      }
-      nodes[node->integer_id] = node;
-    }
-  }
-  for (const auto& node : nodes) {
-    if (!node) throw std::runtime_error("cannot persist sparse node id table");
-  }
-  return nodes;
-}
-
-uint32_t checked_node_id(const std::shared_ptr<WorldNode>& node) {
-  if (!node || node->integer_id == INVALID_NODE_ID) {
-    throw std::runtime_error("cannot persist invalid node reference");
-  }
-  return node->integer_id;
-}
-
-uint32_t checked_leaf_id(const std::shared_ptr<BioSequence>& sequence) {
-  if (!sequence || sequence->sequence_id == INVALID_LEAF_ID) {
-    throw std::runtime_error("cannot persist invalid leaf reference");
-  }
-  return sequence->sequence_id;
 }
 
 void write_u32_vector(std::ostream& out, const std::vector<uint32_t>& values) {
   write_size(out, values.size());
-  for (uint32_t value : values) write_pod<uint32_t>(out, value);
+  if (values.empty()) return;
+  const size_t byte_count = values.size() * sizeof(uint32_t);
+  if (byte_count > static_cast<size_t>(
+                       std::numeric_limits<std::streamsize>::max())) {
+    throw std::runtime_error("u32 vector exceeds stream size range");
+  }
+  out.write(reinterpret_cast<const char*>(values.data()),
+            static_cast<std::streamsize>(byte_count));
+  if (!out) throw std::runtime_error("failed to write u32 vector");
 }
 
 std::vector<uint32_t> read_u32_vector(std::istream& in, const char* field) {
-  size_t count = read_size(in, field);
-  std::vector<uint32_t> values;
-  values.reserve(count);
-  for (size_t i = 0; i < count; ++i) {
-    values.push_back(read_pod<uint32_t>(in, field));
+  const size_t count = read_size(in, field);
+  if (count > static_cast<size_t>(
+                  std::numeric_limits<std::streamsize>::max()) /
+                  sizeof(uint32_t)) {
+    throw std::runtime_error(std::string(field) +
+                             " exceeds stream size range");
+  }
+  std::vector<uint32_t> values(count);
+  if (values.empty()) return values;
+  const size_t byte_count = count * sizeof(uint32_t);
+  in.read(reinterpret_cast<char*>(values.data()),
+          static_cast<std::streamsize>(byte_count));
+  if (!in) {
+    throw std::runtime_error(std::string("failed to read index field: ") +
+                             field);
   }
   return values;
 }
-
-size_t count_edges(
-    const std::vector<std::vector<std::shared_ptr<WorldNode>>>& layers) {
-  size_t total = 0;
-  for (const auto& layer : layers)
-    for (const auto& node : layer)
-      if (node) total += node->child_nodes.size();
-  return total;
-}
-
-size_t count_leaf_links(
-    const std::vector<std::vector<std::shared_ptr<WorldNode>>>& layers) {
-  size_t total = 0;
-  for (const auto& layer : layers)
-    for (const auto& node : layer)
-      if (node) total += node->child_leaves.size();
-  return total;
-}
-
-void rebuild_rect_indexes(BioGeometryIndexBuilder& builder);
 
 }  // namespace
 
 class IndexPersistenceAccess {
  public:
-  static const std::vector<std::vector<std::shared_ptr<WorldNode>>>&
-  primary_layers(const BioGeometryIndexBuilder& builder) {
-    return builder.primary_layers_;
-  }
-
-  static void reset_loaded_state(
+  static void reset_loaded_array_state(
       BioGeometryIndexBuilder& builder,
-      std::unordered_map<std::string, std::shared_ptr<BioSequence>> unique_sequences,
-      std::vector<std::vector<std::shared_ptr<WorldNode>>> primary_layers,
-      size_t world_node_count,
-      size_t sequence_count,
+      SearchGraphView view,
       const IndexBuildManifest& manifest) {
     builder.stats_ = BioGeometryIndexBuilder::Statistics{};
-    builder.stats_.added_sequences = sequence_count;
-    builder.stats_.unique_sequences = sequence_count;
-    builder.stats_.created_primary_nodes.assign(primary_layers.size(), 0);
-    for (size_t i = 0; i < primary_layers.size(); ++i) {
-      builder.stats_.created_primary_nodes[i] = primary_layers[i].size();
+    builder.stats_.added_sequences = view.sequences.size();
+    builder.stats_.unique_sequences = view.sequences.size();
+    builder.stats_.created_primary_nodes.assign(
+        view.layer_begin.size(), 0);
+    for (size_t layer = 0; layer < view.layer_begin.size(); ++layer) {
+      builder.stats_.created_primary_nodes[layer] =
+          view.layer_end[layer] - view.layer_begin[layer];
     }
     builder.stats_.phase2_edges_added = manifest.edge_count;
     builder.stats_.leaf_attachments_added = manifest.leaf_link_count;
-    builder.unique_sequences = std::move(unique_sequences);
-    builder.world_node_count_ = world_node_count;
-    builder.sequence_count_ = sequence_count;
-    builder.primary_layers_ = std::move(primary_layers);
+    builder.world_node_count_ = view.node_records.size();
+    builder.sequence_count_ = view.sequences.size();
+    builder.build_nodes_.clear();
+    builder.final_node_ids_.clear();
+    builder.primary_layers_.clear();
     builder.extended_layers_.clear();
-    builder.search_graph_view_ = SearchGraphView{};
-    rebuild_rect_indexes(builder);
-    builder.build_search_graph_view();
+    builder.search_graph_view_ = std::move(view);
   }
 
-  static BuildRangeConfig& range_config(BioGeometryIndexBuilder& builder) {
-    return builder.range_config_;
-  }
 };
 
 namespace {
 
-void rebuild_rect_indexes(BioGeometryIndexBuilder& builder) {
-  BuildRangeConfig& config = IndexPersistenceAccess::range_config(builder);
-  for (const auto& layer : IndexPersistenceAccess::primary_layers(builder)) {
-    for (const auto& node : layer) {
-      if (!node) continue;
-      node->mbb_rect_index.reset();
-      if (node->child_nodes.size() < config.min_rect_index_fanout ||
-          node->child_nodes.size() > std::numeric_limits<uint32_t>::max() ||
-          node->beacons.empty() ||
-          node->child_beacon_mbbs.size() != node->child_nodes.size()) {
-        continue;
-      }
-      bool valid = true;
-      std::vector<MBBRectIndex::Rect> rects;
-      rects.reserve(node->child_nodes.size());
-      for (size_t child_idx = 0; child_idx < node->child_nodes.size(); ++child_idx) {
-        const auto& row = node->child_beacon_mbbs[child_idx];
-        if (row.size() != node->beacons.size()) {
-          valid = false;
-          break;
-        }
-        MBBRectIndex::Rect rect;
-        rect.child_id = static_cast<uint32_t>(child_idx);
-        rect.lo.reserve(row.size());
-        rect.hi.reserve(row.size());
-        for (const auto& mbb : row) {
-          rect.lo.push_back(mbb.min_dist);
-          rect.hi.push_back(mbb.max_dist);
-        }
-        rects.push_back(std::move(rect));
-      }
-      if (!valid) continue;
-      auto rect_index = std::make_shared<MBBRectIndex>();
-      rect_index->build(rects);
-      if (rect_index->size() == node->child_nodes.size() &&
-          rect_index->dim() == node->beacons.size()) {
-        node->mbb_rect_index = std::move(rect_index);
-      }
-    }
+void write_i32_vector(std::ostream& out,
+                      const std::vector<int32_t>& values) {
+  write_size(out, values.size());
+  if (values.empty()) return;
+  const size_t byte_count = values.size() * sizeof(int32_t);
+  if (byte_count > static_cast<size_t>(
+                       std::numeric_limits<std::streamsize>::max())) {
+    throw std::runtime_error("i32 vector exceeds stream size range");
   }
+  out.write(reinterpret_cast<const char*>(values.data()),
+            static_cast<std::streamsize>(byte_count));
+  if (!out) throw std::runtime_error("failed to write i32 vector");
 }
 
-void write_sequences(std::ostream& out,
-                     const std::vector<std::shared_ptr<BioSequence>>& sequences) {
-  write_size(out, sequences.size());
-  for (const auto& sequence : sequences) {
-    write_string(out, sequence->id);
-    write_string(out, sequence->seq);
-    write_pod<uint32_t>(out, sequence->sequence_id);
-    write_pod<int64_t>(out, sequence->bwt_interval.start);
-    write_pod<int64_t>(out, sequence->bwt_interval.end);
-    write_size(out, sequence->ref_positions.size());
-    for (const auto& pos : sequence->ref_positions) {
+std::vector<int32_t> read_i32_vector(std::istream& in, const char* field) {
+  const size_t count = read_size(in, field);
+  if (count > static_cast<size_t>(
+                  std::numeric_limits<std::streamsize>::max()) /
+                  sizeof(int32_t)) {
+    throw std::runtime_error(std::string(field) +
+                             " exceeds stream size range");
+  }
+  std::vector<int32_t> values(count);
+  if (values.empty()) return values;
+  const size_t byte_count = count * sizeof(int32_t);
+  in.read(reinterpret_cast<char*>(values.data()),
+          static_cast<std::streamsize>(byte_count));
+  if (!in) {
+    throw std::runtime_error(std::string("failed to read index field: ") +
+                             field);
+  }
+  return values;
+}
+
+void write_sequence_store(std::ostream& out, const SequenceStore& store) {
+  write_size(out, store.size());
+  for (const auto& sequence : store.records) {
+    write_string(out, sequence.id);
+    write_string(out, sequence.seq);
+    write_pod<uint32_t>(out, sequence.sequence_id);
+    write_bool(out, sequence.has_source_pos);
+    write_size(out, sequence.source_pos);
+    write_pod<int64_t>(out, sequence.bwt_interval.start);
+    write_pod<int64_t>(out, sequence.bwt_interval.end);
+    write_size(out, sequence.ref_positions.size());
+    for (const auto& pos : sequence.ref_positions) {
       write_string(out, pos.ref_id);
       write_pod<int32_t>(out, static_cast<int32_t>(pos.start));
       write_pod<int32_t>(out, static_cast<int32_t>(pos.end));
@@ -484,218 +415,120 @@ void write_sequences(std::ostream& out,
   }
 }
 
-std::vector<std::shared_ptr<BioSequence>> read_sequences(std::istream& in) {
-  size_t count = read_size(in, "sequence_count");
-  std::vector<std::shared_ptr<BioSequence>> sequences(count);
+SequenceStore read_sequence_store(std::istream& in) {
+  SequenceStore store;
+  const size_t count = read_size(in, "sequence_store.count");
+  store.records.reserve(count);
   for (size_t i = 0; i < count; ++i) {
     std::string id = read_string(in, "sequence.id");
     std::string seq = read_string(in, "sequence.seq");
-    uint32_t sequence_id = read_pod<uint32_t>(in, "sequence.sequence_id");
-    if (sequence_id >= count) throw std::runtime_error("sequence id out of range");
-    auto sequence = std::make_shared<BioSequence>(id, seq);
-    sequence->sequence_id = sequence_id;
-    sequence->bwt_interval.start = read_pod<int64_t>(in, "sequence.bwt_start");
-    sequence->bwt_interval.end = read_pod<int64_t>(in, "sequence.bwt_end");
-    size_t pos_count = read_size(in, "sequence.ref_position_count");
-    sequence->ref_positions.reserve(pos_count);
-    for (size_t pos_idx = 0; pos_idx < pos_count; ++pos_idx) {
+    BioSequence sequence(std::move(id), std::move(seq));
+    sequence.sequence_id =
+        read_pod<uint32_t>(in, "sequence.sequence_id");
+    if (sequence.sequence_id != i) {
+      throw std::runtime_error("array index sequence ids are not contiguous");
+    }
+    sequence.has_source_pos =
+        read_bool(in, "sequence.has_source_pos");
+    sequence.source_pos = read_size(in, "sequence.source_pos");
+    sequence.bwt_interval.start =
+        read_pod<int64_t>(in, "sequence.bwt_start");
+    sequence.bwt_interval.end =
+        read_pod<int64_t>(in, "sequence.bwt_end");
+    const size_t position_count =
+        read_size(in, "sequence.ref_position_count");
+    sequence.ref_positions.reserve(position_count);
+    for (size_t pos_idx = 0; pos_idx < position_count; ++pos_idx) {
       RefPosition pos;
       pos.ref_id = read_string(in, "ref_position.ref_id");
-      pos.start = static_cast<int>(read_pod<int32_t>(in, "ref_position.start"));
-      pos.end = static_cast<int>(read_pod<int32_t>(in, "ref_position.end"));
+      pos.start =
+          static_cast<int>(read_pod<int32_t>(in, "ref_position.start"));
+      pos.end =
+          static_cast<int>(read_pod<int32_t>(in, "ref_position.end"));
       pos.strand = read_string(in, "ref_position.strand");
-      sequence->ref_positions.push_back(std::move(pos));
+      sequence.ref_positions.push_back(std::move(pos));
     }
-    sequences[sequence_id] = std::move(sequence);
+    store.records.push_back(std::move(sequence));
   }
-  for (const auto& sequence : sequences) {
-    if (!sequence) throw std::runtime_error("sparse sequence table in index file");
-  }
-  return sequences;
+  return store;
 }
 
-struct PendingNode {
-  std::shared_ptr<WorldNode> node;
-  std::vector<uint32_t> child_ids;
-  std::vector<uint32_t> leaf_ids;
-  std::vector<uint32_t> beacon_ids;
-  std::vector<std::vector<MBB>> child_mbbs;
-  std::vector<std::vector<int>> leaf_beacon_dists;
-};
-
-void write_nodes(
+void write_node_records(
     std::ostream& out,
-    const std::vector<std::shared_ptr<WorldNode>>& nodes) {
-  write_size(out, nodes.size());
-  for (const auto& node : nodes) {
-    write_string(out, node->node_id);
-    write_pod<uint32_t>(out, checked_leaf_id(node->center_ptr));
-    write_pod<uint32_t>(out, node->integer_id);
-    write_pod<int32_t>(out, static_cast<int32_t>(node->radius));
-    write_pod<int32_t>(out, static_cast<int32_t>(node->expanded_layer_index));
-    write_pod<int32_t>(out, static_cast<int32_t>(node->primary_layer_index));
-    write_bool(out, node->is_primary);
-    write_pod<int32_t>(out, static_cast<int32_t>(node->data_count));
-
-    std::vector<uint32_t> child_ids;
-    child_ids.reserve(node->child_nodes.size());
-    for (const auto& child : node->child_nodes) child_ids.push_back(checked_node_id(child));
-    write_u32_vector(out, child_ids);
-
-    std::vector<uint32_t> leaf_ids;
-    leaf_ids.reserve(node->child_leaves.size());
-    for (const auto& leaf : node->child_leaves) leaf_ids.push_back(checked_leaf_id(leaf));
-    write_u32_vector(out, leaf_ids);
-
-    std::vector<uint32_t> beacon_ids;
-    beacon_ids.reserve(node->beacons.size());
-    for (const auto& beacon : node->beacons) beacon_ids.push_back(checked_leaf_id(beacon));
-    write_u32_vector(out, beacon_ids);
-
-    write_size(out, node->child_beacon_mbbs.size());
-    for (const auto& row : node->child_beacon_mbbs) {
-      write_size(out, row.size());
-      for (const auto& mbb : row) {
-        write_pod<int32_t>(out, static_cast<int32_t>(mbb.min_dist));
-        write_pod<int32_t>(out, static_cast<int32_t>(mbb.max_dist));
-      }
-    }
-
-    write_size(out, node->leaf_beacon_dists.size());
-    for (const auto& row : node->leaf_beacon_dists) {
-      write_size(out, row.size());
-      for (int dist : row) write_pod<int32_t>(out, static_cast<int32_t>(dist));
-    }
+    const std::vector<WorldNodeRecord>& records) {
+  write_size(out, records.size());
+  for (const auto& record : records) {
+    write_pod<uint32_t>(out, record.center_sequence_id);
+    write_pod<int32_t>(out, static_cast<int32_t>(record.radius));
+    write_pod<int32_t>(
+        out, static_cast<int32_t>(record.expanded_layer_index));
+    write_pod<int32_t>(
+        out, static_cast<int32_t>(record.primary_layer_index));
+    write_pod<uint32_t>(out, record.child_begin);
+    write_pod<uint32_t>(out, record.child_count);
+    write_pod<uint32_t>(out, record.leaf_begin);
+    write_pod<uint32_t>(out, record.leaf_count);
+    write_pod<uint32_t>(out, record.beacon_begin);
+    write_pod<uint32_t>(out, record.beacon_count);
+    write_pod<uint32_t>(out, record.mbb_begin);
+    write_pod<uint32_t>(out, record.leaf_beacon_begin);
   }
 }
 
-std::vector<PendingNode> read_nodes(
-    std::istream& in,
-    const std::vector<std::shared_ptr<BioSequence>>& sequences) {
-  size_t count = read_size(in, "node_count");
-  std::vector<PendingNode> pending(count);
-  for (size_t i = 0; i < count; ++i) {
-    std::string node_id = read_string(in, "node.node_id");
-    uint32_t center_id = read_pod<uint32_t>(in, "node.center_id");
-    if (center_id >= sequences.size()) {
-      throw std::runtime_error("node center sequence id out of range");
-    }
-    uint32_t integer_id = read_pod<uint32_t>(in, "node.integer_id");
-    if (integer_id >= count) throw std::runtime_error("node id out of range");
-    int radius = static_cast<int>(read_pod<int32_t>(in, "node.radius"));
-    int expanded_layer_index =
-        static_cast<int>(read_pod<int32_t>(in, "node.expanded_layer_index"));
-    int primary_layer_index =
-        static_cast<int>(read_pod<int32_t>(in, "node.primary_layer_index"));
-    bool is_primary = read_bool(in, "node.is_primary");
-    int data_count = static_cast<int>(read_pod<int32_t>(in, "node.data_count"));
-
-    auto node = std::make_shared<WorldNode>(
-        sequences[center_id], radius, expanded_layer_index);
-    node->node_id = std::move(node_id);
-    node->integer_id = integer_id;
-    node->expanded_layer_index = expanded_layer_index;
-    node->primary_layer_index = primary_layer_index;
-    node->is_primary = is_primary;
-    node->data_count = data_count;
-
-    PendingNode record;
-    record.node = std::move(node);
-    record.child_ids = read_u32_vector(in, "node.child_ids");
-    record.leaf_ids = read_u32_vector(in, "node.leaf_ids");
-    record.beacon_ids = read_u32_vector(in, "node.beacon_ids");
-
-    size_t mbb_rows = read_size(in, "node.child_mbb_rows");
-    record.child_mbbs.reserve(mbb_rows);
-    for (size_t row_idx = 0; row_idx < mbb_rows; ++row_idx) {
-      size_t dim = read_size(in, "node.child_mbb_dim");
-      std::vector<MBB> row;
-      row.reserve(dim);
-      for (size_t d = 0; d < dim; ++d) {
-        MBB mbb;
-        mbb.min_dist = static_cast<int>(read_pod<int32_t>(in, "mbb.min"));
-        mbb.max_dist = static_cast<int>(read_pod<int32_t>(in, "mbb.max"));
-        row.push_back(mbb);
-      }
-      record.child_mbbs.push_back(std::move(row));
-    }
-
-    size_t leaf_rows = read_size(in, "node.leaf_beacon_rows");
-    record.leaf_beacon_dists.reserve(leaf_rows);
-    for (size_t row_idx = 0; row_idx < leaf_rows; ++row_idx) {
-      size_t dim = read_size(in, "node.leaf_beacon_dim");
-      std::vector<int> row;
-      row.reserve(dim);
-      for (size_t d = 0; d < dim; ++d) {
-        row.push_back(static_cast<int>(read_pod<int32_t>(in, "leaf_beacon_dist")));
-      }
-      record.leaf_beacon_dists.push_back(std::move(row));
-    }
-
-    pending[integer_id] = std::move(record);
+std::vector<WorldNodeRecord> read_node_records(std::istream& in) {
+  const size_t count = read_size(in, "node_records.count");
+  std::vector<WorldNodeRecord> records(count);
+  for (auto& record : records) {
+    record.center_sequence_id =
+        read_pod<uint32_t>(in, "node.center_sequence_id");
+    record.radius = static_cast<int>(read_pod<int32_t>(in, "node.radius"));
+    record.expanded_layer_index =
+        static_cast<int>(read_pod<int32_t>(
+            in, "node.expanded_layer_index"));
+    record.primary_layer_index =
+        static_cast<int>(read_pod<int32_t>(
+            in, "node.primary_layer_index"));
+    record.child_begin = read_pod<uint32_t>(in, "node.child_begin");
+    record.child_count = read_pod<uint32_t>(in, "node.child_count");
+    record.leaf_begin = read_pod<uint32_t>(in, "node.leaf_begin");
+    record.leaf_count = read_pod<uint32_t>(in, "node.leaf_count");
+    record.beacon_begin = read_pod<uint32_t>(in, "node.beacon_begin");
+    record.beacon_count = read_pod<uint32_t>(in, "node.beacon_count");
+    record.mbb_begin = read_pod<uint32_t>(in, "node.mbb_begin");
+    record.leaf_beacon_begin =
+        read_pod<uint32_t>(in, "node.leaf_beacon_begin");
   }
-
-  for (const auto& record : pending) {
-    if (!record.node) throw std::runtime_error("sparse node table in index file");
-  }
-  return pending;
+  return records;
 }
 
-void connect_nodes(
-    std::vector<PendingNode>& pending,
-    const std::vector<std::shared_ptr<BioSequence>>& sequences) {
-  std::vector<std::shared_ptr<WorldNode>> nodes(pending.size());
-  for (const auto& record : pending) nodes[record.node->integer_id] = record.node;
-
-  for (auto& record : pending) {
-    auto& node = record.node;
-    node->child_nodes.reserve(record.child_ids.size());
-    for (uint32_t child_id : record.child_ids) {
-      if (child_id >= nodes.size()) throw std::runtime_error("child node id out of range");
-      node->child_nodes.push_back(nodes[child_id]);
-    }
-    node->child_leaves.reserve(record.leaf_ids.size());
-    for (uint32_t leaf_id : record.leaf_ids) {
-      if (leaf_id >= sequences.size()) throw std::runtime_error("leaf id out of range");
-      node->child_leaves.push_back(sequences[leaf_id]);
-    }
-    node->beacons.reserve(record.beacon_ids.size());
-    for (uint32_t beacon_id : record.beacon_ids) {
-      if (beacon_id >= sequences.size()) throw std::runtime_error("beacon id out of range");
-      node->beacons.push_back(sequences[beacon_id]);
-    }
-    node->child_beacon_mbbs = std::move(record.child_mbbs);
-    node->leaf_beacon_dists = std::move(record.leaf_beacon_dists);
-  }
+void write_search_graph_view(std::ostream& out,
+                             const SearchGraphView& view) {
+  write_sequence_store(out, view.sequences);
+  write_node_records(out, view.node_records);
+  write_u32_vector(out, view.layer_begin);
+  write_u32_vector(out, view.layer_end);
+  write_u32_vector(out, view.child_ids);
+  write_u32_vector(out, view.leaf_ids);
+  write_u32_vector(out, view.beacon_ids);
+  write_i32_vector(out, view.mbb_lo);
+  write_i32_vector(out, view.mbb_hi);
+  write_i32_vector(out, view.leaf_beacon_dists);
 }
 
-void write_primary_layers(
-    std::ostream& out,
-    const std::vector<std::vector<std::shared_ptr<WorldNode>>>& layers) {
-  write_size(out, layers.size());
-  for (const auto& layer : layers) {
-    write_size(out, layer.size());
-    for (const auto& node : layer) write_pod<uint32_t>(out, checked_node_id(node));
-  }
-}
-
-std::vector<std::vector<std::shared_ptr<WorldNode>>> read_primary_layers(
-    std::istream& in,
-    const std::vector<PendingNode>& pending) {
-  size_t layer_count = read_size(in, "primary_layer_count");
-  std::vector<std::vector<std::shared_ptr<WorldNode>>> layers(layer_count);
-  for (size_t layer_idx = 0; layer_idx < layer_count; ++layer_idx) {
-    size_t node_count = read_size(in, "primary_layer_size");
-    layers[layer_idx].reserve(node_count);
-    for (size_t node_idx = 0; node_idx < node_count; ++node_idx) {
-      uint32_t node_id = read_pod<uint32_t>(in, "primary_layer_node_id");
-      if (node_id >= pending.size()) {
-        throw std::runtime_error("primary layer node id out of range");
-      }
-      layers[layer_idx].push_back(pending[node_id].node);
-    }
-  }
-  return layers;
+SearchGraphView read_search_graph_view(std::istream& in) {
+  SearchGraphView view;
+  view.sequences = read_sequence_store(in);
+  view.node_records = read_node_records(in);
+  view.layer_begin = read_u32_vector(in, "layer_begin");
+  view.layer_end = read_u32_vector(in, "layer_end");
+  view.child_ids = read_u32_vector(in, "child_ids");
+  view.leaf_ids = read_u32_vector(in, "leaf_ids");
+  view.beacon_ids = read_u32_vector(in, "beacon_ids");
+  view.mbb_lo = read_i32_vector(in, "mbb_lo");
+  view.mbb_hi = read_i32_vector(in, "mbb_hi");
+  view.leaf_beacon_dists =
+      read_i32_vector(in, "leaf_beacon_dists");
+  return view;
 }
 
 }  // namespace
@@ -761,6 +594,10 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
+  if (manifest.format_version != 3) {
+    throw std::runtime_error(
+        "unsupported NavigaMer index version; rebuild the array index");
+  }
   IndexBuildManifest signature_check = manifest;
   refresh_signature(signature_check);
   if (signature_check.signature != manifest.signature) {
@@ -798,24 +635,21 @@ void save_index(const std::string& path,
     throw std::runtime_error("cannot persist invalid NavigaMer index");
   }
 
-  const auto& layers = IndexPersistenceAccess::primary_layers(builder);
-  std::vector<std::shared_ptr<BioSequence>> sequences = sequences_by_id(builder);
-  std::vector<std::shared_ptr<WorldNode>> nodes =
-      nodes_by_id(layers, builder.num_world_nodes());
+  const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
+  stored.format_version = 3;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
-  stored.edge_count = count_edges(layers);
-  stored.leaf_link_count = count_leaf_links(layers);
+  stored.edge_count = view.child_ids.size();
+  stored.leaf_link_count = view.leaf_ids.size();
+  refresh_signature(stored);
 
   std::ofstream out(path, std::ios::binary);
   if (!out) throw std::runtime_error("unable to open index output: " + path);
   write_magic(out);
   write_manifest(out, stored);
-  write_sequences(out, sequences);
-  write_nodes(out, nodes);
-  write_primary_layers(out, layers);
+  write_search_graph_view(out, view);
   out.close();
   if (!out) throw std::runtime_error("failed to write index output: " + path);
 }
@@ -825,6 +659,10 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
+  if (manifest.format_version != 3) {
+    throw std::runtime_error(
+        "unsupported NavigaMer index version; rebuild the array index");
+  }
   IndexBuildManifest signature_check = manifest;
   refresh_signature(signature_check);
   if (signature_check.signature != manifest.signature) {
@@ -836,21 +674,16 @@ LoadedIndex load_index(const std::string& path) {
       HierarchyConfig(manifest.primary_radii, manifest.auxiliary_radii),
       range_config);
 
-  std::vector<std::shared_ptr<BioSequence>> sequences = read_sequences(in);
-  std::vector<PendingNode> pending = read_nodes(in, sequences);
-  connect_nodes(pending, sequences);
-  std::vector<std::vector<std::shared_ptr<WorldNode>>> layers =
-      read_primary_layers(in, pending);
-
-  std::unordered_map<std::string, std::shared_ptr<BioSequence>> unique_sequences;
-  unique_sequences.reserve(sequences.size());
-  for (const auto& sequence : sequences) {
-    unique_sequences[sequence->seq] = sequence;
+  SearchGraphView view = read_search_graph_view(in);
+  if (view.sequences.size() != manifest.sequence_count ||
+      view.node_records.size() != manifest.world_node_count ||
+      view.child_ids.size() != manifest.edge_count ||
+      view.leaf_ids.size() != manifest.leaf_link_count) {
+    throw std::runtime_error(
+        "array index manifest counts do not match stored arrays");
   }
-
-  IndexPersistenceAccess::reset_loaded_state(
-      builder, std::move(unique_sequences), std::move(layers),
-      pending.size(), sequences.size(), manifest);
+  IndexPersistenceAccess::reset_loaded_array_state(
+      builder, std::move(view), manifest);
 
   if (!builder.validate_integer_ids() || !builder.validate_search_graph_view()) {
     throw std::runtime_error("loaded NavigaMer index failed validation");

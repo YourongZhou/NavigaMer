@@ -70,7 +70,7 @@ build_leaf_triangle_prune_sequences() {
 }
 
 std::vector<std::string> ids(
-    const std::vector<std::shared_ptr<navigamer::BioSequence>>& hits) {
+    const navigamer::SearchResult& hits) {
   std::vector<std::string> out;
   for (const auto& hit : hits) {
     if (hit) out.push_back(hit->id);
@@ -209,7 +209,7 @@ int main() {
       auto [baseline_hits, baseline_stats] = baseline.search_adaptive(query, 1);
       auto [reuse_hits, reuse_stats] = reused.search_adaptive(query, 1);
       auto [brute_hits, brute_stats] =
-          baseline.search_brute_force(query, 1, sequences);
+          baseline.search_brute_force(query, 1);
       (void)brute_stats;
       const auto baseline_ids = ids(baseline_hits);
       const auto reuse_ids = ids(reuse_hits);
@@ -260,7 +260,7 @@ int main() {
     auto [baseline_q1_hits, baseline_q1_stats] = baseline.search_adaptive(q1, 2);
     auto [reuse_q1_hits, reuse_q1_stats] = reused.search_adaptive(q1, 2);
     auto [brute_q1_hits, brute_q1_stats] =
-        baseline.search_brute_force(q1, 2, sequences);
+        baseline.search_brute_force(q1, 2);
     (void)brute_q1_stats;
 
     assert(ids(baseline_q1_hits) == ids(brute_q1_hits));

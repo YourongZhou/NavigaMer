@@ -203,6 +203,13 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
     int tolerance,
     unsigned seed,
     size_t queries_per_class);
+std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
+    const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
+    const SequenceStore& unique_sequences,
+    int query_length,
+    int tolerance,
+    unsigned seed,
+    size_t queries_per_class);
 LocalityBenchmarkQuerySets generate_locality_benchmark_queries(
     const std::string& reference,
     size_t query_count,

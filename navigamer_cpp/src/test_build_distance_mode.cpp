@@ -24,7 +24,7 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> build_sequences() {
 }
 
 std::set<std::string> ids(
-    const std::vector<std::shared_ptr<navigamer::BioSequence>>& hits) {
+    const navigamer::SearchResult& hits) {
   std::set<std::string> out;
   for (const auto& hit : hits) out.insert(hit->id);
   return out;
@@ -33,15 +33,19 @@ std::set<std::string> ids(
 std::vector<std::set<std::string>> edge_signature(
     const navigamer::BioGeometryIndexBuilder& builder) {
   std::vector<std::set<std::string>> out;
-  for (const auto& layer : builder.primary_layers()) {
-    for (const auto& node : layer) {
-      std::set<std::string> row;
-      for (const auto& child : node->child_nodes) {
-        row.insert(child->center_ptr ? child->center_ptr->id : "");
-      }
-      for (const auto& leaf : node->child_leaves) row.insert("leaf:" + leaf->id);
-      out.push_back(std::move(row));
+  const auto& view = builder.search_graph_view();
+  for (const auto& node : view.node_records) {
+    std::set<std::string> row;
+    for (uint32_t offset = 0; offset < node.child_count; ++offset) {
+      const auto& child =
+          view.node_records[view.child_ids[node.child_begin + offset]];
+      row.insert(view.sequences[child.center_sequence_id].id);
     }
+    for (uint32_t offset = 0; offset < node.leaf_count; ++offset) {
+      row.insert("leaf:" +
+                 view.sequences[view.leaf_ids[node.leaf_begin + offset]].id);
+    }
+    out.push_back(std::move(row));
   }
   return out;
 }

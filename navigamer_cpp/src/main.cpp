@@ -446,7 +446,7 @@ std::vector<BoundaryQuery> generate_boundary_queries(
 }
 
 bool recovers_source_locus(
-    const std::shared_ptr<navigamer::BioSequence>& hit,
+    const navigamer::BioSequence* hit,
     const BoundaryQuery& query) {
   if (!hit) return false;
   if (hit->id == query.source_id) return true;
@@ -524,27 +524,26 @@ void run_demo(int size, const navigamer::HierarchyConfig& config,
 
   auto stats = builder.get_statistics();
   std::cout << "Index primary layers=" << builder.num_primary_layers()
-            << " finest_nodes=" << builder.primary_layer(builder.finest_primary_layer_index()).size()
+            << " finest_nodes="
+            << builder.primary_layer_size(builder.finest_primary_layer_index())
             << " compression=" << (stats.compression_ratio * 100) << "%\n";
 
   BioGeometrySearchEngine engine(builder, search_config);
-  std::vector<std::shared_ptr<BioSequence>> unique_list;
-  for (const auto& p : builder.unique_sequences) unique_list.push_back(p.second);
 
   int tolerance = 2;
   size_t adaptive_ok = 0, exhaustive_ok = 0, bf_ok = 0;
   for (size_t i = 0; i < std::min(size_t(50), reads.size()); ++i) {
     auto [adaptive_res, st_adapt] = engine.search_adaptive(*reads[i], tolerance);
     auto [exhaustive_res, st_ex] = engine.search_exhaustive(*reads[i], tolerance);
-    auto [bf_res, st_bf] = engine.search_brute_force(*reads[i], tolerance, unique_list);
+    auto [bf_res, st_bf] = engine.search_brute_force(*reads[i], tolerance);
     if (!bf_res.empty()) bf_ok++;
     bool a_ok = false, e_ok = false;
     for (const auto& h : bf_res) {
       if (std::find_if(adaptive_res.begin(), adaptive_res.end(),
-                       [&h](const std::shared_ptr<BioSequence>& x) { return x->id == h->id; }) != adaptive_res.end())
+                       [&h](const BioSequence* x) { return x->id == h->id; }) != adaptive_res.end())
         a_ok = true;
       if (std::find_if(exhaustive_res.begin(), exhaustive_res.end(),
-                       [&h](const std::shared_ptr<BioSequence>& x) { return x->id == h->id; }) != exhaustive_res.end())
+                       [&h](const BioSequence* x) { return x->id == h->id; }) != exhaustive_res.end())
         e_ok = true;
     }
     if (a_ok) adaptive_ok++;
@@ -707,7 +706,7 @@ void run_build_scale(const std::string& ref_input,
     }
     const auto stats = builder.get_statistics();
     const size_t finest_count =
-        builder.primary_layer(builder.finest_primary_layer_index()).size();
+        builder.primary_layer_size(builder.finest_primary_layer_index());
 
     write_row({
         std::to_string(actual_prefix),
@@ -1595,10 +1594,6 @@ void run_boundary(const std::string& ref_input, int length,
   builder.build(index_seqs);
   BioGeometrySearchEngine engine(builder, search_config);
 
-  std::vector<std::shared_ptr<BioSequence>> unique_list;
-  unique_list.reserve(builder.unique_sequences.size());
-  for (const auto& p : builder.unique_sequences) unique_list.push_back(p.second);
-
   std::vector<std::string> columns = {
       "length", "stride_mode", "num_index_seqs",
       "error_rate", "error_edits", "tolerance_rate", "tolerance_edits",
@@ -1645,7 +1640,8 @@ void run_boundary(const std::string& ref_input, int length,
         cell.total_beacon_prune_count += st.beacon_prune_count;
 
         if (qi < bf_limit) {
-          auto [bf_res, bf_st] = engine.search_brute_force(q.query, tolerance_edits, unique_list);
+          auto [bf_res, bf_st] =
+              engine.search_brute_force(q.query, tolerance_edits);
           bool bf_source_found = false;
           for (const auto& hit : bf_res) {
             if (recovers_source_locus(hit, q)) {

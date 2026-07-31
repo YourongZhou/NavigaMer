@@ -13,6 +13,8 @@
 
 namespace navigamer {
 
+using SearchResult = std::vector<const BioSequence*>;
+
 enum class MBBFilterMode {
   Scan,
   RectIndex,
@@ -275,18 +277,17 @@ class BioGeometrySearchEngine {
       const BioGeometryIndexBuilder& index,
       const SearchConfig& config = SearchConfig{});
 
-  std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
+  std::pair<SearchResult, SearchStats>
   search_adaptive(const BioSequence& query_seq, int tolerance);
 
-  std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
+  std::pair<SearchResult, SearchStats>
   search_greedy(const BioSequence& query_seq, int tolerance);
 
-  std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
+  std::pair<SearchResult, SearchStats>
   search_exhaustive(const BioSequence& query_seq, int tolerance);
 
-  std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
-  search_brute_force(const BioSequence& query_seq, int tolerance,
-                     const std::vector<std::shared_ptr<BioSequence>>& all_sequences);
+  std::pair<SearchResult, SearchStats>
+  search_brute_force(const BioSequence& query_seq, int tolerance);
 
   std::vector<std::string> debug_safe_child_router_candidate_ids(
       const std::string& parent_node_id,
@@ -331,6 +332,10 @@ class BioGeometrySearchEngine {
       const std::shared_ptr<WorldNode>& node,
       const BioSequence& query_seq,
       SearchStats& stats) const;
+  std::vector<int> compute_query_beacon_distances_view(
+      NodeId node_id,
+      const BioSequence& query_seq,
+      SearchStats& stats) const;
   std::vector<std::shared_ptr<WorldNode>> scan_mbb_surviving_children(
       const std::shared_ptr<WorldNode>& node,
       const std::vector<int>& query_beacon_dists,
@@ -343,6 +348,13 @@ class BioGeometrySearchEngine {
       SearchStats& stats) const;
   std::vector<size_t> safe_child_router_candidate_indices(
       const std::shared_ptr<WorldNode>& node,
+      const BioSequence& query_seq,
+      const std::vector<int>& query_beacon_dists,
+      int tolerance,
+      SearchStats& stats,
+      bool* used_router) const;
+  std::vector<size_t> safe_child_router_candidate_indices_view(
+      NodeId node_id,
       const BioSequence& query_seq,
       const std::vector<int>& query_beacon_dists,
       int tolerance,
@@ -387,7 +399,7 @@ class BioGeometrySearchEngine {
       NodeId node_id,
       const BioSequence& query_seq,
       int tolerance,
-      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      std::unordered_map<LeafId, const BioSequence*>& unique_results,
       SearchStats& stats) const;
 
   void process_node_adaptive(
@@ -487,7 +499,7 @@ class BioGeometrySearchEngine {
   void process_node_adaptive_view(
       NodeId node_id, int current_layer,
       const BioSequence& query_seq, int tolerance,
-      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      std::unordered_map<LeafId, const BioSequence*>& unique_results,
       std::unordered_set<std::string>* visited_nodes,
       SearchScratch* scratch,
       SearchStats& stats,
@@ -497,7 +509,7 @@ class BioGeometrySearchEngine {
   void search_layer_adaptive_view(
       const std::vector<NodeId>& candidates, int layer_id,
       const BioSequence& query_seq, int tolerance,
-      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      std::unordered_map<LeafId, const BioSequence*>& unique_results,
       std::unordered_set<std::string>* visited_nodes,
       SearchScratch* scratch,
       SearchStats& stats,
@@ -512,6 +524,12 @@ class BioGeometrySearchEngine {
       const BioSequence& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       std::unordered_set<std::string>& visited_nodes,
+      SearchStats& stats) const;
+  void traverse_exhaustive_view(
+      NodeId node_id, int current_layer,
+      const BioSequence& query_seq, int tolerance,
+      std::unordered_map<LeafId, const BioSequence*>& unique_results,
+      std::vector<uint8_t>& visited_nodes,
       SearchStats& stats) const;
 };
 

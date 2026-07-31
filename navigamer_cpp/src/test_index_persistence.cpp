@@ -40,7 +40,7 @@ std::vector<SequencePtr> make_sequences() {
   };
 }
 
-std::set<std::string> ids(const std::vector<SequencePtr>& hits) {
+std::set<std::string> ids(const navigamer::SearchResult& hits) {
   std::set<std::string> out;
   for (const auto& hit : hits) out.insert(hit->id);
   return out;
@@ -66,7 +66,14 @@ void assert_loaded_search_matches_built() {
   assert(loaded.manifest.signature == manifest.signature);
   assert(loaded.manifest.primary_radii == manifest.primary_radii);
 
-  auto restored = loaded.builder.unique_sequences.at("ACGTACGTACGTACGTACGT");
+  const navigamer::BioSequence* restored = nullptr;
+  for (const auto& sequence : loaded.builder.sequence_store().records) {
+    if (sequence.seq == "ACGTACGTACGTACGTACGT") {
+      restored = &sequence;
+      break;
+    }
+  }
+  assert(restored != nullptr);
   assert(restored->ref_positions.size() == 2);
   assert(restored->bwt_interval.start == 100);
   assert(restored->bwt_interval.end == 101);

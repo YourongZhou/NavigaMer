@@ -74,8 +74,14 @@ RangeCandidateMode parse_range_candidate_mode(const std::string& value) {
       "range candidate mode must be auto, pigeonhole, qgram, hybrid, or full");
 }
 
-ExactRangeJoinIndex::ExactRangeJoinIndex(RangeJoinConfig config)
-    : config_(config), qgram_index_(config.qgram_q) {
+ExactRangeJoinIndex::ExactRangeJoinIndex(
+    RangeJoinConfig config, bool defer_qgram_build)
+    : config_(config),
+      qgram_index_(config.qgram_q),
+      defer_qgram_build_(defer_qgram_build),
+      deferred_qgram_mutex_(defer_qgram_build
+                                ? std::make_shared<std::mutex>()
+                                : nullptr) {
   if (config_.min_seed_len <= 0) {
     throw std::invalid_argument("range-join min seed length must be positive");
   }
@@ -96,13 +102,43 @@ void ExactRangeJoinIndex::build(const std::vector<RangeJoinItem>& items) {
   item_lengths_by_id_.clear();
   item_lengths_by_id_.reserve(items.size());
   postings_by_seed_len_.clear();
+  qgram_ready_ = false;
   std::vector<QGramCountIndex::Item> qgram_items;
-  qgram_items.reserve(items.size());
+  if (!defer_qgram_build_) qgram_items.reserve(items.size());
   for (const auto& item : items) {
     item_lengths_by_id_[item.item_id] = item.sequence.size();
-    qgram_items.push_back({item.item_id, item.sequence});
+    if (!defer_qgram_build_) {
+      qgram_items.push_back({item.item_id, item.sequence});
+    }
   }
-  qgram_index_.build(qgram_items);
+  if (!defer_qgram_build_) {
+    qgram_index_.build(qgram_items);
+    qgram_ready_ = true;
+  }
+}
+
+const QGramCountIndex& ExactRangeJoinIndex::ensure_qgram_index() const {
+  const auto build_qgram = [this]() {
+    std::vector<QGramCountIndex::Item> qgram_items;
+    qgram_items.reserve(items_.size());
+    for (const auto& item : items_) {
+      qgram_items.push_back({item.item_id, item.sequence});
+    }
+    qgram_index_.build(qgram_items);
+    qgram_ready_ = true;
+  };
+
+  if (defer_qgram_build_) {
+    std::lock_guard<std::mutex> lock(*deferred_qgram_mutex_);
+    if (!qgram_ready_) build_qgram();
+  } else if (!qgram_ready_) {
+    build_qgram();
+  }
+  return qgram_index_;
+}
+
+void ExactRangeJoinIndex::prepare_qgram() {
+  (void)ensure_qgram_index();
 }
 
 const ExactRangeJoinIndex::PostingLists&
@@ -413,9 +449,11 @@ RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
   result.mode_used = RangeCandidateMode::QGramOnly;
   {
     ScopedTimer timer(&result.range_qgram_query_ms);
+    const QGramCountIndex& qgram_index =
+        defer_qgram_build_ ? ensure_qgram_index() : qgram_index_;
     result.candidate_item_ids =
-        qgram_index_.query(query_sequence, tau, &stats,
-                           workspace ? &workspace->qgram : nullptr);
+        qgram_index.query(query_sequence, tau, &stats,
+                          workspace ? &workspace->qgram : nullptr);
   }
   result.used_full_scan = stats.full_scan_fallbacks > 0;
   result.length_filtered_items = stats.length_filtered_items;

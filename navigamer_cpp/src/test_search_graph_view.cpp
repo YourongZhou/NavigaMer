@@ -36,63 +36,42 @@ void assert_view_equivalent_to_original() {
   assert(builder.validate_search_graph_view());
 
   const auto& view = builder.search_graph_view();
-  assert(view.nodes.size() == builder.num_world_nodes());
-  assert(view.leaves.size() == builder.num_sequences());
-  assert(view.child_begin.size() == builder.num_world_nodes());
-  assert(view.child_end.size() == builder.num_world_nodes());
-  assert(view.leaf_begin.size() == builder.num_world_nodes());
-  assert(view.leaf_end.size() == builder.num_world_nodes());
-
-  for (const auto& layer : builder.primary_layers()) {
-    for (const auto& node : layer) {
-      const navigamer::NodeId node_id = node->integer_id;
-      assert(view.nodes[node_id] == node);
-
-      uint32_t child_begin = view.child_begin[node_id];
-      uint32_t child_end = view.child_end[node_id];
-      assert(child_end >= child_begin);
-      assert(child_end - child_begin == node->child_nodes.size());
-      for (size_t child_idx = 0; child_idx < node->child_nodes.size(); ++child_idx) {
-        assert(view.child_ids[child_begin + child_idx] ==
-               node->child_nodes[child_idx]->integer_id);
-      }
-
-      uint32_t leaf_begin = view.leaf_begin[node_id];
-      uint32_t leaf_end = view.leaf_end[node_id];
-      assert(leaf_end >= leaf_begin);
-      assert(leaf_end - leaf_begin == node->child_leaves.size());
-      for (size_t leaf_idx = 0; leaf_idx < node->child_leaves.size(); ++leaf_idx) {
-        assert(view.leaf_ids[leaf_begin + leaf_idx] ==
-               node->child_leaves[leaf_idx]->sequence_id);
-      }
-
-      assert(view.mbb_dim[node_id] == node->beacons.size());
-      const uint32_t mbb_offset = view.mbb_begin[node_id];
-      const size_t child_count = node->child_nodes.size();
-      for (size_t child_idx = 0; child_idx < node->child_beacon_mbbs.size(); ++child_idx) {
-        for (size_t dim = 0; dim < node->child_beacon_mbbs[child_idx].size(); ++dim) {
-          const size_t flat = mbb_offset + dim * child_count + child_idx;
-          assert(view.mbb_lo[flat] == node->child_beacon_mbbs[child_idx][dim].min_dist);
-          assert(view.mbb_hi[flat] == node->child_beacon_mbbs[child_idx][dim].max_dist);
-        }
-      }
-
-      assert(view.leaf_beacon_dim[node_id] == node->beacons.size());
-      const uint32_t leaf_beacon_offset = view.leaf_beacon_begin[node_id];
-      const size_t leaf_count = node->child_leaves.size();
-      for (size_t leaf_idx = 0; leaf_idx < node->leaf_beacon_dists.size(); ++leaf_idx) {
-        for (size_t dim = 0; dim < node->leaf_beacon_dists[leaf_idx].size(); ++dim) {
-          const size_t flat = leaf_beacon_offset + dim * leaf_count + leaf_idx;
-          assert(view.leaf_beacon_dists[flat] ==
-                 node->leaf_beacon_dists[leaf_idx][dim]);
-        }
-      }
+  assert(view.node_records.size() == builder.num_world_nodes());
+  assert(view.sequences.size() == builder.num_sequences());
+  assert(view.layer_begin.size() ==
+         static_cast<size_t>(builder.num_primary_layers()));
+  assert(view.layer_end.size() ==
+         static_cast<size_t>(builder.num_primary_layers()));
+  for (size_t sequence_id = 0; sequence_id < view.sequences.size();
+       ++sequence_id) {
+    assert(view.sequences.records[sequence_id].sequence_id == sequence_id);
+  }
+  for (size_t layer = 0; layer < view.layer_begin.size(); ++layer) {
+    assert(view.layer_begin[layer] <= view.layer_end[layer]);
+    for (uint32_t node_id = view.layer_begin[layer];
+         node_id < view.layer_end[layer]; ++node_id) {
+      const auto& record = view.node_records[node_id];
+      assert(record.primary_layer_index == static_cast<int>(layer));
+      assert(record.center_sequence_id < view.sequences.size());
+      assert(record.child_begin + record.child_count <=
+             view.child_ids.size());
+      assert(record.leaf_begin + record.leaf_count <= view.leaf_ids.size());
+      assert(record.beacon_begin + record.beacon_count <=
+             view.beacon_ids.size());
+      assert(record.mbb_begin +
+                 static_cast<size_t>(record.child_count) *
+                     record.beacon_count <=
+             view.mbb_lo.size());
+      assert(record.leaf_beacon_begin +
+                 static_cast<size_t>(record.leaf_count) *
+                     record.beacon_count <=
+             view.leaf_beacon_dists.size());
     }
   }
 }
 
 std::set<std::string> ids(
-    const std::vector<std::shared_ptr<navigamer::BioSequence>>& hits) {
+    const navigamer::SearchResult& hits) {
   std::set<std::string> out;
   for (const auto& hit : hits) out.insert(hit->id);
   return out;
