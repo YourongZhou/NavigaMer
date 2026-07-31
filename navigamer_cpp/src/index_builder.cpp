@@ -3303,11 +3303,6 @@ void BioGeometryIndexBuilder::attach_leaves(
         ScopedTimer timer(&stats_.leaf_tuple_merge_sort_ms);
       }
     } else {
-      struct LeafAttachTuple {
-        size_t seq_idx = 0;
-        uint8_t beacon_dist = 0;
-      };
-
       std::vector<RangeJoinItemView> items;
       items.reserve(sequences.size());
       for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
@@ -3356,9 +3351,11 @@ void BioGeometryIndexBuilder::attach_leaves(
                      static_cast<size_t>(std::numeric_limits<int>::max())))));
       std::vector<BioGeometryIndexBuilder::Statistics> thread_stats(
           static_cast<size_t>(thread_count));
-      std::vector<std::vector<LeafAttachTuple>> tuples_by_world(
-          finest_layer.size());
 
+      // Every iteration is the sole writer for one world. Range-join results
+      // follow the identity item IDs in ascending order here, so writing the
+      // two final arrays directly preserves their canonical leaf order and
+      // avoids a second, tuple-shaped copy of every attachment.
 #pragma omp parallel if(thread_count > 1) num_threads(thread_count)
       {
         const int tid = omp_get_thread_num();
@@ -3368,7 +3365,9 @@ void BioGeometryIndexBuilder::attach_leaves(
 #pragma omp for schedule(dynamic, 8)
         for (size_t world_idx = 0; world_idx < finest_layer.size();
              ++world_idx) {
-          const auto& world = build_nodes_[finest_layer[world_idx]];
+          auto& world = build_nodes_[finest_layer[world_idx]];
+          auto& geometry =
+              build_node_geometry_[world.geometry_index];
           const auto& center =
               search_graph_view_.sequences.sequence(
                   world.center_sequence_id);
@@ -3391,7 +3390,6 @@ void BioGeometryIndexBuilder::attach_leaves(
                     .query(center, finest_radius, &workspace);
           }
           accumulate_leaf_candidate_stats(local_stats, candidates);
-          auto& world_tuples = tuples_by_world[world_idx];
           {
             ScopedTimer verify_timer(&local_stats.leaf_exact_verify_ms);
             for (size_t seq_idx : candidates.candidate_item_ids) {
@@ -3423,9 +3421,10 @@ void BioGeometryIndexBuilder::attach_leaves(
                   range_config_.distance_mode, prepared_center_ptr);
               if (dist <= finest_radius) {
                 ScopedTimer timer(&local_stats.leaf_tuple_emit_ms);
-                world_tuples.push_back(
-                    {seq_idx,
-                     static_cast<uint8_t>(dist)});
+                world.child_or_leaf_ids.push_back(
+                    static_cast<LeafId>(seq_idx));
+                geometry.link_beacon_dists.push_back(
+                    static_cast<uint8_t>(dist));
               }
             }
           }
@@ -3436,31 +3435,6 @@ void BioGeometryIndexBuilder::attach_leaves(
 
       for (const auto& local_stats : thread_stats) {
         merge_leaf_local_stats(stats_, local_stats);
-      }
-      {
-        ScopedTimer timer(&stats_.leaf_tuple_merge_sort_ms);
-        for (auto& world_tuples : tuples_by_world) {
-          std::sort(
-              world_tuples.begin(), world_tuples.end(),
-              [](const LeafAttachTuple& lhs, const LeafAttachTuple& rhs) {
-                return lhs.seq_idx < rhs.seq_idx;
-              });
-        }
-      }
-      {
-        ScopedTimer timer(&stats_.leaf_populate_ms);
-        for (size_t world_idx = 0; world_idx < finest_layer.size();
-             ++world_idx) {
-          auto& world = build_nodes_[finest_layer[world_idx]];
-          auto& geometry =
-              build_node_geometry_[world.geometry_index];
-          for (auto& tuple : tuples_by_world[world_idx]) {
-            world.child_or_leaf_ids.push_back(
-                static_cast<LeafId>(tuple.seq_idx));
-            geometry.link_beacon_dists.push_back(
-                tuple.beacon_dist);
-          }
-        }
       }
     }
   }
