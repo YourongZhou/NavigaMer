@@ -31,8 +31,11 @@ or finest-layer leaf distances. Edit distance is in
 Reference-window builds flatten the input while retaining contig boundaries.
 Only all-ACGT windows contained entirely in one contig are indexed; windows
 containing ambiguous bases and cross-contig windows are excluded. The store
-keeps one reference string plus one 4-byte representative source offset per
-unique window. Repeated windows add only sorted 8-byte `(LeafId, source offset)`
+keeps one reference string plus a block-compressed monotone mapping from
+`LeafId` to its representative source offset. Regular 256-window blocks store
+only one 16-byte base/step record; irregular blocks choose an exact local
+bitset or 8/16/32-bit values. Repeated windows add only sorted 8-byte
+`(LeafId, source offset)`
 entries after their representative occurrence, including occurrences between
 stride-selected starts, so query output resolves every contig-local coordinate
 without rescanning the reference. No per-window
@@ -40,7 +43,7 @@ without rescanning the reference. No per-window
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 19 stores the shared
+edit distance fits in one byte. Persisted format version 20 stores the shared
 reference as exact chunked 2-bit ACGT plus verbatim non-ACGT exceptions, and
 keeps long literal inputs in the manifest only as content fingerprints. It
 stores one child-center-to-beacon distance per MBB cell instead of separate

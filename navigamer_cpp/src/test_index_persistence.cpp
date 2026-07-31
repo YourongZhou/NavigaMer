@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -221,7 +222,7 @@ void assert_reference_backed_index_round_trip() {
       "synthetic_ref", reference, kWindowLength, 1);
   assert(built.sequence_store().reference_backed);
   assert(built.sequence_store().records.empty());
-  assert(!built.sequence_store().reference_records.empty());
+  assert(!built.sequence_store().reference_position_blocks.empty());
 
   auto manifest = navigamer::make_reference_window_index_manifest(
       reference, reference.size(), static_cast<int>(kWindowLength), 1,
@@ -331,7 +332,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 19);
+  assert(loaded.manifest.format_version == 20);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);
@@ -342,7 +343,10 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   assert(loaded_store.occurrence_positions(aaaa_id) ==
          std::vector<uint32_t>({0, 16, 21}));
 #if defined(__unix__) || defined(__APPLE__)
-  assert(loaded_store.reference_records.is_mapped());
+  assert(loaded_store.reference_position_blocks.is_mapped());
+  if (!loaded_store.reference_position_payload.empty()) {
+    assert(loaded_store.reference_position_payload.is_mapped());
+  }
   if (!loaded_store.singleton_occurrences.empty()) {
     assert(loaded_store.singleton_occurrences.is_mapped());
   }
@@ -451,6 +455,112 @@ void assert_chunked_reference_encoding_is_exact() {
   std::remove(index_path.c_str());
 }
 
+std::string deterministic_dna(size_t length, uint32_t seed) {
+  std::mt19937 generator(seed);
+  std::uniform_int_distribution<int> base(0, 3);
+  static constexpr char kBases[] = {'A', 'C', 'G', 'T'};
+  std::string sequence(length, 'A');
+  for (char& value : sequence) value = kBases[base(generator)];
+  return sequence;
+}
+
+std::string sparse_reference(const std::vector<size_t>& positions) {
+  constexpr size_t kWindowLength = 16;
+  std::string reference(positions.back() + kWindowLength, 'N');
+  for (size_t idx = 0; idx < positions.size(); ++idx) {
+    const std::string sequence =
+        deterministic_dna(kWindowLength, static_cast<uint32_t>(idx + 91));
+    reference.replace(positions[idx], kWindowLength, sequence);
+  }
+  return reference;
+}
+
+void assert_reference_position_encodings_are_exact() {
+  constexpr size_t kWindowLength = 16;
+  navigamer::BuildRangeConfig build_config;
+  const navigamer::HierarchyConfig hierarchy({8, 4, 2});
+
+  const auto build_store = [&](const std::string& reference)
+      -> navigamer::BioGeometryIndexBuilder {
+    navigamer::BioGeometryIndexBuilder builder(hierarchy, build_config);
+    builder.build_reference_windows(
+        "position_encoding", reference, kWindowLength, 1);
+    assert(builder.validate_integer_ids());
+    return builder;
+  };
+
+  const std::string linear_reference = deterministic_dna(400, 1001);
+  auto linear = build_store(linear_reference);
+  const auto& linear_store = linear.sequence_store();
+  assert(linear_store.size() > navigamer::kReferencePositionBlockSize);
+  assert(linear_store.reference_position_blocks[0].encoding ==
+         navigamer::ReferencePositionEncoding::Linear);
+  assert(linear_store.reference_position_blocks[0].payload_size == 1);
+  assert(linear_store.reference_position_blocks.size() *
+                 sizeof(navigamer::ReferencePositionBlock) +
+             linear_store.reference_position_payload.size() <
+         linear_store.size());
+  for (size_t idx = 0; idx < linear_store.size(); ++idx) {
+    assert(linear_store.source_position(static_cast<navigamer::LeafId>(idx)) ==
+           idx);
+  }
+
+  std::string bitset_reference = deterministic_dna(500, 2002);
+  for (size_t pos = 99; pos < bitset_reference.size(); pos += 100) {
+    bitset_reference[pos] = 'N';
+  }
+  auto bitset = build_store(bitset_reference);
+  const auto& bitset_store = bitset.sequence_store();
+  assert(bitset_store.size() > navigamer::kReferencePositionBlockSize);
+  assert(bitset_store.reference_position_blocks[0].encoding ==
+         navigamer::ReferencePositionEncoding::Bitset);
+  uint32_t previous = 0;
+  for (size_t idx = 0; idx < bitset_store.size(); ++idx) {
+    const uint32_t position = static_cast<uint32_t>(
+        bitset_store.source_position(static_cast<navigamer::LeafId>(idx)));
+    assert(idx == 0 || position > previous);
+    assert(bitset_store.sequence(static_cast<navigamer::LeafId>(idx)).find('N') ==
+           std::string_view::npos);
+    previous = position;
+  }
+
+  const auto assert_sparse_encoding = [&](
+      const std::vector<size_t>& positions,
+      navigamer::ReferencePositionEncoding expected) {
+    auto sparse = build_store(sparse_reference(positions));
+    const auto& store = sparse.sequence_store();
+    assert(store.size() == positions.size());
+    assert(store.reference_position_blocks.size() == 1);
+    assert(store.reference_position_blocks[0].encoding == expected);
+    for (size_t idx = 0; idx < positions.size(); ++idx) {
+      assert(store.source_position(static_cast<navigamer::LeafId>(idx)) ==
+             positions[idx]);
+    }
+  };
+  assert_sparse_encoding(
+      {0, 50, 200}, navigamer::ReferencePositionEncoding::Delta8);
+  assert_sparse_encoding(
+      {0, 1000, 3000}, navigamer::ReferencePositionEncoding::Delta16);
+  assert_sparse_encoding(
+      {0, 70000, 140000},
+      navigamer::ReferencePositionEncoding::Absolute32);
+
+  const std::string path = "/tmp/navigamer_test_position_bitset.navidx";
+  auto manifest = navigamer::make_reference_window_index_manifest(
+      bitset_reference, bitset_reference.size(), kWindowLength, 1,
+      hierarchy, build_config);
+  navigamer::save_index(path, bitset, manifest);
+  const auto loaded = navigamer::load_index(path);
+  const auto& loaded_store = loaded.builder.sequence_store();
+  assert(loaded_store.size() == bitset_store.size());
+  for (size_t idx = 0; idx < bitset_store.size(); ++idx) {
+    const auto id = static_cast<navigamer::LeafId>(idx);
+    assert(loaded_store.source_position(id) == bitset_store.source_position(id));
+    assert(loaded_store.sequence(id) == bitset_store.sequence(id));
+  }
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -460,6 +570,7 @@ int main() {
   assert_reference_backed_index_round_trip();
   assert_multicontig_invalid_base_and_occurrence_round_trip();
   assert_chunked_reference_encoding_is_exact();
+  assert_reference_position_encodings_are_exact();
   std::cout << "index persistence tests passed\n";
   return 0;
 }

@@ -173,7 +173,7 @@ TestResult run_reference_backed_test() {
       "contig1", reference, kSequenceLength, 1, contigs);
   assert(builder.sequence_store().reference_backed);
   assert(builder.sequence_store().records.empty());
-  assert(!builder.sequence_store().reference_records.empty());
+  assert(!builder.sequence_store().reference_position_blocks.empty());
   assert(builder.get_statistics().invalid_reference_windows > 0);
   for (size_t sequence_idx = 0;
        sequence_idx < builder.sequence_store().size(); ++sequence_idx) {

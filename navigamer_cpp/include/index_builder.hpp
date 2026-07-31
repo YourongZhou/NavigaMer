@@ -6,6 +6,7 @@
 #include "range_join.hpp"
 #include "phase2_distance_verifier.hpp"
 #include <algorithm>
+#include <cstring>
 #include <initializer_list>
 #include <iterator>
 #include <memory>
@@ -234,13 +235,37 @@ class FinalArray {
   std::shared_ptr<const void> mapped_owner_;
 };
 
-// A reference-backed leaf needs no BioSequence object. The fixed k-mer is a
-// view of reference_sequence at source_pos.
-struct ReferenceSequenceRecord {
-  uint32_t source_pos = 0;
+constexpr size_t kReferencePositionBlockSize = 256;
+
+enum class ReferencePositionEncoding : uint8_t {
+  Linear = 0,
+  Bitset = 1,
+  Delta8 = 2,
+  Delta16 = 3,
+  Absolute32 = 4,
 };
-static_assert(sizeof(ReferenceSequenceRecord) == 4,
-              "reference leaf record must remain a compact 4-byte value");
+
+// One independently decodable block of monotonically increasing
+// representative positions. Dense blocks use a local bitset; sparse blocks
+// use the narrowest exact offset representation. LeafId implies both the
+// block and the position within it.
+struct ReferencePositionBlock {
+  uint64_t payload_begin = 0;
+  uint32_t base = 0;
+  // Payload byte count, or arithmetic step for Linear blocks.
+  uint16_t payload_size = 0;
+  ReferencePositionEncoding encoding = ReferencePositionEncoding::Bitset;
+  uint8_t reserved = 0;
+
+  bool operator==(const ReferencePositionBlock& other) const {
+    return payload_begin == other.payload_begin &&
+           base == other.base &&
+           payload_size == other.payload_size &&
+           encoding == other.encoding && reserved == other.reserved;
+  }
+};
+static_assert(sizeof(ReferencePositionBlock) == 16,
+              "reference position block must remain 16 bytes");
 
 struct ReferenceOccurrence {
   LeafId sequence_id = INVALID_LEAF_ID;
@@ -267,11 +292,13 @@ static_assert(sizeof(ReferenceOccurrenceGroup) == 8,
               "reference occurrence group must remain an 8-byte value");
 
 // Canonical, pointer-free sequence storage for a finalized index. SequenceId is
-// implicit from the position in records/reference_records, so nodes, beacons,
+// implicit from the position in records/reference positions, so nodes, beacons,
 // leaf links, and search results only need a 32-bit integer reference.
 struct SequenceStore {
   std::vector<BioSequence> records;
-  FinalArray<ReferenceSequenceRecord> reference_records;
+  FinalArray<ReferencePositionBlock> reference_position_blocks;
+  FinalArray<uint8_t> reference_position_payload;
+  uint32_t reference_sequence_count = 0;
   // A sequence with one extra position uses one compact pair. Sequences with
   // two or more extras share one group record and a flat position array.
   FinalArray<ReferenceOccurrence> singleton_occurrences;
@@ -284,7 +311,7 @@ struct SequenceStore {
   bool reference_backed = false;
 
   size_t size() const {
-    return reference_backed ? reference_records.size() : records.size();
+    return reference_backed ? reference_sequence_count : records.size();
   }
   bool empty() const { return size() == 0; }
   const BioSequence& at(LeafId id) const {
@@ -295,17 +322,74 @@ struct SequenceStore {
   }
   std::string_view sequence(LeafId id) const {
     if (reference_backed) {
-      const auto& record =
-          reference_records[static_cast<size_t>(id)];
       return std::string_view(
-          reference_sequence.data() + record.source_pos,
+          reference_sequence.data() + source_position(id),
           fixed_sequence_length);
     }
     return records[static_cast<size_t>(id)].seq;
   }
   size_t source_position(LeafId id) const {
     if (reference_backed) {
-      return reference_records.at(static_cast<size_t>(id)).source_pos;
+      if (id >= reference_sequence_count) {
+        throw std::out_of_range("reference sequence id");
+      }
+      const size_t block_idx =
+          static_cast<size_t>(id) / kReferencePositionBlockSize;
+      const size_t in_block =
+          static_cast<size_t>(id) % kReferencePositionBlockSize;
+      const auto& block = reference_position_blocks.at(block_idx);
+      if (in_block == 0) return block.base;
+      if (block.encoding == ReferencePositionEncoding::Linear) {
+        return static_cast<size_t>(block.base) +
+               in_block * block.payload_size;
+      }
+      const uint8_t* payload =
+          reference_position_payload.data() + block.payload_begin;
+      const size_t encoded_idx = in_block - 1;
+      switch (block.encoding) {
+        case ReferencePositionEncoding::Linear:
+          break;
+        case ReferencePositionEncoding::Bitset: {
+          size_t remaining = encoded_idx;
+          for (size_t byte_idx = 0;
+               byte_idx < block.payload_size; ++byte_idx) {
+            uint8_t bits = payload[byte_idx];
+            const size_t count = static_cast<size_t>(
+                __builtin_popcount(static_cast<unsigned int>(bits)));
+            if (remaining >= count) {
+              remaining -= count;
+              continue;
+            }
+            while (remaining != 0) {
+              bits = static_cast<uint8_t>(bits & (bits - 1));
+              --remaining;
+            }
+            const unsigned int bit = static_cast<unsigned int>(
+                __builtin_ctz(static_cast<unsigned int>(bits)));
+            return static_cast<size_t>(block.base) +
+                   byte_idx * 8 + bit + 1;
+          }
+          throw std::runtime_error(
+              "reference position bitset has too few entries");
+        }
+        case ReferencePositionEncoding::Delta8:
+          return static_cast<size_t>(block.base) +
+                 payload[encoded_idx];
+        case ReferencePositionEncoding::Delta16: {
+          uint16_t delta = 0;
+          std::memcpy(&delta, payload + encoded_idx * sizeof(delta),
+                      sizeof(delta));
+          return static_cast<size_t>(block.base) + delta;
+        }
+        case ReferencePositionEncoding::Absolute32: {
+          uint32_t position = 0;
+          std::memcpy(&position,
+                      payload + encoded_idx * sizeof(position),
+                      sizeof(position));
+          return position;
+        }
+      }
+      throw std::runtime_error("invalid reference position encoding");
     }
     return records.at(static_cast<size_t>(id)).source_pos;
   }

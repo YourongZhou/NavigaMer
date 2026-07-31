@@ -64,6 +64,126 @@ constexpr size_t kPhase2DistanceBatchFlushPairs = 65536;
 constexpr size_t kMaxCompactSequenceLength =
     std::numeric_limits<uint8_t>::max();
 
+class ReferencePositionEncoder {
+ public:
+  LeafId append(uint32_t position) {
+    if (count_ != 0 && position <= previous_) {
+      throw std::runtime_error(
+          "reference representative positions are not strictly increasing");
+    }
+    if (count_ >= static_cast<size_t>(INVALID_LEAF_ID - 1)) {
+      throw std::runtime_error("too many reference sequences for 32-bit LeafId");
+    }
+    const LeafId id = static_cast<LeafId>(count_++);
+    pending_[pending_size_++] = position;
+    previous_ = position;
+    if (pending_size_ == pending_.size()) flush();
+    return id;
+  }
+
+  void finish(SequenceStore& store) {
+    flush();
+    store.reference_sequence_count = static_cast<uint32_t>(count_);
+    store.reference_position_blocks.set_owned(std::move(blocks_));
+    store.reference_position_payload.set_owned(std::move(payload_));
+  }
+
+ private:
+  template <typename T>
+  void append_pod(T value) {
+    const size_t begin = payload_.size();
+    payload_.resize(begin + sizeof(T));
+    std::memcpy(payload_.data() + begin, &value, sizeof(T));
+  }
+
+  void flush() {
+    if (pending_size_ == 0) return;
+    ReferencePositionBlock block;
+    block.payload_begin = payload_.size();
+    block.base = pending_[0];
+
+    uint32_t linear_step = 1;
+    bool linear = true;
+    if (pending_size_ > 1) {
+      linear_step = pending_[1] - pending_[0];
+      linear = linear_step <= std::numeric_limits<uint16_t>::max();
+      for (size_t idx = 2; linear && idx < pending_size_; ++idx) {
+        const uint64_t expected =
+            static_cast<uint64_t>(pending_[0]) +
+            static_cast<uint64_t>(idx) * linear_step;
+        linear = expected == pending_[idx];
+      }
+    }
+    if (linear) {
+      block.encoding = ReferencePositionEncoding::Linear;
+      block.payload_size = static_cast<uint16_t>(linear_step);
+      blocks_.push_back(block);
+      pending_size_ = 0;
+      return;
+    }
+
+    const uint32_t span = pending_[pending_size_ - 1] - pending_[0];
+    const size_t encoded_count = pending_size_ - 1;
+    ReferencePositionEncoding encoding;
+    size_t encoded_bytes = 0;
+    if (span <= std::numeric_limits<uint8_t>::max()) {
+      encoding = ReferencePositionEncoding::Delta8;
+      encoded_bytes = encoded_count;
+    } else if (span <= std::numeric_limits<uint16_t>::max()) {
+      encoding = ReferencePositionEncoding::Delta16;
+      encoded_bytes = encoded_count * sizeof(uint16_t);
+    } else {
+      encoding = ReferencePositionEncoding::Absolute32;
+      encoded_bytes = encoded_count * sizeof(uint32_t);
+    }
+    const uint64_t bitset_bytes_64 =
+        (static_cast<uint64_t>(span) + 7) / 8;
+    if (bitset_bytes_64 <= std::numeric_limits<uint16_t>::max() &&
+        bitset_bytes_64 < encoded_bytes) {
+      encoding = ReferencePositionEncoding::Bitset;
+      encoded_bytes = static_cast<size_t>(bitset_bytes_64);
+    }
+    if (encoded_bytes > std::numeric_limits<uint16_t>::max()) {
+      throw std::runtime_error("reference position block payload is too large");
+    }
+    block.encoding = encoding;
+    block.payload_size = static_cast<uint16_t>(encoded_bytes);
+
+    if (encoding == ReferencePositionEncoding::Bitset) {
+      const size_t payload_begin = payload_.size();
+      payload_.resize(payload_begin + encoded_bytes, 0);
+      for (size_t idx = 1; idx < pending_size_; ++idx) {
+        const uint32_t bit = pending_[idx] - pending_[0] - 1;
+        payload_[payload_begin + bit / 8] |=
+            static_cast<uint8_t>(uint8_t{1} << (bit % 8));
+      }
+    } else if (encoding == ReferencePositionEncoding::Delta8) {
+      for (size_t idx = 1; idx < pending_size_; ++idx) {
+        payload_.push_back(
+            static_cast<uint8_t>(pending_[idx] - pending_[0]));
+      }
+    } else if (encoding == ReferencePositionEncoding::Delta16) {
+      for (size_t idx = 1; idx < pending_size_; ++idx) {
+        append_pod<uint16_t>(
+            static_cast<uint16_t>(pending_[idx] - pending_[0]));
+      }
+    } else {
+      for (size_t idx = 1; idx < pending_size_; ++idx) {
+        append_pod<uint32_t>(pending_[idx]);
+      }
+    }
+    blocks_.push_back(block);
+    pending_size_ = 0;
+  }
+
+  std::array<uint32_t, kReferencePositionBlockSize> pending_{};
+  size_t pending_size_ = 0;
+  size_t count_ = 0;
+  uint32_t previous_ = 0;
+  std::vector<ReferencePositionBlock> blocks_;
+  std::vector<uint8_t> payload_;
+};
+
 struct Phase1CoverScanResult {
   NodeId best = INVALID_NODE_ID;
   int best_dist = INT_MAX;
@@ -1420,7 +1540,10 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
   }
   if (view.sequences.reference_backed) {
     if (!view.sequences.records.empty() ||
-        view.sequences.reference_records.size() != sequence_count_) {
+        view.sequences.reference_sequence_count != sequence_count_ ||
+        view.sequences.reference_position_blocks.size() !=
+            (sequence_count_ + kReferencePositionBlockSize - 1) /
+                kReferencePositionBlockSize) {
       return false;
     }
     uint32_t previous_contig_end = 0;
@@ -1460,10 +1583,18 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
                          view.sequences.fixed_sequence_length <=
                      containing_contig.end;
         };
-    for (const auto& record : view.sequences.reference_records) {
-      if (!is_valid_reference_window(record.source_pos)) {
+    uint32_t previous_representative = 0;
+    for (size_t sequence_idx = 0; sequence_idx < sequence_count_;
+         ++sequence_idx) {
+      const uint32_t representative = static_cast<uint32_t>(
+          view.sequences.source_position(
+              static_cast<LeafId>(sequence_idx)));
+      if (!is_valid_reference_window(representative) ||
+          (sequence_idx != 0 &&
+           representative <= previous_representative)) {
         return false;
       }
+      previous_representative = representative;
     }
     LeafId previous_sequence_id = 0;
     bool first_occurrence = true;
@@ -1471,8 +1602,7 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
          view.sequences.singleton_occurrences) {
       if (occurrence.sequence_id >= sequence_count_ ||
           occurrence.source_pos ==
-              view.sequences.reference_records[
-                  occurrence.sequence_id].source_pos ||
+              view.sequences.source_position(occurrence.sequence_id) ||
           !is_valid_reference_window(occurrence.source_pos) ||
           (!first_occurrence &&
            occurrence.sequence_id <= previous_sequence_id)) {
@@ -1516,8 +1646,7 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
         const uint32_t position =
             view.sequences.grouped_occurrence_positions[position_idx];
         if (position ==
-                view.sequences.reference_records[
-                    group.sequence_id].source_pos ||
+                view.sequences.source_position(group.sequence_id) ||
             !is_valid_reference_window(position) ||
             (!first_position && position <= previous_position)) {
           return false;
@@ -1534,7 +1663,9 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       return false;
     }
   } else {
-    if (!view.sequences.reference_records.empty() ||
+    if (view.sequences.reference_sequence_count != 0 ||
+        !view.sequences.reference_position_blocks.empty() ||
+        !view.sequences.reference_position_payload.empty() ||
         !view.sequences.singleton_occurrences.empty() ||
         !view.sequences.occurrence_groups.empty() ||
         !view.sequences.grouped_occurrence_positions.empty() ||
@@ -1826,7 +1957,9 @@ void BioGeometryIndexBuilder::initialize_sequence_store(
   sequence_count_ = unique_seqs.size();
   auto& store = search_graph_view_.sequences;
   store.reference_backed = false;
-  store.reference_records.clear();
+  store.reference_sequence_count = 0;
+  store.reference_position_blocks.clear();
+  store.reference_position_payload.clear();
   store.singleton_occurrences.clear();
   store.occurrence_groups.clear();
   store.grouped_occurrence_positions.clear();
@@ -1883,6 +2016,9 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
   store.fixed_sequence_length = window_length;
   store.reference_backed = true;
   store.records.clear();
+  store.reference_sequence_count = 0;
+  store.reference_position_blocks.clear();
+  store.reference_position_payload.clear();
   store.singleton_occurrences.clear();
   store.occurrence_groups.clear();
   store.grouped_occurrence_positions.clear();
@@ -1930,8 +2066,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
         "too many reference windows for 32-bit LeafId");
   }
 
-  store.reference_records.clear();
-  store.reference_records.reserve(window_count);
+  ReferencePositionEncoder position_encoder;
   std::unordered_map<std::string_view, LeafId> sequence_ids;
   sequence_ids.reserve(window_count);
   std::vector<ReferenceOccurrence> additional_occurrences;
@@ -1965,9 +2100,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
           }
         } else {
           const LeafId sequence_id =
-              static_cast<LeafId>(store.reference_records.size());
-          store.reference_records.push_back(
-              {static_cast<uint32_t>(start)});
+              position_encoder.append(static_cast<uint32_t>(start));
           sequence_ids.emplace(sequence, sequence_id);
         }
       }
@@ -1978,6 +2111,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
       }
     }
   }
+  position_encoder.finish(store);
   // A sampled leaf represents its sequence at every valid reference
   // occurrence, including positions that are not themselves stride-selected.
   // For stride 1 the first pass already collected exactly this set.
@@ -1999,7 +2133,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
             store.reference_sequence.data() + start, window_length);
         const auto existing = sequence_ids.find(sequence);
         if (existing == sequence_ids.end()) continue;
-        if (store.reference_records[existing->second].source_pos != start) {
+        if (store.source_position(existing->second) != start) {
           additional_occurrences.push_back(
               {existing->second, static_cast<uint32_t>(start)});
         }
@@ -2039,7 +2173,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
     }
     occurrence_begin = occurrence_end;
   }
-  sequence_count_ = store.reference_records.size();
+  sequence_count_ = store.size();
   stats_.unique_sequences = sequence_count_;
 }
 

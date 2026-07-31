@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '9'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '0'};
 constexpr size_t kReferenceChunkBases = size_t{1} << 20;
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
@@ -318,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 19) {
+  if (manifest.format_version != 20) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -723,8 +723,13 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
     }
   }
   if (store.reference_backed) {
+    write_pod<uint32_t>(out, store.reference_sequence_count);
     write_final_array(
-        out, store.reference_records, "sequence_store.reference_records");
+        out, store.reference_position_blocks,
+        "sequence_store.reference_position_blocks");
+    write_final_array(
+        out, store.reference_position_payload,
+        "sequence_store.reference_position_payload");
     write_final_array(
         out, store.singleton_occurrences,
         "sequence_store.singleton_occurrences");
@@ -811,19 +816,97 @@ SequenceStore read_sequence_store(
     }
   }
   if (store.reference_backed) {
-    store.reference_records =
-        read_final_array<ReferenceSequenceRecord>(
-            in, mapping, "sequence_store.reference_records");
+    store.reference_sequence_count =
+        read_pod<uint32_t>(in, "sequence_store.reference_sequence_count");
+    store.reference_position_blocks =
+        read_final_array<ReferencePositionBlock>(
+            in, mapping, "sequence_store.reference_position_blocks");
+    store.reference_position_payload =
+        read_final_array<uint8_t>(
+            in, mapping, "sequence_store.reference_position_payload");
+    const size_t expected_block_count =
+        (static_cast<size_t>(store.reference_sequence_count) +
+         kReferencePositionBlockSize - 1) /
+        kReferencePositionBlockSize;
+    if (store.reference_position_blocks.size() != expected_block_count) {
+      throw std::runtime_error(
+          "reference-backed index has invalid position block count");
+    }
+    uint64_t expected_payload_begin = 0;
+    const auto& position_blocks = store.reference_position_blocks;
+    for (size_t block_idx = 0; block_idx < expected_block_count;
+         ++block_idx) {
+      const auto& block = position_blocks[block_idx];
+      const size_t block_begin = block_idx * kReferencePositionBlockSize;
+      const size_t block_count = std::min(
+          kReferencePositionBlockSize,
+          static_cast<size_t>(store.reference_sequence_count) - block_begin);
+      if (block.reserved != 0 ||
+          block.payload_begin != expected_payload_begin) {
+        throw std::runtime_error(
+            "reference-backed index has invalid position block metadata");
+      }
+      size_t expected_payload_size = block.payload_size;
+      switch (block.encoding) {
+        case ReferencePositionEncoding::Linear:
+          if (block.payload_size == 0) {
+            throw std::runtime_error(
+                "reference-backed index has zero linear position step");
+          }
+          expected_payload_size = 0;
+          break;
+        case ReferencePositionEncoding::Bitset:
+          if (block_count <= 1 || block.payload_size == 0) {
+            throw std::runtime_error(
+                "reference-backed index has invalid position bitset");
+          }
+          break;
+        case ReferencePositionEncoding::Delta8:
+          expected_payload_size = block_count - 1;
+          break;
+        case ReferencePositionEncoding::Delta16:
+          expected_payload_size = (block_count - 1) * sizeof(uint16_t);
+          break;
+        case ReferencePositionEncoding::Absolute32:
+          expected_payload_size = (block_count - 1) * sizeof(uint32_t);
+          break;
+        default:
+          throw std::runtime_error(
+              "reference-backed index has invalid position encoding");
+      }
+      if (block.encoding != ReferencePositionEncoding::Linear &&
+          block.payload_size != expected_payload_size) {
+        throw std::runtime_error(
+            "reference-backed index has invalid position payload size");
+      }
+      expected_payload_begin += expected_payload_size;
+      if (expected_payload_begin >
+          store.reference_position_payload.size()) {
+        throw std::runtime_error(
+            "reference-backed index has truncated position payload");
+      }
+    }
+    if (expected_payload_begin !=
+        store.reference_position_payload.size()) {
+      throw std::runtime_error(
+          "reference-backed index has excess position payload");
+    }
     if (validation == IndexLoadValidation::Full) {
-      for (const auto& sequence : store.reference_records) {
-        if (sequence.source_pos >
+      uint32_t previous_position = 0;
+      for (size_t sequence_idx = 0;
+           sequence_idx < store.reference_sequence_count; ++sequence_idx) {
+        const uint32_t source_pos = static_cast<uint32_t>(
+            store.source_position(static_cast<LeafId>(sequence_idx)));
+        if (source_pos >
                 store.reference_sequence.size() ||
             store.fixed_sequence_length >
                 store.reference_sequence.size() -
-                    sequence.source_pos) {
+                    source_pos ||
+            (sequence_idx != 0 && source_pos <= previous_position)) {
           throw std::runtime_error(
               "reference-backed sequence lies outside stored reference");
         }
+        previous_position = source_pos;
       }
     }
   } else {
@@ -870,7 +953,7 @@ SequenceStore read_sequence_store(
       ReferenceOccurrence previous;
       bool first = true;
       for (const auto& occurrence : store.singleton_occurrences) {
-        if (occurrence.sequence_id >= store.reference_records.size() ||
+        if (occurrence.sequence_id >= store.size() ||
             occurrence.source_pos >= store.reference_sequence.size() ||
             (!first &&
              occurrence.sequence_id <= previous.sequence_id)) {
@@ -888,7 +971,7 @@ SequenceStore read_sequence_store(
       ReferenceOccurrenceGroup previous_group;
       bool first = true;
       for (const auto& group : store.occurrence_groups) {
-        if (group.sequence_id >= store.reference_records.size() ||
+        if (group.sequence_id >= store.size() ||
             (!first &&
              group.sequence_id <= previous_group.sequence_id)) {
           throw std::runtime_error(
@@ -1060,7 +1143,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 19) {
+  if (manifest.format_version != 20) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1104,7 +1187,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 19;
+  stored.format_version = 20;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
@@ -1128,7 +1211,7 @@ LoadedIndex load_index(
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 19) {
+  if (manifest.format_version != 20) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
