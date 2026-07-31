@@ -2795,14 +2795,22 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
       }
     }
 
-    const int thread_count = std::max(1, omp_get_max_threads());
+    // Each child is one OpenMP task.  Do not create idle workers (or their
+    // per-worker verification buffers) when a tier has less work than the
+    // machine has hardware threads.
+    const int thread_count = std::max(
+        1, std::min(
+               omp_get_max_threads(),
+               static_cast<int>(std::min<size_t>(
+                   children.size(),
+                   static_cast<size_t>(std::numeric_limits<int>::max())))));
     std::vector<std::vector<Phase2EdgeTuple>> thread_edges(
         static_cast<size_t>(thread_count));
     std::vector<Phase2LocalStats> thread_stats(
         static_cast<size_t>(thread_count));
     (void)make_phase2_distance_verifier(verifier_distance_mode);
 
-#pragma omp parallel
+#pragma omp parallel if(thread_count > 1) num_threads(thread_count)
     {
       const int tid = omp_get_thread_num();
       RangeJoinQueryWorkspace workspace;
@@ -2810,7 +2818,17 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
       auto& local_edges = thread_edges[static_cast<size_t>(tid)];
       auto& local = thread_stats[static_cast<size_t>(tid)];
       std::vector<Phase2DistancePair> verify_batch;
-      verify_batch.reserve(kPhase2DistanceBatchFlushPairs);
+      // The flush bound is useful for dense joins, but small tiers should only
+      // reserve enough storage for the pairs they can possibly produce.
+      size_t possible_pair_count = kPhase2DistanceBatchFlushPairs;
+      if (parents.empty() || children.empty()) {
+        possible_pair_count = 0;
+      } else if (parents.size() <=
+                 kPhase2DistanceBatchFlushPairs / children.size()) {
+        possible_pair_count = parents.size() * children.size();
+      }
+      verify_batch.reserve(
+          std::min(kPhase2DistanceBatchFlushPairs, possible_pair_count));
       auto flush_verify_batch = [&]() {
         if (verify_batch.empty()) return;
         const auto verify_start = Clock::now();
