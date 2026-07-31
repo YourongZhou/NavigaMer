@@ -133,15 +133,15 @@ TestResult run_test(const TestConfig& cfg) {
     auto [bf_res, bf_st] = engine.search_brute_force(q, cfg.tolerance);
     auto [ad_res, ad_st] = engine.search_adaptive(q, cfg.tolerance);
 
-    std::unordered_set<std::string> ad_ids;
-    for (const auto& h : ad_res) ad_ids.insert(h->id);
+    std::unordered_set<navigamer::LeafId> ad_ids(
+        ad_res.begin(), ad_res.end());
 
     result.total_bf_hits += bf_res.size();
     result.total_adaptive_hits += ad_res.size();
 
     size_t missed = 0;
-    for (const auto& h : bf_res) {
-      if (ad_ids.find(h->id) == ad_ids.end()) {
+    for (navigamer::LeafId h : bf_res) {
+      if (ad_ids.find(h) == ad_ids.end()) {
         missed++;
       }
     }
@@ -165,9 +165,8 @@ TestResult run_reference_backed_test() {
   builder.build_reference_windows(
       "synthetic", reference, kSequenceLength, 1);
   assert(builder.sequence_store().reference_backed);
-  for (const auto& record : builder.sequence_store().records) {
-    assert(record.seq.empty());
-  }
+  assert(builder.sequence_store().records.empty());
+  assert(!builder.sequence_store().reference_records.empty());
 
   navigamer::BioGeometrySearchEngine engine(builder);
   std::uniform_int_distribution<size_t> start_pick(
@@ -186,15 +185,13 @@ TestResult run_reference_backed_test() {
     (void)bf_stats;
     (void)adaptive_stats;
 
-    std::unordered_set<navigamer::LeafId> adaptive_ids;
-    for (const auto* hit : adaptive_res) {
-      adaptive_ids.insert(hit->sequence_id);
-    }
+    std::unordered_set<navigamer::LeafId> adaptive_ids(
+        adaptive_res.begin(), adaptive_res.end());
     result.total_bf_hits += bf_res.size();
     result.total_adaptive_hits += adaptive_res.size();
     size_t missed = 0;
-    for (const auto* hit : bf_res) {
-      if (!adaptive_ids.count(hit->sequence_id)) missed++;
+    for (navigamer::LeafId hit : bf_res) {
+      if (!adaptive_ids.count(hit)) missed++;
     }
     result.total_missed_hits += missed;
     if (missed != 0) result.fn_queries++;

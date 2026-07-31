@@ -446,11 +446,18 @@ std::vector<BoundaryQuery> generate_boundary_queries(
 }
 
 bool recovers_source_locus(
-    const navigamer::BioSequence* hit,
+    navigamer::LeafId hit_id,
+    const navigamer::SequenceStore& sequence_store,
     const BoundaryQuery& query) {
-  if (!hit) return false;
-  if (hit->id == query.source_id) return true;
-  for (const auto& occ : hit->ref_positions) {
+  if (hit_id >= sequence_store.size()) return false;
+  if (sequence_store.reference_backed) {
+    return query.source_start >= 0 &&
+           sequence_store.source_position(hit_id) ==
+               static_cast<size_t>(query.source_start);
+  }
+  const auto& hit = sequence_store.at(hit_id);
+  if (hit.id == query.source_id) return true;
+  for (const auto& occ : hit.ref_positions) {
     if (occ.ref_id == query.source_ref_id &&
         occ.start == query.source_start &&
         occ.end == query.source_end) {
@@ -538,12 +545,12 @@ void run_demo(int size, const navigamer::HierarchyConfig& config,
     auto [bf_res, st_bf] = engine.search_brute_force(*reads[i], tolerance);
     if (!bf_res.empty()) bf_ok++;
     bool a_ok = false, e_ok = false;
-    for (const auto& h : bf_res) {
-      if (std::find_if(adaptive_res.begin(), adaptive_res.end(),
-                       [&h](const BioSequence* x) { return x->id == h->id; }) != adaptive_res.end())
+    for (LeafId h : bf_res) {
+      if (std::find(adaptive_res.begin(), adaptive_res.end(), h) !=
+          adaptive_res.end())
         a_ok = true;
-      if (std::find_if(exhaustive_res.begin(), exhaustive_res.end(),
-                       [&h](const BioSequence* x) { return x->id == h->id; }) != exhaustive_res.end())
+      if (std::find(exhaustive_res.begin(), exhaustive_res.end(), h) !=
+          exhaustive_res.end())
         e_ok = true;
     }
     if (a_ok) adaptive_ok++;
@@ -784,13 +791,12 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
   BioGeometrySearchEngine engine(builder, search_config);
   BioSequence q("query", query_seq);
   const auto& sequences = builder.sequence_store();
-  const auto print_hit = [&](const BioSequence* hit) {
-    const LeafId sequence_id = hit->sequence_id;
+  const auto print_hit = [&](LeafId sequence_id) {
     const std::string display_id =
-        !hit->id.empty()
-            ? hit->id
+        !sequences.reference_backed
+            ? sequences.at(sequence_id).id
             : sequences.reference_id + "_" +
-                  std::to_string(hit->source_pos);
+                  std::to_string(sequences.source_position(sequence_id));
     std::cout << "  " << display_id << " dist="
               << compute_distance(
                      query_seq, sequences.sequence(sequence_id))
@@ -1018,6 +1024,7 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
   BioGeometryIndexBuilder builder(config, range_config);
   builder.build(reads);
   BioGeometrySearchEngine engine(builder, search_config);
+  const auto& sequence_store = builder.sequence_store();
 
   std::vector<std::string> columns = {
       "query_id", "hit_id", "distance", "ref_positions", "read_id", "read_len",
@@ -1034,9 +1041,10 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
     const size_t ri = scheduled_indices[pos];
     const auto& read = reads[ri];
     auto [res, st] = engine.search_adaptive(*read, tolerance);
-    for (const auto& hit : res) {
-      int ed = compute_distance(read->seq, hit->seq);
-      auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, *hit, ed);
+    for (LeafId hit_id : res) {
+      const auto& hit = sequence_store.at(hit_id);
+      int ed = compute_distance(read->seq, hit.seq);
+      auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, hit, ed);
       for (const auto& r : rows) {
         per_read_rows[ri].push_back({
             r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
@@ -1077,6 +1085,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
   BioGeometryIndexBuilder builder(config, range_config);
   builder.build(std::move(index_seqs));
   BioGeometrySearchEngine engine(builder, search_config);
+  const auto& sequence_store = builder.sequence_store();
 
   auto queries = load_reads(query_input, ref_id);
   if (queries.empty()) {
@@ -1314,9 +1323,10 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       row.insert(row.end(), search_stats.begin(), search_stats.end());
       per_query_rows[qi].push_back(std::move(row));
     } else {
-      for (const auto& hit : res) {
-        int ed = compute_distance(read->seq, hit->seq);
-        auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, *hit, ed);
+      for (LeafId hit_id : res) {
+        const auto& hit = sequence_store.at(hit_id);
+        int ed = compute_distance(read->seq, hit.seq);
+        auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, hit, ed);
         for (const auto& r : rows) {
           std::vector<std::string> row = {
               r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
@@ -1454,20 +1464,14 @@ void run_query_index_batch(const std::string& index_path,
       row.insert(row.end(), search_stats.begin(), search_stats.end());
       all_rows.push_back(std::move(row));
     } else {
-      for (const auto& hit : res) {
+      for (LeafId hit_id : res) {
         const std::string_view hit_sequence =
-            sequence_store.sequence(hit->sequence_id);
+            sequence_store.sequence(hit_id);
         int ed = compute_distance(read->seq, hit_sequence);
-        BioSequence materialized_hit = *hit;
-        materialized_hit.seq.assign(
-            hit_sequence.data(), hit_sequence.size());
-        if (materialized_hit.id.empty()) {
-          materialized_hit.id =
-              sequence_store.reference_id + "_" +
-              std::to_string(materialized_hit.source_pos);
-        }
-        if (sequence_store.reference_backed &&
-            materialized_hit.ref_positions.empty()) {
+        BioSequence materialized_hit;
+        const BioSequence* output_hit = nullptr;
+        if (sequence_store.reference_backed) {
+          materialized_hit = sequence_store.materialize(hit_id);
           size_t occurrence = sequence_store.reference_sequence.find(
               materialized_hit.seq);
           while (occurrence != std::string::npos) {
@@ -1485,9 +1489,12 @@ void run_query_index_batch(const std::string& index_path,
             occurrence = sequence_store.reference_sequence.find(
                 materialized_hit.seq, occurrence + 1);
           }
+          output_hit = &materialized_hit;
+        } else {
+          output_hit = &sequence_store.at(hit_id);
         }
         auto rows = search_results_to_tsv_rows(
-            read->id, read->seq, 0, materialized_hit, ed);
+            read->id, read->seq, 0, *output_hit, ed);
         for (const auto& r : rows) {
           std::vector<std::string> row = {
               r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
@@ -1676,7 +1683,8 @@ void run_boundary(const std::string& ref_input, int length,
 
         bool source_found = false;
         for (const auto& hit : res) {
-          if (recovers_source_locus(hit, q)) {
+          if (recovers_source_locus(
+                  hit, builder.sequence_store(), q)) {
             source_found = true;
             break;
           }
@@ -1695,7 +1703,8 @@ void run_boundary(const std::string& ref_input, int length,
               engine.search_brute_force(q.query, tolerance_edits);
           bool bf_source_found = false;
           for (const auto& hit : bf_res) {
-            if (recovers_source_locus(hit, q)) {
+            if (recovers_source_locus(
+                    hit, builder.sequence_store(), q)) {
               bf_source_found = true;
               break;
             }
@@ -1821,7 +1830,8 @@ void run_layer_radius_experiment(const std::string& ref_input,
           auto end = std::chrono::high_resolution_clock::now();
           bool source_recovered = false;
           for (const auto& hit : results) {
-            if (recovers_source_locus(hit, queries[query_idx])) {
+            if (recovers_source_locus(
+                    hit, builder.sequence_store(), queries[query_idx])) {
               source_recovered = true;
               break;
             }

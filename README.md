@@ -25,11 +25,13 @@ does not allocate a temporary `WorldNode` pointer graph. Edit distance is in
 `navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in
 `navigamer_cpp/src/io_utils.cpp`.
 
-Reference-window builds keep one reference string plus a representative source
-offset per unique window. Distance, q-gram, seed-index, and range-join code read
-non-owning sequence views, so the index does not allocate one sequence string
-per reference window. Persisted format version 4 stores this reference-backed
-representation directly.
+Reference-window builds keep one reference string plus one 12-byte compact
+record per unique window: a 32-bit representative source offset and a reserved
+32-bit half-open SA interval pair. No per-window `BioSequence`, identifier, occurrence
+vector, or sequence string is allocated. Search returns 32-bit `LeafId` values,
+and distance, q-gram, seed-index, and range-join code read non-owning sequence
+views into the shared reference. Persisted format version 4 stores this
+reference-backed representation directly.
 
 ## Installation
 

@@ -1443,10 +1443,25 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       view.sequences.size() != sequence_count_) {
     return false;
   }
-  for (size_t sequence_id = 0; sequence_id < view.sequences.size();
-       ++sequence_id) {
-    if (view.sequences.records[sequence_id].sequence_id != sequence_id) {
+  if (view.sequences.reference_backed) {
+    if (!view.sequences.records.empty() ||
+        view.sequences.reference_records.size() != sequence_count_) {
       return false;
+    }
+    for (const auto& record : view.sequences.reference_records) {
+      if (record.source_pos > view.sequences.reference_sequence.size() ||
+          view.sequences.fixed_sequence_length >
+              view.sequences.reference_sequence.size() - record.source_pos) {
+        return false;
+      }
+    }
+  } else {
+    if (!view.sequences.reference_records.empty()) return false;
+    for (size_t sequence_id = 0; sequence_id < view.sequences.size();
+         ++sequence_id) {
+      if (view.sequences.records[sequence_id].sequence_id != sequence_id) {
+        return false;
+      }
     }
   }
   for (const auto& node : view.node_records) {
@@ -1616,7 +1631,13 @@ void BioGeometryIndexBuilder::initialize_sequence_store(
     const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
     bool consume_records) {
   sequence_count_ = unique_seqs.size();
-  search_graph_view_.sequences.records.resize(sequence_count_);
+  auto& store = search_graph_view_.sequences;
+  store.reference_backed = false;
+  store.reference_records.clear();
+  store.reference_id.clear();
+  store.reference_sequence.clear();
+  store.fixed_sequence_length = 0;
+  store.records.resize(sequence_count_);
   for (size_t sequence_idx = 0; sequence_idx < unique_seqs.size();
        ++sequence_idx) {
     if (!unique_seqs[sequence_idx]) {
@@ -1628,13 +1649,10 @@ void BioGeometryIndexBuilder::initialize_sequence_store(
     const LeafId sequence_id = static_cast<LeafId>(sequence_idx);
     unique_seqs[sequence_idx]->sequence_id = sequence_id;
     if (consume_records) {
-      search_graph_view_.sequences.records[sequence_id] =
-          std::move(*unique_seqs[sequence_idx]);
-      search_graph_view_.sequences.records[sequence_id].sequence_id =
-          sequence_id;
+      store.records[sequence_id] = std::move(*unique_seqs[sequence_idx]);
+      store.records[sequence_id].sequence_id = sequence_id;
     } else {
-      search_graph_view_.sequences.records[sequence_id] =
-          *unique_seqs[sequence_idx];
+      store.records[sequence_id] = *unique_seqs[sequence_idx];
     }
   }
 }
@@ -1657,6 +1675,13 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
   store.reference_sequence = std::move(reference_sequence);
   store.fixed_sequence_length = window_length;
   store.reference_backed = true;
+  store.records.clear();
+
+  if (store.reference_sequence.size() >=
+      static_cast<size_t>(UINT32_MAX)) {
+    throw std::runtime_error(
+        "reference-backed index requires reference coordinates below 2^32");
+  }
 
   const size_t window_count =
       store.reference_sequence.size() < window_length
@@ -1667,8 +1692,8 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
         "too many reference windows for 32-bit LeafId");
   }
 
-  store.records.clear();
-  store.records.reserve(window_count);
+  store.reference_records.clear();
+  store.reference_records.reserve(window_count);
   std::unordered_map<std::string_view, LeafId> sequence_ids;
   sequence_ids.reserve(window_count);
   for (size_t window_idx = 0, start = 0;
@@ -1682,12 +1707,9 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
       stats_.deduplicated++;
     } else {
       const LeafId sequence_id =
-          static_cast<LeafId>(store.records.size());
-      BioSequence record;
-      record.sequence_id = sequence_id;
-      record.has_source_pos = true;
-      record.source_pos = start;
-      store.records.push_back(std::move(record));
+          static_cast<LeafId>(store.reference_records.size());
+      store.reference_records.push_back(
+          {static_cast<uint32_t>(start), UINT32_MAX, UINT32_MAX});
       sequence_ids.emplace(sequence, sequence_id);
     }
     if (progress &&
@@ -1696,7 +1718,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
       progress->set_completed(window_idx + 1);
     }
   }
-  sequence_count_ = store.records.size();
+  sequence_count_ = store.reference_records.size();
   stats_.unique_sequences = sequence_count_;
 }
 

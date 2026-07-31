@@ -119,6 +119,7 @@ void map_orientation(const BioSequence& read,
                      const std::string& ref_seq,
                      int tolerance,
                      BioGeometrySearchEngine& engine,
+                     const SequenceStore& sequence_store,
                      const OccurrenceLocator& locator,
                      std::unordered_map<std::string, Map150Result>& unique_results) {
   BioSequence query(read.id + "/" + strand, oriented_query);
@@ -126,9 +127,10 @@ void map_orientation(const BioSequence& read,
   auto candidates = search_candidates(
       engine, query, map150_candidate_tolerance(tolerance), stats);
 
-  for (const auto& candidate : candidates) {
-    for (const auto& occurrence : locator.locate(*candidate)) {
-      verify_occurrence(read.id, original_query, oriented_query, ref_seq, *candidate,
+  for (LeafId candidate_id : candidates) {
+    const auto& candidate = sequence_store.at(candidate_id);
+    for (const auto& occurrence : locator.locate(candidate)) {
+      verify_occurrence(read.id, original_query, oriented_query, ref_seq, candidate,
                         occurrence, strand, tolerance, stats, unique_results);
     }
   }
@@ -333,9 +335,11 @@ std::vector<Map150Result> map150_reads_with_locator(
       throw std::runtime_error("map150 supports only 150 bp reads");
     }
     map_orientation(*read, normalized_read, normalized_read, "+", normalized_ref,
-                    tolerance, engine, locator, unique_results);
+                    tolerance, engine, builder.sequence_store(), locator,
+                    unique_results);
     map_orientation(*read, normalized_read, reverse_complement(normalized_read), "-",
-                    normalized_ref, tolerance, engine, locator, unique_results);
+                    normalized_ref, tolerance, engine,
+                    builder.sequence_store(), locator, unique_results);
   }
 
   std::vector<Map150Result> out;

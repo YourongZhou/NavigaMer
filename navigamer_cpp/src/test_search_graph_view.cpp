@@ -70,11 +70,9 @@ void assert_view_equivalent_to_original() {
   }
 }
 
-std::set<std::string> ids(
+std::set<navigamer::LeafId> ids(
     const navigamer::SearchResult& hits) {
-  std::set<std::string> out;
-  for (const auto& hit : hits) out.insert(hit->id);
-  return out;
+  return {hits.begin(), hits.end()};
 }
 
 void assert_flat_search_matches_original() {

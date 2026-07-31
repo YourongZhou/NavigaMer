@@ -2374,7 +2374,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     NodeId node_id,
     const BioSequence& query_seq,
     int tolerance,
-    std::unordered_map<LeafId, const BioSequence*>& unique_results,
+    std::unordered_set<LeafId>& unique_results,
     SearchStats& stats) const {
   ScopedSearchTimer collect_timer(stats.query_profile_enabled, &stats.leaf_collect_ms);
   stats.leaf_world_count++;
@@ -2453,7 +2453,6 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
       if (next_offset < leaf_count) {
         const LeafId next_leaf_id = view.leaf_ids[leaf_begin + next_offset];
         if (next_leaf_id < view.sequences.size()) {
-          prefetch_read(&view.sequences[next_leaf_id]);
           const auto& next_sequence =
               view.sequences.sequence(next_leaf_id);
           if (!next_sequence.empty()) {
@@ -2466,35 +2465,34 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     const LeafId leaf_id = view.leaf_ids[leaf_begin + leaf_offset];
     if (leaf_id >= view.sequences.size()) {
       throw std::runtime_error("view leaf id has no sequence record");
-	    }
-	    const auto& child = view.sequences[leaf_id];
-	    if (near_query_triangle_prunes_leaf(this, leaf_id, tolerance, stats)) {
-	      continue;
-	    }
-	    ScopedSearchTimer leaf_verify_timer(stats.query_profile_enabled,
-	                                        &stats.leaf_verify_ms);
-	    stats.candidate_count++;
-	    stats.raw_candidate_count++;
-	    stats.candidate_verify_count++;
-	    stats.leaf_exact_distance_call_count++;
-	    const bool cache_leaf_distance =
-	        active_path_reuse_context(this) &&
-	        active_path_reuse_context(this)->enabled;
-	    const int distance_bound =
-	        leaf_distance_cache_bound(config_, tolerance, cache_leaf_distance);
-	    int leaf_dist = compute_query_distance_with_mode(
-	        query_seq.seq, view.sequences.sequence(leaf_id), distance_bound,
-	        config_.distance_mode);
-	    if (auto* reuse = active_path_reuse_context(this);
-	        reuse && reuse->enabled) {
-	      reuse->next.leaf_dist_by_sequence_id[leaf_id] = leaf_dist;
-	    }
-	    stats.dist_calc_count++;
-	    stats.leaf_verify_count++;
-	    if (config_.trace_paths) {
-	      stats.leaf_trace.push_back(leaf_id);
-	    }
-	    if (leaf_dist <= tolerance) unique_results[leaf_id] = &child;
+    }
+    if (near_query_triangle_prunes_leaf(this, leaf_id, tolerance, stats)) {
+      continue;
+    }
+    ScopedSearchTimer leaf_verify_timer(stats.query_profile_enabled,
+                                        &stats.leaf_verify_ms);
+    stats.candidate_count++;
+    stats.raw_candidate_count++;
+    stats.candidate_verify_count++;
+    stats.leaf_exact_distance_call_count++;
+    const bool cache_leaf_distance =
+        active_path_reuse_context(this) &&
+        active_path_reuse_context(this)->enabled;
+    const int distance_bound =
+        leaf_distance_cache_bound(config_, tolerance, cache_leaf_distance);
+    int leaf_dist = compute_query_distance_with_mode(
+        query_seq.seq, view.sequences.sequence(leaf_id), distance_bound,
+        config_.distance_mode);
+    if (auto* reuse = active_path_reuse_context(this);
+        reuse && reuse->enabled) {
+      reuse->next.leaf_dist_by_sequence_id[leaf_id] = leaf_dist;
+    }
+    stats.dist_calc_count++;
+    stats.leaf_verify_count++;
+    if (config_.trace_paths) {
+      stats.leaf_trace.push_back(leaf_id);
+    }
+    if (leaf_dist <= tolerance) unique_results.insert(leaf_id);
   }
 }
 
@@ -3114,7 +3112,7 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
 void BioGeometrySearchEngine::process_node_adaptive_view(
     NodeId node_id, int current_layer,
     const BioSequence& query_seq, int tolerance,
-    std::unordered_map<LeafId, const BioSequence*>& unique_results,
+    std::unordered_set<LeafId>& unique_results,
     std::unordered_set<std::string>* visited_nodes,
     SearchScratch* scratch,
     SearchStats& stats,
@@ -3170,7 +3168,7 @@ void BioGeometrySearchEngine::process_node_adaptive_view(
 void BioGeometrySearchEngine::search_layer_adaptive_view(
     const std::vector<NodeId>& candidates, int layer_id,
     const BioSequence& query_seq, int tolerance,
-    std::unordered_map<LeafId, const BioSequence*>& unique_results,
+    std::unordered_set<LeafId>& unique_results,
     std::unordered_set<std::string>* visited_nodes,
     SearchScratch* scratch,
     SearchStats& stats,
@@ -3469,19 +3467,18 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
         cache_valid = false;
         break;
       }
-      const auto& hit = view.sequences[hit_id];
-	      const int distance_bound =
-	          leaf_distance_cache_bound(config_, tolerance, true);
-	      const int dist = compute_query_distance_with_mode(
-	          query_seq.seq, view.sequences.sequence(hit_id), distance_bound,
-	          config_.distance_mode);
-	      reuse_context.next.leaf_dist_by_sequence_id[hit_id] = dist;
-	      stats.dist_calc_count++;
-	      stats.candidate_verify_count++;
+      const int distance_bound =
+          leaf_distance_cache_bound(config_, tolerance, true);
+      const int dist = compute_query_distance_with_mode(
+          query_seq.seq, view.sequences.sequence(hit_id), distance_bound,
+          config_.distance_mode);
+      reuse_context.next.leaf_dist_by_sequence_id[hit_id] = dist;
+      stats.dist_calc_count++;
+      stats.candidate_verify_count++;
       stats.leaf_verify_count++;
       stats.leaf_exact_distance_call_count++;
       if (dist <= tolerance) {
-        cached_hits.push_back(&hit);
+        cached_hits.push_back(hit_id);
       } else {
         cache_valid = false;
         break;
@@ -3503,9 +3500,7 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
       reuse_context.next.exact_query_completed = true;
       reuse_context.next.exact_verified_hits.clear();
       reuse_context.next.exact_verified_hits.reserve(cached_hits.size());
-      for (const auto* hit : cached_hits) {
-        reuse_context.next.exact_verified_hits.push_back(hit->sequence_id);
-      }
+      reuse_context.next.exact_verified_hits = cached_hits;
       g_path_reuse_cache_by_engine[this] = std::move(reuse_context.next);
       return {cached_hits, stats};
     }
@@ -3522,7 +3517,7 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
       stats.search_qgram_signature_build_count = search_q_it->second.size();
     }
   }
-  std::unordered_map<LeafId, const BioSequence*> unique_results;
+  std::unordered_set<LeafId> unique_results;
   std::unordered_set<std::string> visited_nodes;
   QGramSignature query_qgram_signature;
   const QGramSignature* query_qgram_signature_ptr = nullptr;
@@ -3550,7 +3545,6 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
     const auto& view = index_.search_graph_view();
     for (LeafId hit_id : reuse_context.previous->exact_verified_hits) {
       if (hit_id >= view.sequences.size()) continue;
-      const auto& hit = view.sequences[hit_id];
       stats.near_query_direct_verify_count++;
       stats.dist_calc_count++;
       stats.candidate_verify_count++;
@@ -3562,8 +3556,7 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
 	          query_seq.seq, view.sequences.sequence(hit_id), distance_bound,
 	          config_.distance_mode);
 	      reuse_context.next.leaf_dist_by_sequence_id[hit_id] = dist;
-	      if (dist <= tolerance) {
-        unique_results[hit_id] = &hit;
+      if (dist <= tolerance && unique_results.insert(hit_id).second) {
         direct_verified_hits++;
       }
     }
@@ -3610,7 +3603,7 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
   SearchResult out;
   {
     ScopedSearchTimer dedup_timer(stats.query_profile_enabled, &stats.result_dedup_ms);
-    for (const auto& entry : unique_results) out.push_back(entry.second);
+    out.insert(out.end(), unique_results.begin(), unique_results.end());
   }
   stats.result_count = out.size();
   if (reuse_context.enabled) {
@@ -3618,9 +3611,7 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
     reuse_context.next.exact_query_completed = true;
     reuse_context.next.exact_verified_hits.clear();
     reuse_context.next.exact_verified_hits.reserve(out.size());
-    for (const auto* hit : out) {
-      reuse_context.next.exact_verified_hits.push_back(hit->sequence_id);
-    }
+    reuse_context.next.exact_verified_hits = out;
   }
   if (stats.query_profile_enabled) {
     stats.query_total_ms =
@@ -3676,12 +3667,12 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
     if (best_node == INVALID_NODE_ID) return {{}, stats};
 
     if (layer_id == index_.finest_primary_layer_index()) {
-      std::unordered_map<LeafId, const BioSequence*> unique_results;
+      std::unordered_set<LeafId> unique_results;
       verify_leaf_candidates_view(
           best_node, query_seq, tolerance, unique_results, stats);
 
       SearchResult results;
-      for (const auto& entry : unique_results) results.push_back(entry.second);
+      results.insert(results.end(), unique_results.begin(), unique_results.end());
       return {results, stats};
     }
 
@@ -3726,7 +3717,7 @@ void BioGeometrySearchEngine::traverse_exhaustive(
 void BioGeometrySearchEngine::traverse_exhaustive_view(
     NodeId node_id, int current_layer,
     const BioSequence& query_seq, int tolerance,
-    std::unordered_map<LeafId, const BioSequence*>& unique_results,
+    std::unordered_set<LeafId>& unique_results,
     std::vector<uint8_t>& visited_nodes,
     SearchStats& stats) const {
   const auto& view = index_.search_graph_view();
@@ -3766,7 +3757,7 @@ void BioGeometrySearchEngine::traverse_exhaustive_view(
 std::pair<SearchResult, SearchStats>
 BioGeometrySearchEngine::search_exhaustive(const BioSequence& query_seq, int tolerance) {
   SearchStats stats(static_cast<size_t>(index_.num_primary_layers()));
-  std::unordered_map<LeafId, const BioSequence*> unique_results;
+  std::unordered_set<LeafId> unique_results;
   const auto& view = index_.search_graph_view();
   std::vector<uint8_t> visited_nodes(view.node_records.size(), 0);
   const size_t top_layer =
@@ -3779,7 +3770,7 @@ BioGeometrySearchEngine::search_exhaustive(const BioSequence& query_seq, int tol
   }
 
   SearchResult out;
-  for (const auto& entry : unique_results) out.push_back(entry.second);
+  out.insert(out.end(), unique_results.begin(), unique_results.end());
   return {out, stats};
 }
 
@@ -3788,7 +3779,6 @@ BioGeometrySearchEngine::search_brute_force(
     const BioSequence& query_seq, int tolerance) {
   SearchStats stats(static_cast<size_t>(index_.num_primary_layers()));
   const auto& sequence_store = index_.sequence_store();
-  const auto& all_sequences = sequence_store.records;
   std::vector<SearchResult> thread_results;
 
   #pragma omp parallel
@@ -3799,12 +3789,13 @@ BioGeometrySearchEngine::search_brute_force(
 
     int tid = omp_get_thread_num();
     #pragma omp for schedule(dynamic, 64)
-    for (size_t i = 0; i < all_sequences.size(); ++i) {
+    for (size_t i = 0; i < sequence_store.size(); ++i) {
       int dist = compute_distance(
           query_seq.seq,
           sequence_store.sequence(static_cast<LeafId>(i)));
       if (dist <= tolerance) {
-        thread_results[static_cast<size_t>(tid)].push_back(&all_sequences[i]);
+        thread_results[static_cast<size_t>(tid)].push_back(
+            static_cast<LeafId>(i));
       }
     }
   }
@@ -3814,8 +3805,8 @@ BioGeometrySearchEngine::search_brute_force(
     for (auto& result : thread_vec) results.push_back(std::move(result));
   }
 
-  stats.dist_calc_count = all_sequences.size();
-  stats.leaf_verify_count = all_sequences.size();
+  stats.dist_calc_count = sequence_store.size();
+  stats.leaf_verify_count = sequence_store.size();
   return {results, stats};
 }
 

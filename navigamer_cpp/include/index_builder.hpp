@@ -80,18 +80,38 @@ struct BuildRangeConfig {
   int progress_interval_seconds = 600;
 };
 
+// A reference-backed leaf needs no BioSequence object. The fixed k-mer is a
+// view of reference_sequence at source_pos, while [sa_begin, sa_end) identifies
+// all of its suffix-array occurrences when an interval has been attached.
+// UINT32_MAX is the invalid SA endpoint sentinel.
+struct ReferenceSequenceRecord {
+  uint32_t source_pos = 0;
+  uint32_t sa_begin = UINT32_MAX;
+  uint32_t sa_end = UINT32_MAX;
+
+  bool has_sa_interval() const {
+    return sa_begin != UINT32_MAX && sa_end != UINT32_MAX &&
+           sa_end >= sa_begin;
+  }
+};
+static_assert(sizeof(ReferenceSequenceRecord) == 12,
+              "reference leaf record must remain a compact 12-byte value");
+
 // Canonical, pointer-free sequence storage for a finalized index. SequenceId is
-// the position in records, so nodes, beacons, and leaf links only need a 32-bit
-// integer reference.
+// implicit from the position in records/reference_records, so nodes, beacons,
+// leaf links, and search results only need a 32-bit integer reference.
 struct SequenceStore {
   std::vector<BioSequence> records;
+  std::vector<ReferenceSequenceRecord> reference_records;
   std::string reference_id;
   std::string reference_sequence;
   size_t fixed_sequence_length = 0;
   bool reference_backed = false;
 
-  size_t size() const { return records.size(); }
-  bool empty() const { return records.empty(); }
+  size_t size() const {
+    return reference_backed ? reference_records.size() : records.size();
+  }
+  bool empty() const { return size() == 0; }
   const BioSequence& at(LeafId id) const {
     return records.at(static_cast<size_t>(id));
   }
@@ -99,13 +119,42 @@ struct SequenceStore {
     return records[static_cast<size_t>(id)];
   }
   std::string_view sequence(LeafId id) const {
-    const auto& record = records[static_cast<size_t>(id)];
-    if (reference_backed && record.has_source_pos) {
+    if (reference_backed) {
+      const auto& record =
+          reference_records[static_cast<size_t>(id)];
       return std::string_view(
           reference_sequence.data() + record.source_pos,
           fixed_sequence_length);
     }
-    return record.seq;
+    return records[static_cast<size_t>(id)].seq;
+  }
+  size_t source_position(LeafId id) const {
+    if (reference_backed) {
+      return reference_records.at(static_cast<size_t>(id)).source_pos;
+    }
+    return records.at(static_cast<size_t>(id)).source_pos;
+  }
+  BwtInterval sa_interval(LeafId id) const {
+    if (!reference_backed) {
+      return records.at(static_cast<size_t>(id)).bwt_interval;
+    }
+    const auto& record =
+        reference_records.at(static_cast<size_t>(id));
+    if (!record.has_sa_interval()) return {};
+    return {static_cast<int64_t>(record.sa_begin),
+            static_cast<int64_t>(record.sa_end)};
+  }
+  BioSequence materialize(LeafId id) const {
+    if (!reference_backed) return records.at(static_cast<size_t>(id));
+    const auto sequence_view = sequence(id);
+    BioSequence sequence_record(
+        reference_id + "_" + std::to_string(source_position(id)),
+        std::string(sequence_view));
+    sequence_record.sequence_id = id;
+    sequence_record.has_source_pos = true;
+    sequence_record.source_pos = source_position(id);
+    sequence_record.bwt_interval = sa_interval(id);
+    return sequence_record;
   }
 };
 

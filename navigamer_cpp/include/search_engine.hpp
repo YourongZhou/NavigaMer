@@ -14,7 +14,7 @@
 
 namespace navigamer {
 
-using SearchResult = std::vector<const BioSequence*>;
+using SearchResult = std::vector<LeafId>;
 
 enum class MBBFilterMode {
   Scan,
@@ -400,7 +400,7 @@ class BioGeometrySearchEngine {
       NodeId node_id,
       const BioSequence& query_seq,
       int tolerance,
-      std::unordered_map<LeafId, const BioSequence*>& unique_results,
+      std::unordered_set<LeafId>& unique_results,
       SearchStats& stats) const;
 
   void process_node_adaptive(
@@ -500,7 +500,7 @@ class BioGeometrySearchEngine {
   void process_node_adaptive_view(
       NodeId node_id, int current_layer,
       const BioSequence& query_seq, int tolerance,
-      std::unordered_map<LeafId, const BioSequence*>& unique_results,
+      std::unordered_set<LeafId>& unique_results,
       std::unordered_set<std::string>* visited_nodes,
       SearchScratch* scratch,
       SearchStats& stats,
@@ -510,7 +510,7 @@ class BioGeometrySearchEngine {
   void search_layer_adaptive_view(
       const std::vector<NodeId>& candidates, int layer_id,
       const BioSequence& query_seq, int tolerance,
-      std::unordered_map<LeafId, const BioSequence*>& unique_results,
+      std::unordered_set<LeafId>& unique_results,
       std::unordered_set<std::string>* visited_nodes,
       SearchScratch* scratch,
       SearchStats& stats,
@@ -529,7 +529,7 @@ class BioGeometrySearchEngine {
   void traverse_exhaustive_view(
       NodeId node_id, int current_layer,
       const BioSequence& query_seq, int tolerance,
-      std::unordered_map<LeafId, const BioSequence*>& unique_results,
+      std::unordered_set<LeafId>& unique_results,
       std::vector<uint8_t>& visited_nodes,
       SearchStats& stats) const;
 };

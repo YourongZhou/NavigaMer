@@ -45,10 +45,8 @@ std::vector<SequencePtr> make_sequences() {
   return sequences;
 }
 
-std::set<std::string> ids(const navigamer::SearchResult& hits) {
-  std::set<std::string> out;
-  for (const auto& hit : hits) out.insert(hit->id);
-  return out;
+std::set<navigamer::LeafId> ids(const navigamer::SearchResult& hits) {
+  return {hits.begin(), hits.end()};
 }
 
 navigamer::SearchConfig config(

@@ -403,13 +403,21 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
     write_size(out, store.fixed_sequence_length);
   }
   write_size(out, store.size());
-  for (const auto& sequence : store.records) {
-    if (store.reference_backed) {
+  if (store.reference_backed) {
+    for (const auto& sequence : store.reference_records) {
       write_size(out, sequence.source_pos);
-      write_pod<int64_t>(out, sequence.bwt_interval.start);
-      write_pod<int64_t>(out, sequence.bwt_interval.end);
-      continue;
+      const int64_t sa_begin = sequence.has_sa_interval()
+                                   ? static_cast<int64_t>(sequence.sa_begin)
+                                   : -1;
+      const int64_t sa_end = sequence.has_sa_interval()
+                                 ? static_cast<int64_t>(sequence.sa_end)
+                                 : -1;
+      write_pod<int64_t>(out, sa_begin);
+      write_pod<int64_t>(out, sa_end);
     }
+    return;
+  }
+  for (const auto& sequence : store.records) {
     write_string(out, sequence.id);
     write_string(out, sequence.seq);
     write_pod<uint32_t>(out, sequence.sequence_id);
@@ -444,25 +452,43 @@ SequenceStore read_sequence_store(std::istream& in) {
     }
   }
   const size_t count = read_size(in, "sequence_store.count");
-  store.records.reserve(count);
+  if (store.reference_backed) {
+    store.reference_records.reserve(count);
+  } else {
+    store.records.reserve(count);
+  }
   for (size_t i = 0; i < count; ++i) {
     if (store.reference_backed) {
-      BioSequence sequence;
-      sequence.sequence_id = static_cast<LeafId>(i);
-      sequence.has_source_pos = true;
-      sequence.source_pos =
+      const size_t source_pos =
           read_size(in, "sequence.source_pos");
-      sequence.bwt_interval.start =
+      const int64_t sa_begin =
           read_pod<int64_t>(in, "sequence.bwt_start");
-      sequence.bwt_interval.end =
+      const int64_t sa_end =
           read_pod<int64_t>(in, "sequence.bwt_end");
-      if (sequence.source_pos > store.reference_sequence.size() ||
+      if (source_pos >= static_cast<size_t>(UINT32_MAX)) {
+        throw std::runtime_error(
+            "reference-backed sequence coordinate exceeds 32-bit storage");
+      }
+      if ((sa_begin < 0) != (sa_end < 0) ||
+          sa_begin > static_cast<int64_t>(UINT32_MAX - 1) ||
+          sa_end > static_cast<int64_t>(UINT32_MAX - 1) ||
+          (sa_begin >= 0 && sa_end < sa_begin)) {
+        throw std::runtime_error(
+            "reference-backed sequence has invalid 32-bit SA interval");
+      }
+      if (source_pos > store.reference_sequence.size() ||
           store.fixed_sequence_length >
-              store.reference_sequence.size() - sequence.source_pos) {
+              store.reference_sequence.size() - source_pos) {
         throw std::runtime_error(
             "reference-backed sequence lies outside stored reference");
       }
-      store.records.push_back(std::move(sequence));
+      ReferenceSequenceRecord sequence;
+      sequence.source_pos = static_cast<uint32_t>(source_pos);
+      if (sa_begin >= 0) {
+        sequence.sa_begin = static_cast<uint32_t>(sa_begin);
+        sequence.sa_end = static_cast<uint32_t>(sa_end);
+      }
+      store.reference_records.push_back(sequence);
       continue;
     }
     std::string id = read_string(in, "sequence.id");

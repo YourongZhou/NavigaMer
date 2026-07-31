@@ -132,7 +132,9 @@ std::set<std::string> hit_sequences(
   navigamer::BioGeometrySearchEngine engine(builder);
   auto [hits, stats] = engine.search_adaptive(query, tau);
   std::set<std::string> result;
-  for (const auto& hit : hits) result.insert(hit->seq);
+  for (navigamer::LeafId hit : hits) {
+    result.insert(std::string(builder.sequence_store().sequence(hit)));
+  }
   return result;
 }
 

@@ -111,7 +111,9 @@ std::set<std::string> adaptive_hits(
   navigamer::BioSequence query("query", sequence);
   auto [hits, stats] = engine.search_adaptive(query, tau);
   std::set<std::string> out;
-  for (const auto& hit : hits) out.insert(hit->seq);
+  for (navigamer::LeafId hit : hits) {
+    out.insert(std::string(builder.sequence_store().sequence(hit)));
+  }
   return out;
 }
 

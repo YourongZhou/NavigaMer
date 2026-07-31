@@ -40,17 +40,9 @@ std::vector<SequencePtr> make_sequences() {
   };
 }
 
-std::set<std::string> ids(const navigamer::SearchResult& hits) {
-  std::set<std::string> out;
-  for (const auto& hit : hits) out.insert(hit->id);
-  return out;
-}
-
 std::set<navigamer::LeafId> sequence_ids(
     const navigamer::SearchResult& hits) {
-  std::set<navigamer::LeafId> out;
-  for (const auto* hit : hits) out.insert(hit->sequence_id);
-  return out;
+  return {hits.begin(), hits.end()};
 }
 
 void assert_loaded_search_matches_built() {
@@ -107,8 +99,8 @@ void assert_loaded_search_matches_built() {
     (void)built_stats;
     (void)loaded_stats;
     (void)rect_stats;
-    assert(ids(built_hits) == ids(loaded_hits));
-    assert(ids(built_hits) == ids(rect_hits));
+    assert(sequence_ids(built_hits) == sequence_ids(loaded_hits));
+    assert(sequence_ids(built_hits) == sequence_ids(rect_hits));
   }
 
   std::remove(path.c_str());
@@ -187,9 +179,8 @@ void assert_reference_backed_index_round_trip() {
   built.build_reference_windows(
       "synthetic_ref", reference, kWindowLength, 1);
   assert(built.sequence_store().reference_backed);
-  for (const auto& record : built.sequence_store().records) {
-    assert(record.seq.empty());
-  }
+  assert(built.sequence_store().records.empty());
+  assert(!built.sequence_store().reference_records.empty());
 
   auto manifest = navigamer::make_reference_window_index_manifest(
       reference, reference.size(), static_cast<int>(kWindowLength), 1,
@@ -207,7 +198,12 @@ void assert_reference_backed_index_round_trip() {
        sequence_idx < built_store.size(); ++sequence_idx) {
     const auto id = static_cast<navigamer::LeafId>(sequence_idx);
     assert(loaded_store.sequence(id) == built_store.sequence(id));
-    assert(loaded_store[id].seq.empty());
+    assert(loaded_store.source_position(id) ==
+           built_store.source_position(id));
+    assert(loaded_store.sa_interval(id).start ==
+           built_store.sa_interval(id).start);
+    assert(loaded_store.sa_interval(id).end ==
+           built_store.sa_interval(id).end);
   }
 
   navigamer::BioGeometrySearchEngine engine(loaded.builder);

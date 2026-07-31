@@ -136,15 +136,16 @@ TestResult run_test(const TestConfig& cfg) {
   auto check_results = [&](const navigamer::SearchResult& candidates,
                            const navigamer::BioSequence& query, int tolerance,
                            size_t& violation_count, const std::string& method_name) {
-    for (const auto& cand : candidates) {
+    for (navigamer::LeafId cand : candidates) {
       result.total_candidates_checked++;
-      int d = navigamer::compute_distance(query.seq, cand->seq);
+      int d = navigamer::compute_distance(
+          query.seq, builder.sequence_store().sequence(cand));
       if (d > tolerance) {
         violation_count++;
         if (result.first_violations.size() < 10) {
           result.first_violations.push_back({
             query.id + " [" + method_name + "]",
-            cand->id, d, tolerance
+            builder.sequence_store().at(cand).id, d, tolerance
           });
         }
       }

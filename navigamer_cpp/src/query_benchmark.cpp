@@ -699,13 +699,17 @@ std::vector<std::shared_ptr<BioSequence>> build_reference_windows(
   return out;
 }
 
-template <typename SequencePointer>
 std::vector<std::string> result_ids(
-    const std::vector<SequencePointer>& results) {
+    const SearchResult& results,
+    const SequenceStore& sequence_store) {
   std::vector<std::string> ids;
   ids.reserve(results.size());
-  for (const auto& result : results) {
-    if (result) ids.push_back(result->id);
+  for (LeafId result : results) {
+    ids.push_back(sequence_store.reference_backed
+                      ? sequence_store.reference_id + "_" +
+                            std::to_string(
+                                sequence_store.source_position(result))
+                      : sequence_store.at(result).id);
   }
   return sorted_unique(std::move(ids));
 }
@@ -1487,13 +1491,17 @@ LocalityBenchmarkQuerySets generate_locality_benchmark_queries(
   return out;
 }
 
-template <typename SequencePointer>
 std::vector<std::string> search_result_ids(
-    const std::vector<SequencePointer>& hits) {
+    const SearchResult& hits,
+    const SequenceStore& sequence_store) {
   std::vector<std::string> ids;
   ids.reserve(hits.size());
-  for (const auto& hit : hits) {
-    if (hit) ids.push_back(hit->id);
+  for (LeafId hit : hits) {
+    ids.push_back(sequence_store.reference_backed
+                      ? sequence_store.reference_id + "_" +
+                            std::to_string(
+                                sequence_store.source_position(hit))
+                      : sequence_store.at(hit).id);
   }
   return sorted_unique(std::move(ids));
 }
@@ -1732,12 +1740,13 @@ LocalityBenchmarkRow run_locality_profile(
         bool cache_valid = true;
         SearchResult cached_hits;
         cached_hits.reserve(cache_it->second.size());
-        for (const auto& hit : cache_it->second) {
-          if (!hit) {
+        for (LeafId hit : cache_it->second) {
+          if (hit >= builder.sequence_store().size()) {
             cache_valid = false;
             break;
           }
-          const int dist = compute_distance(query.seq, hit->seq);
+          const int dist = compute_distance(
+              query.seq, builder.sequence_store().sequence(hit));
           stats.dist_calc_count++;
           stats.candidate_verify_count++;
           stats.leaf_verify_count++;
@@ -1766,7 +1775,8 @@ LocalityBenchmarkRow run_locality_profile(
       }
     }
     auto one_end = std::chrono::high_resolution_clock::now();
-    const auto ids = search_result_ids(hits);
+    const auto ids =
+        search_result_ids(hits, builder.sequence_store());
     if (observed_ids) observed_ids->push_back(ids);
     if (ids.empty()) ++row.fn_count;
     if (!baseline_ids.empty() && ids != baseline_ids[i]) ++row.mismatch_count;
@@ -2141,7 +2151,8 @@ std::vector<std::vector<std::string>> baseline_locality_ids(
     }
     auto [hits, stats] = engine.search_adaptive(query.query, tolerance);
     (void)stats;
-    auto ids = search_result_ids(hits);
+    auto ids =
+        search_result_ids(hits, builder.sequence_store());
     auto inserted = exact_query_cache.emplace(query.query.seq, ids);
     out.push_back(inserted.first->second);
   }
@@ -2555,7 +2566,8 @@ QueryBenchmarkRunResult run_query_benchmark(
     record.latency_ms =
         timed ? std::chrono::duration<double, std::milli>(end - start).count()
               : 0.0;
-    record.result_ids = result_ids(hits);
+    record.result_ids =
+        result_ids(hits, builder.sequence_store());
     record.result_count = record.result_ids.size();
     record.brute_force_result_count = generated.brute_force_ids.size();
     record.stats = std::move(stats);

@@ -1,6 +1,6 @@
 # NavigaMer — C++ reference implementation
 
-This directory contains the **C++17 v8** reference indexer and CLI (`navigamer`) used for the paper implementation. The build pipeline follows a **top-down extended hierarchy**, **inter-tier DAG wiring**, **auxiliary-tier collapse with beacon sequences and MBBs**, and **leaf attachment** to the finest primary layer. Construction stores nodes in a `BuildWorldNodeRecord` array and all relationships as integer IDs, without allocating a `WorldNode` pointer graph. The finalized index is stored as `WorldNodeRecord` and `BioSequence` arrays plus flat child, leaf, beacon, MBB, and leaf-beacon arrays, which adaptive search uses directly.
+This directory contains the **C++17 v8** reference indexer and CLI (`navigamer`) used for the paper implementation. The build pipeline follows a **top-down extended hierarchy**, **inter-tier DAG wiring**, **auxiliary-tier collapse with beacon sequences and MBBs**, and **leaf attachment** to the finest primary layer. Construction stores nodes in a `BuildWorldNodeRecord` array and all relationships as integer IDs, without allocating a `WorldNode` pointer graph. The finalized index uses `WorldNodeRecord` arrays plus flat child, leaf, beacon, MBB, and leaf-beacon arrays. Generic inputs use a `BioSequence` array; reference-backed inputs instead use one shared reference and a 12-byte compact record per unique window. Adaptive search returns 32-bit `LeafId` values.
 
 ## Build
 
@@ -284,9 +284,12 @@ and writes phase timing, substep timing, construction counters, range candidate
 mode, and q-gram length to CSV. With one prefix and `--index`, it also writes a
 loadable persisted index whose manifest includes the reference fingerprint,
 actual prefix length, window length, and stride. Reference windows are
-reference-backed: each unique window stores a representative offset and all
-construction/search kernels consume `std::string_view` values into the single
-stored reference instead of owning one string per window.
+reference-backed: each unique window stores a 12-byte record containing a
+32-bit representative offset and two reserved 32-bit SA interval endpoints. Its
+`BioSequence` identity and sequence are implicit in the array index and the
+fixed window length. All construction/search kernels consume
+`std::string_view` values into the single stored reference instead of owning
+one object or string per window.
 
 ## Parameter sweeps
 
