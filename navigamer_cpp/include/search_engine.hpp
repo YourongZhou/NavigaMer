@@ -499,9 +499,11 @@ class BioGeometrySearchEngine {
   int compute_center_distance_for_search(
       const BioSequence& query_seq,
       const std::string& node_id,
+      LeafId center_sequence_id,
       std::string_view center_sequence,
       int tau,
-      bool after_mbb_filter) const;
+      bool after_mbb_filter,
+      bool* cache_hit = nullptr) const;
   void process_node_adaptive_view(
       NodeId node_id, int current_layer,
       const BioSequence& query_seq, int tolerance,

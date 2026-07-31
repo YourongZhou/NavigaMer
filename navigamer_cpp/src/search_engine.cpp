@@ -1,5 +1,6 @@
 #include "search_engine.hpp"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -65,6 +66,108 @@ int compute_exact_distance_with_mode(const std::string& lhs,
   }
   return compute_query_distance_with_mode(
       lhs, rhs, static_cast<int>(max_length), mode);
+}
+
+// One compact entry records an exact distance for the current query. A
+// fixed-size, thread-local table keeps working memory independent of index
+// size. Excessive collisions safely bypass the cache, and values outside the
+// compact distance range do the same.
+class QueryDistanceCache {
+ public:
+  void begin_query() {
+    if (++epoch_ == 0) {
+      for (auto& entry : entries_) entry.epoch = 0;
+      epoch_ = 1;
+    }
+  }
+
+  bool lookup(LeafId sequence_id, int* distance) const {
+    if (!distance) return false;
+    size_t slot = hash_slot(sequence_id);
+    for (size_t probe = 0; probe < kMaxProbe; ++probe) {
+      const auto& entry = entries_[slot];
+      if (entry.epoch != epoch_) return false;
+      if (entry.sequence_id == sequence_id) {
+        const uint16_t code = entry.code;
+        if (code >= kExactBase && code <= kExactLimit) {
+          *distance = static_cast<int>(code - kExactBase);
+          return true;
+        }
+        return false;
+      }
+      slot = (slot + 1) & kSlotMask;
+    }
+    return false;
+  }
+
+  void store(LeafId sequence_id, int distance) {
+    if (distance < 0 || distance > 255) return;
+    const uint16_t code = static_cast<uint16_t>(kExactBase + distance);
+
+    size_t slot = hash_slot(sequence_id);
+    for (size_t probe = 0; probe < kMaxProbe; ++probe) {
+      auto& entry = entries_[slot];
+      if (entry.epoch != epoch_) {
+        entry = {sequence_id, code, epoch_};
+        return;
+      }
+      if (entry.sequence_id == sequence_id) {
+        entry.code = code;
+        return;
+      }
+      slot = (slot + 1) & kSlotMask;
+    }
+  }
+
+ private:
+  struct Entry {
+    LeafId sequence_id = INVALID_LEAF_ID;
+    uint16_t code = 0;
+    uint16_t epoch = 0;
+  };
+  static_assert(sizeof(Entry) == 8,
+                "query distance cache entry must remain 8 bytes");
+  static constexpr size_t kSlotCount = 2048;
+  static constexpr size_t kSlotMask = kSlotCount - 1;
+  static constexpr size_t kMaxProbe = 8;
+  static constexpr uint16_t kExactBase = 1;
+  static constexpr uint16_t kExactLimit = kExactBase + 255;
+
+  static size_t hash_slot(LeafId sequence_id) {
+    return (static_cast<uint64_t>(sequence_id) * 11400714819323198485ull) &
+           kSlotMask;
+  }
+
+  std::array<Entry, kSlotCount> entries_{};
+  uint16_t epoch_ = 0;
+};
+
+thread_local QueryDistanceCache g_query_distance_cache;
+
+int compute_indexed_query_distance(
+    const std::string& lhs,
+    std::string_view rhs,
+    LeafId sequence_id,
+    int tau,
+    DistanceMode mode,
+    bool require_exact,
+    bool* cache_hit = nullptr) {
+  int distance = 0;
+  if (sequence_id != INVALID_LEAF_ID &&
+      g_query_distance_cache.lookup(
+          sequence_id, &distance)) {
+    if (cache_hit) *cache_hit = true;
+    return distance;
+  }
+  if (cache_hit) *cache_hit = false;
+  distance = require_exact
+                 ? compute_exact_distance_with_mode(lhs, rhs, mode)
+                 : compute_query_distance_with_mode(lhs, rhs, tau, mode);
+  if (sequence_id != INVALID_LEAF_ID &&
+      (require_exact || distance <= tau)) {
+    g_query_distance_cache.store(sequence_id, distance);
+  }
+  return distance;
 }
 
 inline void prefetch_read(const void* ptr) {
@@ -989,11 +1092,15 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     if (beacon_id >= view.sequences.size()) {
       throw std::runtime_error("array beacon id has no sequence");
     }
-    dists.push_back(compute_exact_distance_with_mode(
-        query_seq.seq, view.sequences.sequence(beacon_id),
-        config_.distance_mode));
+    bool cache_hit = false;
+    dists.push_back(compute_indexed_query_distance(
+        query_seq.seq, view.sequences.sequence(beacon_id), beacon_id,
+        0,
+        config_.distance_mode, true, &cache_hit));
     stats.anchor_distance_count++;
-    stats.dist_calc_count++;
+    if (!cache_hit) {
+      stats.dist_calc_count++;
+    }
   };
   const uint32_t beacon_begin =
       node.beacon_storage() ==
@@ -1530,10 +1637,11 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
       }
       const int child_tau = tolerance + child_radius;
       stats.safe_child_router_exact_verify_count++;
-      const int dist = compute_query_distance_with_mode(
+      const int dist = compute_indexed_query_distance(
           query_seq.seq,
           view.sequences.sequence(child.center_sequence_id),
-          child_tau, config_.distance_mode);
+          child.center_sequence_id, child_tau,
+          config_.distance_mode, false);
       if (dist <= child_tau && !in_candidate[child_idx]) {
         throw std::runtime_error(
             "safe child router missed a possible child candidate");
@@ -1749,6 +1857,7 @@ std::vector<std::string> BioGeometrySearchEngine::debug_safe_child_router_candid
     const BioSequence& query_seq,
     int tolerance,
     bool* used_router) const {
+  g_query_distance_cache.begin_query();
   if (used_router) *used_router = false;
   size_t parsed = 0;
   unsigned long raw_id = 0;
@@ -2490,19 +2599,18 @@ int leaf_distance_cache_bound(const SearchConfig& config,
 int BioGeometrySearchEngine::compute_center_distance_for_search(
     const BioSequence& query_seq,
     const std::string& node_id,
+    LeafId center_sequence_id,
     std::string_view center_sequence,
     int tau,
-    bool after_mbb_filter) const {
+    bool after_mbb_filter,
+    bool* cache_hit) const {
   (void)after_mbb_filter;
   auto* reuse = active_path_reuse_context(this);
   const bool record_exact_center_distance =
       reuse && reuse->enabled && config_.path_reuse_enabled;
-  const int dist =
-      record_exact_center_distance
-          ? compute_exact_distance_with_mode(
-                query_seq.seq, center_sequence, config_.distance_mode)
-          : compute_query_distance_with_mode(
-                query_seq.seq, center_sequence, tau, config_.distance_mode);
+  const int dist = compute_indexed_query_distance(
+      query_seq.seq, center_sequence, center_sequence_id, tau,
+      config_.distance_mode, record_exact_center_distance, cache_hit);
   if (record_exact_center_distance) {
     reuse->next.center_dist_by_node[node_id] = dist;
   }
@@ -2688,20 +2796,23 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
       stats.candidate_count++;
       stats.raw_candidate_count++;
       stats.candidate_verify_count++;
-      stats.leaf_exact_distance_call_count++;
       const bool cache_leaf_distance =
           active_path_reuse_context(this) &&
           active_path_reuse_context(this)->enabled;
       const int distance_bound = leaf_distance_cache_bound(
           config_, tolerance, cache_leaf_distance);
-      int leaf_dist = compute_query_distance_with_mode(
-          query_seq.seq, view.sequences.sequence(leaf_id), distance_bound,
-          config_.distance_mode);
+      bool cache_hit = false;
+      int leaf_dist = compute_indexed_query_distance(
+          query_seq.seq, view.sequences.sequence(leaf_id), leaf_id,
+          distance_bound, config_.distance_mode, false, &cache_hit);
       if (auto* reuse = active_path_reuse_context(this);
           reuse && reuse->enabled) {
         reuse->next.leaf_dist_by_sequence_id[leaf_id] = leaf_dist;
       }
-      stats.dist_calc_count++;
+      if (!cache_hit) {
+        stats.leaf_exact_distance_call_count++;
+        stats.dist_calc_count++;
+      }
       stats.leaf_verify_count++;
       if (config_.trace_paths) {
         stats.leaf_trace.push_back(leaf_id);
@@ -2817,7 +2928,8 @@ void BioGeometrySearchEngine::search_layer_adaptive(
         ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                        &stats.center_distance_ms);
         const int dist = compute_center_distance_for_search(
-            query_seq, node->node_id, node->get_center_sequence(), tau,
+            query_seq, node->node_id, INVALID_LEAF_ID,
+            node->get_center_sequence(), tau,
             after_mbb_filter);
         stats.dist_calc_count++;
         stats.world_access_count++;
@@ -2891,7 +3003,8 @@ void BioGeometrySearchEngine::search_layer_adaptive(
     ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                    &stats.center_distance_ms);
     int dist = compute_center_distance_for_search(
-        query_seq, node->node_id, node->get_center_sequence(), tau,
+        query_seq, node->node_id, INVALID_LEAF_ID,
+        node->get_center_sequence(), tau,
         after_mbb_filter);
     stats.dist_calc_count++;
     stats.world_access_count++;
@@ -3023,7 +3136,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
         ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                        &stats.center_distance_ms);
         const int dist = compute_center_distance_for_search(
-            query_seq, node->node_id, node->get_center_sequence(), tau,
+            query_seq, node->node_id, INVALID_LEAF_ID,
+            node->get_center_sequence(), tau,
             after_mbb_filter);
         stats.dist_calc_count++;
         stats.world_access_count++;
@@ -3098,7 +3212,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
     ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                    &stats.center_distance_ms);
     int dist = compute_center_distance_for_search(
-        query_seq, node->node_id, node->get_center_sequence(), tau,
+        query_seq, node->node_id, INVALID_LEAF_ID,
+        node->get_center_sequence(), tau,
         after_mbb_filter);
     stats.dist_calc_count++;
     stats.world_access_count++;
@@ -3492,15 +3607,18 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
           break;
         }
         const int tau = layer_radius + tolerance;
-        stats.center_exact_distance_call_count++;
         stats.center_distance_count++;
         ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                        &stats.center_distance_ms);
+        bool cache_hit = false;
         const int dist = compute_center_distance_for_search(
-            query_seq, key,
+            query_seq, key, node.center_sequence_id,
             view.sequences.sequence(node.center_sequence_id), tau,
-            after_mbb_filter);
-        stats.dist_calc_count++;
+            after_mbb_filter, &cache_hit);
+        if (!cache_hit) {
+          stats.center_exact_distance_call_count++;
+          stats.dist_calc_count++;
+        }
         stats.world_access_count++;
         if (config_.trace_paths) {
           stats.world_trace.push_back(node_id);
@@ -3584,15 +3702,18 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
         near_query_triangle_prunes_center(key, tau, stats)) {
       continue;
     }
-    stats.center_exact_distance_call_count++;
     stats.center_distance_count++;
     ScopedSearchTimer center_timer(stats.query_profile_enabled,
                                    &stats.center_distance_ms);
+    bool cache_hit = false;
     int dist = compute_center_distance_for_search(
-        query_seq, key,
+        query_seq, key, node.center_sequence_id,
         view.sequences.sequence(node.center_sequence_id), tau,
-        after_mbb_filter);
-    stats.dist_calc_count++;
+        after_mbb_filter, &cache_hit);
+    if (!cache_hit) {
+      stats.center_exact_distance_call_count++;
+      stats.dist_calc_count++;
+    }
     stats.world_access_count++;
     if (config_.trace_paths) {
       stats.world_trace.push_back(node_id);
@@ -3657,6 +3778,7 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
     }
   }
   ScopedActiveMyersQueryContext scoped_myers(active_myers_context);
+  g_query_distance_cache.begin_query();
 
   SearchStats stats(static_cast<size_t>(index_.num_primary_layers()));
   stats.query_profile_enabled = config_.query_profile;
@@ -3757,14 +3879,17 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
       }
       const int distance_bound =
           leaf_distance_cache_bound(config_, tolerance, true);
-      const int dist = compute_query_distance_with_mode(
-          query_seq.seq, view.sequences.sequence(hit_id), distance_bound,
-          config_.distance_mode);
+      bool cache_hit = false;
+      const int dist = compute_indexed_query_distance(
+          query_seq.seq, view.sequences.sequence(hit_id), hit_id,
+          distance_bound, config_.distance_mode, false, &cache_hit);
       reuse_context.next.leaf_dist_by_sequence_id[hit_id] = dist;
-      stats.dist_calc_count++;
+      if (!cache_hit) {
+        stats.dist_calc_count++;
+        stats.leaf_exact_distance_call_count++;
+      }
       stats.candidate_verify_count++;
       stats.leaf_verify_count++;
-      stats.leaf_exact_distance_call_count++;
       if (dist <= tolerance) {
         cached_hits.push_back(hit_id);
       } else {
@@ -3834,16 +3959,19 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
     for (LeafId hit_id : reuse_context.previous->exact_verified_hits) {
       if (hit_id >= view.sequences.size()) continue;
       stats.near_query_direct_verify_count++;
-      stats.dist_calc_count++;
       stats.candidate_verify_count++;
       stats.leaf_verify_count++;
-      stats.leaf_exact_distance_call_count++;
-	      const int distance_bound =
-	          leaf_distance_cache_bound(config_, tolerance, true);
-	      const int dist = compute_query_distance_with_mode(
-	          query_seq.seq, view.sequences.sequence(hit_id), distance_bound,
-	          config_.distance_mode);
-	      reuse_context.next.leaf_dist_by_sequence_id[hit_id] = dist;
+      const int distance_bound =
+          leaf_distance_cache_bound(config_, tolerance, true);
+      bool cache_hit = false;
+      const int dist = compute_indexed_query_distance(
+          query_seq.seq, view.sequences.sequence(hit_id), hit_id,
+          distance_bound, config_.distance_mode, false, &cache_hit);
+      if (!cache_hit) {
+        stats.dist_calc_count++;
+        stats.leaf_exact_distance_call_count++;
+      }
+      reuse_context.next.leaf_dist_by_sequence_id[hit_id] = dist;
       if (dist <= tolerance && unique_results.insert(hit_id).second) {
         direct_verified_hits++;
       }
@@ -3915,6 +4043,7 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
 
 std::pair<SearchResult, SearchStats>
 BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int tolerance) {
+  g_query_distance_cache.begin_query();
   SearchStats stats(static_cast<size_t>(index_.num_primary_layers()));
   const auto& view = index_.search_graph_view();
   const size_t top_layer =
@@ -4056,6 +4185,7 @@ void BioGeometrySearchEngine::traverse_exhaustive_view(
 
 std::pair<SearchResult, SearchStats>
 BioGeometrySearchEngine::search_exhaustive(const BioSequence& query_seq, int tolerance) {
+  g_query_distance_cache.begin_query();
   SearchStats stats(static_cast<size_t>(index_.num_primary_layers()));
   std::unordered_set<LeafId> unique_results;
   const auto& view = index_.search_graph_view();

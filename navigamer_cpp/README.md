@@ -349,7 +349,7 @@ records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 22
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 24
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints and stores
@@ -387,6 +387,12 @@ Because finest nodes use leaf links and all other nodes use child links, those
 two mutually exclusive ranges share one offset/count pair. Together with the
 packed count word, a finalized world node is therefore 16 bytes instead of 32,
 with no range tag and no lossy count limit.
+Adaptive, greedy, and exhaustive searches reuse exact edit distances already
+computed for the same sequence ID within one query. This fixed open-addressed
+cache occupies 16 KiB per thread regardless of index size. It stores only exact
+8-bit distances; a bounded result above its threshold and an overfull probe
+chain both bypass the cache, preserving the original pruning and recall
+semantics.
 
 ## Parameter sweeps
 
