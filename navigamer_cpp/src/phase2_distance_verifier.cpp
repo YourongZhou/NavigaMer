@@ -15,7 +15,17 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
   Phase2DistanceBatchResult verify(
       const std::vector<std::string_view>& parent_sequences,
       const std::vector<std::string_view>& child_sequences,
-      const std::vector<Phase2DistancePair>& pairs) override {
+      const std::vector<Phase2DistancePair>& pairs,
+      int tau) override {
+    if (tau < 0) {
+      throw std::invalid_argument(
+          "phase2 distance threshold must be non-negative");
+    }
+    if (pairs.size() >
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+      throw std::length_error(
+          "phase2 distance batch exceeds compact result capacity");
+    }
     Phase2DistanceBatchResult result;
     result.accepted_pair_indices.reserve(pairs.size());
 
@@ -54,15 +64,18 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
             prepared,
             prepare_parent ? child_sequences[pair.child_idx]
                            : parent_sequences[pair.parent_idx],
-            pair.tau);
+            tau);
       } else {
         dist = compute_distance_bounded_with_mode(
             parent_sequences[pair.parent_idx],
             child_sequences[pair.child_idx],
-            pair.tau,
+            tau,
             distance_mode_);
       }
-      if (dist <= pair.tau) result.accepted_pair_indices.push_back(pair_idx);
+      if (dist <= tau) {
+        result.accepted_pair_indices.push_back(
+            static_cast<uint32_t>(pair_idx));
+      }
     }
     return result;
   }

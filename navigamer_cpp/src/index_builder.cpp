@@ -2351,14 +2351,15 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
           stats_.phase2_candidate_pairs++;
           stats_.phase2_exact_distance_calls++;
           verify_pairs.push_back(
-              {parent_idx, child_idx, link_tolerance});
+              {static_cast<uint32_t>(parent_idx),
+               static_cast<uint32_t>(child_idx)});
         }
         if (verify_pairs.empty()) continue;
         Phase2DistanceBatchResult result;
         {
           ScopedTimer verify_timer(&stats_.phase2_exact_verify_ms);
           result = verifier->verify(parent_sequences, child_sequences,
-                                    verify_pairs);
+                                    verify_pairs, link_tolerance);
         }
         stats_.phase2_distance_batches++;
         for (size_t accepted_idx : result.accepted_pair_indices) {
@@ -2477,7 +2478,8 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
         if (verify_batch.empty()) return;
         const auto verify_start = Clock::now();
         const Phase2DistanceBatchResult result =
-            verifier->verify(parent_sequences, child_sequences, verify_batch);
+            verifier->verify(parent_sequences, child_sequences, verify_batch,
+                             link_tolerance);
         local.exact_verify_worker_ms += elapsed_ms_since(verify_start);
         local.stats.phase2_distance_batches++;
         for (size_t accepted_idx : result.accepted_pair_indices) {
@@ -2530,7 +2532,8 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
           }
           local.stats.phase2_exact_distance_calls++;
           verify_batch.push_back(
-              {parent_idx, child_idx, link_tolerance});
+              {static_cast<uint32_t>(parent_idx),
+               static_cast<uint32_t>(child_idx)});
           if (verify_batch.size() >= kPhase2DistanceBatchFlushPairs) {
             flush_verify_batch();
           }
