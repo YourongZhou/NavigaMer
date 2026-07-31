@@ -65,7 +65,7 @@ constexpr size_t kPhase2DistanceBatchFlushPairs = 65536;
 // Any beacon subset preserves the triangle-inequality lower bound. Capping the
 // subset bounds the otherwise quadratic child-by-beacon matrix and also bounds
 // the number of query-to-beacon distances evaluated at each world.
-constexpr size_t kMaxBuildBeaconsPerNode = 16;
+constexpr size_t kMaxBuildBeaconsPerNode = 12;
 constexpr size_t kMaxCompactSequenceLength =
     std::numeric_limits<uint8_t>::max();
 
