@@ -77,9 +77,9 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
       const auto& parent = view.node_records[parent_id];
       auto& children =
           edges[view.sequences[parent.center_sequence_id].seq];
-      for (uint32_t offset = 0; offset < parent.child_count; ++offset) {
+      for (uint32_t offset = 0; offset < parent.child_count(); ++offset) {
         const auto& child =
-            view.node_records[view.child_ids[parent.child_begin + offset]];
+            view.node_records[view.child_ids[parent.child_begin() + offset]];
         children.insert(view.sequences[child.center_sequence_id].seq);
       }
     }
@@ -96,9 +96,9 @@ LinkMap leaf_links(const navigamer::BioGeometryIndexBuilder& builder) {
        world_id < view.layer_end[layer]; ++world_id) {
     const auto& world = view.node_records[world_id];
     auto& leaves = links[view.sequences[world.center_sequence_id].seq];
-    for (uint32_t offset = 0; offset < world.leaf_count; ++offset) {
+    for (uint32_t offset = 0; offset < world.leaf_count(); ++offset) {
       leaves.insert(
-          view.sequences[view.leaf_ids[world.leaf_begin + offset]].seq);
+          view.sequences[view.leaf_ids[world.leaf_begin() + offset]].seq);
     }
   }
   return links;

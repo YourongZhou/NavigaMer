@@ -444,14 +444,19 @@ struct WorldNodeRecord {
 
   LeafId center_sequence_id = INVALID_LEAF_ID;
 
-  uint32_t child_begin = 0;
-  uint32_t child_count = 0;
-  uint32_t leaf_begin = 0;
-  uint32_t leaf_count = 0;
+  // Non-finest nodes address child_ids; finest nodes address leaf_ids.
+  // Primary layers are explicit, so the two mutually exclusive ranges share
+  // one offset/count pair without a tag or query-time branch.
+  uint32_t link_begin = 0;
+  uint32_t link_count = 0;
   uint32_t beacon_begin = 0;
   uint32_t beacon_count_and_storage = 0;
   uint32_t mbb_begin = 0;
 
+  uint32_t child_begin() const { return link_begin; }
+  uint32_t child_count() const { return link_count; }
+  uint32_t leaf_begin() const { return link_begin; }
+  uint32_t leaf_count() const { return link_count; }
   uint32_t beacon_count() const {
     return beacon_count_and_storage & BEACON_COUNT_MASK;
   }
@@ -469,8 +474,8 @@ struct WorldNodeRecord {
         count | (static_cast<uint32_t>(storage) << 30);
   }
 };
-static_assert(sizeof(WorldNodeRecord) == 32,
-              "finalized world node must remain a cache-friendly 32 bytes");
+static_assert(sizeof(WorldNodeRecord) == 24,
+              "finalized world node must remain a compact 24 bytes");
 
 // Mutable construction record. It intentionally contains only integer
 // references: no WorldNode objects are allocated while building the hierarchy.

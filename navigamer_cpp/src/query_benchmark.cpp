@@ -883,19 +883,27 @@ bool node_subtree_has_hit(
   auto memo_it = memo.find(node_id);
   if (memo_it != memo.end()) return memo_it->second;
   const auto& node = view.node_records[node_id];
-  for (uint32_t offset = 0; offset < node.leaf_count; ++offset) {
-    const LeafId leaf_id = view.leaf_ids[node.leaf_begin + offset];
-    if (leaf_id < view.sequences.size() &&
-        hit_ids.count(view.sequences[leaf_id].id)) {
-      memo[node_id] = true;
-      return true;
+  const bool is_finest =
+      !view.layer_begin.empty() &&
+      node_id >= view.layer_begin.back();
+  if (is_finest) {
+    for (uint32_t offset = 0; offset < node.leaf_count(); ++offset) {
+      const LeafId leaf_id =
+          view.leaf_ids[node.leaf_begin() + offset];
+      if (leaf_id < view.sequences.size() &&
+          hit_ids.count(view.sequences[leaf_id].id)) {
+        memo[node_id] = true;
+        return true;
+      }
     }
-  }
-  for (uint32_t offset = 0; offset < node.child_count; ++offset) {
-    if (node_subtree_has_hit(
-            view, view.child_ids[node.child_begin + offset], hit_ids, memo)) {
-      memo[node_id] = true;
-      return true;
+  } else {
+    for (uint32_t offset = 0; offset < node.child_count(); ++offset) {
+      if (node_subtree_has_hit(
+              view, view.child_ids[node.child_begin() + offset],
+              hit_ids, memo)) {
+        memo[node_id] = true;
+        return true;
+      }
     }
   }
   memo[node_id] = false;
@@ -1592,9 +1600,15 @@ struct FanoutSummary {
 
 FanoutSummary compute_fanout_summary(const BioGeometryIndexBuilder& builder) {
   std::vector<double> fanouts;
-  for (const auto& node : builder.search_graph_view().node_records) {
-    if (node.child_count == 0) continue;
-    fanouts.push_back(static_cast<double>(node.child_count));
+  const auto& view = builder.search_graph_view();
+  const NodeId finest_begin =
+      view.layer_begin.empty()
+          ? static_cast<NodeId>(view.node_records.size())
+          : view.layer_begin.back();
+  for (NodeId node_id = 0; node_id < finest_begin; ++node_id) {
+    const auto& node = view.node_records[node_id];
+    if (node.child_count() == 0) continue;
+    fanouts.push_back(static_cast<double>(node.child_count()));
   }
   if (fanouts.empty()) return {};
   FanoutSummary summary;

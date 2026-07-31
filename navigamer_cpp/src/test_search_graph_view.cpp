@@ -52,19 +52,22 @@ void assert_view_equivalent_to_original() {
          node_id < view.layer_end[layer]; ++node_id) {
       const auto& record = view.node_records[node_id];
       assert(record.center_sequence_id < view.sequences.size());
-      assert(record.child_begin + record.child_count <=
-             view.child_ids.size());
-      assert(record.leaf_begin + record.leaf_count <= view.leaf_ids.size());
-      assert(record.child_count == 0 ||
-             record.beacon_count() <= record.child_count);
-      assert(record.mbb_begin +
-                 static_cast<size_t>(record.child_count) *
-                     record.beacon_count() <=
-             view.child_beacon_dists.size());
-      assert(record.leaf_begin +
-                 static_cast<size_t>(record.leaf_count) *
-                     record.beacon_count() <=
-             view.leaf_beacon_dists.size());
+      if (layer + 1 == view.layer_begin.size()) {
+        assert(record.leaf_begin() + record.leaf_count() <=
+               view.leaf_ids.size());
+        assert(record.leaf_begin() +
+                   static_cast<size_t>(record.leaf_count()) *
+                       record.beacon_count() <=
+               view.leaf_beacon_dists.size());
+      } else {
+        assert(record.child_begin() + record.child_count() <=
+               view.child_ids.size());
+        assert(record.beacon_count() <= record.child_count());
+        assert(record.mbb_begin +
+                   static_cast<size_t>(record.child_count()) *
+                       record.beacon_count() <=
+               view.child_beacon_dists.size());
+      }
     }
   }
 }

@@ -294,7 +294,7 @@ records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 15
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 16
 stores the shared reference as exact chunked 2-bit ACGT plus verbatim non-ACGT
 exceptions, keeps long literal inputs only as manifest fingerprints, and stores
 one child-center-to-beacon byte per MBB cell. The child-layer radius
@@ -316,6 +316,9 @@ Finalized node, edge, beacon, MBB, leaf, reference-record, and repeated
 occurrence arrays are aligned in the index and loaded through read-only memory
 mappings, so index load does not duplicate the arrays into heap memory. Query
 access still uses cached raw pointers and sizes.
+Because finest nodes use leaf links and all other nodes use child links, those
+two mutually exclusive ranges share one offset/count pair. A finalized world
+node is therefore 24 bytes instead of 32, with no tag or hot-path decode.
 
 ## Parameter sweeps
 

@@ -79,7 +79,7 @@ navigamer::NodeId first_parent_with_children(
     const size_t layer_id = static_cast<size_t>(layer);
     for (uint32_t node_id = view.layer_begin[layer_id];
          node_id < view.layer_end[layer_id]; ++node_id) {
-      if (view.node_records[node_id].child_count > 0) return node_id;
+      if (view.node_records[node_id].child_count() > 0) return node_id;
     }
   }
   return navigamer::INVALID_NODE_ID;
@@ -153,9 +153,9 @@ int main() {
   std::set<std::string> candidate_set(candidate_ids.begin(), candidate_ids.end());
   const auto& view = builder.search_graph_view();
   const auto& parent_record = view.node_records[parent];
-  for (uint32_t offset = 0; offset < parent_record.child_count; ++offset) {
+  for (uint32_t offset = 0; offset < parent_record.child_count(); ++offset) {
     const auto child_id =
-        view.child_ids[parent_record.child_begin + offset];
+        view.child_ids[parent_record.child_begin() + offset];
     const auto& child = view.node_records[child_id];
     const auto child_layer_it = std::upper_bound(
         view.layer_end.begin(), view.layer_end.end(), child_id);
