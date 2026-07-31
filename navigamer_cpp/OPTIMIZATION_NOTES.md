@@ -161,6 +161,8 @@ Method: postings store the item's position in the contiguous item array:
 16-bit indexes for at most 65,535 items and 32-bit indexes otherwise. A
 worker-local epoch array deduplicates posting hits without per-query hash-node
 allocations. Item IDs and lengths are read from the contiguous item record.
+The final candidate vector reserves the already known number of touched items,
+avoiding geometric reallocation while applying the length filter.
 If an array index cannot be represented, the operation conservatively uses a
 full scan.
 

@@ -658,6 +658,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
 
   result.seed_candidate_pairs_before_length_filter =
       workspace->seed_touched.size();
+  result.candidate_item_ids.reserve(workspace->seed_touched.size());
   {
     ScopedTimer timer(&result.range_length_filter_ms);
     for (uint32_t item_idx : workspace->seed_touched) {
