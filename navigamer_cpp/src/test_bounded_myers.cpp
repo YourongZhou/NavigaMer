@@ -102,13 +102,15 @@ void test_random_against_full_dp() {
 }
 
 void test_non_acgt_fallback() {
-  const std::vector<std::pair<std::string, std::string>> pairs = {
+  std::vector<std::pair<std::string, std::string>> pairs = {
       {"ACGTNACGT", "ACGTGACGT"},
       {"acgtacgt", "acgtccgt"},
       {"ACGT-ACGT", "ACGTAACGT"},
       {"NNNN", "ACGT"},
       {"ACGT", "NNNN"},
   };
+  pairs.emplace_back(
+      std::string(250, 'A'), std::string(249, 'A') + "N");
   for (const auto& pair : pairs) {
     for (int tau : {0, 1, 2, 5, 10}) {
       assert_matches_dp_fallback(pair.first, pair.second, tau);

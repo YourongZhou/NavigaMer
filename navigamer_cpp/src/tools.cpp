@@ -277,8 +277,12 @@ int compute_distance_bounded_myers_single_word(
   int score = static_cast<int>(m);
 
   for (char c : text) {
+    const int base = dna_base_index(c);
+    if (base < 0) {
+      return compute_distance_bounded_dp(pattern.pattern, text, tau);
+    }
     const uint64_t eq =
-        pattern.peq[0][static_cast<size_t>(dna_base_index(c))];
+        pattern.peq[0][static_cast<size_t>(base)];
     const uint64_t x = eq | vn;
     const uint64_t d0 = (((x & vp) + vp) ^ vp) | x;
     uint64_t hp = vn | ~(d0 | vp);
@@ -323,7 +327,11 @@ int compute_distance_bounded_myers_multiword(
   int score = static_cast<int>(m);
 
   for (char c : text) {
-    const size_t base = static_cast<size_t>(dna_base_index(c));
+    const int base_index = dna_base_index(c);
+    if (base_index < 0) {
+      return compute_distance_bounded_dp(pattern.pattern, text, tau);
+    }
+    const size_t base = static_cast<size_t>(base_index);
     uint64_t carry = 0;
     for (size_t block = 0; block < block_count; ++block) {
       xv[block] = pattern.peq[block][base] | mv[block];
@@ -392,7 +400,7 @@ int compute_distance_bounded_myers_prepared(
   if (std::abs(m - n) > tau) return tau + 1;
   if (m == 0) return n <= tau ? n : tau + 1;
   if (n == 0) return m <= tau ? m : tau + 1;
-  if (!pattern.supported || !is_acgt_string(text)) {
+  if (!pattern.supported) {
     return compute_distance_bounded_dp(pattern.pattern, text, tau);
   }
   if (pattern.pattern.size() <= 64) {
