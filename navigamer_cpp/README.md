@@ -367,7 +367,7 @@ encoding: signed 8-bit or 16-bit deltas from the node center, falling back to a
 full 32-bit ID only when necessary. A finest-layer node's sole beacon is its
 center and consumes no side-array entry.
 Each parent uses 16-bit forward deltas for child node IDs when its complete
-child range fits. A one-bit-per-node bitmap selects that compact array;
+child range fits. A flag packed into each node record selects that compact array;
 parents with any larger delta use the exact 32-bit child-ID array instead, so
 there is no truncation or additional graph-size limit.
 Repeated reference positions use one pair for a singleton duplicate, while

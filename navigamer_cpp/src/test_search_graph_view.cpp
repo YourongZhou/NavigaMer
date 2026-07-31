@@ -252,7 +252,6 @@ void assert_node_count_overflow_is_exact() {
 void assert_child_id_encodings_are_exact() {
   navigamer::SearchGraphView view;
   view.node_records.resize(2);
-  view.child_delta16_node_bits.assign(1, 0);
   view.child_id_deltas16 = {0, UINT16_MAX};
   view.child_ids = {70000, UINT32_MAX - 1};
 

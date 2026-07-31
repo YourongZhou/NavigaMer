@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '1'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '2'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -873,9 +873,6 @@ void write_search_graph_view(std::ostream& out,
   write_final_array(
       out, view.child_id_deltas16, "child_id_deltas16");
   write_final_array(out, view.child_ids, "child_ids");
-  write_final_array(
-      out, view.child_delta16_node_bits,
-      "child_delta16_node_bits");
   write_final_array(out, view.leaf_ids, "leaf_ids");
   write_final_array(out, view.beacon_deltas8, "beacon_deltas8");
   write_final_array(out, view.beacon_deltas16, "beacon_deltas16");
@@ -905,9 +902,6 @@ SearchGraphView read_search_graph_view(
           in, mapping, "child_id_deltas16");
   view.child_ids =
       read_final_array<NodeId>(in, mapping, "child_ids");
-  view.child_delta16_node_bits =
-      read_final_array<uint64_t>(
-          in, mapping, "child_delta16_node_bits");
   view.leaf_ids =
       read_final_array<LeafId>(in, mapping, "leaf_ids");
   view.beacon_deltas8 =
@@ -929,9 +923,7 @@ bool validate_structural_layout(
   const size_t layer_count =
       builder.hierarchy_config().primary_radii.size();
   if (view.layer_begin.size() != layer_count ||
-      view.layer_end.size() != layer_count ||
-      view.child_delta16_node_bits.size() !=
-          (view.node_records.size() + 63) / 64) {
+      view.layer_end.size() != layer_count) {
     return false;
   }
   uint32_t expected_begin = 0;

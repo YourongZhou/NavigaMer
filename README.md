@@ -65,8 +65,8 @@ from the node center, with full 32-bit IDs only when needed. A finest-layer
 node's sole beacon is its center and occupies no side-array element. No
 per-edge distance vector is allocated before finalization.
 Parent-child links use exact 16-bit forward node-ID deltas when every child of
-that parent is representable; a one-bit-per-node bitmap selects the compact
-array, and any parent outside the range falls back to full 32-bit child IDs.
+that parent is representable; a flag packed into the node record selects the
+compact array, and any parent outside the range falls back to full 32-bit child IDs.
 This changes neither node IDs nor graph connectivity and never truncates an
 edge.
 Repeated reference positions use one pair for a singleton duplicate, while

@@ -555,13 +555,17 @@ struct WorldNodeRecord {
     ImplicitCenter = 3,
   };
   static constexpr uint32_t LINK_COUNT_BITS = 24;
-  static constexpr uint32_t BEACON_COUNT_BITS = 6;
+  static constexpr uint32_t BEACON_COUNT_BITS = 4;
   static constexpr uint32_t LINK_COUNT_MASK =
       (uint32_t{1} << LINK_COUNT_BITS) - 1;
   static constexpr uint32_t BEACON_COUNT_MASK =
       (uint32_t{1} << BEACON_COUNT_BITS) - 1;
   static constexpr uint32_t BEACON_COUNT_SHIFT = LINK_COUNT_BITS;
-  static constexpr uint32_t STORAGE_SHIFT = 30;
+  static constexpr uint32_t STORAGE_SHIFT = 28;
+  static constexpr uint32_t STORAGE_MASK = 3;
+  static constexpr uint32_t CHILD_DELTA16_SHIFT = 30;
+  static constexpr uint32_t CHILD_DELTA16_MASK =
+      uint32_t{1} << CHILD_DELTA16_SHIFT;
   static constexpr uint32_t COUNT_OVERFLOW_CODE = BEACON_COUNT_MASK;
 
   LeafId center_sequence_id = INVALID_LEAF_ID;
@@ -590,7 +594,13 @@ struct WorldNodeRecord {
   }
   BeaconStorage beacon_storage() const {
     return static_cast<BeaconStorage>(
-        packed_counts >> STORAGE_SHIFT);
+        (packed_counts >> STORAGE_SHIFT) & STORAGE_MASK);
+  }
+  bool child_ids_delta16() const {
+    return (packed_counts & CHILD_DELTA16_MASK) != 0;
+  }
+  void set_child_ids_delta16() {
+    packed_counts |= CHILD_DELTA16_MASK;
   }
   void set_inline_counts(uint32_t link_count, uint32_t beacon_count,
                          BeaconStorage storage) {
@@ -598,7 +608,8 @@ struct WorldNodeRecord {
         beacon_count >= COUNT_OVERFLOW_CODE) {
       throw std::length_error("node counts exceed inline packed range");
     }
-    packed_counts = link_count |
+    packed_counts = (packed_counts & CHILD_DELTA16_MASK) |
+                    link_count |
                     (beacon_count << BEACON_COUNT_SHIFT) |
                     (static_cast<uint32_t>(storage) << STORAGE_SHIFT);
   }
@@ -607,7 +618,8 @@ struct WorldNodeRecord {
     if (overflow_index > LINK_COUNT_MASK) {
       throw std::length_error("too many node-count overflow records");
     }
-    packed_counts = overflow_index |
+    packed_counts = (packed_counts & CHILD_DELTA16_MASK) |
+                    overflow_index |
                     (COUNT_OVERFLOW_CODE << BEACON_COUNT_SHIFT) |
                     (static_cast<uint32_t>(storage) << STORAGE_SHIFT);
   }
@@ -652,10 +664,9 @@ struct SearchGraphView {
 
   // A parent uses 16-bit forward deltas when every child is within 65536
   // subsequent node IDs, and otherwise falls back to absolute 32-bit IDs.
-  // One bit per node selects the representation without imposing an ID limit.
+  // The representation bit is packed into WorldNodeRecord::packed_counts.
   FinalArray<uint16_t> child_id_deltas16;
   FinalArray<NodeId> child_ids;
-  FinalArray<uint64_t> child_delta16_node_bits;
   FinalArray<LeafId> leaf_ids;
 
   FinalArray<uint8_t> child_beacon_dists;
@@ -709,18 +720,10 @@ struct SearchGraphView {
   }
 
   bool child_ids_are_delta16(NodeId node_id) const {
-    const size_t word = static_cast<size_t>(node_id) / 64;
-    return word < child_delta16_node_bits.size() &&
-           (child_delta16_node_bits[word] &
-            (uint64_t{1} << (node_id % 64))) != 0;
+    return node_records[node_id].child_ids_delta16();
   }
   void set_child_ids_delta16(NodeId node_id) {
-    const size_t word = static_cast<size_t>(node_id) / 64;
-    if (word >= child_delta16_node_bits.size()) {
-      throw std::out_of_range("child-ID encoding bitmap is too small");
-    }
-    child_delta16_node_bits[word] |=
-        uint64_t{1} << (node_id % 64);
+    node_records[node_id].set_child_ids_delta16();
   }
   NodeId child_id(NodeId node_id, uint32_t child_offset) const {
     const auto& node = node_records[node_id];

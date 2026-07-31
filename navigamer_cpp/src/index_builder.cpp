@@ -1925,9 +1925,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
   if (view.node_records.size() != world_node_count_ ||
       view.sequences.size() != sequence_count_ ||
       view.layer_begin.size() != static_cast<size_t>(num_primary_layers()) ||
-      view.layer_end.size() != static_cast<size_t>(num_primary_layers()) ||
-      view.child_delta16_node_bits.size() !=
-          (view.node_records.size() + 63) / 64) {
+      view.layer_end.size() != static_cast<size_t>(num_primary_layers())) {
     return false;
   }
   uint32_t expected_layer_begin = 0;
@@ -3706,8 +3704,6 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   }
   view.child_id_deltas16.reserve(total_child_deltas16);
   view.child_ids.reserve(total_child_ids32);
-  view.child_delta16_node_bits.assign(
-      (world_node_count_ + 63) / 64, uint64_t{0});
   view.leaf_ids.reserve(total_leaf_ids);
   view.child_beacon_dists.reserve(total_mbb_cells);
   view.beacon_deltas8.reserve(total_beacon_deltas8);
