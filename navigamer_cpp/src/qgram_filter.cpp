@@ -195,8 +195,14 @@ void QGramQueryWorkspace::reset_seen(size_t item_count) {
   }
 }
 
-void QGramQueryWorkspace::reset(size_t item_count) {
-  if (shared.size() != item_count) shared.assign(item_count, 0);
+void QGramQueryWorkspace::reset(size_t item_count, bool compact_shared) {
+  if (compact_shared) {
+    if (shared16.size() != item_count) shared16.assign(item_count, 0);
+    if (!shared.empty()) std::vector<size_t>().swap(shared);
+  } else {
+    if (shared.size() != item_count) shared.assign(item_count, 0);
+    if (!shared16.empty()) std::vector<uint16_t>().swap(shared16);
+  }
   reset_seen(item_count);
 }
 
@@ -284,7 +290,10 @@ std::vector<size_t> QGramCountIndex::query(
   const size_t query_total = query_signature.total_qgrams;
   QGramQueryWorkspace local_workspace;
   QGramQueryWorkspace* ws = workspace ? workspace : &local_workspace;
-  ws->reset(items_.size());
+  // Packed postings are selected only when every indexed item has at most
+  // UINT16_MAX q-grams. Shared counts cannot exceed the item's total.
+  const bool compact_shared = !dense_packed_postings_.empty();
+  ws->reset(items_.size(), compact_shared);
 
   if (query_signature.safe_for_pruning) {
     for (const auto& query_entry : query_signature.entries) {
@@ -292,10 +301,20 @@ std::vector<size_t> QGramCountIndex::query(
                                        uint32_t count) {
         if (ws->seen_epoch[internal_idx] != ws->epoch) {
           ws->seen_epoch[internal_idx] = ws->epoch;
-          ws->shared[internal_idx] = 0;
+          if (compact_shared) {
+            ws->shared16[internal_idx] = 0;
+          } else {
+            ws->shared[internal_idx] = 0;
+          }
         }
-        ws->shared[internal_idx] +=
+        const uint32_t contribution =
             std::min(query_entry.count, count);
+        if (compact_shared) {
+          ws->shared16[internal_idx] = static_cast<uint16_t>(
+              ws->shared16[internal_idx] + contribution);
+        } else {
+          ws->shared[internal_idx] += contribution;
+        }
       };
       if (!dense_packed_postings_.empty()) {
         if (query_entry.code >= dense_packed_postings_.size()) continue;
@@ -356,7 +375,9 @@ std::vector<size_t> QGramCountIndex::query(
         static_cast<size_t>((numerator + 1) / 2);
     const size_t shared_count =
         ws->seen_epoch[internal_idx] == ws->epoch
-            ? ws->shared[internal_idx]
+            ? (compact_shared
+                   ? static_cast<size_t>(ws->shared16[internal_idx])
+                   : ws->shared[internal_idx])
             : 0;
     if (shared_count >= required_shared) {
       candidates.push_back(item.item_id);

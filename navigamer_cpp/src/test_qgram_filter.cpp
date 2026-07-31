@@ -182,17 +182,18 @@ void test_qgram_index_reuses_sparse_workspace() {
   navigamer::QGramCountIndex::QueryStats first_stats;
   auto first = index.query(items[0].sequence, 2, &first_stats, &workspace);
   assert(contains(first, 0));
-  assert(workspace.shared.size() == items.size());
+  assert(workspace.shared.empty());
+  assert(workspace.shared16.size() == items.size());
   assert(workspace.seen_epoch.size() == items.size());
-  const auto* shared_storage = workspace.shared.data();
+  const auto* shared_storage = workspace.shared16.data();
   const auto* seen_storage = workspace.seen_epoch.data();
 
   navigamer::QGramCountIndex::QueryStats second_stats;
   auto second = index.query(items[1].sequence, 2, &second_stats, &workspace);
   assert(contains(second, 1));
-  assert(workspace.shared.data() == shared_storage);
+  assert(workspace.shared16.data() == shared_storage);
   assert(workspace.seen_epoch.data() == seen_storage);
-  assert(workspace.shared.size() == items.size());
+  assert(workspace.shared16.size() == items.size());
   assert(workspace.seen_epoch.size() == items.size());
 
   navigamer::QGramCountIndex::QueryStats short_stats;
@@ -229,17 +230,25 @@ void test_qgram_dense_postings_use_wide_fallbacks() {
   }
   navigamer::QGramCountIndex many_index(5);
   many_index.build(many_items);
-  const auto many_candidates = many_index.query("ACGTA", 0);
+  navigamer::QGramQueryWorkspace many_workspace;
+  const auto many_candidates =
+      many_index.query("ACGTA", 0, nullptr, &many_workspace);
   assert(many_candidates.size() == item_count);
   assert(many_candidates.front() == 0);
   assert(many_candidates.back() == item_count - 1);
+  assert(many_workspace.shared.size() == item_count);
+  assert(many_workspace.shared16.empty());
 
   const std::string long_sequence(
       static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 8, 'A');
   navigamer::QGramCountIndex long_index(5);
   long_index.build({{7, long_sequence}});
-  const auto long_candidates = long_index.query(long_sequence, 0);
+  navigamer::QGramQueryWorkspace long_workspace;
+  const auto long_candidates =
+      long_index.query(long_sequence, 0, nullptr, &long_workspace);
   assert((long_candidates == std::vector<size_t>{7}));
+  assert(long_workspace.shared.size() == 1);
+  assert(long_workspace.shared16.empty());
 }
 
 }  // namespace
