@@ -774,8 +774,9 @@ void append_node_anchors(const SearchGraphView& view, NodeId node_id,
   if (node.center_sequence_id < view.sequences.size()) {
     anchors.emplace_back(view.sequences.sequence(node.center_sequence_id));
   }
-  for (uint32_t offset = 0; offset < node.beacon_count; ++offset) {
-    const LeafId beacon_id = view.beacon_ids[node.beacon_begin + offset];
+  for (uint32_t offset = 0; offset < node.beacon_count(); ++offset) {
+    const LeafId beacon_id =
+        view.beacon_sequence_id(node_id, offset);
     if (beacon_id < view.sequences.size()) {
       anchors.emplace_back(view.sequences.sequence(beacon_id));
     }

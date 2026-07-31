@@ -1541,11 +1541,18 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
         return false;
       }
       if (layer + 1 == view.layer_begin.size()) {
-        if (node.child_count != 0 || node.beacon_count != 1) {
+        if (node.child_count != 0 || node.beacon_count() != 1 ||
+            node.beacon_storage() !=
+                WorldNodeRecord::BeaconStorage::ImplicitCenter) {
           return false;
         }
       } else {
-        if (node.leaf_count != 0) return false;
+        if (node.leaf_count != 0 ||
+            node.beacon_count() > node.child_count ||
+            node.beacon_storage() ==
+                WorldNodeRecord::BeaconStorage::ImplicitCenter) {
+          return false;
+        }
         for (uint32_t child_offset = 0;
              child_offset < node.child_count; ++child_offset) {
           const NodeId child_id =
@@ -1563,34 +1570,65 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
 
   size_t expected_child_begin = 0;
   size_t expected_leaf_begin = 0;
-  size_t expected_beacon_begin = 0;
   size_t expected_mbb_begin = 0;
-  for (const auto& node : view.node_records) {
+  size_t expected_beacon_delta8_begin = 0;
+  size_t expected_beacon_delta16_begin = 0;
+  size_t expected_beacon_id32_begin = 0;
+  for (NodeId node_id = 0; node_id < view.node_records.size();
+       ++node_id) {
+    const auto& node = view.node_records[node_id];
     if (node.center_sequence_id >= sequence_count_ ||
         node.child_begin != expected_child_begin ||
         node.leaf_begin != expected_leaf_begin ||
-        node.beacon_begin != expected_beacon_begin ||
         node.mbb_begin != expected_mbb_begin) {
       return false;
     }
     expected_child_begin += node.child_count;
     expected_leaf_begin += node.leaf_count;
-    expected_beacon_begin += node.beacon_count;
-    expected_mbb_begin +=
-        static_cast<size_t>(node.child_count) * node.beacon_count;
+    expected_mbb_begin += static_cast<size_t>(node.child_count) *
+                          node.beacon_count();
+    const size_t beacon_count = node.beacon_count();
+    switch (node.beacon_storage()) {
+      case WorldNodeRecord::BeaconStorage::Delta8:
+        if (node.beacon_begin != expected_beacon_delta8_begin) return false;
+        expected_beacon_delta8_begin += beacon_count;
+        break;
+      case WorldNodeRecord::BeaconStorage::Delta16:
+        if (node.beacon_begin != expected_beacon_delta16_begin) return false;
+        expected_beacon_delta16_begin += beacon_count;
+        break;
+      case WorldNodeRecord::BeaconStorage::Absolute32:
+        if (node.beacon_begin != expected_beacon_id32_begin) return false;
+        expected_beacon_id32_begin += beacon_count;
+        break;
+      case WorldNodeRecord::BeaconStorage::ImplicitCenter:
+        if (node.beacon_begin != 0 || beacon_count != 1) return false;
+        break;
+    }
     if (expected_child_begin > view.child_ids.size() ||
         expected_leaf_begin > view.leaf_ids.size() ||
-        expected_beacon_begin > view.beacon_ids.size() ||
         expected_mbb_begin > view.child_beacon_dists.size() ||
-        expected_leaf_begin > view.leaf_beacon_dists.size()) {
+        expected_leaf_begin > view.leaf_beacon_dists.size() ||
+        expected_beacon_delta8_begin > view.beacon_deltas8.size() ||
+        expected_beacon_delta16_begin > view.beacon_deltas16.size() ||
+        expected_beacon_id32_begin > view.beacon_ids32.size()) {
       return false;
+    }
+    for (uint32_t beacon_offset = 0;
+         beacon_offset < beacon_count; ++beacon_offset) {
+      if (view.beacon_sequence_id(node_id, beacon_offset) >=
+          sequence_count_) {
+        return false;
+      }
     }
   }
   if (expected_child_begin != view.child_ids.size() ||
       expected_leaf_begin != view.leaf_ids.size() ||
-      expected_beacon_begin != view.beacon_ids.size() ||
       expected_mbb_begin != view.child_beacon_dists.size() ||
-      expected_leaf_begin != view.leaf_beacon_dists.size()) {
+      expected_leaf_begin != view.leaf_beacon_dists.size() ||
+      expected_beacon_delta8_begin != view.beacon_deltas8.size() ||
+      expected_beacon_delta16_begin != view.beacon_deltas16.size() ||
+      expected_beacon_id32_begin != view.beacon_ids32.size()) {
     return false;
   }
   return validate_integer_ids();
@@ -2947,6 +2985,29 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     }
     return static_cast<uint32_t>(value);
   };
+  auto beacon_storage_for =
+      [](LeafId center, const std::vector<LeafId>& beacon_ids) {
+        bool fits_delta8 = true;
+        bool fits_delta16 = true;
+        for (LeafId beacon_id : beacon_ids) {
+          const int64_t delta = static_cast<int64_t>(beacon_id) - center;
+          fits_delta8 =
+              fits_delta8 &&
+              delta >= std::numeric_limits<int8_t>::min() &&
+              delta <= std::numeric_limits<int8_t>::max();
+          fits_delta16 =
+              fits_delta16 &&
+              delta >= std::numeric_limits<int16_t>::min() &&
+              delta <= std::numeric_limits<int16_t>::max();
+        }
+        if (fits_delta8) {
+          return WorldNodeRecord::BeaconStorage::Delta8;
+        }
+        if (fits_delta16) {
+          return WorldNodeRecord::BeaconStorage::Delta16;
+        }
+        return WorldNodeRecord::BeaconStorage::Absolute32;
+      };
   SearchGraphView view;
   view.sequences = std::move(search_graph_view_.sequences);
   view.node_records.assign(world_node_count_, WorldNodeRecord{});
@@ -2954,9 +3015,11 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   view.layer_end.assign(static_cast<size_t>(num_primary_layers()), 0);
   size_t total_child_ids = 0;
   size_t total_leaf_ids = 0;
-  size_t total_beacon_ids = 0;
   size_t total_mbb_cells = 0;
   size_t total_leaf_beacon_cells = 0;
+  size_t total_beacon_deltas8 = 0;
+  size_t total_beacon_deltas16 = 0;
+  size_t total_beacon_ids32 = 0;
   for (size_t layer_idx = 0;
        layer_idx < primary_layers_.size(); ++layer_idx) {
     const bool is_finest =
@@ -2965,20 +3028,30 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       const auto& node = build_nodes_[build_node_id];
       if (is_finest) {
         total_leaf_ids += node.child_or_leaf_ids.size();
-        total_beacon_ids += 1;
         total_leaf_beacon_cells +=
             node.leaf_beacon_dists.size();
       } else {
         total_child_ids += node.child_or_leaf_ids.size();
-        total_beacon_ids += node.beacon_ids.size();
         total_mbb_cells += node.child_beacon_dists.size();
+        const auto storage =
+            beacon_storage_for(node.center_sequence_id, node.beacon_ids);
+        if (storage == WorldNodeRecord::BeaconStorage::Delta8) {
+          total_beacon_deltas8 += node.beacon_ids.size();
+        } else if (storage ==
+                   WorldNodeRecord::BeaconStorage::Delta16) {
+          total_beacon_deltas16 += node.beacon_ids.size();
+        } else {
+          total_beacon_ids32 += node.beacon_ids.size();
+        }
       }
     }
   }
   view.child_ids.reserve(total_child_ids);
   view.leaf_ids.reserve(total_leaf_ids);
-  view.beacon_ids.reserve(total_beacon_ids);
   view.child_beacon_dists.reserve(total_mbb_cells);
+  view.beacon_deltas8.reserve(total_beacon_deltas8);
+  view.beacon_deltas16.reserve(total_beacon_deltas16);
+  view.beacon_ids32.reserve(total_beacon_ids32);
   view.leaf_beacon_dists.reserve(total_leaf_beacon_cells);
 
   for (size_t layer_idx = 0; layer_idx < primary_layers_.size(); ++layer_idx) {
@@ -3029,20 +3102,54 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       record.leaf_count =
           to_u32(view.leaf_ids.size(), "leaf_ids") - record.leaf_begin;
 
-      record.beacon_begin = to_u32(view.beacon_ids.size(), "beacon_ids");
       if (is_finest) {
-        view.beacon_ids.push_back(node.center_sequence_id);
+        record.set_beacon_layout(
+            0, 1,
+            WorldNodeRecord::BeaconStorage::ImplicitCenter);
       } else {
-        for (LeafId beacon_id : node.beacon_ids) {
-          if (beacon_id >= sequence_count_) {
-            throw std::runtime_error(
-                "cannot build search graph view with invalid beacon id");
+        const auto storage =
+            beacon_storage_for(node.center_sequence_id, node.beacon_ids);
+        uint32_t beacon_begin = 0;
+        if (storage == WorldNodeRecord::BeaconStorage::Delta8) {
+          beacon_begin =
+              to_u32(view.beacon_deltas8.size(), "beacon_deltas8");
+          for (LeafId beacon_id : node.beacon_ids) {
+            if (beacon_id >= sequence_count_) {
+              throw std::runtime_error(
+                  "cannot build search graph view with invalid beacon id");
+            }
+            view.beacon_deltas8.push_back(static_cast<int8_t>(
+                static_cast<int64_t>(beacon_id) -
+                node.center_sequence_id));
           }
-          view.beacon_ids.push_back(beacon_id);
+        } else if (
+            storage == WorldNodeRecord::BeaconStorage::Delta16) {
+          beacon_begin =
+              to_u32(view.beacon_deltas16.size(), "beacon_deltas16");
+          for (LeafId beacon_id : node.beacon_ids) {
+            if (beacon_id >= sequence_count_) {
+              throw std::runtime_error(
+                  "cannot build search graph view with invalid beacon id");
+            }
+            view.beacon_deltas16.push_back(static_cast<int16_t>(
+                static_cast<int64_t>(beacon_id) -
+                node.center_sequence_id));
+          }
+        } else {
+          beacon_begin =
+              to_u32(view.beacon_ids32.size(), "beacon_ids32");
+          for (LeafId beacon_id : node.beacon_ids) {
+            if (beacon_id >= sequence_count_) {
+              throw std::runtime_error(
+                  "cannot build search graph view with invalid beacon id");
+            }
+            view.beacon_ids32.push_back(beacon_id);
+          }
         }
+        record.set_beacon_layout(
+            beacon_begin, to_u32(node.beacon_ids.size(), "beacons"),
+            storage);
       }
-      record.beacon_count =
-          to_u32(view.beacon_ids.size(), "beacon_ids") - record.beacon_begin;
 
       const size_t child_count =
           is_finest ? 0 : node.child_or_leaf_ids.size();

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <iterator>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -232,6 +233,14 @@ struct SequenceStore {
 // One fixed-size world record. Variable-length relationships live in the
 // global arrays in SearchGraphView and are addressed by offset + count.
 struct WorldNodeRecord {
+  enum class BeaconStorage : uint32_t {
+    Delta8 = 0,
+    Delta16 = 1,
+    Absolute32 = 2,
+    ImplicitCenter = 3,
+  };
+  static constexpr uint32_t BEACON_COUNT_MASK = (uint32_t{1} << 30) - 1;
+
   LeafId center_sequence_id = INVALID_LEAF_ID;
 
   uint32_t child_begin = 0;
@@ -239,11 +248,28 @@ struct WorldNodeRecord {
   uint32_t leaf_begin = 0;
   uint32_t leaf_count = 0;
   uint32_t beacon_begin = 0;
-  uint32_t beacon_count = 0;
+  uint32_t beacon_count_and_storage = 0;
   uint32_t mbb_begin = 0;
+
+  uint32_t beacon_count() const {
+    return beacon_count_and_storage & BEACON_COUNT_MASK;
+  }
+  BeaconStorage beacon_storage() const {
+    return static_cast<BeaconStorage>(
+        beacon_count_and_storage >> 30);
+  }
+  void set_beacon_layout(uint32_t begin, uint32_t count,
+                         BeaconStorage storage) {
+    if (count > BEACON_COUNT_MASK) {
+      throw std::length_error("node beacon count exceeds packed range");
+    }
+    beacon_begin = begin;
+    beacon_count_and_storage =
+        count | (static_cast<uint32_t>(storage) << 30);
+  }
 };
 static_assert(sizeof(WorldNodeRecord) == 32,
-              "finalized world node must remain 32 bytes");
+              "finalized world node must remain a cache-friendly 32 bytes");
 
 // Mutable construction record. It intentionally contains only integer
 // references: no WorldNode objects are allocated while building the hierarchy.
@@ -280,9 +306,31 @@ struct SearchGraphView {
   std::vector<LeafId> leaf_ids;
 
   std::vector<uint8_t> child_beacon_dists;
-  std::vector<LeafId> beacon_ids;
+  std::vector<int8_t> beacon_deltas8;
+  std::vector<int16_t> beacon_deltas16;
+  std::vector<LeafId> beacon_ids32;
 
   std::vector<uint8_t> leaf_beacon_dists;
+
+  LeafId beacon_sequence_id(NodeId node_id,
+                            uint32_t beacon_offset) const {
+    const auto& node = node_records[node_id];
+    switch (node.beacon_storage()) {
+      case WorldNodeRecord::BeaconStorage::Delta8:
+        return static_cast<LeafId>(
+            static_cast<int64_t>(node.center_sequence_id) +
+            beacon_deltas8[node.beacon_begin + beacon_offset]);
+      case WorldNodeRecord::BeaconStorage::Delta16:
+        return static_cast<LeafId>(
+            static_cast<int64_t>(node.center_sequence_id) +
+            beacon_deltas16[node.beacon_begin + beacon_offset]);
+      case WorldNodeRecord::BeaconStorage::Absolute32:
+        return beacon_ids32[node.beacon_begin + beacon_offset];
+      case WorldNodeRecord::BeaconStorage::ImplicitCenter:
+        return node.center_sequence_id;
+    }
+    return INVALID_LEAF_ID;
+  }
 };
 
 class BioGeometryIndexBuilder {

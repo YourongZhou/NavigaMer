@@ -55,15 +55,15 @@ void assert_view_equivalent_to_original() {
       assert(record.child_begin + record.child_count <=
              view.child_ids.size());
       assert(record.leaf_begin + record.leaf_count <= view.leaf_ids.size());
-      assert(record.beacon_begin + record.beacon_count <=
-             view.beacon_ids.size());
+      assert(record.child_count == 0 ||
+             record.beacon_count() <= record.child_count);
       assert(record.mbb_begin +
                  static_cast<size_t>(record.child_count) *
-                     record.beacon_count <=
+                     record.beacon_count() <=
              view.child_beacon_dists.size());
       assert(record.leaf_begin +
                  static_cast<size_t>(record.leaf_count) *
-                     record.beacon_count <=
+                     record.beacon_count() <=
              view.leaf_beacon_dists.size());
     }
   }
@@ -176,12 +176,49 @@ void assert_max_byte_distance_is_recall_safe() {
   }
 }
 
+void assert_all_beacon_id_encodings_are_exact() {
+  navigamer::SearchGraphView view;
+  view.node_records.resize(4);
+  view.beacon_deltas8 = {-120};
+  view.beacon_deltas16 = {30000};
+  view.beacon_ids32 = {4000000000U};
+
+  auto& delta8 = view.node_records[0];
+  delta8.center_sequence_id = 200;
+  delta8.set_beacon_layout(
+      0, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::Delta8);
+  assert(view.beacon_sequence_id(0, 0) == 80);
+
+  auto& delta16 = view.node_records[1];
+  delta16.center_sequence_id = 1000;
+  delta16.set_beacon_layout(
+      0, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::Delta16);
+  assert(view.beacon_sequence_id(1, 0) == 31000);
+
+  auto& absolute32 = view.node_records[2];
+  absolute32.center_sequence_id = 0;
+  absolute32.set_beacon_layout(
+      0, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
+  assert(view.beacon_sequence_id(2, 0) == 4000000000U);
+
+  auto& implicit = view.node_records[3];
+  implicit.center_sequence_id = 123456789U;
+  implicit.set_beacon_layout(
+      0, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  assert(view.beacon_sequence_id(3, 0) == 123456789U);
+}
+
 }  // namespace
 
 int main() {
   assert_view_equivalent_to_original();
   assert_flat_search_matches_original();
   assert_max_byte_distance_is_recall_safe();
+  assert_all_beacon_id_encodings_are_exact();
   std::cout << "search graph view tests passed\n";
   return 0;
 }

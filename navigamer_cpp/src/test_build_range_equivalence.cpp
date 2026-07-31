@@ -216,9 +216,9 @@ Phase3BuildResult build_and_collect_phase3(
       std::ostringstream row;
       row << layer_idx << ':'
           << view.sequences[parent.center_sequence_id].seq << "|b=";
-      for (uint32_t offset = 0; offset < parent.beacon_count; ++offset) {
+      for (uint32_t offset = 0; offset < parent.beacon_count(); ++offset) {
         row << view.sequences[
-                   view.beacon_ids[parent.beacon_begin + offset]]
+                   view.beacon_sequence_id(parent_id, offset)]
                    .seq
             << ';';
       }
@@ -230,7 +230,7 @@ Phase3BuildResult build_and_collect_phase3(
       }
       row << "|m=";
       for (uint32_t child = 0; child < parent.child_count; ++child) {
-        for (uint32_t dim = 0; dim < parent.beacon_count; ++dim) {
+        for (uint32_t dim = 0; dim < parent.beacon_count(); ++dim) {
           const size_t flat = parent.mbb_begin +
                               static_cast<size_t>(dim) *
                                   parent.child_count +

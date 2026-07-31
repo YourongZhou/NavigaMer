@@ -8,12 +8,13 @@
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
+#include <type_traits>
 
 namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '0'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '1'};
 
 template <typename T>
 void write_pod(std::ostream& out, const T& value) {
@@ -240,7 +241,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 10) {
+  if (manifest.format_version != 11) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -361,6 +362,52 @@ class IndexPersistenceAccess {
 };
 
 namespace {
+
+template <typename T>
+void write_numeric_vector(std::ostream& out,
+                          const std::vector<T>& values,
+                          const char* field) {
+  static_assert(std::is_arithmetic<T>::value,
+                "numeric vector requires arithmetic elements");
+  write_size(out, values.size());
+  if (values.empty()) return;
+  const size_t byte_count = values.size() * sizeof(T);
+  if (byte_count > static_cast<size_t>(
+                       std::numeric_limits<std::streamsize>::max())) {
+    throw std::runtime_error(std::string(field) +
+                             " exceeds stream size range");
+  }
+  out.write(reinterpret_cast<const char*>(values.data()),
+            static_cast<std::streamsize>(byte_count));
+  if (!out) {
+    throw std::runtime_error(std::string("failed to write index field: ") +
+                             field);
+  }
+}
+
+template <typename T>
+std::vector<T> read_numeric_vector(std::istream& in,
+                                   const char* field) {
+  static_assert(std::is_arithmetic<T>::value,
+                "numeric vector requires arithmetic elements");
+  const size_t count = read_size(in, field);
+  if (count > static_cast<size_t>(
+                  std::numeric_limits<std::streamsize>::max()) /
+                  sizeof(T)) {
+    throw std::runtime_error(std::string(field) +
+                             " exceeds stream size range");
+  }
+  std::vector<T> values(count);
+  if (values.empty()) return values;
+  const size_t byte_count = count * sizeof(T);
+  in.read(reinterpret_cast<char*>(values.data()),
+          static_cast<std::streamsize>(byte_count));
+  if (!in) {
+    throw std::runtime_error(std::string("failed to read index field: ") +
+                             field);
+  }
+  return values;
+}
 
 void write_u8_vector(std::ostream& out,
                      const std::vector<uint8_t>& values) {
@@ -575,7 +622,7 @@ void write_node_records(
     write_pod<uint32_t>(out, record.leaf_begin);
     write_pod<uint32_t>(out, record.leaf_count);
     write_pod<uint32_t>(out, record.beacon_begin);
-    write_pod<uint32_t>(out, record.beacon_count);
+    write_pod<uint32_t>(out, record.beacon_count_and_storage);
     write_pod<uint32_t>(out, record.mbb_begin);
   }
 }
@@ -591,7 +638,8 @@ std::vector<WorldNodeRecord> read_node_records(std::istream& in) {
     record.leaf_begin = read_pod<uint32_t>(in, "node.leaf_begin");
     record.leaf_count = read_pod<uint32_t>(in, "node.leaf_count");
     record.beacon_begin = read_pod<uint32_t>(in, "node.beacon_begin");
-    record.beacon_count = read_pod<uint32_t>(in, "node.beacon_count");
+    record.beacon_count_and_storage =
+        read_pod<uint32_t>(in, "node.beacon_count_and_storage");
     record.mbb_begin = read_pod<uint32_t>(in, "node.mbb_begin");
   }
   return records;
@@ -605,7 +653,11 @@ void write_search_graph_view(std::ostream& out,
   write_u32_vector(out, view.layer_end);
   write_u32_vector(out, view.child_ids);
   write_u32_vector(out, view.leaf_ids);
-  write_u32_vector(out, view.beacon_ids);
+  write_numeric_vector(
+      out, view.beacon_deltas8, "beacon_deltas8");
+  write_numeric_vector(
+      out, view.beacon_deltas16, "beacon_deltas16");
+  write_u32_vector(out, view.beacon_ids32);
   write_u8_vector(out, view.child_beacon_dists);
   write_u8_vector(out, view.leaf_beacon_dists);
 }
@@ -618,7 +670,11 @@ SearchGraphView read_search_graph_view(std::istream& in) {
   view.layer_end = read_u32_vector(in, "layer_end");
   view.child_ids = read_u32_vector(in, "child_ids");
   view.leaf_ids = read_u32_vector(in, "leaf_ids");
-  view.beacon_ids = read_u32_vector(in, "beacon_ids");
+  view.beacon_deltas8 =
+      read_numeric_vector<int8_t>(in, "beacon_deltas8");
+  view.beacon_deltas16 =
+      read_numeric_vector<int16_t>(in, "beacon_deltas16");
+  view.beacon_ids32 = read_u32_vector(in, "beacon_ids32");
   view.child_beacon_dists =
       read_u8_vector(in, "child_beacon_dists");
   view.leaf_beacon_dists =
@@ -689,7 +745,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 10) {
+  if (manifest.format_version != 11) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -733,7 +789,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 10;
+  stored.format_version = 11;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -754,7 +810,7 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 10) {
+  if (manifest.format_version != 11) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
