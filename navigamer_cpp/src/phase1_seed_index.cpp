@@ -14,6 +14,8 @@ constexpr uint32_t kInvalidPostingIndex =
     std::numeric_limits<uint32_t>::max();
 constexpr uint16_t kInvalidCompactPostingIndex =
     std::numeric_limits<uint16_t>::max();
+constexpr uint32_t kInvalidCompact24PostingIndex = UINT32_C(0x00ffffff);
+constexpr uint32_t kMaxPackedItemIndex = UINT32_C(0x00ffffff);
 
 bool encode_seed(std::string_view sequence, size_t start, int seed_len,
                  uint64_t& code) {
@@ -99,35 +101,70 @@ IncrementalPigeonholeIndex::ensure_state(int seed_len) {
   return state;
 }
 
-void IncrementalPigeonholeIndex::promote_to_packed_postings(
+void IncrementalPigeonholeIndex::promote_to_compact24_postings(
     SeedState& state) {
   if (state.posting_storage !=
       SeedState::PostingStorage::Compact16) {
     return;
   }
-  state.packed_heads.reserve(state.compact_heads.size());
-  state.packed_entries.reserve(state.compact_entries.size());
+  state.compact24_heads.reserve(state.compact_heads.size());
+  state.compact24_entries.reserve(state.compact_entries.size());
   state.compact_heads.for_each([&](uint64_t code, uint16_t head) {
-    uint32_t packed_head = kInvalidPostingIndex;
+    uint32_t compact24_head = kInvalidCompact24PostingIndex;
     uint16_t compact_idx = head;
     while (compact_idx != kInvalidCompactPostingIndex) {
       const uint32_t entry = state.compact_entries[compact_idx];
       const uint16_t compact = static_cast<uint16_t>(entry >> 16);
+      const uint32_t new_idx =
+          static_cast<uint32_t>(state.compact24_entries.size());
+      SeedState::Compact24PostingEntry compact24_entry;
+      compact24_entry.item_idx = static_cast<uint16_t>(compact >> 8);
+      compact24_entry.position = static_cast<uint8_t>(compact);
+      compact24_entry.set_next(compact24_head);
+      state.compact24_entries.push_back(compact24_entry);
+      compact24_head = new_idx;
+      compact_idx = static_cast<uint16_t>(entry);
+    }
+    state.compact24_heads.get_or_insert(code) = compact24_head;
+  });
+  state.compact_heads.clear_and_release();
+  state.compact_entries.clear();
+  state.compact_entries.shrink_to_fit();
+  state.posting_storage = SeedState::PostingStorage::Compact24;
+}
+
+void IncrementalPigeonholeIndex::promote_to_packed_postings(
+    SeedState& state) {
+  if (state.posting_storage ==
+      SeedState::PostingStorage::Compact16) {
+    promote_to_compact24_postings(state);
+  }
+  if (state.posting_storage !=
+      SeedState::PostingStorage::Compact24) {
+    return;
+  }
+  state.packed_heads.reserve(state.compact24_heads.size());
+  state.packed_entries.reserve(state.compact24_entries.size());
+  state.compact24_heads.for_each([&](uint64_t code, uint32_t head) {
+    uint32_t packed_head = kInvalidPostingIndex;
+    uint32_t compact24_idx = head;
+    while (compact24_idx != kInvalidCompact24PostingIndex) {
+      const auto& entry = state.compact24_entries[compact24_idx];
       const uint32_t packed =
-          (static_cast<uint32_t>(compact >> 8) << 16) |
-          static_cast<uint32_t>(compact & 0xff);
+          (static_cast<uint32_t>(entry.item_idx) << 8) |
+          entry.position;
       const uint32_t new_idx =
           static_cast<uint32_t>(state.packed_entries.size());
       state.packed_entries.push_back(
           (static_cast<uint64_t>(packed) << 32) | packed_head);
       packed_head = new_idx;
-      compact_idx = static_cast<uint16_t>(entry);
+      compact24_idx = entry.next();
     }
     state.packed_heads.get_or_insert(code) = packed_head;
   });
-  state.compact_heads.clear_and_release();
-  state.compact_entries.clear();
-  state.compact_entries.shrink_to_fit();
+  state.compact24_heads.clear_and_release();
+  state.compact24_entries.clear();
+  state.compact24_entries.shrink_to_fit();
   state.posting_storage = SeedState::PostingStorage::Packed32;
 }
 
@@ -152,8 +189,8 @@ void IncrementalPigeonholeIndex::promote_to_wide_postings(
       const uint32_t new_idx =
           static_cast<uint32_t>(state.wide_entries.size());
       state.wide_entries.push_back({
-          packed >> 16,
-          packed & std::numeric_limits<uint16_t>::max(),
+          packed >> 8,
+          packed & 0xff,
           wide_head});
       wide_head = new_idx;
       packed_idx = static_cast<uint32_t>(entry);
@@ -187,11 +224,19 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
        seed_count - 1 > std::numeric_limits<uint8_t>::max() ||
        seed_count > kInvalidCompactPostingIndex -
                         state.compact_entries.size())) {
+    promote_to_compact24_postings(state);
+  }
+  if (state.posting_storage ==
+          SeedState::PostingStorage::Compact24 &&
+      (item_idx > std::numeric_limits<uint16_t>::max() ||
+       seed_count - 1 > std::numeric_limits<uint8_t>::max() ||
+       seed_count > kInvalidCompact24PostingIndex -
+                        state.compact24_entries.size())) {
     promote_to_packed_postings(state);
   }
-  if (state.posting_storage != SeedState::PostingStorage::Wide &&
-      (item_idx > std::numeric_limits<uint16_t>::max() ||
-       seed_count - 1 > std::numeric_limits<uint16_t>::max())) {
+  if (state.posting_storage == SeedState::PostingStorage::Packed32 &&
+      (item_idx > kMaxPackedItemIndex ||
+       seed_count - 1 > std::numeric_limits<uint8_t>::max())) {
     promote_to_wide_postings(state);
   }
   const uint64_t mask =
@@ -223,6 +268,20 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
           (static_cast<uint32_t>(packed) << 16) | head);
       head = entry_idx;
     } else if (state.posting_storage ==
+               SeedState::PostingStorage::Compact24) {
+      uint32_t& head = state.compact24_heads.get_or_insert(code);
+      const uint32_t entry_idx =
+          static_cast<uint32_t>(state.compact24_entries.size());
+      SeedState::Compact24PostingEntry entry;
+      entry.item_idx = static_cast<uint16_t>(item_idx);
+      entry.position = static_cast<uint8_t>(start);
+      entry.set_next(
+          head == std::numeric_limits<uint32_t>::max()
+              ? kInvalidCompact24PostingIndex
+              : head);
+      state.compact24_entries.push_back(entry);
+      head = entry_idx;
+    } else if (state.posting_storage ==
                SeedState::PostingStorage::Packed32) {
       if (state.packed_entries.size() >= kInvalidPostingIndex) {
         throw std::overflow_error("phase1 seed posting arena exceeds uint32 capacity");
@@ -231,7 +290,7 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
       const uint32_t entry_idx =
           static_cast<uint32_t>(state.packed_entries.size());
       const uint32_t packed =
-          (item_idx << 16) | static_cast<uint32_t>(start);
+          (item_idx << 8) | static_cast<uint32_t>(start);
       state.packed_entries.push_back(
           (static_cast<uint64_t>(packed) << 32) | head);
       head = entry_idx;
@@ -313,6 +372,20 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
         }
       }
     } else if (state.posting_storage ==
+               SeedState::PostingStorage::Compact24) {
+      const uint32_t posting = state.compact24_heads.find(code);
+      if (posting == std::numeric_limits<uint32_t>::max()) continue;
+      for (uint32_t entry_idx = posting;
+           entry_idx != kInvalidCompact24PostingIndex;) {
+        const auto& entry = state.compact24_entries[entry_idx];
+        entry_idx = entry.next();
+        result.posting_entries_visited++;
+        if (std::llabs(static_cast<long long>(entry.position) -
+                       static_cast<long long>(block_start)) <= tau) {
+          add_item(entry.item_idx);
+        }
+      }
+    } else if (state.posting_storage ==
                SeedState::PostingStorage::Packed32) {
       const uint32_t posting = state.packed_heads.find(code);
       if (posting == kInvalidPostingIndex) continue;
@@ -322,9 +395,8 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
         const uint32_t packed = static_cast<uint32_t>(entry >> 32);
         entry_idx = static_cast<uint32_t>(entry);
         result.posting_entries_visited++;
-        const uint32_t item_idx = packed >> 16;
-        const uint32_t position =
-            packed & std::numeric_limits<uint16_t>::max();
+        const uint32_t item_idx = packed >> 8;
+        const uint32_t position = packed & 0xff;
         if (std::llabs(static_cast<long long>(position) -
                        static_cast<long long>(block_start)) <= tau) {
           add_item(item_idx);

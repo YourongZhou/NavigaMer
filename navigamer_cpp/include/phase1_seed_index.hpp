@@ -136,9 +136,31 @@ class IncrementalPigeonholeIndex {
   struct SeedState {
     enum class PostingStorage : uint8_t {
       Compact16,
+      Compact24,
       Packed32,
       Wide,
     };
+
+    struct Compact24PostingEntry {
+      uint16_t item_idx = 0;
+      uint8_t position = 0;
+      uint8_t next_low = 0xff;
+      uint8_t next_mid = 0xff;
+      uint8_t next_high = 0xff;
+
+      uint32_t next() const {
+        return static_cast<uint32_t>(next_low) |
+               (static_cast<uint32_t>(next_mid) << 8) |
+               (static_cast<uint32_t>(next_high) << 16);
+      }
+      void set_next(uint32_t value) {
+        next_low = static_cast<uint8_t>(value);
+        next_mid = static_cast<uint8_t>(value >> 8);
+        next_high = static_cast<uint8_t>(value >> 16);
+      }
+    };
+    static_assert(sizeof(Compact24PostingEntry) == 6,
+                  "compact phase1 posting entry must remain 6 bytes");
 
     struct WidePostingEntry {
       uint32_t item_idx = 0;
@@ -152,6 +174,8 @@ class IncrementalPigeonholeIndex {
     PostingStorage posting_storage = PostingStorage::Compact16;
     PostingHeadMap<uint16_t> compact_heads;
     std::vector<uint32_t> compact_entries;
+    PostingHeadMap<uint32_t> compact24_heads;
+    std::vector<Compact24PostingEntry> compact24_entries;
     PostingHeadMap<uint32_t> packed_heads;
     std::vector<uint64_t> packed_entries;
     PostingHeadMap<uint32_t> wide_heads;
@@ -166,6 +190,7 @@ class IncrementalPigeonholeIndex {
   uint32_t epoch_ = 0;
 
   SeedState& ensure_state(int seed_len);
+  static void promote_to_compact24_postings(SeedState& state);
   static void promote_to_packed_postings(SeedState& state);
   static void promote_to_wide_postings(SeedState& state);
   void index_item(SeedState& state, int seed_len, uint32_t item_idx);
