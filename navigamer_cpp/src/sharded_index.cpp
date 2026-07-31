@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <limits>
 #include <omp.h>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
@@ -34,6 +35,7 @@ constexpr std::array<char, 8> kRouterMagic = {
 constexpr uint32_t kShardFormatVersion = 3;
 constexpr uint32_t kRouterFormatVersion = 2;
 constexpr size_t kRouterHeaderBytes = 48;
+constexpr std::streamoff kRouterChecksumOffset = 40;
 constexpr uint32_t kRouterK = 16;
 constexpr uint32_t kRouterWindow = 64;
 constexpr uint64_t kMaxShardCount = uint64_t{1} << 20;
@@ -190,27 +192,17 @@ size_t packed_shard_byte_count(
   return (entry_count * shard_id_bits + 7) / 8;
 }
 
-template <typename Emit>
-void for_each_packed_shard_byte(
-    const uint64_t* entries, size_t entry_count,
-    uint32_t shard_count, uint32_t shard_id_bits,
-    Emit emit) {
-  uint64_t pending = 0;
-  uint32_t pending_bits = 0;
-  for (size_t idx = 0; idx < entry_count; ++idx) {
-    const uint32_t shard_id = static_cast<uint32_t>(entries[idx]);
-    if (shard_id >= shard_count) {
-      throw std::runtime_error("shard router contains invalid shard ID");
-    }
-    pending |= static_cast<uint64_t>(shard_id) << pending_bits;
-    pending_bits += shard_id_bits;
-    while (pending_bits >= 8) {
-      emit(static_cast<uint8_t>(pending));
-      pending >>= 8;
-      pending_bits -= 8;
-    }
-  }
-  if (pending_bits != 0) emit(static_cast<uint8_t>(pending));
+uint64_t begin_router_checksum(
+    uint32_t k, uint32_t window, uint32_t shard_count,
+    uint32_t shard_id_bits, size_t entry_count) {
+  uint64_t hash = kFnvOffset;
+  hash_pod<uint32_t>(&hash, kRouterFormatVersion);
+  hash_pod<uint32_t>(&hash, k);
+  hash_pod<uint32_t>(&hash, window);
+  hash_pod<uint32_t>(&hash, shard_count);
+  hash_pod<uint32_t>(&hash, shard_id_bits);
+  hash_pod<uint64_t>(&hash, entry_count);
+  return hash;
 }
 
 [[maybe_unused]] uint64_t router_storage_checksum(
@@ -218,43 +210,11 @@ void for_each_packed_shard_byte(
     uint32_t shard_id_bits, size_t entry_count,
     const uint32_t* minimizer_codes,
     const uint8_t* packed_shard_ids, size_t packed_size) {
-  uint64_t hash = kFnvOffset;
-  hash_pod<uint32_t>(&hash, kRouterFormatVersion);
-  hash_pod<uint32_t>(&hash, k);
-  hash_pod<uint32_t>(&hash, window);
-  hash_pod<uint32_t>(&hash, shard_count);
-  hash_pod<uint32_t>(&hash, shard_id_bits);
-  hash_pod<uint64_t>(&hash, entry_count);
+  uint64_t hash = begin_router_checksum(
+      k, window, shard_count, shard_id_bits, entry_count);
   hash_bytes(
       &hash, minimizer_codes, entry_count * sizeof(uint32_t));
   hash_bytes(&hash, packed_shard_ids, packed_size);
-  return hash;
-}
-
-uint64_t router_checksum(
-    uint32_t k, uint32_t window, uint32_t shard_count,
-    const uint64_t* entries, size_t entry_count) {
-  if (entry_count >
-      std::numeric_limits<size_t>::max() / sizeof(uint32_t)) {
-    throw std::runtime_error("shard router checksum size overflow");
-  }
-  const uint32_t shard_id_bits =
-      required_shard_id_bits(shard_count);
-  (void)packed_shard_byte_count(entry_count, shard_id_bits);
-  uint64_t hash = kFnvOffset;
-  hash_pod<uint32_t>(&hash, kRouterFormatVersion);
-  hash_pod<uint32_t>(&hash, k);
-  hash_pod<uint32_t>(&hash, window);
-  hash_pod<uint32_t>(&hash, shard_count);
-  hash_pod<uint32_t>(&hash, shard_id_bits);
-  hash_pod<uint64_t>(&hash, entry_count);
-  for (size_t idx = 0; idx < entry_count; ++idx) {
-    const uint32_t code = static_cast<uint32_t>(entries[idx] >> 32);
-    hash_pod<uint32_t>(&hash, code);
-  }
-  for_each_packed_shard_byte(
-      entries, entry_count, shard_count, shard_id_bits,
-      [&hash](uint8_t byte) { hash_bytes(&hash, &byte, 1); });
   return hash;
 }
 
@@ -362,6 +322,7 @@ std::vector<uint32_t> reference_minimizers(
   minimizers.erase(
       std::unique(minimizers.begin(), minimizers.end()),
       minimizers.end());
+  minimizers.shrink_to_fit();
   return minimizers;
 }
 
@@ -383,6 +344,11 @@ struct ShardBuildSpec {
   uint32_t source_begin = 0;
   uint32_t source_end = 0;
   size_t window_count = 0;
+};
+
+struct RouterBuildData {
+  std::vector<std::vector<uint32_t>> shard_minimizers;
+  size_t entry_count = 0;
 };
 
 bool load_reusable_shard(
@@ -440,18 +406,27 @@ void install_shard_atomically(
   }
 }
 
-void save_router_sidecar(
+uint64_t save_router_sidecar(
     const std::filesystem::path& path,
     uint32_t k, uint32_t window, uint32_t shard_count,
-    const std::vector<uint64_t>& entries, uint64_t checksum) {
+    const RouterBuildData& data) {
+  if (data.shard_minimizers.size() != shard_count ||
+      data.entry_count == 0) {
+    throw std::runtime_error("invalid shard router build data");
+  }
   const std::filesystem::path temporary = path.string() + ".tmp";
+  const std::filesystem::path packed_temporary =
+      path.string() + ".packed.tmp";
   const uint32_t shard_id_bits =
       required_shard_id_bits(shard_count);
   const size_t packed_size =
-      packed_shard_byte_count(entries.size(), shard_id_bits);
-  {
+      packed_shard_byte_count(data.entry_count, shard_id_bits);
+  uint64_t checksum = begin_router_checksum(
+      k, window, shard_count, shard_id_bits, data.entry_count);
+  try {
     std::ofstream out(temporary, std::ios::binary);
-    if (!out) {
+    std::ofstream packed_out(packed_temporary, std::ios::binary);
+    if (!out || !packed_out) {
       throw std::runtime_error("unable to open shard router output");
     }
     out.write(kRouterMagic.data(),
@@ -462,56 +437,140 @@ void save_router_sidecar(
     write_pod<uint32_t>(out, shard_count);
     write_pod<uint32_t>(out, shard_id_bits);
     write_pod<uint32_t>(out, 0);
-    write_pod<uint64_t>(out, entries.size());
-    write_pod<uint64_t>(out, checksum);
-    if (!entries.empty()) {
-      if (entries.size() >
-          static_cast<size_t>(
-              std::numeric_limits<std::streamsize>::max()) /
-              sizeof(uint32_t)) {
-        throw std::runtime_error(
-            "shard router exceeds stream size limit");
+    write_pod<uint64_t>(out, data.entry_count);
+    write_pod<uint64_t>(out, 0);
+
+    struct Cursor {
+      uint32_t code = 0;
+      uint32_t shard_id = 0;
+      size_t offset = 0;
+    };
+    struct CursorGreater {
+      bool operator()(const Cursor& left, const Cursor& right) const {
+        if (left.code != right.code) return left.code > right.code;
+        return left.shard_id > right.shard_id;
       }
-      std::array<uint32_t, 16384> code_buffer{};
-      for (size_t begin = 0; begin < entries.size();
-           begin += code_buffer.size()) {
-        const size_t count = std::min(
-            code_buffer.size(), entries.size() - begin);
-        for (size_t offset = 0; offset < count; ++offset) {
-          code_buffer[offset] = static_cast<uint32_t>(
-              entries[begin + offset] >> 32);
-        }
-        out.write(
-            reinterpret_cast<const char*>(code_buffer.data()),
-            static_cast<std::streamsize>(
-                count * sizeof(uint32_t)));
-      }
-      std::array<uint8_t, 65536> shard_buffer{};
-      size_t buffered = 0;
-      size_t written = 0;
-      const auto flush = [&]() {
-        out.write(
-            reinterpret_cast<const char*>(shard_buffer.data()),
-            static_cast<std::streamsize>(buffered));
-        written += buffered;
-        buffered = 0;
-      };
-      for_each_packed_shard_byte(
-          entries.data(), entries.size(), shard_count,
-          shard_id_bits, [&](uint8_t byte) {
-            shard_buffer[buffered++] = byte;
-            if (buffered == shard_buffer.size()) flush();
-          });
-      if (buffered != 0) flush();
-      if (written != packed_size) {
-        throw std::runtime_error(
-            "shard router packed size mismatch");
+    };
+    std::priority_queue<
+        Cursor, std::vector<Cursor>, CursorGreater> queue;
+    for (uint32_t shard_id = 0; shard_id < shard_count; ++shard_id) {
+      const auto& minimizers = data.shard_minimizers[shard_id];
+      if (!minimizers.empty()) {
+        queue.push({minimizers.front(), shard_id, 0});
       }
     }
+
+    std::vector<uint32_t> code_buffer(
+        std::min<size_t>(16384, data.entry_count));
+    size_t code_buffered = 0;
+    const auto flush_codes = [&]() {
+      if (code_buffered == 0) return;
+      const size_t byte_count =
+          code_buffered * sizeof(uint32_t);
+      out.write(
+          reinterpret_cast<const char*>(code_buffer.data()),
+          static_cast<std::streamsize>(byte_count));
+      hash_bytes(&checksum, code_buffer.data(), byte_count);
+      code_buffered = 0;
+    };
+    std::vector<uint8_t> shard_buffer(
+        std::min<size_t>(65536, packed_size));
+    size_t shard_buffered = 0;
+    size_t packed_written = 0;
+    const auto flush_shards = [&]() {
+      if (shard_buffered == 0) return;
+      packed_out.write(
+          reinterpret_cast<const char*>(shard_buffer.data()),
+          static_cast<std::streamsize>(shard_buffered));
+      packed_written += shard_buffered;
+      shard_buffered = 0;
+    };
+    const auto emit_packed_byte = [&](uint8_t byte) {
+      shard_buffer[shard_buffered++] = byte;
+      if (shard_buffered == shard_buffer.size()) flush_shards();
+    };
+    uint64_t pending_shard_bits = 0;
+    uint32_t pending_bit_count = 0;
+    size_t emitted = 0;
+    while (!queue.empty()) {
+      const Cursor cursor = queue.top();
+      queue.pop();
+      code_buffer[code_buffered++] = cursor.code;
+      if (code_buffered == code_buffer.size()) flush_codes();
+
+      pending_shard_bits |=
+          static_cast<uint64_t>(cursor.shard_id) << pending_bit_count;
+      pending_bit_count += shard_id_bits;
+      while (pending_bit_count >= 8) {
+        emit_packed_byte(static_cast<uint8_t>(pending_shard_bits));
+        pending_shard_bits >>= 8;
+        pending_bit_count -= 8;
+      }
+      ++emitted;
+
+      const auto& minimizers =
+          data.shard_minimizers[cursor.shard_id];
+      const size_t next_offset = cursor.offset + 1;
+      if (next_offset < minimizers.size()) {
+        queue.push({
+            minimizers[next_offset], cursor.shard_id, next_offset});
+      }
+    }
+    flush_codes();
+    if (pending_bit_count != 0) {
+      emit_packed_byte(static_cast<uint8_t>(pending_shard_bits));
+    }
+    flush_shards();
+    packed_out.close();
+    if (!packed_out || emitted != data.entry_count ||
+        packed_written != packed_size) {
+      throw std::runtime_error("failed to pack shard router IDs");
+    }
+
+    std::ifstream packed_in(packed_temporary, std::ios::binary);
+    if (!packed_in) {
+      throw std::runtime_error("unable to reopen packed shard router IDs");
+    }
+    size_t packed_copied = 0;
+    while (packed_in) {
+      packed_in.read(
+          reinterpret_cast<char*>(shard_buffer.data()),
+          static_cast<std::streamsize>(shard_buffer.size()));
+      const size_t count = static_cast<size_t>(packed_in.gcount());
+      if (count != 0) {
+        out.write(
+            reinterpret_cast<const char*>(shard_buffer.data()),
+            static_cast<std::streamsize>(count));
+        hash_bytes(&checksum, shard_buffer.data(), count);
+        packed_copied += count;
+      }
+    }
+    if (!packed_in.eof() || packed_copied != packed_size) {
+      throw std::runtime_error("failed to read packed shard router IDs");
+    }
+    packed_in.close();
+    if (checksum == 0) {
+      throw std::runtime_error("invalid zero shard router checksum");
+    }
+    out.seekp(kRouterChecksumOffset, std::ios::beg);
+    write_pod<uint64_t>(out, checksum);
     out.close();
     if (!out) {
       throw std::runtime_error("failed to finalize shard router output");
     }
+    std::error_code remove_error;
+    std::filesystem::remove(packed_temporary, remove_error);
+    if (remove_error) {
+      throw std::runtime_error(
+          "unable to remove temporary shard router IDs: " +
+          remove_error.message());
+    }
+  } catch (...) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    ignored.clear();
+    std::filesystem::remove(packed_temporary, ignored);
+    throw;
   }
   std::error_code error;
   std::filesystem::rename(temporary, path, error);
@@ -520,36 +579,31 @@ void save_router_sidecar(
     throw std::runtime_error(
         "unable to install shard router: " + error.message());
   }
+  return checksum;
 }
 
-std::vector<uint64_t> build_router_entries(
+RouterBuildData build_router_data(
     const std::string& reference_sequence,
     const std::vector<ShardBuildSpec>& specs,
     uint32_t k, uint32_t window) {
   if (specs.size() > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("too many shards for seed router");
   }
-  std::vector<uint64_t> entries;
-  for (size_t shard_idx = 0; shard_idx < specs.size(); ++shard_idx) {
-    const auto& spec = specs[shard_idx];
+  RouterBuildData data;
+  data.shard_minimizers.reserve(specs.size());
+  for (const auto& spec : specs) {
     const std::string_view slice(
         reference_sequence.data() + spec.slice_begin,
         spec.slice_end - spec.slice_begin);
-    const auto minimizers = reference_minimizers(slice, k, window);
+    auto minimizers = reference_minimizers(slice, k, window);
     if (minimizers.size() >
-        std::numeric_limits<size_t>::max() - entries.size()) {
+        std::numeric_limits<size_t>::max() - data.entry_count) {
       throw std::runtime_error("shard router entry count overflow");
     }
-    entries.reserve(entries.size() + minimizers.size());
-    for (uint32_t code : minimizers) {
-      entries.push_back(
-          (static_cast<uint64_t>(code) << 32) |
-          static_cast<uint32_t>(shard_idx));
-    }
+    data.entry_count += minimizers.size();
+    data.shard_minimizers.push_back(std::move(minimizers));
   }
-  std::sort(entries.begin(), entries.end());
-  entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
-  return entries;
+  return data;
 }
 
 void validate_manifest(const ShardedIndexManifest& manifest) {
@@ -1184,21 +1238,17 @@ ShardedIndexManifest build_sharded_reference_index(
     manifest.shards.push_back(std::move(descriptor));
   }
   if (specs.size() > 1 && window_length >= kRouterWindow) {
-    auto router_entries = build_router_entries(
+    auto router_data = build_router_data(
         reference_sequence, specs, kRouterK, kRouterWindow);
-    if (!router_entries.empty()) {
+    if (router_data.entry_count != 0) {
       manifest.router_k = kRouterK;
       manifest.router_window = kRouterWindow;
-      manifest.router_entry_count = router_entries.size();
-      manifest.router_checksum = router_checksum(
-          manifest.router_k, manifest.router_window,
-          static_cast<uint32_t>(manifest.shards.size()),
-          router_entries.data(), router_entries.size());
-      save_router_sidecar(
+      manifest.router_entry_count = router_data.entry_count;
+      manifest.router_checksum = save_router_sidecar(
           router_output_path(bundle), manifest.router_k,
           manifest.router_window,
           static_cast<uint32_t>(manifest.shards.size()),
-          router_entries, manifest.router_checksum);
+          router_data);
     }
   }
   save_sharded_index_manifest(bundle_path, manifest);

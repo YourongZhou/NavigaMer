@@ -222,13 +222,16 @@ interrupted build; new shards are installed atomically. The final
 and a memory-mapped exact-minimizer router sidecar. The sidecar stores sorted
 32-bit minimizers plus shard IDs at exactly `ceil(log2(shard_count))` bits per
 entry. For a query at tolerance `d`, the router takes one 64-base seed from
-each of `d + 1` disjoint query
-blocks and searches only shards containing at least one seed minimizer. The
-pigeonhole principle makes this a necessary condition for an edit-distance
+each of `d + 1` disjoint query blocks and searches only shards containing at
+least one seed minimizer. The pigeonhole principle makes this a necessary
+condition for an edit-distance
 hit, not a heuristic. Short or ambiguous unsupported queries, and missing or
 invalid router sidecars, conservatively search every shard. `query-index` and
 `query-index-batch` search the selected parts in parallel and merge identical
 sequences and all of their occurrences before reporting results.
+Router construction retains only each shard's sorted 32-bit minimizer list and
+k-way merges those lists directly into the sidecar. It does not allocate the
+older 8-byte global pair array or perform a second global sort.
 Query loading validates signatures, counts, file bounds, layer ranges, shard
 coordinates, and the bundle checksum without rescanning every mapped node or
 edge; completed or resumed builds perform the full per-part validation.

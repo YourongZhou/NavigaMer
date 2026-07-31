@@ -297,10 +297,13 @@ windows of at least 64 bases also store a memory-mapped `.route` sidecar of
 exact 16-mer minimizers. Minimizers use a 32-bit array and parallel shard IDs
 use exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
 64-base seed is taken from each of `d + 1` disjoint query blocks; only shards
-containing at least one seed
-minimizer are searched. This is a pigeonhole necessary condition for an exact
-edit-distance hit. Unsupported short/ambiguous queries or an unavailable
+containing at least one seed minimizer are searched. This is a pigeonhole
+necessary condition for an exact edit-distance hit. Unsupported
+short/ambiguous queries or an unavailable
 sidecar conservatively search all parts.
+Router construction stores only per-shard 32-bit minimizer lists and k-way
+merges them directly into the sidecar, avoiding an 8-byte global pair array and
+a second global sort. This changes build peak memory, not query-time layout.
 
 **Required:** `--ref`, `--index`, `--shard-windows`
 

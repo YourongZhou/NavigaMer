@@ -344,14 +344,25 @@ void test_seed_router_no_false_negatives() {
          expected_router_bytes);
   assert(expected_router_bytes <
          40 + manifest.router_entry_count * sizeof(uint64_t));
+  const auto rebuilt_manifest =
+      navigamer::build_sharded_reference_index(
+          bundle.string(), "literal-router-reference", "reference",
+          reference, contigs, window, stride, shard_windows,
+          hierarchy, range_config, 2);
+  assert(rebuilt_manifest.router_entry_count ==
+         manifest.router_entry_count);
+  assert(rebuilt_manifest.router_checksum ==
+         manifest.router_checksum);
+  assert(!std::filesystem::exists(
+      bundle.string() + ".route.packed.tmp"));
   const auto router = navigamer::load_sharded_seed_router(
-      bundle.string(), manifest);
+      bundle.string(), rebuilt_manifest);
   assert(router.enabled());
   assert(router.shard_id_bits == 3);
   assert(router.minimizer_codes.is_mapped());
   assert(router.packed_shard_ids.is_mapped());
   const auto shards = navigamer::load_sharded_index(
-      bundle.string(), manifest);
+      bundle.string(), rebuilt_manifest);
 
   const std::vector<size_t> source_positions = {
       0, 1, 50, 98, 99, 100, 101, 198, 199,

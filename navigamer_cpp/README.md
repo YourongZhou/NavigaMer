@@ -246,8 +246,8 @@ has multiple shards and windows of at least 64 bases, a memory-mapped
 `d + 1` disjoint query blocks. Its keys are 32-bit arrays and the parallel
 shard IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
 within edit distance `d` must contain one whole block exactly, so omitting
-shards without all of those minimizers is
-no-FN-safe. Unsupported short/ambiguous queries or an unavailable sidecar fall
+shards without all of those minimizers is no-FN-safe. Unsupported
+short/ambiguous queries or an unavailable sidecar fall
 back to every part. `query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Bundle query
 loading validates signatures, counts, mapped file bounds, layer ranges, shard coordinates, and
@@ -268,6 +268,11 @@ run can distinguish low-fanout gating from high-fanout router usage.
 benchmarks and can compare original, random, minimizer, q-gram signature, router
 signature, and source-sorted oracle query ordering; the source oracle schedule is
 diagnostic only.
+
+The router builder retains only per-shard sorted 32-bit minimizer lists, then
+k-way merges them while streaming the key column and packed shard IDs. This
+halves the dominant router-construction array from 8 to 4 bytes per entry and
+removes the former second global sort; query-time layout is unchanged.
 Use `--query-fastq-out <path>` to export the deterministic generated queries
 with `source_pos=` read-header annotations for matched external baseline
 candidate-recovery checks.
