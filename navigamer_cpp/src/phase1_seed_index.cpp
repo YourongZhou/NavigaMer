@@ -94,6 +94,24 @@ IncrementalPigeonholeIndex::ensure_state(int seed_len) {
   return state;
 }
 
+void IncrementalPigeonholeIndex::promote_to_wide_postings(
+    SeedState& state) {
+  if (!state.uses_packed_postings) return;
+  state.wide_postings.reserve(state.packed_postings.size());
+  for (auto& entry : state.packed_postings) {
+    auto& wide = state.wide_postings[entry.first];
+    wide.reserve(entry.second.size());
+    for (uint32_t packed : entry.second) {
+      wide.push_back({
+          packed >> 16,
+          packed & std::numeric_limits<uint16_t>::max()});
+    }
+  }
+  state.packed_postings.clear();
+  state.packed_postings.rehash(0);
+  state.uses_packed_postings = false;
+}
+
 void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
                                             uint32_t item_idx) {
   const std::string& sequence = items_[item_idx].sequence;
@@ -105,6 +123,15 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
 
   const size_t seed_count =
       sequence.size() - static_cast<size_t>(seed_len) + 1;
+  if (seed_count - 1 > std::numeric_limits<uint32_t>::max()) {
+    state.unindexable_items.push_back(item_idx);
+    return;
+  }
+  if (state.uses_packed_postings &&
+      (item_idx > std::numeric_limits<uint16_t>::max() ||
+       seed_count - 1 > std::numeric_limits<uint16_t>::max())) {
+    promote_to_wide_postings(state);
+  }
   const uint64_t mask =
       seed_len == 32
           ? std::numeric_limits<uint64_t>::max()
@@ -123,8 +150,13 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
       state.unindexable_items.push_back(item_idx);
       return;
     }
-    state.postings[code].push_back(
-        {item_idx, static_cast<uint32_t>(start)});
+    if (state.uses_packed_postings) {
+      state.packed_postings[code].push_back(
+          (item_idx << 16) | static_cast<uint32_t>(start));
+    } else {
+      state.wide_postings[code].push_back(
+          {item_idx, static_cast<uint32_t>(start)});
+    }
   }
 }
 
@@ -174,13 +206,28 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
     const size_t block_start = block_idx * block_len;
     uint64_t code = 0;
     if (!encode_seed(sequence, block_start, result.seed_len, code)) return {};
-    auto posting = state.postings.find(code);
-    if (posting == state.postings.end()) continue;
-    result.posting_entries_visited += posting->second.size();
-    for (const auto& seed_posting : posting->second) {
-      if (std::llabs(static_cast<long long>(seed_posting.position) -
-                     static_cast<long long>(block_start)) <= tau) {
-        add_item(seed_posting.item_idx);
+    if (state.uses_packed_postings) {
+      const auto posting = state.packed_postings.find(code);
+      if (posting == state.packed_postings.end()) continue;
+      result.posting_entries_visited += posting->second.size();
+      for (uint32_t packed : posting->second) {
+        const uint32_t item_idx = packed >> 16;
+        const uint32_t position =
+            packed & std::numeric_limits<uint16_t>::max();
+        if (std::llabs(static_cast<long long>(position) -
+                       static_cast<long long>(block_start)) <= tau) {
+          add_item(item_idx);
+        }
+      }
+    } else {
+      const auto posting = state.wide_postings.find(code);
+      if (posting == state.wide_postings.end()) continue;
+      result.posting_entries_visited += posting->second.size();
+      for (const auto& seed_posting : posting->second) {
+        if (std::llabs(static_cast<long long>(seed_posting.position) -
+                       static_cast<long long>(block_start)) <= tau) {
+          add_item(seed_posting.item_idx);
+        }
       }
     }
   }

@@ -55,11 +55,17 @@ Problem: q-gram posting maps used heap-allocated string keys and repeated
 substring hashing.
 
 Method: q-grams of at most 32 bases use the same 2-bit `uint64_t` encoding.
-Counts are built from rolling codes, sorted, and run-length encoded.
+Counts are built from rolling codes, sorted, and run-length encoded. For the
+production setting `q <= 5`, the code space has at most 1,024 entries, so
+signatures are counted directly in a fixed array and emitted in code order.
+The inverted index uses direct code-indexed posting arrays rather than a hash
+lookup. When item indexes and counts fit in 16 bits, one posting is packed into
+32 bits; larger inputs automatically retain the wide representation.
 
 Safety: the q-gram L1 inequality is unchanged. Unsupported q values or
 non-ACGT input disable pruning for the affected item/query, which can add work
-but cannot remove a true hit.
+but cannot remove a true hit. Dense and packed paths store the same exact
+code/count pairs, and boundary tests force both wide fallbacks.
 
 ### Parallel exact leaf attachment
 
@@ -129,6 +135,23 @@ entries are reset logically for every input sequence, so results are never
 shared across different queries. Parallel scans retain their former
 independent exact checks.
 
+### Earlier exact Phase 1 helper crossover
+
+Problem: direct scanning remained enabled until a parent-local group reached
+64 candidates, even though the exact metric/q-gram helper already paid for
+itself at substantially smaller fanout on the fixed and E. coli workloads.
+
+Method: the default metric and q-gram helper crossover is 12 candidates. The
+incremental pigeonhole helper packs its usual `(item, position)` posting into
+32 bits and promotes the complete posting table to the wide structure if
+either field exceeds 16 bits. This makes the lower crossover cheap enough to
+reduce the fixed benchmark's Phase 1 exact calls from about 22,500 to 7,700.
+
+Safety: the helper returns a conservative candidate superset and every
+survivor is still verified by bounded exact Edlib. Promotion copies every
+existing posting before the packed table is released. Dedicated tests exceed
+both the 65,535-item and 65,535-position limits.
+
 ### Prepared DNA Edlib patterns
 
 Problem: the same sequence is compared against many targets in every build
@@ -170,6 +193,29 @@ Safety: internal positions are translated back to the original item ID before
 returning candidates. Epoch marking changes only duplicate removal. Capacity
 overflow and unindexable DNA expand the candidate set rather than remove an
 item.
+
+### Position-aware Phase 2 pigeonhole postings
+
+Problem: Phase 2's exact pigeonhole lookup accepted every parent containing an
+exact query block anywhere in its center sequence. Many of those matches were
+too far from the block's query offset to belong to a pair within the edit
+threshold, so they reached exact Edlib unnecessarily.
+
+Method: Phase 2 stores every seed occurrence as `(item, position)`. The normal
+case packs two 16-bit fields into 32 bits; item sets or sequences exceeding
+that capacity use two 32-bit fields packed into 64 bits. A posting contributes
+its item only when `abs(position - query_block_start) <= tau`. Leaf attachment
+keeps the non-positional rolling-window index because an A/B test found no wall
+time gain there.
+
+Safety: if edit distance is at most `tau`, partitioning the query into
+`tau + 1` blocks guarantees at least one block has no edit. Its position in the
+candidate can move from the query offset only through preceding insertions and
+deletions, whose total count is at most `tau`. Therefore at least one exact
+block necessarily survives the position test. Ambiguous DNA, unsupported seed
+lengths, and capacity failures retain the existing conservative full-scan
+fallback. Random insertion/deletion tests compare the positional result with
+the standard index, and exact Edlib remains the final authority.
 
 ### Phase 2 base-count lower bound
 
@@ -297,10 +343,9 @@ On the fixed benchmark and release `-O2` build:
 
 | Measurement | Pointer-era baseline | Current | Change |
 | --- | ---: | ---: | ---: |
-| Mean adaptive query time | 19.096 ms | 1.332 ms | 14.3x faster |
-| Build time, 16 threads | about 2.39 s | about 0.388 s | about 6.2x faster |
-| Build time, 64 threads | about 2.39 s | about 0.292 s | about 8.2x faster |
-| Peak build RSS, 16 threads | about 94,500 KB | about 31,200 KB | about 67% lower |
+| Mean adaptive query time | 19.096 ms | 1.320 ms | 14.5x faster |
+| Build time, 64 threads | about 2.39 s | about 0.234 s | about 10.2x faster |
+| Peak build RSS, 64 threads | about 94,500 KB | about 30,412 KB | about 67.8% lower |
 
 The query comparison uses identical query/hit/distance/reference-position
 fields. Build comparisons use identical structural counters. Timings should be
@@ -311,10 +356,17 @@ query samples, a 0.09% difference inside run-to-run noise; wall time was
 identical. The new build-only cache and lazy indexes are destroyed before
 search and do not change the persisted query representation. Query semantic
 fields were byte-identical to both the previous checkpoint and the fixed
-reference. At 64 build threads, peak RSS remains about 34 MB because more
-worker-local state is live concurrently.
+reference. The final seven-run 64-thread build median was 233.527 ms; median
+peak RSS was 30,412 KB. Position-aware Phase 2 reduced fixed-workload candidate
+pairs from 808,567 to 451,408 and exact calls from 773,416 to 450,647 while
+preserving all 19,573 Phase 2 edges. A final three-run check over the same 512
+queries measured 1.315, 1.320, and 1.323 ms per query and reproduced all 1,535
+semantic result rows exactly. With the former explicit Phase 1 thresholds,
+the final build also reproduced the reference serialized index byte for byte
+with SHA-256
+`ddd4ea35b53b7f12887ab21b2c7638d097df3a50cebcad4719edf9d35cd3bc0f`.
 
-## Why the 100x memory and 10x build targets are not met
+## Why 100x memory is impossible and further build gains are bounded
 
 A 100x reduction from about 94.5 MB would require peak RSS below 0.95 MB. The raw
 4,751 by 250-base input alone contains 1,187,750 base bytes (about 1.13 MiB)
@@ -324,17 +376,15 @@ for a query uses multiple megabytes of runtime memory. Therefore a 100x
 whole-process RSS reduction is below the data-size lower bound for this
 benchmark.
 
-A 10x build target relative to 2.39 seconds is below 0.239 seconds. Phase 1
-currently takes about 0.105 seconds and is intentionally
-insertion-order-dependent: each sequence selects the best current covering
-world, and creating or selecting that world changes the candidates available
-to later sequences and lower layers. Parallel snapshot construction would
-change the tree. At 64 threads, Phase 1 and Phase 2 together take about
-0.23 seconds, leaving only about 9 ms of the 10x budget for Phase 0, MBB
-construction, leaf attachment, ID assignment, and graph materialization;
-those remaining exact stages currently take about 55--60 ms. Reaching 10x while
-preserving byte-identical topology therefore requires a materially faster
-exact-distance backend, not another container substitution.
+The 10x build target relative to 2.39 seconds is below 0.239 seconds and is now
+met at a 0.234-second median. Phase 1 still takes about 0.091 seconds and is
+intentionally insertion-order-dependent: each sequence selects the best
+current covering world, and creating or selecting that world changes the
+candidates available to later sequences and lower layers. Parallel snapshot
+construction would change the tree. Phase 2 takes roughly 0.09 seconds and the
+remaining exact stages take roughly 0.05 seconds. Consequently, substantially
+larger gains while preserving byte-identical topology require a materially
+faster exact-distance backend rather than another container substitution.
 
 An allocation-only Edlib workspace prototype was rejected because it did not
 improve wall time. The successful prepared path is different: it also caches
@@ -349,8 +399,12 @@ increased the fixed 64-thread build from about 0.32 seconds to about 0.42
 seconds; at 16 threads it used about 34 MB instead of roughly 28--29 MB because
 its 8-byte entry duplicated a seed for every posting. A safe 64-bin q-gram
 lower bound pruned only about 1% of Phase 2 pairs and slowed the 16,000-base
-build. Lower Phase 1 index thresholds, OpenMP schedule/affinity changes, and a
-CUDA Phase 2 prototype were also slower.
+build. Phase 1 thresholds below 12, OpenMP schedule/affinity changes, and a
+CUDA Phase 2 prototype were also slower. Additional rejected experiments were
+an adjacent-window triangle bound, non-owning Phase 1 sequence views, smaller
+Phase 2 candidate reserves, compact Phase 2 pair records, and position-aware
+leaf postings; each either regressed wall time or increased memory without a
+stable speed benefit.
 
 Further large reductions would require a different contract or a new exact
 distance backend, for example a verified SIMD/GPU batch kernel, direct

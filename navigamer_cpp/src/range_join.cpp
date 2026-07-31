@@ -139,11 +139,13 @@ void RangeJoinQueryWorkspace::reset_seed(size_t item_count) {
 
 ExactRangeJoinIndex::ExactRangeJoinIndex(
     RangeJoinConfig config, bool defer_qgram_build,
-    bool enable_shifted_window_postings)
+    bool enable_shifted_window_postings,
+    bool enable_positional_postings)
     : config_(config),
       qgram_index_(config.qgram_q),
       defer_qgram_build_(defer_qgram_build),
       enable_shifted_window_postings_(enable_shifted_window_postings),
+      enable_positional_postings_(enable_positional_postings),
       deferred_qgram_mutex_(defer_qgram_build
                                 ? std::make_shared<std::mutex>()
                                 : nullptr) {
@@ -166,14 +168,35 @@ void ExactRangeJoinIndex::build(std::vector<RangeJoinItem> items) {
   items_ = std::move(items);
   postings16_by_seed_len_.clear();
   postings_by_seed_len_.clear();
+  positional_postings_by_seed_len_.clear();
+  wide_positional_postings_by_seed_len_.clear();
   unindexable_items16_by_seed_len_.clear();
   unindexable_items_by_seed_len_.clear();
   seed_index_capacity_ =
       items_.size() <= static_cast<size_t>(
                            std::numeric_limits<uint32_t>::max());
+  if (enable_positional_postings_ && seed_index_capacity_) {
+    for (const auto& item : items_) {
+      if (item.sequence.size() >
+          static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1) {
+        seed_index_capacity_ = false;
+        break;
+      }
+    }
+  }
   seed_index_uses_16bit_ =
       items_.size() <= static_cast<size_t>(
                            std::numeric_limits<uint16_t>::max());
+  positional_postings_use_32bit_ = seed_index_uses_16bit_;
+  if (positional_postings_use_32bit_) {
+    for (const auto& item : items_) {
+      if (item.sequence.size() >
+          static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1) {
+        positional_postings_use_32bit_ = false;
+        break;
+      }
+    }
+  }
   qgram_ready_ = false;
   std::vector<QGramCountIndex::ItemView> qgram_items;
   if (!defer_qgram_build_) qgram_items.reserve(items_.size());
@@ -213,13 +236,94 @@ void ExactRangeJoinIndex::prepare_qgram() {
 }
 
 void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
-  if (seed_index_uses_16bit_) {
+  if (enable_positional_postings_) {
+    if (positional_postings_use_32bit_) {
+      if (positional_postings_by_seed_len_.count(seed_len)) return;
+    } else if (wide_positional_postings_by_seed_len_.count(seed_len)) {
+      return;
+    }
+  } else if (seed_index_uses_16bit_) {
     if (postings16_by_seed_len_.count(seed_len)) return;
   } else if (postings_by_seed_len_.count(seed_len)) {
     return;
   }
   if (!seed_index_capacity_) {
-    postings_by_seed_len_.emplace(seed_len, PostingLists{});
+    if (enable_positional_postings_) {
+      wide_positional_postings_by_seed_len_.emplace(
+          seed_len, WidePositionalPostingLists{});
+    } else {
+      postings_by_seed_len_.emplace(seed_len, PostingLists{});
+    }
+    return;
+  }
+
+  if (enable_positional_postings_) {
+    const auto populate_positional = [&](auto& postings,
+                                         auto& unindexable_items) {
+      using Posting =
+          typename std::decay_t<decltype(postings)>::mapped_type::value_type;
+      using CompactIndex =
+          typename std::decay_t<decltype(unindexable_items)>::value_type;
+      const uint64_t mask =
+          seed_len >= 32
+              ? std::numeric_limits<uint64_t>::max()
+              : (uint64_t{1} << (2 * seed_len)) - 1;
+      for (size_t item_idx = 0; item_idx < items_.size(); ++item_idx) {
+        const auto& sequence = items_[item_idx].sequence;
+        const CompactIndex compact_idx =
+            static_cast<CompactIndex>(item_idx);
+        if (sequence.size() < static_cast<size_t>(seed_len)) {
+          continue;
+        }
+        if (seed_len > 32 || !is_acgt_sequence(sequence)) {
+          unindexable_items.push_back(compact_idx);
+          continue;
+        }
+        const size_t last =
+            sequence.size() - static_cast<size_t>(seed_len);
+        uint64_t code = 0;
+        for (int offset = 0; offset < seed_len; ++offset) {
+          code = (code << 2) |
+                 dna_base_bits(sequence[static_cast<size_t>(offset)]);
+        }
+        for (size_t pos = 0; pos <= last; ++pos) {
+          if (pos > 0) {
+            const size_t next =
+                pos + static_cast<size_t>(seed_len) - 1;
+            code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
+          }
+          if constexpr (std::is_same_v<Posting, uint32_t>) {
+            postings[code].push_back(
+                (static_cast<uint32_t>(item_idx) << 16) |
+                static_cast<uint32_t>(pos));
+          } else {
+            postings[code].push_back(
+                (static_cast<uint64_t>(item_idx) << 32) |
+                static_cast<uint64_t>(pos));
+          }
+        }
+      }
+    };
+
+    if (positional_postings_use_32bit_) {
+      PositionalPostingLists postings;
+      postings.reserve(items_.size());
+      std::vector<uint16_t> unindexable_items;
+      populate_positional(postings, unindexable_items);
+      positional_postings_by_seed_len_.emplace(
+          seed_len, std::move(postings));
+      unindexable_items16_by_seed_len_.emplace(
+          seed_len, std::move(unindexable_items));
+    } else {
+      WidePositionalPostingLists postings;
+      postings.reserve(items_.size());
+      std::vector<uint32_t> unindexable_items;
+      populate_positional(postings, unindexable_items);
+      wide_positional_postings_by_seed_len_.emplace(
+          seed_len, std::move(postings));
+      unindexable_items_by_seed_len_.emplace(
+          seed_len, std::move(unindexable_items));
+    }
     return;
   }
 
@@ -566,9 +670,24 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   result.seed_len = seed_len;
   const PostingLists16* postings16_ptr = nullptr;
   const PostingLists* postings_ptr = nullptr;
+  const PositionalPostingLists* positional_postings_ptr = nullptr;
+  const WidePositionalPostingLists* wide_positional_postings_ptr = nullptr;
   {
     ScopedTimer timer(&result.range_posting_lookup_ms);
-    if (seed_index_uses_16bit_) {
+    if (enable_positional_postings_ &&
+        positional_postings_use_32bit_) {
+      const auto existing =
+          positional_postings_by_seed_len_.find(result.seed_len);
+      if (existing != positional_postings_by_seed_len_.end()) {
+        positional_postings_ptr = &existing->second;
+      }
+    } else if (enable_positional_postings_) {
+      const auto existing =
+          wide_positional_postings_by_seed_len_.find(result.seed_len);
+      if (existing != wide_positional_postings_by_seed_len_.end()) {
+        wide_positional_postings_ptr = &existing->second;
+      }
+    } else if (seed_index_uses_16bit_) {
       const auto existing =
           postings16_by_seed_len_.find(result.seed_len);
       if (existing != postings16_by_seed_len_.end()) {
@@ -581,7 +700,8 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
       }
     }
   }
-  if (!postings16_ptr && !postings_ptr) {
+  if (!postings16_ptr && !postings_ptr &&
+      !positional_postings_ptr && !wide_positional_postings_ptr) {
     auto fallback = full_scan(query_sequence, tau, true);
     merge_range_timing(fallback, result);
     fallback.block_len = block_len;
@@ -604,6 +724,39 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
     }
     return true;
   };
+  const auto consume_positional_indices =
+      [&](const auto& indices, size_t block_start) {
+        using Posting =
+            typename std::decay_t<decltype(indices)>::value_type;
+        for (Posting packed : indices) {
+          uint32_t item_idx = 0;
+          uint32_t position = 0;
+          if constexpr (std::is_same_v<Posting, uint32_t>) {
+            item_idx = packed >> 16;
+            position =
+                packed & std::numeric_limits<uint16_t>::max();
+          } else {
+            item_idx = static_cast<uint32_t>(packed >> 32);
+            position = static_cast<uint32_t>(
+                packed & std::numeric_limits<uint32_t>::max());
+          }
+          if (std::llabs(static_cast<long long>(position) -
+                         static_cast<long long>(block_start)) <= tau) {
+            add_candidate(item_idx);
+            if (workspace->seed_touched.size() >
+                early_abort_candidate_limit) {
+              result.seed_candidate_pairs_before_length_filter =
+                  workspace->seed_touched.size();
+              result.pigeonhole_candidate_count =
+                  workspace->seed_touched.size();
+              result.pigeonhole_early_abort_count = 1;
+              result.final_candidate_pairs = 0;
+              return false;
+            }
+          }
+        }
+        return true;
+      };
 
   const int block_count = tau + 1;
   for (int block_idx = 0; block_idx < block_count; ++block_idx) {
@@ -618,7 +771,33 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
       fallback.seed_len = seed_len;
       return fallback;
     }
-    if (postings16_ptr) {
+    if (positional_postings_ptr) {
+      PositionalPostingLists::const_iterator posting;
+      {
+        ScopedTimer timer(&result.range_posting_lookup_ms);
+        posting = positional_postings_ptr->find(seed);
+      }
+      if (posting != positional_postings_ptr->end()) {
+        ScopedTimer timer(&result.range_seed_union_ms);
+        if (!consume_positional_indices(
+                posting->second, block_start)) {
+          return result;
+        }
+      }
+    } else if (wide_positional_postings_ptr) {
+      WidePositionalPostingLists::const_iterator posting;
+      {
+        ScopedTimer timer(&result.range_posting_lookup_ms);
+        posting = wide_positional_postings_ptr->find(seed);
+      }
+      if (posting != wide_positional_postings_ptr->end()) {
+        ScopedTimer timer(&result.range_seed_union_ms);
+        if (!consume_positional_indices(
+                posting->second, block_start)) {
+          return result;
+        }
+      }
+    } else if (postings16_ptr) {
       PostingLists16::const_iterator posting;
       {
         ScopedTimer timer(&result.range_posting_lookup_ms);
@@ -640,7 +819,11 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
       }
     }
   }
-  if (seed_index_uses_16bit_) {
+  const bool compact_unindexable =
+      enable_positional_postings_
+          ? positional_postings_use_32bit_
+          : seed_index_uses_16bit_;
+  if (compact_unindexable) {
     const auto unindexable_it =
         unindexable_items16_by_seed_len_.find(result.seed_len);
     if (unindexable_it != unindexable_items16_by_seed_len_.end()) {

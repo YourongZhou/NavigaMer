@@ -83,7 +83,8 @@ class ExactRangeJoinIndex {
  public:
   explicit ExactRangeJoinIndex(
       RangeJoinConfig config = {}, bool defer_qgram_build = false,
-      bool enable_shifted_window_postings = false);
+      bool enable_shifted_window_postings = false,
+      bool enable_positional_postings = false);
 
   void build(std::vector<RangeJoinItem> items);
   void prepare_qgram();
@@ -97,21 +98,31 @@ class ExactRangeJoinIndex {
   using PostingLists16 =
       std::unordered_map<uint64_t, std::vector<uint16_t>>;
   using PostingLists = std::unordered_map<uint64_t, std::vector<uint32_t>>;
+  using PositionalPostingLists =
+      std::unordered_map<uint64_t, std::vector<uint32_t>>;
+  using WidePositionalPostingLists =
+      std::unordered_map<uint64_t, std::vector<uint64_t>>;
 
   RangeJoinConfig config_;
   std::vector<RangeJoinItem> items_;
   std::unordered_map<int, PostingLists16> postings16_by_seed_len_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
+  std::unordered_map<int, PositionalPostingLists>
+      positional_postings_by_seed_len_;
+  std::unordered_map<int, WidePositionalPostingLists>
+      wide_positional_postings_by_seed_len_;
   std::unordered_map<int, std::vector<uint16_t>>
       unindexable_items16_by_seed_len_;
   std::unordered_map<int, std::vector<uint32_t>>
       unindexable_items_by_seed_len_;
   bool seed_index_capacity_ = true;
   bool seed_index_uses_16bit_ = true;
+  bool positional_postings_use_32bit_ = true;
   mutable QGramCountIndex qgram_index_;
   mutable bool qgram_ready_ = false;
   bool defer_qgram_build_ = false;
   bool enable_shifted_window_postings_ = false;
+  bool enable_positional_postings_ = false;
   mutable std::shared_ptr<std::mutex> deferred_qgram_mutex_;
 
   const QGramCountIndex& ensure_qgram_index() const;

@@ -31,8 +31,8 @@ Used by all pipelines that build the index:
 | `--auto-hybrid-on-large-candidates` | `true` | Compatibility flag; normal auto early-aborts oversized seed unions and uses q-gram safe fallback |
 | `--build-distance-mode` | `edlib` | Index construction edit-distance backend: default `edlib`, reference `dp`, or `auto` (Myers when supported, otherwise Edlib) |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
-| `--phase1-metric-min-fanout` | `64` | Minimum Phase1 parent-local candidate fanout before building/querying the metric helper instead of scanning |
-| `--phase1-qgram-min-fanout` | `64` | Minimum Phase1 parent-local candidate fanout before using the q-gram helper instead of the metric helper |
+| `--phase1-metric-min-fanout` | `12` | Minimum Phase1 parent-local candidate fanout before building/querying the metric helper instead of scanning |
+| `--phase1-qgram-min-fanout` | `12` | Minimum Phase1 parent-local candidate fanout before using the q-gram helper instead of the metric helper |
 | `--phase1-qgram-max-touched` | `250000` | Maximum Phase1 q-gram touched/candidate set size before conservatively falling back |
 | `--progress-interval-seconds` | `600` | Timestamped build heartbeat interval on stderr; `0` disables periodic heartbeats but keeps phase-boundary reports |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |

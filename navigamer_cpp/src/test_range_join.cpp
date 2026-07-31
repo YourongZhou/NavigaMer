@@ -162,6 +162,58 @@ void test_shifted_window_postings_match_standard_index() {
   }
 }
 
+void test_positional_postings_are_recall_safe() {
+  std::mt19937 gen(881);
+  std::vector<navigamer::RangeJoinItem> items;
+  for (size_t idx = 0; idx < 160; ++idx) {
+    items.push_back({idx, random_dna(100, gen)});
+  }
+
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 20;
+  config.qgram_q = 5;
+  navigamer::ExactRangeJoinIndex standard(
+      config, true, false, false);
+  navigamer::ExactRangeJoinIndex positional(
+      config, true, false, true);
+  standard.build(items);
+  positional.build(items);
+
+  for (int tau : {0, 1, 2, 5, 10}) {
+    for (size_t query_idx = 0; query_idx < 32; ++query_idx) {
+      const std::string query = mutate_with_indels(
+          items[query_idx].sequence, tau, gen);
+      const auto standard_result = standard.query(query, tau);
+      const auto positional_result = positional.query(query, tau);
+      for (size_t item_id : positional_result.candidate_item_ids) {
+        assert(contains(standard_result.candidate_item_ids, item_id));
+      }
+      for (const auto& item : items) {
+        if (navigamer::compute_distance(query, item.sequence) <= tau) {
+          assert(contains(
+              positional_result.candidate_item_ids, item.item_id));
+        }
+      }
+    }
+  }
+
+  const std::string long_sequence(
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 8, 'A');
+  navigamer::RangeJoinConfig long_config;
+  long_config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  long_config.min_seed_len = 4;
+  long_config.max_seed_len = 4;
+  navigamer::ExactRangeJoinIndex long_index(
+      long_config, true, false, true);
+  long_index.build({{7, long_sequence}});
+  const auto long_result = long_index.query(long_sequence, 0);
+  assert((long_result.candidate_item_ids == std::vector<size_t>{7}));
+}
+
 }  // namespace
 
 int main() {
@@ -172,6 +224,7 @@ int main() {
 
   test_parallel_range_join_queries_are_deterministic();
   test_shifted_window_postings_match_standard_index();
+  test_positional_postings_are_recall_safe();
 
   std::mt19937 gen(42);
   std::vector<RangeJoinItem> items;

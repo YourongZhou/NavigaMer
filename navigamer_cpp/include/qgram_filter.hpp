@@ -93,6 +93,9 @@ class QGramCountIndex {
   int q_;
   std::vector<StoredItem> items_;
   std::unordered_map<uint64_t, std::vector<Posting>> postings_;
+  std::vector<std::vector<Posting>> dense_postings_;
+  std::vector<std::vector<uint32_t>> dense_packed_postings_;
+  bool item_ids_strictly_increasing_ = true;
 };
 
 }  // namespace navigamer

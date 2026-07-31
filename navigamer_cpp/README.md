@@ -146,8 +146,8 @@ Query-side optimization safety contract:
 - `ExactVerifier` remains the final authority for returned hits.
 
 Build commands also expose Phase1 helper thresholds for tuning the extended
-sketch step: `--phase1-metric-min-fanout N` (default `64`),
-`--phase1-qgram-min-fanout N` (default `64`), and
+sketch step: `--phase1-metric-min-fanout N` (default `12`),
+`--phase1-qgram-min-fanout N` (default `12`), and
 `--phase1-qgram-max-touched N` (default `250000`). These switch parent-local
 candidate groups from direct scan to the metric helper and then to the q-gram
 helper; every surviving candidate is still bounded-exact verified before a

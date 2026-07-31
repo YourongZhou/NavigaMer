@@ -70,8 +70,8 @@ struct BuildRangeConfig {
   Phase1CandidateMode phase1_candidate_mode = Phase1CandidateMode::Hybrid;
   RangeJoinConfig range_join;
   size_t min_rect_index_fanout = 64;
-  size_t phase1_metric_min_fanout = 64;
-  size_t phase1_qgram_min_fanout = 64;
+  size_t phase1_metric_min_fanout = 12;
+  size_t phase1_qgram_min_fanout = 12;
   size_t phase1_qgram_max_touched = 250000;
   bool phase1_preserve_input_order = true;
   bool phase2_qgram_postfilter = false;

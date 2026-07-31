@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -136,6 +137,29 @@ void test_far_seed_occurrences_are_filtered_by_position() {
                              result.candidate_indices.end(), size_t{1}));
 }
 
+void test_packed_postings_promote_without_losing_candidates() {
+  navigamer::IncrementalPigeonholeIndex many_items({4, 4});
+  const std::string short_sequence = "ACGT";
+  constexpr size_t item_count =
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 2;
+  for (size_t idx = 0; idx < item_count; ++idx) {
+    many_items.append(idx, short_sequence);
+  }
+  const auto many_result = many_items.query(short_sequence, 0);
+  assert(many_result.safe);
+  assert(many_result.candidate_indices.size() == item_count);
+  assert(many_result.candidate_indices.front() == 0);
+  assert(many_result.candidate_indices.back() == item_count - 1);
+
+  navigamer::IncrementalPigeonholeIndex long_position({4, 4});
+  const std::string long_sequence(
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 8, 'A');
+  long_position.append(0, long_sequence);
+  const auto long_result = long_position.query(long_sequence, 0);
+  assert(long_result.safe);
+  assert((long_result.candidate_indices == std::vector<size_t>{0}));
+}
+
 }  // namespace
 
 int main() {
@@ -143,6 +167,7 @@ int main() {
   test_unindexable_candidates_are_not_dropped();
   test_unsafe_queries_request_fallback();
   test_far_seed_occurrences_are_filtered_by_position();
+  test_packed_postings_promote_without_losing_candidates();
   std::cout << "phase1 seed index tests passed\n";
   return 0;
 }

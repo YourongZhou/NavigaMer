@@ -2009,7 +2009,8 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
            search_graph_view_.sequences[parent.center_sequence_id].seq});
       max_parent_radius = std::max(max_parent_radius, parent.radius);
     }
-    ExactRangeJoinIndex parent_index(range_config_.range_join, true);
+    ExactRangeJoinIndex parent_index(
+        range_config_.range_join, true, false, true);
     std::vector<int> seed_lengths;
     seed_lengths.reserve(children.size());
     for (NodeId child_id : children) {
@@ -2590,7 +2591,7 @@ void BioGeometryIndexBuilder::attach_leaves(
       }
 
       ExactRangeJoinIndex sequence_index(
-          range_config_.range_join, true, true);
+          range_config_.range_join, true, true, false);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         sequence_index.build(std::move(items));

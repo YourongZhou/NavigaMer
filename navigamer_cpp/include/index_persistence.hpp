@@ -32,8 +32,8 @@ struct IndexBuildManifest {
   double auto_pigeonhole_max_ratio = 0.25;
   bool auto_hybrid_on_large_candidates = true;
   size_t min_rect_index_fanout = 64;
-  size_t phase1_metric_min_fanout = 64;
-  size_t phase1_qgram_min_fanout = 64;
+  size_t phase1_metric_min_fanout = 12;
+  size_t phase1_qgram_min_fanout = 12;
   size_t phase1_qgram_max_touched = 250000;
   bool phase2_qgram_postfilter = false;
   bool leaf_qgram_postfilter = false;

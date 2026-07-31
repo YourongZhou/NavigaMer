@@ -37,13 +37,15 @@ class IncrementalPigeonholeIndex {
   };
 
   struct SeedState {
-    struct Posting {
+    struct WidePosting {
       uint32_t item_idx = 0;
       uint32_t position = 0;
     };
 
     size_t indexed_count = 0;
-    std::unordered_map<uint64_t, std::vector<Posting>> postings;
+    bool uses_packed_postings = true;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> packed_postings;
+    std::unordered_map<uint64_t, std::vector<WidePosting>> wide_postings;
     std::vector<uint32_t> unindexable_items;
   };
 
@@ -54,6 +56,7 @@ class IncrementalPigeonholeIndex {
   uint32_t epoch_ = 0;
 
   SeedState& ensure_state(int seed_len);
+  static void promote_to_wide_postings(SeedState& state);
   void index_item(SeedState& state, int seed_len, uint32_t item_idx);
   void begin_query();
 };

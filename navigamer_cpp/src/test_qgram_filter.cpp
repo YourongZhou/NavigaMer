@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -207,6 +208,41 @@ void test_qgram_index_reuses_sparse_workspace() {
   assert(with_workspace == without_workspace);
 }
 
+void test_qgram_index_sorts_nonmonotonic_item_ids() {
+  const std::vector<navigamer::QGramCountIndex::Item> items = {
+      {9, "ACGTACGTACGT"},
+      {3, "ACGTACGTACGT"},
+      {9, "ACGTACGTACGT"},
+  };
+  navigamer::QGramCountIndex index(5);
+  index.build(items);
+  const auto candidates = index.query("ACGTACGTACGT", 0);
+  assert((candidates == std::vector<size_t>{3, 9}));
+}
+
+void test_qgram_dense_postings_use_wide_fallbacks() {
+  constexpr size_t item_count =
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 2;
+  std::vector<navigamer::QGramCountIndex::Item> many_items;
+  many_items.reserve(item_count);
+  for (size_t idx = 0; idx < item_count; ++idx) {
+    many_items.push_back({idx, "ACGTA"});
+  }
+  navigamer::QGramCountIndex many_index(5);
+  many_index.build(many_items);
+  const auto many_candidates = many_index.query("ACGTA", 0);
+  assert(many_candidates.size() == item_count);
+  assert(many_candidates.front() == 0);
+  assert(many_candidates.back() == item_count - 1);
+
+  const std::string long_sequence(
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 8, 'A');
+  navigamer::QGramCountIndex long_index(5);
+  long_index.build({{7, long_sequence}});
+  const auto long_candidates = long_index.query(long_sequence, 0);
+  assert((long_candidates == std::vector<size_t>{7}));
+}
+
 }  // namespace
 
 int main() {
@@ -217,6 +253,8 @@ int main() {
   test_qgram_l1_bound_no_false_negative();
   test_qgram_index_no_false_negative();
   test_qgram_index_reuses_sparse_workspace();
+  test_qgram_index_sorts_nonmonotonic_item_ids();
+  test_qgram_dense_postings_use_wide_fallbacks();
   std::cout << "qgram filter tests passed\n";
   return 0;
 }
