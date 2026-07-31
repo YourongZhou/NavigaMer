@@ -2589,7 +2589,8 @@ void BioGeometryIndexBuilder::attach_leaves(
         items.push_back({seq_idx, unique_seqs[seq_idx]->seq});
       }
 
-      ExactRangeJoinIndex sequence_index(range_config_.range_join, true);
+      ExactRangeJoinIndex sequence_index(
+          range_config_.range_join, true, true);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         sequence_index.build(std::move(items));

@@ -123,6 +123,45 @@ void test_parallel_range_join_queries_are_deterministic() {
   assert(serial == parallel);
 }
 
+void test_shifted_window_postings_match_standard_index() {
+  const std::string reference =
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      "ACGTGCACTGATCGTACCGTATGCTAGCATGC"
+      "TTTTTTTTTTTTTTTTACGACGTAGCTAGCTA";
+  constexpr size_t kWindow = 32;
+  std::vector<navigamer::RangeJoinItem> items;
+  for (size_t start = 0; start + kWindow <= reference.size(); ++start) {
+    items.push_back(
+        {1000 + start, reference.substr(start, kWindow)});
+  }
+  items.insert(items.begin() + 17, {9999, std::string(kWindow, 'C')});
+
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode = navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 12;
+  config.qgram_q = 4;
+
+  navigamer::ExactRangeJoinIndex standard(config, true, false);
+  navigamer::ExactRangeJoinIndex shifted(config, true, true);
+  standard.build(items);
+  shifted.build(items);
+  standard.prepare_seed_lengths({4, 6, 8, 10, 12});
+  shifted.prepare_seed_lengths({4, 6, 8, 10, 12});
+
+  for (int tau : {0, 1, 2, 3, 5}) {
+    for (size_t query_idx = 0; query_idx < items.size();
+         query_idx += 7) {
+      auto standard_result =
+          standard.query(items[query_idx].sequence, tau);
+      auto shifted_result =
+          shifted.query(items[query_idx].sequence, tau);
+      assert(shifted_result.candidate_item_ids ==
+             standard_result.candidate_item_ids);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -132,6 +171,7 @@ int main() {
   using navigamer::RangeJoinItem;
 
   test_parallel_range_join_queries_are_deterministic();
+  test_shifted_window_postings_match_standard_index();
 
   std::mt19937 gen(42);
   std::vector<RangeJoinItem> items;

@@ -14,6 +14,7 @@ namespace navigamer {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+constexpr size_t kMinShiftRunForRollingPostings = 8;
 
 double elapsed_ms_since(Clock::time_point start) {
   return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
@@ -137,10 +138,12 @@ void RangeJoinQueryWorkspace::reset_seed(size_t item_count) {
 }
 
 ExactRangeJoinIndex::ExactRangeJoinIndex(
-    RangeJoinConfig config, bool defer_qgram_build)
+    RangeJoinConfig config, bool defer_qgram_build,
+    bool enable_shifted_window_postings)
     : config_(config),
       qgram_index_(config.qgram_q),
       defer_qgram_build_(defer_qgram_build),
+      enable_shifted_window_postings_(enable_shifted_window_postings),
       deferred_qgram_mutex_(defer_qgram_build
                                 ? std::make_shared<std::mutex>()
                                 : nullptr) {
@@ -224,24 +227,98 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
     using CompactIndex =
         typename std::decay_t<decltype(unindexable_items)>::value_type;
     std::vector<uint64_t> item_codes;
+    std::vector<uint64_t> rolling_codes;
+    std::unordered_map<uint64_t, uint32_t> rolling_counts;
+    const std::string* previous_sequence = nullptr;
+    size_t rolling_head = 0;
+    bool rolling_active = false;
+    size_t consecutive_one_base_shifts = 0;
+    const uint64_t mask =
+        seed_len >= 32
+            ? std::numeric_limits<uint64_t>::max()
+            : (uint64_t{1} << (2 * seed_len)) - 1;
+
+    const auto initialize_rolling = [&](const std::string& sequence) {
+      const size_t code_count =
+          sequence.size() - static_cast<size_t>(seed_len) + 1;
+      rolling_codes.resize(code_count);
+      rolling_counts.clear();
+      rolling_counts.reserve(code_count);
+      uint64_t code = 0;
+      for (int offset = 0; offset < seed_len; ++offset) {
+        code = (code << 2) |
+               dna_base_bits(sequence[static_cast<size_t>(offset)]);
+      }
+      rolling_codes[0] = code;
+      rolling_counts[code]++;
+      for (size_t pos = 1; pos < code_count; ++pos) {
+        const size_t next = pos + static_cast<size_t>(seed_len) - 1;
+        code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
+        rolling_codes[pos] = code;
+        rolling_counts[code]++;
+      }
+      rolling_head = 0;
+      rolling_active = true;
+    };
+
     for (size_t item_idx = 0; item_idx < items_.size(); ++item_idx) {
       const auto& item = items_[item_idx];
       const auto& sequence = item.sequence;
       const CompactIndex compact_idx =
           static_cast<CompactIndex>(item_idx);
-      if (sequence.size() < static_cast<size_t>(seed_len)) continue;
-      if (seed_len > 32 || !is_acgt_sequence(sequence)) {
-        unindexable_items.push_back(compact_idx);
+      if (sequence.size() < static_cast<size_t>(seed_len)) {
+        previous_sequence = nullptr;
+        rolling_active = false;
+        consecutive_one_base_shifts = 0;
         continue;
       }
+      if (seed_len > 32 || !is_acgt_sequence(sequence)) {
+        unindexable_items.push_back(compact_idx);
+        previous_sequence = nullptr;
+        rolling_active = false;
+        consecutive_one_base_shifts = 0;
+        continue;
+      }
+      const bool shifted_one_base =
+          enable_shifted_window_postings_ && previous_sequence &&
+          previous_sequence->size() == sequence.size() &&
+          std::equal(previous_sequence->begin() + 1,
+                     previous_sequence->end(), sequence.begin());
+      consecutive_one_base_shifts =
+          shifted_one_base ? consecutive_one_base_shifts + 1 : 0;
+      if (shifted_one_base &&
+          (rolling_active ||
+           consecutive_one_base_shifts >=
+               kMinShiftRunForRollingPostings)) {
+        if (!rolling_active) initialize_rolling(*previous_sequence);
+        const size_t code_count = rolling_codes.size();
+        const uint64_t outgoing = rolling_codes[rolling_head];
+        auto outgoing_count = rolling_counts.find(outgoing);
+        if (--outgoing_count->second == 0) {
+          rolling_counts.erase(outgoing_count);
+        }
+        const size_t previous_tail =
+            (rolling_head + code_count - 1) % code_count;
+        const uint64_t incoming =
+            ((rolling_codes[previous_tail] << 2) |
+             dna_base_bits(sequence.back())) &
+            mask;
+        rolling_head = (rolling_head + 1) % code_count;
+        const size_t new_tail =
+            (rolling_head + code_count - 1) % code_count;
+        rolling_codes[new_tail] = incoming;
+        rolling_counts[incoming]++;
+        for (const auto& entry : rolling_counts) {
+          postings[entry.first].push_back(compact_idx);
+        }
+        previous_sequence = &sequence;
+        continue;
+      }
+
       item_codes.clear();
       item_codes.reserve(
           sequence.size() - static_cast<size_t>(seed_len) + 1);
       const size_t last = sequence.size() - static_cast<size_t>(seed_len);
-      const uint64_t mask =
-          seed_len == 32
-              ? std::numeric_limits<uint64_t>::max()
-              : (uint64_t{1} << (2 * seed_len)) - 1;
       uint64_t code = 0;
       for (int offset = 0; offset < seed_len; ++offset) {
         code = (code << 2) |
@@ -259,6 +336,8 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
       for (uint64_t item_code : item_codes) {
         postings[item_code].push_back(compact_idx);
       }
+      previous_sequence = &sequence;
+      rolling_active = false;
     }
   };
 

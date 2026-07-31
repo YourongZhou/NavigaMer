@@ -82,7 +82,8 @@ struct RangeJoinQueryWorkspace {
 class ExactRangeJoinIndex {
  public:
   explicit ExactRangeJoinIndex(
-      RangeJoinConfig config = {}, bool defer_qgram_build = false);
+      RangeJoinConfig config = {}, bool defer_qgram_build = false,
+      bool enable_shifted_window_postings = false);
 
   void build(std::vector<RangeJoinItem> items);
   void prepare_qgram();
@@ -110,6 +111,7 @@ class ExactRangeJoinIndex {
   mutable QGramCountIndex qgram_index_;
   mutable bool qgram_ready_ = false;
   bool defer_qgram_build_ = false;
+  bool enable_shifted_window_postings_ = false;
   mutable std::shared_ptr<std::mutex> deferred_qgram_mutex_;
 
   const QGramCountIndex& ensure_qgram_index() const;

@@ -250,6 +250,30 @@ An eager/deferred A/B build produced byte-identical 2.9 MB serialized indexes
 with SHA-256
 `ddd4ea35b53b7f12887ab21b2c7638d097df3a50cebcad4719edf9d35cd3bc0f`.
 
+### Incremental postings for consecutive leaf windows
+
+Problem: leaf-range construction indexed every overlapping reference window
+independently. For a 250-base window and a 20-base seed, shifting the window by
+one base preserves 230 of its 231 positional seeds, but the former path
+regenerated and sorted all 231 seeds again.
+
+Method: the leaf sequence index explicitly enables a shifted-window posting
+builder. It uses the fast path only after proving that the previous sequence
+without its first base exactly equals the current sequence without its last
+base. A ring buffer removes the outgoing seed and appends the incoming seed,
+while a small count map preserves per-item seed deduplication for repeats.
+Runs shorter than eight shifts retain the sort path because initializing the
+rolling state costs more than it saves. Phase 2 does not enable this option:
+its sparse world centers made the same optimization slower.
+
+Safety: the strict overlap equality proves that every retained positional seed
+is unchanged. Counts ensure that a seed is emitted exactly once per item,
+including homopolymers and other repeated seeds. Non-ACGT input, short
+sequences, a broken overlap, and short runs use the original construction.
+The fixed benchmark's serialized index remained byte-identical, while leaf
+index construction fell from about 49--50 ms to about 18 ms. On the
+16,000-base E. coli case it fell from about 170 ms to about 68--74 ms.
+
 ### Removal of speculative path-reuse distances
 
 Problem: with path reuse enabled, each visited non-leaf world computed an
@@ -272,9 +296,9 @@ On the fixed benchmark and release `-O2` build:
 | Measurement | Pointer-era baseline | Current | Change |
 | --- | ---: | ---: | ---: |
 | Mean adaptive query time | 19.096 ms | 1.332 ms | 14.3x faster |
-| Build time, 16 threads | about 2.39 s | about 0.409 s | about 5.8x faster |
-| Build time, 64 threads | about 2.39 s | about 0.320 s | about 7.5x faster |
-| Peak build RSS, 16 threads | about 94,500 KB | about 33,000 KB | about 65% lower |
+| Build time, 16 threads | about 2.39 s | about 0.388 s | about 6.2x faster |
+| Build time, 64 threads | about 2.39 s | about 0.292 s | about 8.2x faster |
+| Peak build RSS, 16 threads | about 94,500 KB | about 31,200 KB | about 67% lower |
 
 The query comparison uses identical query/hit/distance/reference-position
 fields. Build comparisons use identical structural counters. Timings should be
@@ -285,7 +309,7 @@ query samples, a 0.09% difference inside run-to-run noise; wall time was
 identical. The new build-only cache and lazy indexes are destroyed before
 search and do not change the persisted query representation. Query semantic
 fields were byte-identical to both the previous checkpoint and the fixed
-reference. At 64 build threads, peak RSS is about 34 MB because more
+reference. At 64 build threads, peak RSS remains about 34 MB because more
 worker-local state is live concurrently.
 
 ## Why the 100x memory and 10x build targets are not met
@@ -306,7 +330,7 @@ to later sequences and lower layers. Parallel snapshot construction would
 change the tree. At 64 threads, Phase 1 and Phase 2 together take about
 0.23 seconds, leaving only about 9 ms of the 10x budget for Phase 0, MBB
 construction, leaf attachment, ID assignment, and graph materialization;
-those remaining exact stages currently take about 85 ms. Reaching 10x while
+those remaining exact stages currently take about 55--60 ms. Reaching 10x while
 preserving byte-identical topology therefore requires a materially faster
 exact-distance backend, not another container substitution.
 
