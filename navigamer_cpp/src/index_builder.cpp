@@ -2678,9 +2678,11 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
 void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
     BuildProgressReporter* progress) {
   struct Phase2EdgeTuple {
-    size_t parent_idx = 0;
-    size_t child_idx = 0;
+    uint32_t parent_idx = 0;
+    uint32_t child_idx = 0;
   };
+  static_assert(sizeof(Phase2EdgeTuple) == 8,
+                "phase2 edge tuple must remain 8 bytes");
 
   struct Phase2LocalStats {
     BioGeometryIndexBuilder::Statistics stats;
@@ -2873,13 +2875,16 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
         static_cast<size_t>(thread_count));
     std::vector<Phase2LocalStats> thread_stats(
         static_cast<size_t>(thread_count));
-    (void)make_phase2_distance_verifier(verifier_distance_mode);
-
 #pragma omp parallel if(thread_count > 1) num_threads(thread_count)
     {
       const int tid = omp_get_thread_num();
+      const bool direct_edlib =
+          verifier_distance_mode == DistanceMode::Edlib;
       RangeJoinQueryWorkspace workspace;
-      auto verifier = make_phase2_distance_verifier(verifier_distance_mode);
+      std::unique_ptr<Phase2DistanceVerifier> verifier;
+      if (!direct_edlib) {
+        verifier = make_phase2_distance_verifier(verifier_distance_mode);
+      }
       auto& local_edges = thread_edges[static_cast<size_t>(tid)];
       auto& local = thread_stats[static_cast<size_t>(tid)];
       std::vector<Phase2DistancePair> verify_batch;
@@ -2892,8 +2897,10 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
                  kPhase2DistanceBatchFlushPairs / children.size()) {
         possible_pair_count = parents.size() * children.size();
       }
-      verify_batch.reserve(
-          std::min(kPhase2DistanceBatchFlushPairs, possible_pair_count));
+      if (!direct_edlib) {
+        verify_batch.reserve(
+            std::min(kPhase2DistanceBatchFlushPairs, possible_pair_count));
+      }
       auto flush_verify_batch = [&]() {
         if (verify_batch.empty()) return;
         const auto verify_start = Clock::now();
@@ -2924,6 +2931,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
 
         accumulate_phase2_candidate_stats(local.stats, candidates);
 
+        size_t exact_candidate_count = 0;
         for (size_t parent_idx : candidates.candidate_item_ids) {
           auto& parent = build_nodes_[parents[parent_idx]];
           const auto& parent_sequence =
@@ -2951,11 +2959,35 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
             continue;
           }
           local.stats.phase2_exact_distance_calls++;
-          verify_batch.push_back(
-              {static_cast<uint32_t>(parent_idx),
-               static_cast<uint32_t>(child_idx)});
-          if (verify_batch.size() >= kPhase2DistanceBatchFlushPairs) {
-            flush_verify_batch();
+          candidates.candidate_item_ids[exact_candidate_count++] =
+              static_cast<RangeJoinItemId>(parent_idx);
+        }
+        candidates.candidate_item_ids.resize(exact_candidate_count);
+
+        if (direct_edlib && !candidates.candidate_item_ids.empty()) {
+          const auto verify_start = Clock::now();
+          const PreparedEdlibDnaPattern prepared_child =
+              prepare_edlib_dna_pattern(child_sequence);
+          for (RangeJoinItemId parent_idx :
+               candidates.candidate_item_ids) {
+            if (compute_distance_bounded_edlib_prepared(
+                    prepared_child, parent_sequences[parent_idx],
+                    link_tolerance) <= link_tolerance) {
+              local_edges.push_back(
+                  {parent_idx, static_cast<uint32_t>(child_idx)});
+              local.stats.phase2_edges_added++;
+            }
+          }
+          local.exact_verify_worker_ms += elapsed_ms_since(verify_start);
+          local.stats.phase2_distance_batches++;
+        } else if (!direct_edlib) {
+          for (RangeJoinItemId parent_idx :
+               candidates.candidate_item_ids) {
+            verify_batch.push_back(
+                {parent_idx, static_cast<uint32_t>(child_idx)});
+            if (verify_batch.size() >= kPhase2DistanceBatchFlushPairs) {
+              flush_verify_batch();
+            }
           }
         }
         if (progress && child_idx % 256 == 255) progress->advance(256);
