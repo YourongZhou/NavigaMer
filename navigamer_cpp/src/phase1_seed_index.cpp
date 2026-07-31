@@ -107,9 +107,9 @@ void IncrementalPigeonholeIndex::promote_to_packed_postings(
   }
   state.packed_heads.reserve(state.compact_heads.size());
   state.packed_entries.reserve(state.compact_entries.size());
-  for (const auto& head_entry : state.compact_heads) {
+  state.compact_heads.for_each([&](uint64_t code, uint16_t head) {
     uint32_t packed_head = kInvalidPostingIndex;
-    uint16_t compact_idx = head_entry.second;
+    uint16_t compact_idx = head;
     while (compact_idx != kInvalidCompactPostingIndex) {
       const uint32_t entry = state.compact_entries[compact_idx];
       const uint16_t compact = static_cast<uint16_t>(entry >> 16);
@@ -123,10 +123,9 @@ void IncrementalPigeonholeIndex::promote_to_packed_postings(
       packed_head = new_idx;
       compact_idx = static_cast<uint16_t>(entry);
     }
-    state.packed_heads.emplace(head_entry.first, packed_head);
-  }
-  state.compact_heads.clear();
-  state.compact_heads.rehash(0);
+    state.packed_heads.get_or_insert(code) = packed_head;
+  });
+  state.compact_heads.clear_and_release();
   state.compact_entries.clear();
   state.compact_entries.shrink_to_fit();
   state.posting_storage = SeedState::PostingStorage::Packed32;
@@ -141,9 +140,9 @@ void IncrementalPigeonholeIndex::promote_to_wide_postings(
   }
   state.wide_heads.reserve(state.packed_heads.size());
   state.wide_entries.reserve(state.packed_entries.size());
-  for (const auto& head_entry : state.packed_heads) {
+  state.packed_heads.for_each([&](uint64_t code, uint32_t head) {
     uint32_t wide_head = kInvalidPostingIndex;
-    uint32_t packed_idx = head_entry.second;
+    uint32_t packed_idx = head;
     while (packed_idx != kInvalidPostingIndex) {
       const uint64_t entry = state.packed_entries[packed_idx];
       const uint32_t packed = static_cast<uint32_t>(entry >> 32);
@@ -159,10 +158,9 @@ void IncrementalPigeonholeIndex::promote_to_wide_postings(
       wide_head = new_idx;
       packed_idx = static_cast<uint32_t>(entry);
     }
-    state.wide_heads.emplace(head_entry.first, wide_head);
-  }
-  state.packed_heads.clear();
-  state.packed_heads.rehash(0);
+    state.wide_heads.get_or_insert(code) = wide_head;
+  });
+  state.packed_heads.clear_and_release();
   state.packed_entries.clear();
   state.packed_entries.shrink_to_fit();
   state.posting_storage = SeedState::PostingStorage::Wide;
@@ -216,43 +214,37 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
     }
     if (state.posting_storage ==
         SeedState::PostingStorage::Compact16) {
-      auto head = state.compact_heads
-                      .try_emplace(code, kInvalidCompactPostingIndex)
-                      .first;
+      uint16_t& head = state.compact_heads.get_or_insert(code);
       const uint16_t entry_idx =
           static_cast<uint16_t>(state.compact_entries.size());
       const uint16_t packed = static_cast<uint16_t>(
           (item_idx << 8) | static_cast<uint32_t>(start));
       state.compact_entries.push_back(
-          (static_cast<uint32_t>(packed) << 16) | head->second);
-      head->second = entry_idx;
+          (static_cast<uint32_t>(packed) << 16) | head);
+      head = entry_idx;
     } else if (state.posting_storage ==
                SeedState::PostingStorage::Packed32) {
       if (state.packed_entries.size() >= kInvalidPostingIndex) {
         throw std::overflow_error("phase1 seed posting arena exceeds uint32 capacity");
       }
-      auto head = state.packed_heads
-                      .try_emplace(code, kInvalidPostingIndex)
-                      .first;
+      uint32_t& head = state.packed_heads.get_or_insert(code);
       const uint32_t entry_idx =
           static_cast<uint32_t>(state.packed_entries.size());
       const uint32_t packed =
           (item_idx << 16) | static_cast<uint32_t>(start);
       state.packed_entries.push_back(
-          (static_cast<uint64_t>(packed) << 32) | head->second);
-      head->second = entry_idx;
+          (static_cast<uint64_t>(packed) << 32) | head);
+      head = entry_idx;
     } else {
       if (state.wide_entries.size() >= kInvalidPostingIndex) {
         throw std::overflow_error("phase1 seed posting arena exceeds uint32 capacity");
       }
-      auto head = state.wide_heads
-                      .try_emplace(code, kInvalidPostingIndex)
-                      .first;
+      uint32_t& head = state.wide_heads.get_or_insert(code);
       const uint32_t entry_idx =
           static_cast<uint32_t>(state.wide_entries.size());
       state.wide_entries.push_back(
-          {item_idx, static_cast<uint32_t>(start), head->second});
-      head->second = entry_idx;
+          {item_idx, static_cast<uint32_t>(start), head});
+      head = entry_idx;
     }
   }
 }
@@ -305,9 +297,9 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
     if (!encode_seed(sequence, block_start, result.seed_len, code)) return {};
     if (state.posting_storage ==
         SeedState::PostingStorage::Compact16) {
-      const auto posting = state.compact_heads.find(code);
-      if (posting == state.compact_heads.end()) continue;
-      for (uint16_t entry_idx = posting->second;
+      const uint16_t posting = state.compact_heads.find(code);
+      if (posting == kInvalidCompactPostingIndex) continue;
+      for (uint16_t entry_idx = posting;
            entry_idx != kInvalidCompactPostingIndex;) {
         const uint32_t entry = state.compact_entries[entry_idx];
         const uint16_t packed = static_cast<uint16_t>(entry >> 16);
@@ -322,9 +314,9 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
       }
     } else if (state.posting_storage ==
                SeedState::PostingStorage::Packed32) {
-      const auto posting = state.packed_heads.find(code);
-      if (posting == state.packed_heads.end()) continue;
-      for (uint32_t entry_idx = posting->second;
+      const uint32_t posting = state.packed_heads.find(code);
+      if (posting == kInvalidPostingIndex) continue;
+      for (uint32_t entry_idx = posting;
            entry_idx != kInvalidPostingIndex;) {
         const uint64_t entry = state.packed_entries[entry_idx];
         const uint32_t packed = static_cast<uint32_t>(entry >> 32);
@@ -339,9 +331,9 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
         }
       }
     } else {
-      const auto posting = state.wide_heads.find(code);
-      if (posting == state.wide_heads.end()) continue;
-      for (uint32_t entry_idx = posting->second;
+      const uint32_t posting = state.wide_heads.find(code);
+      if (posting == kInvalidPostingIndex) continue;
+      for (uint32_t entry_idx = posting;
            entry_idx != kInvalidPostingIndex;) {
         const auto& seed_posting = state.wide_entries[entry_idx];
         entry_idx = seed_posting.next;

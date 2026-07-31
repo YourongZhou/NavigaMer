@@ -4,9 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace navigamer {
@@ -33,6 +35,99 @@ class IncrementalPigeonholeIndex {
   size_t size() const { return items_.size(); }
 
  private:
+  template <typename Head>
+  class PostingHeadMap {
+   public:
+    static constexpr Head invalid_head() {
+      return std::numeric_limits<Head>::max();
+    }
+
+    size_t size() const { return size_; }
+
+    void reserve(size_t expected_size) {
+      size_t capacity = 16;
+      while (capacity * 7 / 10 < expected_size) {
+        if (capacity > std::numeric_limits<size_t>::max() / 2) {
+          throw std::length_error("phase1 posting head table is too large");
+        }
+        capacity *= 2;
+      }
+      if (capacity > heads_.size()) rehash(capacity);
+    }
+
+    Head find(uint64_t key) const {
+      if (heads_.empty()) return invalid_head();
+      const size_t mask = heads_.size() - 1;
+      size_t slot = hash_key(key) & mask;
+      while (heads_[slot] != invalid_head()) {
+        if (keys_[slot] == key) return heads_[slot];
+        slot = (slot + 1) & mask;
+      }
+      return invalid_head();
+    }
+
+    Head& get_or_insert(uint64_t key) {
+      if (heads_.empty() || (size_ + 1) * 10 > heads_.size() * 7) {
+        rehash(heads_.empty() ? 16 : heads_.size() * 2);
+      }
+      const size_t mask = heads_.size() - 1;
+      size_t slot = hash_key(key) & mask;
+      while (heads_[slot] != invalid_head()) {
+        if (keys_[slot] == key) return heads_[slot];
+        slot = (slot + 1) & mask;
+      }
+      keys_[slot] = key;
+      heads_[slot] = invalid_head();
+      size_++;
+      return heads_[slot];
+    }
+
+    template <typename Fn>
+    void for_each(Fn&& fn) const {
+      for (size_t slot = 0; slot < heads_.size(); ++slot) {
+        if (heads_[slot] != invalid_head()) {
+          fn(keys_[slot], heads_[slot]);
+        }
+      }
+    }
+
+    void clear_and_release() {
+      keys_.clear();
+      keys_.shrink_to_fit();
+      heads_.clear();
+      heads_.shrink_to_fit();
+      size_ = 0;
+    }
+
+   private:
+    static size_t hash_key(uint64_t key) {
+      key ^= key >> 30;
+      key *= UINT64_C(0xbf58476d1ce4e5b9);
+      key ^= key >> 27;
+      key *= UINT64_C(0x94d049bb133111eb);
+      key ^= key >> 31;
+      return static_cast<size_t>(key);
+    }
+
+    void rehash(size_t capacity) {
+      if (capacity < 16) capacity = 16;
+      std::vector<uint64_t> old_keys = std::move(keys_);
+      std::vector<Head> old_heads = std::move(heads_);
+      keys_.assign(capacity, 0);
+      heads_.assign(capacity, invalid_head());
+      size_ = 0;
+      for (size_t slot = 0; slot < old_heads.size(); ++slot) {
+        if (old_heads[slot] == invalid_head()) continue;
+        Head& head = get_or_insert(old_keys[slot]);
+        head = old_heads[slot];
+      }
+    }
+
+    std::vector<uint64_t> keys_;
+    std::vector<Head> heads_;
+    size_t size_ = 0;
+  };
+
   struct Item {
     size_t item_id = 0;
     std::string_view sequence;
@@ -55,11 +150,11 @@ class IncrementalPigeonholeIndex {
 
     size_t indexed_count = 0;
     PostingStorage posting_storage = PostingStorage::Compact16;
-    std::unordered_map<uint64_t, uint16_t> compact_heads;
+    PostingHeadMap<uint16_t> compact_heads;
     std::vector<uint32_t> compact_entries;
-    std::unordered_map<uint64_t, uint32_t> packed_heads;
+    PostingHeadMap<uint32_t> packed_heads;
     std::vector<uint64_t> packed_entries;
-    std::unordered_map<uint64_t, uint32_t> wide_heads;
+    PostingHeadMap<uint32_t> wide_heads;
     std::vector<WidePostingEntry> wide_entries;
     std::vector<uint32_t> unindexable_items;
   };
