@@ -12,7 +12,7 @@
 // Keep the three dominant array-query entry points on stable instruction-cache
 // boundaries even when construction-only object code changes size.
 #if defined(__GNUC__) || defined(__clang__)
-#define NAVIGAMER_QUERY_HOT_ALIGN __attribute__((aligned(256)))
+#define NAVIGAMER_QUERY_HOT_ALIGN __attribute__((hot, aligned(256)))
 #else
 #define NAVIGAMER_QUERY_HOT_ALIGN
 #endif
