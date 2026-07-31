@@ -85,6 +85,155 @@ struct BuildRangeConfig {
   int progress_interval_seconds = 600;
 };
 
+// Build-time owned vector that can become a read-only view into a persisted
+// mmap after loading. Query access remains a plain pointer plus size.
+template <typename T>
+class FinalArray {
+ public:
+  using const_iterator = const T*;
+
+  FinalArray() = default;
+  FinalArray(std::initializer_list<T> values) : owned_(values) {
+    sync_owned_view();
+  }
+  FinalArray(const FinalArray& other) { copy_from(other); }
+  FinalArray& operator=(const FinalArray& other) {
+    if (this != &other) copy_from(other);
+    return *this;
+  }
+  FinalArray(FinalArray&& other) noexcept { move_from(std::move(other)); }
+  FinalArray& operator=(FinalArray&& other) noexcept {
+    if (this != &other) move_from(std::move(other));
+    return *this;
+  }
+  FinalArray& operator=(std::initializer_list<T> values) {
+    ensure_owned();
+    owned_ = values;
+    sync_owned_view();
+    return *this;
+  }
+
+  size_t size() const { return size_; }
+  bool empty() const { return size() == 0; }
+  const T* data() const { return data_; }
+  const T& operator[](size_t index) const { return data()[index]; }
+  T& operator[](size_t index) {
+    ensure_owned();
+    return owned_[index];
+  }
+  const T& at(size_t index) const {
+    if (index >= size()) throw std::out_of_range("final array index");
+    return data()[index];
+  }
+  T& at(size_t index) {
+    ensure_owned();
+    return owned_.at(index);
+  }
+  const_iterator begin() const { return data(); }
+  const_iterator end() const {
+    const T* first = data();
+    return empty() ? first : first + size();
+  }
+  bool is_mapped() const { return static_cast<bool>(mapped_owner_); }
+
+  bool operator==(const FinalArray& other) const {
+    return size() == other.size() &&
+           std::equal(begin(), end(), other.begin());
+  }
+  bool operator!=(const FinalArray& other) const {
+    return !(*this == other);
+  }
+
+  void reserve(size_t capacity) {
+    ensure_owned();
+    owned_.reserve(capacity);
+    sync_owned_view();
+  }
+  void resize(size_t size) {
+    ensure_owned();
+    owned_.resize(size);
+    sync_owned_view();
+  }
+  void assign(size_t count, const T& value) {
+    ensure_owned();
+    owned_.assign(count, value);
+    sync_owned_view();
+  }
+  void push_back(const T& value) {
+    ensure_owned();
+    owned_.push_back(value);
+    sync_owned_view();
+  }
+  void clear() {
+    ensure_owned();
+    owned_.clear();
+    sync_owned_view();
+  }
+  template <typename Iterator>
+  void append(Iterator first, Iterator last) {
+    ensure_owned();
+    owned_.insert(owned_.end(), first, last);
+    sync_owned_view();
+  }
+  void set_owned(std::vector<T> values) {
+    mapped_owner_.reset();
+    owned_ = std::move(values);
+    sync_owned_view();
+  }
+  void set_mapped(std::shared_ptr<const void> owner,
+                  const T* data, size_t size) {
+    if (!owner || (!data && size != 0)) {
+      throw std::invalid_argument("invalid mapped final array");
+    }
+    owned_.clear();
+    owned_.shrink_to_fit();
+    mapped_owner_ = std::move(owner);
+    data_ = data;
+    size_ = size;
+  }
+
+ private:
+  void ensure_owned() const {
+    if (mapped_owner_) {
+      throw std::logic_error("cannot mutate a mapped final array");
+    }
+  }
+  void sync_owned_view() {
+    data_ = owned_.data();
+    size_ = owned_.size();
+  }
+  void copy_from(const FinalArray& other) {
+    mapped_owner_ = other.mapped_owner_;
+    if (mapped_owner_) {
+      owned_.clear();
+      owned_.shrink_to_fit();
+      data_ = other.data_;
+      size_ = other.size_;
+    } else {
+      owned_ = other.owned_;
+      sync_owned_view();
+    }
+  }
+  void move_from(FinalArray&& other) {
+    const bool mapped = static_cast<bool>(other.mapped_owner_);
+    owned_ = std::move(other.owned_);
+    mapped_owner_ = std::move(other.mapped_owner_);
+    if (mapped) {
+      data_ = other.data_;
+      size_ = other.size_;
+    } else {
+      sync_owned_view();
+    }
+    other.data_ = nullptr;
+    other.size_ = 0;
+  }
+
+  const T* data_ = nullptr;
+  size_t size_ = 0;
+  std::vector<T> owned_;
+  std::shared_ptr<const void> mapped_owner_;
+};
+
 // A reference-backed leaf needs no BioSequence object. The fixed k-mer is a
 // view of reference_sequence at source_pos.
 struct ReferenceSequenceRecord {
@@ -122,12 +271,12 @@ static_assert(sizeof(ReferenceOccurrenceGroup) == 8,
 // leaf links, and search results only need a 32-bit integer reference.
 struct SequenceStore {
   std::vector<BioSequence> records;
-  std::vector<ReferenceSequenceRecord> reference_records;
+  FinalArray<ReferenceSequenceRecord> reference_records;
   // A sequence with one extra position uses one compact pair. Sequences with
   // two or more extras share one group record and a flat position array.
-  std::vector<ReferenceOccurrence> singleton_occurrences;
-  std::vector<ReferenceOccurrenceGroup> occurrence_groups;
-  std::vector<uint32_t> grouped_occurrence_positions;
+  FinalArray<ReferenceOccurrence> singleton_occurrences;
+  FinalArray<ReferenceOccurrenceGroup> occurrence_groups;
+  FinalArray<uint32_t> grouped_occurrence_positions;
   std::vector<ReferenceContig> reference_contigs;
   std::string reference_id;
   std::string reference_sequence;
@@ -344,139 +493,6 @@ struct BuildWorldNodeRecord {
   std::vector<uint8_t> child_beacon_dists;
   // Dimension-major: [beacon_index * leaf_count + leaf_index].
   std::vector<uint8_t> leaf_beacon_dists;
-};
-
-// Build-time owned vector that can become a read-only view into a persisted
-// mmap after loading. Query access remains a plain pointer plus size.
-template <typename T>
-class FinalArray {
- public:
-  using const_iterator = const T*;
-
-  FinalArray() = default;
-  FinalArray(std::initializer_list<T> values) : owned_(values) {
-    sync_owned_view();
-  }
-  FinalArray(const FinalArray& other) { copy_from(other); }
-  FinalArray& operator=(const FinalArray& other) {
-    if (this != &other) copy_from(other);
-    return *this;
-  }
-  FinalArray(FinalArray&& other) noexcept { move_from(std::move(other)); }
-  FinalArray& operator=(FinalArray&& other) noexcept {
-    if (this != &other) move_from(std::move(other));
-    return *this;
-  }
-  FinalArray& operator=(std::initializer_list<T> values) {
-    ensure_owned();
-    owned_ = values;
-    sync_owned_view();
-    return *this;
-  }
-
-  size_t size() const { return size_; }
-  bool empty() const { return size() == 0; }
-  const T* data() const { return data_; }
-  const T& operator[](size_t index) const { return data()[index]; }
-  T& operator[](size_t index) {
-    ensure_owned();
-    return owned_[index];
-  }
-  const_iterator begin() const { return data(); }
-  const_iterator end() const {
-    const T* first = data();
-    return empty() ? first : first + size();
-  }
-  bool is_mapped() const { return static_cast<bool>(mapped_owner_); }
-
-  void reserve(size_t capacity) {
-    ensure_owned();
-    owned_.reserve(capacity);
-    sync_owned_view();
-  }
-  void resize(size_t size) {
-    ensure_owned();
-    owned_.resize(size);
-    sync_owned_view();
-  }
-  void assign(size_t count, const T& value) {
-    ensure_owned();
-    owned_.assign(count, value);
-    sync_owned_view();
-  }
-  void push_back(const T& value) {
-    ensure_owned();
-    owned_.push_back(value);
-    sync_owned_view();
-  }
-  void clear() {
-    ensure_owned();
-    owned_.clear();
-    sync_owned_view();
-  }
-  template <typename Iterator>
-  void append(Iterator first, Iterator last) {
-    ensure_owned();
-    owned_.insert(owned_.end(), first, last);
-    sync_owned_view();
-  }
-  void set_owned(std::vector<T> values) {
-    mapped_owner_.reset();
-    owned_ = std::move(values);
-    sync_owned_view();
-  }
-  void set_mapped(std::shared_ptr<const void> owner,
-                  const T* data, size_t size) {
-    if (!owner || (!data && size != 0)) {
-      throw std::invalid_argument("invalid mapped final array");
-    }
-    owned_.clear();
-    owned_.shrink_to_fit();
-    mapped_owner_ = std::move(owner);
-    data_ = data;
-    size_ = size;
-  }
-
- private:
-  void ensure_owned() const {
-    if (mapped_owner_) {
-      throw std::logic_error("cannot mutate a mapped final array");
-    }
-  }
-  void sync_owned_view() {
-    data_ = owned_.data();
-    size_ = owned_.size();
-  }
-  void copy_from(const FinalArray& other) {
-    mapped_owner_ = other.mapped_owner_;
-    if (mapped_owner_) {
-      owned_.clear();
-      owned_.shrink_to_fit();
-      data_ = other.data_;
-      size_ = other.size_;
-    } else {
-      owned_ = other.owned_;
-      sync_owned_view();
-    }
-  }
-  void move_from(FinalArray&& other) {
-    const bool mapped = static_cast<bool>(other.mapped_owner_);
-    owned_ = std::move(other.owned_);
-    mapped_owner_ = std::move(other.mapped_owner_);
-    if (mapped) {
-      data_ = other.data_;
-      size_ = other.size_;
-    } else {
-      sync_owned_view();
-    }
-    other.data_ = nullptr;
-    other.size_ = 0;
-  }
-
-  std::vector<T> owned_;
-  std::shared_ptr<const void> mapped_owner_;
-  const T* data_ = nullptr;
-  size_t size_ = 0;
 };
 
 struct SearchGraphView {

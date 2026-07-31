@@ -316,7 +316,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 14);
+  assert(loaded.manifest.format_version == 15);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);
@@ -326,6 +326,18 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
          store.grouped_occurrence_positions);
   assert(loaded_store.occurrence_positions(aaaa_id) ==
          std::vector<uint32_t>({0, 16, 21}));
+#if defined(__unix__) || defined(__APPLE__)
+  assert(loaded_store.reference_records.is_mapped());
+  if (!loaded_store.singleton_occurrences.empty()) {
+    assert(loaded_store.singleton_occurrences.is_mapped());
+  }
+  if (!loaded_store.occurrence_groups.empty()) {
+    assert(loaded_store.occurrence_groups.is_mapped());
+  }
+  if (!loaded_store.grouped_occurrence_positions.empty()) {
+    assert(loaded_store.grouped_occurrence_positions.is_mapped());
+  }
+#endif
 
   navigamer::BioGeometrySearchEngine engine(loaded.builder);
   navigamer::BioSequence query("q", "AAAA");

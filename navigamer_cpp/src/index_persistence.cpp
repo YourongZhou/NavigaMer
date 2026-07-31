@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '4'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '5'};
 constexpr size_t kReferenceChunkBases = size_t{1} << 20;
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
@@ -318,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 14) {
+  if (manifest.format_version != 15) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -721,24 +721,21 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
       write_pod<uint32_t>(out, contig.end);
     }
   }
-  write_size(out, store.size());
   if (store.reference_backed) {
-    for (const auto& sequence : store.reference_records) {
-      write_pod<uint32_t>(out, sequence.source_pos);
-    }
-    write_size(out, store.singleton_occurrences.size());
-    for (const auto& occurrence : store.singleton_occurrences) {
-      write_pod<uint32_t>(out, occurrence.sequence_id);
-      write_pod<uint32_t>(out, occurrence.source_pos);
-    }
-    write_size(out, store.occurrence_groups.size());
-    for (const auto& group : store.occurrence_groups) {
-      write_pod<uint32_t>(out, group.sequence_id);
-      write_pod<uint32_t>(out, group.position_begin);
-    }
-    write_u32_vector(out, store.grouped_occurrence_positions);
+    write_final_array(
+        out, store.reference_records, "sequence_store.reference_records");
+    write_final_array(
+        out, store.singleton_occurrences,
+        "sequence_store.singleton_occurrences");
+    write_final_array(
+        out, store.occurrence_groups,
+        "sequence_store.occurrence_groups");
+    write_final_array(
+        out, store.grouped_occurrence_positions,
+        "sequence_store.grouped_occurrence_positions");
     return;
   }
+  write_size(out, store.records.size());
   for (const auto& sequence : store.records) {
     write_string(out, sequence.id);
     write_string(out, sequence.seq);
@@ -757,7 +754,9 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
   }
 }
 
-SequenceStore read_sequence_store(std::istream& in) {
+SequenceStore read_sequence_store(
+    std::istream& in,
+    const std::shared_ptr<MappedIndexFile>& mapping) {
   SequenceStore store;
   store.reference_backed =
       read_bool(in, "sequence_store.reference_backed");
@@ -800,17 +799,11 @@ SequenceStore read_sequence_store(std::istream& in) {
           "reference-backed index contigs do not cover reference");
     }
   }
-  const size_t count = read_size(in, "sequence_store.count");
   if (store.reference_backed) {
-    store.reference_records.reserve(count);
-  } else {
-    store.records.reserve(count);
-  }
-  for (size_t i = 0; i < count; ++i) {
-    if (store.reference_backed) {
-      ReferenceSequenceRecord sequence;
-      sequence.source_pos =
-          read_pod<uint32_t>(in, "sequence.source_pos");
+    store.reference_records =
+        read_final_array<ReferenceSequenceRecord>(
+            in, mapping, "sequence_store.reference_records");
+    for (const auto& sequence : store.reference_records) {
       if (sequence.source_pos >
               store.reference_sequence.size() ||
           store.fixed_sequence_length >
@@ -819,54 +812,50 @@ SequenceStore read_sequence_store(std::istream& in) {
         throw std::runtime_error(
             "reference-backed sequence lies outside stored reference");
       }
-      store.reference_records.push_back(sequence);
-      continue;
     }
-    std::string id = read_string(in, "sequence.id");
-    std::string seq = read_string(in, "sequence.seq");
-    BioSequence sequence(std::move(id), std::move(seq));
-    sequence.sequence_id =
-        read_pod<uint32_t>(in, "sequence.sequence_id");
-    if (sequence.sequence_id != i) {
-      throw std::runtime_error("array index sequence ids are not contiguous");
+  } else {
+    const size_t count = read_size(in, "sequence_store.count");
+    store.records.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      std::string id = read_string(in, "sequence.id");
+      std::string seq = read_string(in, "sequence.seq");
+      BioSequence sequence(std::move(id), std::move(seq));
+      sequence.sequence_id =
+          read_pod<uint32_t>(in, "sequence.sequence_id");
+      if (sequence.sequence_id != i) {
+        throw std::runtime_error(
+            "array index sequence ids are not contiguous");
+      }
+      sequence.has_source_pos =
+          read_bool(in, "sequence.has_source_pos");
+      sequence.source_pos = read_size(in, "sequence.source_pos");
+      sequence.bwt_interval.start =
+          read_pod<int64_t>(in, "sequence.bwt_start");
+      sequence.bwt_interval.end =
+          read_pod<int64_t>(in, "sequence.bwt_end");
+      const size_t position_count =
+          read_size(in, "sequence.ref_position_count");
+      sequence.ref_positions.reserve(position_count);
+      for (size_t pos_idx = 0; pos_idx < position_count; ++pos_idx) {
+        RefPosition pos;
+        pos.ref_id = read_string(in, "ref_position.ref_id");
+        pos.start = static_cast<int>(
+            read_pod<int32_t>(in, "ref_position.start"));
+        pos.end = static_cast<int>(
+            read_pod<int32_t>(in, "ref_position.end"));
+        pos.strand = read_string(in, "ref_position.strand");
+        sequence.ref_positions.push_back(std::move(pos));
+      }
+      store.records.push_back(std::move(sequence));
     }
-    sequence.has_source_pos =
-        read_bool(in, "sequence.has_source_pos");
-    sequence.source_pos = read_size(in, "sequence.source_pos");
-    sequence.bwt_interval.start =
-        read_pod<int64_t>(in, "sequence.bwt_start");
-    sequence.bwt_interval.end =
-        read_pod<int64_t>(in, "sequence.bwt_end");
-    const size_t position_count =
-        read_size(in, "sequence.ref_position_count");
-    sequence.ref_positions.reserve(position_count);
-    for (size_t pos_idx = 0; pos_idx < position_count; ++pos_idx) {
-      RefPosition pos;
-      pos.ref_id = read_string(in, "ref_position.ref_id");
-      pos.start =
-          static_cast<int>(read_pod<int32_t>(in, "ref_position.start"));
-      pos.end =
-          static_cast<int>(read_pod<int32_t>(in, "ref_position.end"));
-      pos.strand = read_string(in, "ref_position.strand");
-      sequence.ref_positions.push_back(std::move(pos));
-    }
-    store.records.push_back(std::move(sequence));
   }
   if (store.reference_backed) {
-    const size_t singleton_count =
-        read_size(in, "sequence_store.singleton_occurrence_count");
-    store.singleton_occurrences.reserve(singleton_count);
+    store.singleton_occurrences =
+        read_final_array<ReferenceOccurrence>(
+            in, mapping, "sequence_store.singleton_occurrences");
     ReferenceOccurrence previous;
     bool first = true;
-    for (size_t occurrence_idx = 0;
-         occurrence_idx < singleton_count; ++occurrence_idx) {
-      ReferenceOccurrence occurrence;
-      occurrence.sequence_id =
-          read_pod<uint32_t>(
-              in, "singleton_occurrence.sequence_id");
-      occurrence.source_pos =
-          read_pod<uint32_t>(
-              in, "singleton_occurrence.source_pos");
+    for (const auto& occurrence : store.singleton_occurrences) {
       if (occurrence.sequence_id >= store.reference_records.size() ||
           occurrence.source_pos >= store.reference_sequence.size() ||
           (!first &&
@@ -874,33 +863,28 @@ SequenceStore read_sequence_store(std::istream& in) {
         throw std::runtime_error(
             "reference-backed index has invalid singleton occurrences");
       }
-      store.singleton_occurrences.push_back(occurrence);
       previous = occurrence;
       first = false;
     }
-    const size_t group_count =
-        read_size(in, "sequence_store.occurrence_group_count");
-    store.occurrence_groups.reserve(group_count);
+    store.occurrence_groups =
+        read_final_array<ReferenceOccurrenceGroup>(
+            in, mapping, "sequence_store.occurrence_groups");
     ReferenceOccurrenceGroup previous_group;
     first = true;
-    for (size_t group_idx = 0; group_idx < group_count; ++group_idx) {
-      ReferenceOccurrenceGroup group;
-      group.sequence_id =
-          read_pod<uint32_t>(in, "occurrence_group.sequence_id");
-      group.position_begin =
-          read_pod<uint32_t>(in, "occurrence_group.position_begin");
+    for (const auto& group : store.occurrence_groups) {
       if (group.sequence_id >= store.reference_records.size() ||
           (!first &&
            group.sequence_id <= previous_group.sequence_id)) {
         throw std::runtime_error(
             "reference-backed index has invalid occurrence groups");
       }
-      store.occurrence_groups.push_back(group);
       previous_group = group;
       first = false;
     }
-    store.grouped_occurrence_positions = read_u32_vector(
-        in, "sequence_store.grouped_occurrence_positions");
+    store.grouped_occurrence_positions =
+        read_final_array<uint32_t>(
+            in, mapping,
+            "sequence_store.grouped_occurrence_positions");
   }
   return store;
 }
@@ -926,7 +910,7 @@ SearchGraphView read_search_graph_view(
     std::istream& in,
     const std::shared_ptr<MappedIndexFile>& mapping) {
   SearchGraphView view;
-  view.sequences = read_sequence_store(in);
+  view.sequences = read_sequence_store(in, mapping);
   view.node_records = read_final_array<WorldNodeRecord>(
       in, mapping, "node_records");
   view.layer_begin = read_u32_vector(in, "layer_begin");
@@ -1018,7 +1002,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 14) {
+  if (manifest.format_version != 15) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1062,7 +1046,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 14;
+  stored.format_version = 15;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -1084,7 +1068,7 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 14) {
+  if (manifest.format_version != 15) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
