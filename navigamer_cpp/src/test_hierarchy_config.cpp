@@ -71,16 +71,14 @@ void validate_primary_layout(const std::vector<int>& primary_radii) {
     if (i == builder.finest_primary_layer_index()) {
       for (uint32_t node_id = view.layer_begin[layer];
            node_id < view.layer_end[layer]; ++node_id) {
-        const auto& node = view.node_records[node_id];
-        assert(node.leaf_count() > 0);
+        assert(view.leaf_count(node_id) > 0);
       }
     } else {
       bool saw_child = false;
       for (uint32_t node_id = view.layer_begin[layer];
            node_id < view.layer_end[layer]; ++node_id) {
-        const auto& node = view.node_records[node_id];
-        assert(node.beacon_count() > 0);
-        if (node.child_count() > 0) saw_child = true;
+        assert(view.beacon_count(node_id) > 0);
+        if (view.child_count(node_id) > 0) saw_child = true;
       }
       assert(saw_child && "expected at least one folded child edge in non-finest layer");
     }

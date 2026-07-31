@@ -774,7 +774,7 @@ void append_node_anchors(const SearchGraphView& view, NodeId node_id,
   if (node.center_sequence_id < view.sequences.size()) {
     anchors.emplace_back(view.sequences.sequence(node.center_sequence_id));
   }
-  for (uint32_t offset = 0; offset < node.beacon_count(); ++offset) {
+  for (uint32_t offset = 0; offset < view.beacon_count(node_id); ++offset) {
     const LeafId beacon_id =
         view.beacon_sequence_id(node_id, offset);
     if (beacon_id < view.sequences.size()) {
@@ -887,7 +887,7 @@ bool node_subtree_has_hit(
       !view.layer_begin.empty() &&
       node_id >= view.layer_begin.back();
   if (is_finest) {
-    for (uint32_t offset = 0; offset < node.leaf_count(); ++offset) {
+    for (uint32_t offset = 0; offset < view.leaf_count(node_id); ++offset) {
       const LeafId leaf_id =
           view.leaf_ids[node.leaf_begin() + offset];
       if (leaf_id < view.sequences.size() &&
@@ -897,7 +897,7 @@ bool node_subtree_has_hit(
       }
     }
   } else {
-    for (uint32_t offset = 0; offset < node.child_count(); ++offset) {
+    for (uint32_t offset = 0; offset < view.child_count(node_id); ++offset) {
       if (node_subtree_has_hit(
               view, view.child_ids[node.child_begin() + offset],
               hit_ids, memo)) {
@@ -1606,9 +1606,8 @@ FanoutSummary compute_fanout_summary(const BioGeometryIndexBuilder& builder) {
           ? static_cast<NodeId>(view.node_records.size())
           : view.layer_begin.back();
   for (NodeId node_id = 0; node_id < finest_begin; ++node_id) {
-    const auto& node = view.node_records[node_id];
-    if (node.child_count() == 0) continue;
-    fanouts.push_back(static_cast<double>(node.child_count()));
+    if (view.child_count(node_id) == 0) continue;
+    fanouts.push_back(static_cast<double>(view.child_count(node_id)));
   }
   if (fanouts.empty()) return {};
   FanoutSummary summary;

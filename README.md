@@ -40,7 +40,7 @@ without rescanning the reference. No per-window
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 17 stores the shared
+edit distance fits in one byte. Persisted format version 18 stores the shared
 reference as exact chunked 2-bit ACGT plus verbatim non-ACGT exceptions, and
 keeps long literal inputs in the manifest only as content fingerprints. It
 stores one child-center-to-beacon distance per MBB cell instead of separate
@@ -49,9 +49,12 @@ child-layer radius; equivalently, a child survives exactly when the two beacon
 distances
 differ by at most `child_radius + tolerance`. Leaf distances are also flat
 bytes, and finest-layer nodes reuse their cleared child buffer for leaf IDs.
-Finalized nodes remain cache-friendly 24-byte records containing only the
-center ID and shared array offsets/counts. Layer arrays imply both the layer ID
-and its radii, while
+Finalized nodes remain cache-friendly 20-byte records containing only the
+center ID and shared array offsets plus one packed count/encoding word. The
+common case stores a 24-bit child-or-leaf count, a 6-bit beacon count, and the
+2-bit beacon-ID encoding inline; an exact side table handles the rare count
+overflow instead of imposing a build limit. Layer arrays imply both the layer
+ID and its radii, while
 `leaf_begin` also addresses the aligned leaf-distance array. Parent beacon IDs
 use the narrowest exact per-node representation: signed 8-bit or 16-bit deltas
 from the node center, with full 32-bit IDs only when needed. A finest-layer
@@ -65,8 +68,9 @@ occurrence arrays are aligned in the persisted file and loaded as read-only
 memory mappings. Loading an index does not allocate or copy those arrays; only
 pages reached by validation and queries need to become resident.
 Finest-layer leaf ranges and non-finest child ranges share one offset/count
-pair, reducing every finalized world-node record from 32 to 24 bytes without
-adding a tag or a query-time decode branch.
+pair. Together with packed counts, this reduces every finalized world-node
+record from 32 to 20 bytes without adding a range tag; ordinary nodes take the
+inline-count path and overflow nodes retain full 32-bit counts.
 
 ## Installation
 
@@ -174,7 +178,7 @@ loads that persisted `.navidx` once and calls `navigamer query-index-batch`;
 without it, the bridge falls back to `navigamer benchmark` on reference windows.
 
 The C++ `build` and `query` commands support explicit persisted indexes with
-`--index <file>`. The v17 index file stores a manifest with input fingerprints
+`--index <file>`. The v18 index file stores a manifest with input fingerprints
 and construction parameters plus the canonical sequence, node, child, leaf,
 beacon, MBB, and leaf-beacon arrays. Older pointer-graph index files must be
 rebuilt. `query --index <file> --query <seq>` and
@@ -200,7 +204,7 @@ shards retain only the reference overlap required to materialize their last
 windows, so neither windows nor original contig coordinates are lost.
 Completed shard files are content- and parameter-validated and reused after an
 interrupted build; new shards are installed atomically. The final
-`.navshard` manifest contains relative paths to ordinary v17 `.navidx` parts.
+`.navshard` manifest contains relative paths to ordinary v18 `.navidx` parts.
 `query-index` and `query-index-batch` search the parts in parallel and merge
 identical sequences and all of their occurrences before reporting results.
 Query loading validates signatures, counts, file bounds, layer ranges, shard

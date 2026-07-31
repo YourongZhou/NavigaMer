@@ -37,14 +37,14 @@ std::vector<std::set<std::string>> edge_signature(
     const auto& node = view.node_records[node_id];
     std::set<std::string> row;
     if (node_id >= view.layer_begin.back()) {
-      for (uint32_t offset = 0; offset < node.leaf_count(); ++offset) {
+      for (uint32_t offset = 0; offset < view.leaf_count(node_id); ++offset) {
         row.insert(
             "leaf:" +
             view.sequences[
                 view.leaf_ids[node.leaf_begin() + offset]].id);
       }
     } else {
-      for (uint32_t offset = 0; offset < node.child_count(); ++offset) {
+      for (uint32_t offset = 0; offset < view.child_count(node_id); ++offset) {
         const auto& child =
             view.node_records[
                 view.child_ids[node.child_begin() + offset]];

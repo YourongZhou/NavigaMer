@@ -436,6 +436,18 @@ struct SequenceStore {
   }
 };
 
+struct NodeCountOverflowRecord {
+  uint32_t link_count = 0;
+  uint32_t beacon_count = 0;
+
+  bool operator==(const NodeCountOverflowRecord& other) const {
+    return link_count == other.link_count &&
+           beacon_count == other.beacon_count;
+  }
+};
+static_assert(sizeof(NodeCountOverflowRecord) == 8,
+              "node-count overflow must remain 8 bytes");
+
 // One fixed-size world record. Variable-length relationships live in the
 // global arrays in SearchGraphView and are addressed by offset + count.
 struct WorldNodeRecord {
@@ -445,7 +457,15 @@ struct WorldNodeRecord {
     Absolute32 = 2,
     ImplicitCenter = 3,
   };
-  static constexpr uint32_t BEACON_COUNT_MASK = (uint32_t{1} << 30) - 1;
+  static constexpr uint32_t LINK_COUNT_BITS = 24;
+  static constexpr uint32_t BEACON_COUNT_BITS = 6;
+  static constexpr uint32_t LINK_COUNT_MASK =
+      (uint32_t{1} << LINK_COUNT_BITS) - 1;
+  static constexpr uint32_t BEACON_COUNT_MASK =
+      (uint32_t{1} << BEACON_COUNT_BITS) - 1;
+  static constexpr uint32_t BEACON_COUNT_SHIFT = LINK_COUNT_BITS;
+  static constexpr uint32_t STORAGE_SHIFT = 30;
+  static constexpr uint32_t COUNT_OVERFLOW_CODE = BEACON_COUNT_MASK;
 
   LeafId center_sequence_id = INVALID_LEAF_ID;
 
@@ -453,34 +473,49 @@ struct WorldNodeRecord {
   // Primary layers are explicit, so the two mutually exclusive ranges share
   // one offset/count pair without a tag or query-time branch.
   uint32_t link_begin = 0;
-  uint32_t link_count = 0;
   uint32_t beacon_begin = 0;
-  uint32_t beacon_count_and_storage = 0;
+  uint32_t packed_counts = 0;
   uint32_t mbb_begin = 0;
 
   uint32_t child_begin() const { return link_begin; }
-  uint32_t child_count() const { return link_count; }
   uint32_t leaf_begin() const { return link_begin; }
-  uint32_t leaf_count() const { return link_count; }
-  uint32_t beacon_count() const {
-    return beacon_count_and_storage & BEACON_COUNT_MASK;
+  bool counts_overflow() const {
+    return ((packed_counts >> BEACON_COUNT_SHIFT) &
+            BEACON_COUNT_MASK) == COUNT_OVERFLOW_CODE;
+  }
+  uint32_t inline_link_count_or_overflow_index() const {
+    return packed_counts & LINK_COUNT_MASK;
+  }
+  uint32_t inline_beacon_count() const {
+    return (packed_counts >> BEACON_COUNT_SHIFT) &
+           BEACON_COUNT_MASK;
   }
   BeaconStorage beacon_storage() const {
     return static_cast<BeaconStorage>(
-        beacon_count_and_storage >> 30);
+        packed_counts >> STORAGE_SHIFT);
   }
-  void set_beacon_layout(uint32_t begin, uint32_t count,
+  void set_inline_counts(uint32_t link_count, uint32_t beacon_count,
                          BeaconStorage storage) {
-    if (count > BEACON_COUNT_MASK) {
-      throw std::length_error("node beacon count exceeds packed range");
+    if (link_count > LINK_COUNT_MASK ||
+        beacon_count >= COUNT_OVERFLOW_CODE) {
+      throw std::length_error("node counts exceed inline packed range");
     }
-    beacon_begin = begin;
-    beacon_count_and_storage =
-        count | (static_cast<uint32_t>(storage) << 30);
+    packed_counts = link_count |
+                    (beacon_count << BEACON_COUNT_SHIFT) |
+                    (static_cast<uint32_t>(storage) << STORAGE_SHIFT);
+  }
+  void set_count_overflow(uint32_t overflow_index,
+                          BeaconStorage storage) {
+    if (overflow_index > LINK_COUNT_MASK) {
+      throw std::length_error("too many node-count overflow records");
+    }
+    packed_counts = overflow_index |
+                    (COUNT_OVERFLOW_CODE << BEACON_COUNT_SHIFT) |
+                    (static_cast<uint32_t>(storage) << STORAGE_SHIFT);
   }
 };
-static_assert(sizeof(WorldNodeRecord) == 24,
-              "finalized world node must remain a compact 24 bytes");
+static_assert(sizeof(WorldNodeRecord) == 20,
+              "finalized world node must remain a compact 20 bytes");
 
 // Mutable construction record. It intentionally contains only integer
 // references: no WorldNode objects are allocated while building the hierarchy.
@@ -512,6 +547,7 @@ struct SearchGraphView {
   // Canonical array representation. NodeId and LeafId are positions in
   // node_records and sequences respectively.
   FinalArray<WorldNodeRecord> node_records;
+  FinalArray<NodeCountOverflowRecord> node_count_overflows;
   SequenceStore sequences;
   std::vector<uint32_t> layer_begin;
   std::vector<uint32_t> layer_end;
@@ -525,6 +561,49 @@ struct SearchGraphView {
   FinalArray<LeafId> beacon_ids32;
 
   FinalArray<uint8_t> leaf_beacon_dists;
+
+  uint32_t link_count(NodeId node_id) const {
+    const auto& node = node_records[node_id];
+    if (!node.counts_overflow()) {
+      return node.inline_link_count_or_overflow_index();
+    }
+    return node_count_overflows[
+        node.inline_link_count_or_overflow_index()].link_count;
+  }
+  uint32_t child_count(NodeId node_id) const {
+    return link_count(node_id);
+  }
+  uint32_t leaf_count(NodeId node_id) const {
+    return link_count(node_id);
+  }
+  uint32_t beacon_count(NodeId node_id) const {
+    const auto& node = node_records[node_id];
+    if (!node.counts_overflow()) {
+      return node.inline_beacon_count();
+    }
+    return node_count_overflows[
+        node.inline_link_count_or_overflow_index()].beacon_count;
+  }
+  void set_node_counts(NodeId node_id, uint32_t link_count_value,
+                       uint32_t beacon_count_value,
+                       WorldNodeRecord::BeaconStorage storage) {
+    auto& node = node_records[node_id];
+    if (link_count_value <= WorldNodeRecord::LINK_COUNT_MASK &&
+        beacon_count_value < WorldNodeRecord::COUNT_OVERFLOW_CODE) {
+      node.set_inline_counts(
+          link_count_value, beacon_count_value, storage);
+      return;
+    }
+    if (node_count_overflows.size() >
+        WorldNodeRecord::LINK_COUNT_MASK) {
+      throw std::length_error("too many node-count overflow records");
+    }
+    const uint32_t overflow_index =
+        static_cast<uint32_t>(node_count_overflows.size());
+    node_count_overflows.push_back(
+        {link_count_value, beacon_count_value});
+    node.set_count_overflow(overflow_index, storage);
+  }
 
   LeafId beacon_sequence_id(NodeId node_id,
                             uint32_t beacon_offset) const {

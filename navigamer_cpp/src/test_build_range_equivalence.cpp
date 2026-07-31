@@ -75,7 +75,7 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
       const auto& parent = view.node_records[parent_id];
       auto& children =
           edges[view.sequences[parent.center_sequence_id].seq];
-      for (uint32_t offset = 0; offset < parent.child_count(); ++offset) {
+      for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
         const auto& child =
             view.node_records[view.child_ids[parent.child_begin() + offset]];
         children.insert(view.sequences[child.center_sequence_id].seq);
@@ -99,7 +99,7 @@ OrderedLinkMap ordered_primary_edges(
           std::to_string(layer_idx) + ":" +
           view.sequences[parent.center_sequence_id].seq;
       auto& children = edges[key];
-      for (uint32_t offset = 0; offset < parent.child_count(); ++offset) {
+      for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
         const auto& child =
             view.node_records[view.child_ids[parent.child_begin() + offset]];
         children.push_back(view.sequences[child.center_sequence_id].seq);
@@ -118,7 +118,7 @@ LinkMap leaf_links(const navigamer::BioGeometryIndexBuilder& builder) {
        world_id < view.layer_end[layer]; ++world_id) {
     const auto& world = view.node_records[world_id];
     auto& leaves = links[view.sequences[world.center_sequence_id].seq];
-    for (uint32_t offset = 0; offset < world.leaf_count(); ++offset) {
+    for (uint32_t offset = 0; offset < view.leaf_count(world_id); ++offset) {
       leaves.insert(
           view.sequences[view.leaf_ids[world.leaf_begin() + offset]].seq);
     }
@@ -218,7 +218,7 @@ Phase3BuildResult build_and_collect_phase3(
       std::ostringstream row;
       row << layer_idx << ':'
           << view.sequences[parent.center_sequence_id].seq << "|b=";
-      for (uint32_t offset = 0; offset < parent.beacon_count(); ++offset) {
+      for (uint32_t offset = 0; offset < view.beacon_count(parent_id); ++offset) {
         row << view.sequences[
                    view.beacon_sequence_id(parent_id, offset)]
                    .seq
@@ -226,7 +226,7 @@ Phase3BuildResult build_and_collect_phase3(
       }
       row << "|c=";
       if (!is_finest) {
-        for (uint32_t offset = 0; offset < parent.child_count(); ++offset) {
+        for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
           const auto& child =
               view.node_records[view.child_ids[parent.child_begin() + offset]];
           row << view.sequences[child.center_sequence_id].seq << ';';
@@ -234,11 +234,11 @@ Phase3BuildResult build_and_collect_phase3(
       }
       row << "|m=";
       if (!is_finest) {
-        for (uint32_t child = 0; child < parent.child_count(); ++child) {
-          for (uint32_t dim = 0; dim < parent.beacon_count(); ++dim) {
+        for (uint32_t child = 0; child < view.child_count(parent_id); ++child) {
+          for (uint32_t dim = 0; dim < view.beacon_count(parent_id); ++dim) {
             const size_t flat = parent.mbb_begin +
                                 static_cast<size_t>(dim) *
-                                    parent.child_count() +
+                                    view.child_count(parent_id) +
                                 child;
             row << static_cast<int>(
                        view.child_beacon_dists[flat])
@@ -249,7 +249,7 @@ Phase3BuildResult build_and_collect_phase3(
       }
       row << "|r="
           << (!is_finest &&
-                      parent.child_count() >= config.min_rect_index_fanout
+                      view.child_count(parent_id) >= config.min_rect_index_fanout
                   ? 1
                   : 0);
       result.signature.push_back(row.str());

@@ -51,21 +51,21 @@ void assert_view_equivalent_to_original() {
     for (uint32_t node_id = view.layer_begin[layer];
          node_id < view.layer_end[layer]; ++node_id) {
       const auto& record = view.node_records[node_id];
+      const uint32_t link_count = view.link_count(node_id);
+      const uint32_t beacon_count = view.beacon_count(node_id);
       assert(record.center_sequence_id < view.sequences.size());
       if (layer + 1 == view.layer_begin.size()) {
-        assert(record.leaf_begin() + record.leaf_count() <=
+        assert(record.leaf_begin() + link_count <=
                view.leaf_ids.size());
         assert(record.leaf_begin() +
-                   static_cast<size_t>(record.leaf_count()) *
-                       record.beacon_count() <=
+                   static_cast<size_t>(link_count) * beacon_count <=
                view.leaf_beacon_dists.size());
       } else {
-        assert(record.child_begin() + record.child_count() <=
+        assert(record.child_begin() + link_count <=
                view.child_ids.size());
-        assert(record.beacon_count() <= record.child_count());
+        assert(beacon_count <= link_count);
         assert(record.mbb_begin +
-                   static_cast<size_t>(record.child_count()) *
-                       record.beacon_count() <=
+                   static_cast<size_t>(link_count) * beacon_count <=
                view.child_beacon_dists.size());
       }
     }
@@ -188,31 +188,63 @@ void assert_all_beacon_id_encodings_are_exact() {
 
   auto& delta8 = view.node_records[0];
   delta8.center_sequence_id = 200;
-  delta8.set_beacon_layout(
-      0, 1,
+  delta8.beacon_begin = 0;
+  view.set_node_counts(
+      0, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
   assert(view.beacon_sequence_id(0, 0) == 80);
 
   auto& delta16 = view.node_records[1];
   delta16.center_sequence_id = 1000;
-  delta16.set_beacon_layout(
-      0, 1,
+  delta16.beacon_begin = 0;
+  view.set_node_counts(
+      1, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Delta16);
   assert(view.beacon_sequence_id(1, 0) == 31000);
 
   auto& absolute32 = view.node_records[2];
   absolute32.center_sequence_id = 0;
-  absolute32.set_beacon_layout(
-      0, 1,
+  absolute32.beacon_begin = 0;
+  view.set_node_counts(
+      2, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
   assert(view.beacon_sequence_id(2, 0) == 4000000000U);
 
   auto& implicit = view.node_records[3];
   implicit.center_sequence_id = 123456789U;
-  implicit.set_beacon_layout(
-      0, 1,
+  implicit.beacon_begin = 0;
+  view.set_node_counts(
+      3, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
   assert(view.beacon_sequence_id(3, 0) == 123456789U);
+}
+
+void assert_node_count_overflow_is_exact() {
+  navigamer::SearchGraphView view;
+  view.node_records.resize(2);
+  view.set_node_counts(
+      0, navigamer::WorldNodeRecord::LINK_COUNT_MASK,
+      navigamer::WorldNodeRecord::COUNT_OVERFLOW_CODE - 1,
+      navigamer::WorldNodeRecord::BeaconStorage::Delta8);
+  assert(!view.node_records[0].counts_overflow());
+  assert(view.link_count(0) ==
+         navigamer::WorldNodeRecord::LINK_COUNT_MASK);
+  assert(view.beacon_count(0) ==
+         navigamer::WorldNodeRecord::COUNT_OVERFLOW_CODE - 1);
+
+  const uint32_t large_link_count =
+      navigamer::WorldNodeRecord::LINK_COUNT_MASK + 1;
+  const uint32_t large_beacon_count =
+      navigamer::WorldNodeRecord::COUNT_OVERFLOW_CODE + 17;
+  view.set_node_counts(
+      1, large_link_count, large_beacon_count,
+      navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
+  assert(view.node_records[1].counts_overflow());
+  assert(view.node_count_overflows.size() == 1);
+  assert(view.link_count(1) == large_link_count);
+  assert(view.beacon_count(1) == large_beacon_count);
+  assert(view.node_records[1].beacon_storage() ==
+         navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
 }
 
 }  // namespace
@@ -222,6 +254,7 @@ int main() {
   assert_flat_search_matches_original();
   assert_max_byte_distance_is_recall_safe();
   assert_all_beacon_id_encodings_are_exact();
+  assert_node_count_overflow_is_exact();
   std::cout << "search graph view tests passed\n";
   return 0;
 }
