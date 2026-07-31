@@ -359,7 +359,7 @@ equivalent to testing whether the two beacon distances differ by at most the
 child radius plus query tolerance. Leaf distances remain flat bytes, avoiding
 a separate heap allocation for every child or leaf row. Finest-layer
 construction also reuses the cleared child-ID buffer for leaf IDs. Finalized
-nodes remain 20 bytes and are addressed directly by array index;
+nodes are 16 bytes and are addressed directly by array index;
 layer offsets imply the layer ID and both radii. A packed 32-bit word stores
 the common 24-bit child-or-leaf count, 4-bit beacon count, 2-bit beacon
 encoding, and 2-bit link encoding;
@@ -367,7 +367,9 @@ rare overflows use an exact side-table record with full 32-bit counts. Beacon
 IDs use the narrowest exact per-node
 encoding: signed 8-bit or 16-bit deltas from the node center, falling back to a
 full 32-bit ID only when necessary. A finest-layer node's sole beacon is its
-center and consumes no side-array entry.
+center and consumes no side-array entry. Only the dense non-finest NodeId
+prefix stores explicit beacon offsets in a separate array, eliminating the
+otherwise constant zero field from every finest-layer node.
 Each parent uses 16-bit forward deltas for child node IDs when its complete
 child range fits. A flag packed into each node record selects that compact array;
 parents with any larger delta use the exact 32-bit child-ID array instead, so
@@ -383,7 +385,7 @@ mappings, so index load does not duplicate the arrays into heap memory. Query
 access still uses cached raw pointers and sizes.
 Because finest nodes use leaf links and all other nodes use child links, those
 two mutually exclusive ranges share one offset/count pair. Together with the
-packed count word, a finalized world node is therefore 20 bytes instead of 32,
+packed count word, a finalized world node is therefore 16 bytes instead of 32,
 with no range tag and no lossy count limit.
 
 ## Parameter sweeps

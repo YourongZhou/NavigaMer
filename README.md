@@ -53,8 +53,8 @@ child-layer radius; equivalently, a child survives exactly when the two beacon
 distances
 differ by at most `child_radius + tolerance`. Leaf distances are also flat
 bytes, and finest-layer nodes reuse their cleared child buffer for leaf IDs.
-Finalized nodes remain cache-friendly 20-byte records containing only the
-center ID and shared array offsets plus one packed count/encoding word. The
+Finalized nodes are cache-friendly 16-byte records containing the center ID,
+the two hot shared-array offsets, and one packed count/encoding word. The
 common case stores a 24-bit child-or-leaf count, a 4-bit beacon count, the
 2-bit beacon-ID encoding, and the 2-bit link encoding inline; an exact side
 table handles the rare count
@@ -62,7 +62,9 @@ overflow instead of imposing a build limit. Layer arrays imply both the layer
 ID and its radii. Parent beacon IDs
 use the narrowest exact per-node representation: signed 8-bit or 16-bit deltas
 from the node center, with full 32-bit IDs only when needed. A finest-layer
-node's sole beacon is its center and occupies no side-array element. No
+node's sole beacon is its center and occupies no side-array element. Explicit
+beacon offsets live in a dense side array indexed only by the non-finest NodeId
+prefix, instead of wasting a zero offset in every finest node. No
 per-edge distance vector is allocated before finalization.
 Parent-child links use exact 16-bit forward node-ID deltas when every child of
 that parent is representable; a flag packed into the node record selects the
@@ -80,7 +82,7 @@ memory mappings. Loading an index does not allocate or copy those arrays; only
 pages reached by validation and queries need to become resident.
 Finest-layer leaf ranges and non-finest child ranges share one offset/count
 pair. Together with packed counts, this reduces every finalized world-node
-record from 32 to 20 bytes without adding a range tag; ordinary nodes take the
+record from 32 to 16 bytes without adding a range tag; ordinary nodes take the
 inline-count path and overflow nodes retain full 32-bit counts.
 
 ## Installation

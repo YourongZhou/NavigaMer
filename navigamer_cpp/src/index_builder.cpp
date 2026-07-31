@@ -2031,6 +2031,10 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
   size_t expected_beacon_delta16_begin = 0;
   size_t expected_beacon_id32_begin = 0;
   size_t expected_count_overflow = 0;
+  if (view.layer_begin.empty() ||
+      view.beacon_begins.size() != view.layer_begin.back()) {
+    return false;
+  }
   for (NodeId node_id = 0; node_id < view.node_records.size();
        ++node_id) {
     const auto& node = view.node_records[node_id];
@@ -2088,21 +2092,23 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       expected_mbb_begin +=
           static_cast<size_t>(link_count) * beacon_count;
     }
+    const uint32_t beacon_begin =
+        is_finest ? 0 : view.beacon_begins[node_id];
     switch (node.beacon_storage()) {
       case WorldNodeRecord::BeaconStorage::Delta8:
-        if (node.beacon_begin != expected_beacon_delta8_begin) return false;
+        if (beacon_begin != expected_beacon_delta8_begin) return false;
         expected_beacon_delta8_begin += beacon_count;
         break;
       case WorldNodeRecord::BeaconStorage::Delta16:
-        if (node.beacon_begin != expected_beacon_delta16_begin) return false;
+        if (beacon_begin != expected_beacon_delta16_begin) return false;
         expected_beacon_delta16_begin += beacon_count;
         break;
       case WorldNodeRecord::BeaconStorage::Absolute32:
-        if (node.beacon_begin != expected_beacon_id32_begin) return false;
+        if (beacon_begin != expected_beacon_id32_begin) return false;
         expected_beacon_id32_begin += beacon_count;
         break;
       case WorldNodeRecord::BeaconStorage::ImplicitCenter:
-        if (node.beacon_begin != 0 || beacon_count != 1) return false;
+        if (!is_finest || beacon_count != 1) return false;
         break;
     }
     if (expected_child_delta16_begin >
@@ -3817,6 +3823,10 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   view.leaf_id_deltas16.reserve(total_leaf_deltas16);
   view.leaf_ids.reserve(total_leaf_ids32);
   view.child_beacon_dists.reserve(total_mbb_cells);
+  view.beacon_begins.reserve(
+      primary_layers_.empty()
+          ? 0
+          : world_node_count_ - primary_layers_.back().size());
   view.beacon_deltas8.reserve(total_beacon_deltas8);
   view.beacon_deltas16.reserve(total_beacon_deltas16);
   view.beacon_ids32.reserve(total_beacon_ids32);
@@ -3920,9 +3930,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       auto storage =
           WorldNodeRecord::BeaconStorage::ImplicitCenter;
       uint32_t beacon_count = 1;
-      if (is_finest) {
-        record.beacon_begin = 0;
-      } else {
+      if (!is_finest) {
         storage = beacon_storage_for(
             node.center_sequence_id, geometry.beacon_ids);
         beacon_count =
@@ -3964,7 +3972,11 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             view.beacon_ids32.push_back(beacon_id);
           }
         }
-        record.beacon_begin = beacon_begin;
+        if (view.beacon_begins.size() != node_id) {
+          throw std::runtime_error(
+              "non-finest beacon offsets are not a dense NodeId prefix");
+        }
+        view.beacon_begins.push_back(beacon_begin);
       }
       view.set_node_counts(
           node_id, link_count, beacon_count, storage);

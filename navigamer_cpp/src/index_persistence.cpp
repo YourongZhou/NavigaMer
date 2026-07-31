@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '3'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '4'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -881,6 +881,7 @@ void write_search_graph_view(std::ostream& out,
   write_final_array(out, view.beacon_deltas8, "beacon_deltas8");
   write_final_array(out, view.beacon_deltas16, "beacon_deltas16");
   write_final_array(out, view.beacon_ids32, "beacon_ids32");
+  write_final_array(out, view.beacon_begins, "beacon_begins");
   write_final_array(
       out, view.child_beacon_dists, "child_beacon_dists");
   write_final_array(
@@ -918,6 +919,8 @@ SearchGraphView read_search_graph_view(
       read_final_array<int16_t>(in, mapping, "beacon_deltas16");
   view.beacon_ids32 =
       read_final_array<LeafId>(in, mapping, "beacon_ids32");
+  view.beacon_begins =
+      read_final_array<uint32_t>(in, mapping, "beacon_begins");
   view.child_beacon_dists =
       read_final_array<uint8_t>(in, mapping, "child_beacon_dists");
   view.leaf_beacon_dists =
@@ -943,7 +946,9 @@ bool validate_structural_layout(
     }
     expected_begin = view.layer_end[layer];
   }
-  return expected_begin == view.node_records.size();
+  return expected_begin == view.node_records.size() &&
+         !view.layer_begin.empty() &&
+         view.beacon_begins.size() == view.layer_begin.back();
 }
 
 }  // namespace

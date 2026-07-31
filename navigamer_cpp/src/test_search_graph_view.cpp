@@ -42,6 +42,7 @@ void assert_view_equivalent_to_original() {
          static_cast<size_t>(builder.num_primary_layers()));
   assert(view.layer_end.size() ==
          static_cast<size_t>(builder.num_primary_layers()));
+  assert(view.beacon_begins.size() == view.layer_begin.back());
   for (size_t sequence_id = 0; sequence_id < view.sequences.size();
        ++sequence_id) {
     assert(view.sequences.records[sequence_id].sequence_id == sequence_id);
@@ -185,10 +186,10 @@ void assert_all_beacon_id_encodings_are_exact() {
   view.beacon_deltas8 = {-120};
   view.beacon_deltas16 = {30000};
   view.beacon_ids32 = {4000000000U};
+  view.beacon_begins = {0, 0, 0};
 
   auto& delta8 = view.node_records[0];
   delta8.center_sequence_id = 200;
-  delta8.beacon_begin = 0;
   view.set_node_counts(
       0, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
@@ -196,7 +197,6 @@ void assert_all_beacon_id_encodings_are_exact() {
 
   auto& delta16 = view.node_records[1];
   delta16.center_sequence_id = 1000;
-  delta16.beacon_begin = 0;
   view.set_node_counts(
       1, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Delta16);
@@ -204,7 +204,6 @@ void assert_all_beacon_id_encodings_are_exact() {
 
   auto& absolute32 = view.node_records[2];
   absolute32.center_sequence_id = 0;
-  absolute32.beacon_begin = 0;
   view.set_node_counts(
       2, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
@@ -212,7 +211,6 @@ void assert_all_beacon_id_encodings_are_exact() {
 
   auto& implicit = view.node_records[3];
   implicit.center_sequence_id = 123456789U;
-  implicit.beacon_begin = 0;
   view.set_node_counts(
       3, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);

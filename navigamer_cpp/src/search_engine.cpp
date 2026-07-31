@@ -995,10 +995,15 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     stats.anchor_distance_count++;
     stats.dist_calc_count++;
   };
+  const uint32_t beacon_begin =
+      node.beacon_storage() ==
+              WorldNodeRecord::BeaconStorage::ImplicitCenter
+          ? 0
+          : view.beacon_begins[node_id];
   switch (node.beacon_storage()) {
     case WorldNodeRecord::BeaconStorage::Delta8: {
       const int8_t* deltas =
-          view.beacon_deltas8.data() + node.beacon_begin;
+          view.beacon_deltas8.data() + beacon_begin;
       for (uint32_t offset = 0; offset < beacon_count; ++offset) {
         measure_beacon(static_cast<LeafId>(
             static_cast<int64_t>(node.center_sequence_id) +
@@ -1008,7 +1013,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     }
     case WorldNodeRecord::BeaconStorage::Delta16: {
       const int16_t* deltas =
-          view.beacon_deltas16.data() + node.beacon_begin;
+          view.beacon_deltas16.data() + beacon_begin;
       for (uint32_t offset = 0; offset < beacon_count; ++offset) {
         measure_beacon(static_cast<LeafId>(
             static_cast<int64_t>(node.center_sequence_id) +
@@ -1018,7 +1023,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     }
     case WorldNodeRecord::BeaconStorage::Absolute32: {
       const LeafId* beacon_ids =
-          view.beacon_ids32.data() + node.beacon_begin;
+          view.beacon_ids32.data() + beacon_begin;
       for (uint32_t offset = 0; offset < beacon_count; ++offset) {
         measure_beacon(beacon_ids[offset]);
       }

@@ -580,7 +580,6 @@ struct WorldNodeRecord {
   // Primary layers are explicit, so child and leaf ranges share one
   // offset/count pair; the packed link encoding selects the exact array.
   uint32_t link_begin = 0;
-  uint32_t beacon_begin = 0;
   uint32_t packed_counts = 0;
   uint32_t mbb_begin = 0;
 
@@ -632,8 +631,8 @@ struct WorldNodeRecord {
                     (static_cast<uint32_t>(storage) << STORAGE_SHIFT);
   }
 };
-static_assert(sizeof(WorldNodeRecord) == 20,
-              "finalized world node must remain a compact 20 bytes");
+static_assert(sizeof(WorldNodeRecord) == 16,
+              "finalized world node must remain a compact 16 bytes");
 
 // Mutable construction record. It intentionally contains only integer
 // references: no WorldNode objects are allocated while building the hierarchy.
@@ -680,6 +679,9 @@ struct SearchGraphView {
   FinalArray<LeafId> leaf_ids;
 
   FinalArray<uint8_t> child_beacon_dists;
+  // Explicit beacons only exist above the finest layer. Those NodeIds form a
+  // dense prefix, so this side array needs no per-entry node identifier.
+  FinalArray<uint32_t> beacon_begins;
   FinalArray<int8_t> beacon_deltas8;
   FinalArray<int16_t> beacon_deltas16;
   FinalArray<LeafId> beacon_ids32;
@@ -767,17 +769,22 @@ struct SearchGraphView {
   LeafId beacon_sequence_id(NodeId node_id,
                             uint32_t beacon_offset) const {
     const auto& node = node_records[node_id];
+    const uint32_t beacon_begin =
+        node.beacon_storage() ==
+                WorldNodeRecord::BeaconStorage::ImplicitCenter
+            ? 0
+            : beacon_begins[node_id];
     switch (node.beacon_storage()) {
       case WorldNodeRecord::BeaconStorage::Delta8:
         return static_cast<LeafId>(
             static_cast<int64_t>(node.center_sequence_id) +
-            beacon_deltas8[node.beacon_begin + beacon_offset]);
+            beacon_deltas8[beacon_begin + beacon_offset]);
       case WorldNodeRecord::BeaconStorage::Delta16:
         return static_cast<LeafId>(
             static_cast<int64_t>(node.center_sequence_id) +
-            beacon_deltas16[node.beacon_begin + beacon_offset]);
+            beacon_deltas16[beacon_begin + beacon_offset]);
       case WorldNodeRecord::BeaconStorage::Absolute32:
-        return beacon_ids32[node.beacon_begin + beacon_offset];
+        return beacon_ids32[beacon_begin + beacon_offset];
       case WorldNodeRecord::BeaconStorage::ImplicitCenter:
         return node.center_sequence_id;
     }
