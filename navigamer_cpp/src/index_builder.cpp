@@ -118,18 +118,23 @@ class Phase1DistanceCache {
       entry.rejected_tau = -1;
     }
     if (result <= tau) {
-      entry.exact_distance = result;
-    } else {
-      entry.rejected_tau = std::max(entry.rejected_tau, tau);
+      if (result <= std::numeric_limits<int16_t>::max()) {
+        entry.exact_distance = static_cast<int16_t>(result);
+      }
+    } else if (tau <= std::numeric_limits<int16_t>::max()) {
+      entry.rejected_tau = std::max(
+          entry.rejected_tau, static_cast<int16_t>(tau));
     }
   }
 
  private:
   struct Entry {
-    int exact_distance = -1;
-    int rejected_tau = -1;
     uint32_t epoch = 0;
+    int16_t exact_distance = -1;
+    int16_t rejected_tau = -1;
   };
+  static_assert(sizeof(Entry) == 8,
+                "phase1 distance-cache entry must remain 8 bytes");
 
   std::vector<Entry> entries_;
   uint32_t epoch_ = 0;
