@@ -222,10 +222,10 @@ interrupted build; new shards are installed atomically. The final
 `.navshard` manifest contains relative paths to ordinary v20 `.navidx` parts
 and a memory-mapped exact-minimizer router sidecar. The sidecar stores sorted
 32-bit minimizers plus shard IDs at exactly `ceil(log2(shard_count))` bits per
-entry. For a query at tolerance `d`, the router takes one 64-base seed from
-each of `d + 1` disjoint query blocks and searches only shards containing at
-least one seed minimizer. The pigeonhole principle makes this a necessary
-condition for an edit-distance
+entry. For a query at tolerance `d`, the router takes one seed of 32 to 64
+bases from each of `d + 1` disjoint query blocks and searches only shards
+containing at least one seed minimizer. The pigeonhole principle makes this a
+necessary condition for an edit-distance
 hit, not a heuristic. Short or ambiguous unsupported queries, and missing or
 invalid router sidecars, conservatively search every shard. `query-index` and
 `query-index-batch` search the selected parts in parallel and merge identical

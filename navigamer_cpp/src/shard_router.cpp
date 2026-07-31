@@ -86,10 +86,18 @@ ShardRouteSelection ShardedSeedRouter::select(
     const size_t begin = partition * query.size() / partition_count;
     const size_t end =
         (partition + 1) * query.size() / partition_count;
-    const size_t seed_begin = begin + (end - begin - window) / 2;
+    // A minimizer of a longer exact seed is also the minimizer of at least
+    // one `window`-base subwindow containing it, so it is present in the
+    // reference router. Retain the more selective 64-base query seed when
+    // the partition is long enough while keeping 32 bases as the safe floor.
+    const size_t seed_length =
+        std::min<size_t>(64, end - begin);
+    const size_t seed_begin =
+        begin + (end - begin - seed_length) / 2;
     uint32_t minimizer = 0;
     if (!exact_minimizer_code(
-            query.substr(seed_begin, window), k, window,
+            query.substr(seed_begin, seed_length), k,
+            static_cast<uint32_t>(seed_length),
             &minimizer)) {
       return ShardRouteSelection{};
     }

@@ -334,7 +334,7 @@ void test_seed_router_no_false_negatives() {
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(manifest.shards.size() > 3);
   assert(manifest.router_k == 16);
-  assert(manifest.router_window == 64);
+  assert(manifest.router_window == 32);
   assert(manifest.router_entry_count > 0);
   const size_t expected_router_bytes =
       48 + manifest.router_entry_count * sizeof(uint32_t) +
@@ -372,7 +372,7 @@ void test_seed_router_no_false_negatives() {
   size_t ordinal = 0;
   for (size_t source_pos : source_positions) {
     const std::string exact = reference.substr(source_pos, window);
-    for (int mutation = 0; mutation < 5; ++mutation) {
+    for (int mutation = 0; mutation < 6; ++mutation) {
       std::string sequence = exact;
       if (mutation == 1) {
         sequence[7] = sequence[7] == 'A' ? 'C' : 'A';
@@ -384,23 +384,27 @@ void test_seed_router_no_false_negatives() {
       } else if (mutation == 4) {
         sequence.insert(sequence.begin() + 33, 'C');
         sequence.erase(sequence.begin() + 177);
+      } else if (mutation == 5) {
+        for (size_t pos : {3, 45, 87, 129, 171}) {
+          sequence[pos] = sequence[pos] == 'A' ? 'C' : 'A';
+        }
       }
-      const auto route = router.select(sequence, 2);
+      const auto route = router.select(sequence, 5);
       assert(route.enabled);
       assert(!route.shard_ids.empty());
       navigamer::BioSequence query(
           "router_" + std::to_string(ordinal++), sequence);
-      assert(matching_occurrences(shards, query, 2) ==
+      assert(matching_occurrences(shards, query, 5) ==
              matching_occurrences(
-                 shards, query, 2, &route.shard_ids));
+                 shards, query, 5, &route.shard_ids));
     }
   }
 
   const std::string exact = reference.substr(98, window);
   std::string ambiguous = exact;
   ambiguous[10] = 'N';
-  assert(!router.select(ambiguous, 2).enabled);
-  assert(!router.select(exact.substr(0, 100), 2).enabled);
+  assert(!router.select(ambiguous, 5).enabled);
+  assert(!router.select(exact.substr(0, 100), 5).enabled);
   assert(!router.select(exact, -1).enabled);
 
   std::filesystem::remove_all(directory);

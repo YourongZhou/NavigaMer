@@ -241,12 +241,12 @@ fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
 Format v20 loads the finalized arrays directly; older files must be rebuilt.
 A `.navshard` bundle points to independently loadable v20 parts and, when it
-has multiple shards and windows of at least 64 bases, a memory-mapped
-`.route` sidecar. The router uses 16-mer minimizers from 64-base seeds in
-`d + 1` disjoint query blocks. Its keys are 32-bit arrays and the parallel
+has multiple shards and windows of at least 32 bases, a memory-mapped
+`.route` sidecar. The router uses 16-mer minimizers from 32- to 64-base seeds
+in `d + 1` disjoint query blocks. Its keys are 32-bit arrays and the parallel
 shard IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
 within edit distance `d` must contain one whole block exactly, so omitting
-shards without all of those minimizers is no-FN-safe. Unsupported
+shards without any of those minimizers is no-FN-safe. Unsupported
 short/ambiguous queries or an unavailable sidecar fall
 back to every part. `query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Bundle query
