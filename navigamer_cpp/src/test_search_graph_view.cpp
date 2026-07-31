@@ -135,11 +135,57 @@ void assert_flat_search_matches_original() {
   }
 }
 
+void assert_saturated_byte_bounds_are_recall_safe() {
+  auto sequences =
+      std::vector<std::shared_ptr<navigamer::BioSequence>>{
+          std::make_shared<navigamer::BioSequence>(
+              "a", std::string(255, 'A')),
+          std::make_shared<navigamer::BioSequence>(
+              "c", std::string(255, 'C')),
+          std::make_shared<navigamer::BioSequence>(
+              "t", std::string(255, 'T')),
+      };
+  navigamer::BioGeometryIndexBuilder builder(
+      navigamer::HierarchyConfig({255, 254}));
+  builder.build(std::move(sequences));
+  const auto& view = builder.search_graph_view();
+  bool saw_saturated_upper_bound = false;
+  for (uint8_t upper : view.mbb_hi) {
+    if (upper == 255) {
+      saw_saturated_upper_bound = true;
+      break;
+    }
+  }
+  assert(saw_saturated_upper_bound);
+
+  for (navigamer::SimdMode simd_mode :
+       {navigamer::SimdMode::Scalar,
+        navigamer::SimdMode::Auto,
+        navigamer::SimdMode::AVX2}) {
+    navigamer::SearchConfig config;
+    config.simd_mode = simd_mode;
+    navigamer::BioGeometrySearchEngine engine(builder, config);
+    for (char base : {'A', 'C', 'T'}) {
+      navigamer::BioSequence query(
+          "q", std::string(255, base));
+      auto [adaptive, adaptive_stats] =
+          engine.search_adaptive(query, 0);
+      auto [brute_force, brute_stats] =
+          engine.search_brute_force(query, 0);
+      (void)adaptive_stats;
+      (void)brute_stats;
+      assert(ids(adaptive) == ids(brute_force));
+      assert(adaptive.size() == 1);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
   assert_view_equivalent_to_original();
   assert_flat_search_matches_original();
+  assert_saturated_byte_bounds_are_recall_safe();
   std::cout << "search graph view tests passed\n";
   return 0;
 }

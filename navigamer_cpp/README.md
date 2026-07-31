@@ -293,11 +293,13 @@ fixed window length. Query output resolves all occurrences directly from these
 records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
-Finalized MBB bounds and leaf-beacon distances use checked 16-bit values;
-distances above 65,535 fail explicitly instead of being truncated.
-Construction stores MBB pairs in one packed array and leaf distances in one
-flat array, avoiding a separate heap allocation for every child or leaf row.
-Finest-layer construction also reuses the cleared child-ID buffer for leaf IDs.
+Indexed sequences and reference windows are limited to 255 bases. Therefore
+every exact sequence-to-beacon edit distance fits in 8 bits; MBB upper bounds
+are saturated at 255 without changing the feasible distance domain. Format
+version 8 stores MBB bounds and leaf distances as byte arrays. Construction
+packs each lower/upper pair into 16 bits and keeps leaf distances flat,
+avoiding a separate heap allocation for every child or leaf row. Finest-layer
+construction also reuses the cleared child-ID buffer for leaf IDs.
 
 ## Parameter sweeps
 

@@ -10,7 +10,7 @@
 namespace {
 
 std::vector<uint32_t> reference_survivors(
-    const std::vector<uint16_t>& dist_by_dim,
+    const std::vector<uint8_t>& dist_by_dim,
     size_t leaf_count,
     size_t dim,
     const std::vector<int>& query,
@@ -32,14 +32,15 @@ std::vector<uint32_t> reference_survivors(
 
 void assert_random_equivalence() {
   std::mt19937 rng(20260616);
-  std::uniform_int_distribution<int32_t> pick_dist(0, 65535);
-  std::uniform_int_distribution<int32_t> pick_query(0, 70000);
+  std::uniform_int_distribution<int32_t> pick_dist(0, 255);
+  std::uniform_int_distribution<int32_t> pick_query(0, 300);
   const std::vector<size_t> dims = {1, 2, 4, 8, 16, 32};
-  const std::vector<size_t> leaf_counts = {1, 7, 8, 9, 31, 64, 1000};
+  const std::vector<size_t> leaf_counts = {
+      1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 1000};
 
   for (size_t dim : dims) {
     for (size_t leaf_count : leaf_counts) {
-      std::vector<uint16_t> dist_by_dim(dim * leaf_count);
+      std::vector<uint8_t> dist_by_dim(dim * leaf_count);
       std::vector<int> query(dim);
       for (size_t dim_idx = 0; dim_idx < dim; ++dim_idx) {
         query[dim_idx] = pick_query(rng);

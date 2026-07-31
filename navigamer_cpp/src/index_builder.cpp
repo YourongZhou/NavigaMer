@@ -61,6 +61,8 @@ DistanceMode to_distance_mode(BuildDistanceMode mode);
 
 constexpr size_t kPhase1ParallelScanMinFanout = 512;
 constexpr size_t kPhase2DistanceBatchFlushPairs = 65536;
+constexpr size_t kMaxCompactSequenceLength =
+    std::numeric_limits<uint8_t>::max();
 
 struct Phase1CoverScanResult {
   NodeId best = INVALID_NODE_ID;
@@ -1674,6 +1676,11 @@ void BioGeometryIndexBuilder::initialize_sequence_store(
     if (!unique_seqs[sequence_idx]) {
       throw std::invalid_argument("null BioSequence in deduplicated input");
     }
+    if (unique_seqs[sequence_idx]->seq.size() >
+        kMaxCompactSequenceLength) {
+      throw std::invalid_argument(
+          "indexed sequence length exceeds compact 8-bit distance range");
+    }
     if (sequence_idx > static_cast<size_t>(INVALID_LEAF_ID - 1)) {
       throw std::runtime_error("too many sequences for 32-bit LeafId");
     }
@@ -1697,6 +1704,10 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
     BuildProgressReporter* progress) {
   if (window_length == 0) {
     throw std::invalid_argument("reference window length must be positive");
+  }
+  if (window_length > kMaxCompactSequenceLength) {
+    throw std::invalid_argument(
+        "reference window length exceeds compact 8-bit distance range");
   }
   if (stride == 0) {
     throw std::invalid_argument("reference window stride must be positive");
@@ -2445,8 +2456,6 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
     std::vector<double> collect_ms(static_cast<size_t>(thread_capacity), 0.0);
     std::vector<double> collapse_ms(static_cast<size_t>(thread_capacity), 0.0);
     std::vector<double> distance_ms(static_cast<size_t>(thread_capacity), 0.0);
-    std::vector<uint8_t> distance_overflow(
-        static_cast<size_t>(thread_capacity), 0);
     int actual_threads = 1;
 
 #pragma omp parallel if(thread_capacity > 1) num_threads(thread_capacity)
@@ -2516,23 +2525,19 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
                   std::max<int64_t>(
                       0, static_cast<int64_t>(dist) - child.radius);
               const int64_t upper_value =
-                  static_cast<int64_t>(dist) + child.radius;
-              if (lower_value >
-                      static_cast<int>(
-                          std::numeric_limits<uint16_t>::max()) ||
-                  upper_value >
-                      static_cast<int>(
-                          std::numeric_limits<uint16_t>::max())) {
-                distance_overflow[static_cast<size_t>(tid)] = 1;
-                continue;
-              }
-              const uint16_t lower =
-                  static_cast<uint16_t>(lower_value);
-              const uint16_t upper =
-                  static_cast<uint16_t>(upper_value);
+                  std::min<int64_t>(
+                      std::numeric_limits<uint8_t>::max(),
+                      static_cast<int64_t>(dist) + child.radius);
+              // Indexed strings are at most 255 bases, so their edit distance
+              // to any beacon cannot exceed 255. Saturating the interval at
+              // that domain boundary cannot exclude a possible child.
+              const uint8_t lower =
+                  static_cast<uint8_t>(lower_value);
+              const uint8_t upper =
+                  static_cast<uint8_t>(upper_value);
               node.child_mbb_bounds[flat] =
-                  static_cast<uint32_t>(lower) |
-                  (static_cast<uint32_t>(upper) << 16);
+                  static_cast<uint16_t>(lower) |
+                  (static_cast<uint16_t>(upper) << 8);
             }
           }
         }
@@ -2543,12 +2548,6 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
 
     phase_completed += current_layer.size();
     if (progress) progress->set_completed(phase_completed);
-    if (std::find(
-            distance_overflow.begin(), distance_overflow.end(),
-            static_cast<uint8_t>(1)) != distance_overflow.end()) {
-      throw std::runtime_error(
-          "MBB bounds exceed 16-bit stored distance range");
-    }
 
     stats_.phase3_parallel_threads = std::max(
         stats_.phase3_parallel_threads, static_cast<size_t>(actual_threads));
@@ -2624,7 +2623,7 @@ void BioGeometryIndexBuilder::attach_leaves(
               ScopedTimer timer(&thread_tuple_ms[timer_idx]);
               node.child_or_leaf_ids.push_back(sequence_id);
               node.leaf_beacon_dists.push_back(
-                  static_cast<uint16_t>(dist));
+                  static_cast<uint8_t>(dist));
             }
           }
         }
@@ -2742,7 +2741,7 @@ void BioGeometryIndexBuilder::attach_leaves(
                 ScopedTimer timer(&stats_.leaf_tuple_emit_ms);
                 world.child_or_leaf_ids.push_back(sequence_id);
                 world.leaf_beacon_dists.push_back(
-                    static_cast<uint16_t>(dist));
+                    static_cast<uint8_t>(dist));
               }
             }
           }
@@ -2756,7 +2755,7 @@ void BioGeometryIndexBuilder::attach_leaves(
     } else {
       struct LeafAttachTuple {
         size_t seq_idx = 0;
-        uint16_t beacon_dist = 0;
+        uint8_t beacon_dist = 0;
       };
 
       std::vector<RangeJoinItemView> items;
@@ -2874,7 +2873,7 @@ void BioGeometryIndexBuilder::attach_leaves(
                 ScopedTimer timer(&local_stats.leaf_tuple_emit_ms);
                 world_tuples.push_back(
                     {seq_idx,
-                     static_cast<uint16_t>(dist)});
+                     static_cast<uint8_t>(dist)});
               }
             }
           }
@@ -3061,9 +3060,9 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         throw std::runtime_error(
             "packed child MBB array does not match child/beacon dimensions");
       }
-      for (uint32_t bounds : node.child_mbb_bounds) {
-        view.mbb_lo.push_back(static_cast<uint16_t>(bounds));
-        view.mbb_hi.push_back(static_cast<uint16_t>(bounds >> 16));
+      for (uint16_t bounds : node.child_mbb_bounds) {
+        view.mbb_lo.push_back(static_cast<uint8_t>(bounds));
+        view.mbb_hi.push_back(static_cast<uint8_t>(bounds >> 8));
       }
 
       const size_t leaf_count =

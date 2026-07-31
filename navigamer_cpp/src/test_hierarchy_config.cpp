@@ -32,6 +32,30 @@ void expect_invalid_config(const std::vector<int>& primary_radii) {
   assert(threw && "expected invalid hierarchy config to throw");
 }
 
+void expect_long_sequence_rejected() {
+  bool threw = false;
+  try {
+    BioGeometryIndexBuilder builder{HierarchyConfig({20, 8})};
+    builder.build({
+        std::make_shared<BioSequence>(
+            "too_long", std::string(256, 'A')),
+    });
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw && "expected a sequence longer than 255 to throw");
+
+  threw = false;
+  try {
+    BioGeometryIndexBuilder builder{HierarchyConfig({20, 8})};
+    builder.build_reference_windows(
+        "ref", std::string(300, 'A'), 256, 1);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw && "expected a reference window longer than 255 to throw");
+}
+
 void validate_primary_layout(const std::vector<int>& primary_radii) {
   BioGeometryIndexBuilder builder{HierarchyConfig(primary_radii)};
   builder.build(toy_sequences());
@@ -75,6 +99,7 @@ int main() {
   expect_invalid_config({10, 10});
   expect_invalid_config({8, 12});
   expect_invalid_config({65536, 1});
+  expect_long_sequence_rejected();
 
   validate_primary_layout({20, 8});
   validate_primary_layout({30, 15, 5});

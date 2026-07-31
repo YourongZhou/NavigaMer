@@ -32,8 +32,8 @@ SimdMode parse_simd_mode(const std::string& value);
 bool simd_avx2_runtime_supported();
 
 std::vector<uint32_t> filter_mbb_survivors(
-    const uint16_t* lo_by_dim,
-    const uint16_t* hi_by_dim,
+    const uint8_t* lo_by_dim,
+    const uint8_t* hi_by_dim,
     size_t child_count,
     size_t dim,
     const int* query_beacon_dists,
@@ -42,7 +42,7 @@ std::vector<uint32_t> filter_mbb_survivors(
     MBBFilterSimdStats* stats = nullptr);
 
 std::vector<uint32_t> filter_leaf_beacon_survivors(
-    const uint16_t* dist_by_dim,
+    const uint8_t* dist_by_dim,
     size_t leaf_count,
     size_t dim,
     const int* query_beacon_dists,

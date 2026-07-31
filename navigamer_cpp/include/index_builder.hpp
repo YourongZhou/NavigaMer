@@ -264,10 +264,10 @@ struct BuildWorldNodeRecord {
   std::vector<LeafId> beacon_ids;
   // Dimension-major, matching SearchGraphView directly:
   // [beacon_index * child_count + child_index].
-  // Each uint32_t packs lower in bits 0..15 and upper in bits 16..31.
-  std::vector<uint32_t> child_mbb_bounds;
+  // Each uint16_t packs lower in bits 0..7 and upper in bits 8..15.
+  std::vector<uint16_t> child_mbb_bounds;
   // Dimension-major: [beacon_index * leaf_count + leaf_index].
-  std::vector<uint16_t> leaf_beacon_dists;
+  std::vector<uint8_t> leaf_beacon_dists;
 };
 
 struct SearchGraphView {
@@ -281,11 +281,11 @@ struct SearchGraphView {
   std::vector<NodeId> child_ids;
   std::vector<LeafId> leaf_ids;
 
-  std::vector<uint16_t> mbb_lo;
-  std::vector<uint16_t> mbb_hi;
+  std::vector<uint8_t> mbb_lo;
+  std::vector<uint8_t> mbb_hi;
   std::vector<LeafId> beacon_ids;
 
-  std::vector<uint16_t> leaf_beacon_dists;
+  std::vector<uint8_t> leaf_beacon_dists;
 };
 
 class BioGeometryIndexBuilder {
