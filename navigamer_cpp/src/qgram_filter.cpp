@@ -240,21 +240,30 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
   items_.clear();
   postings_.clear();
   dense_postings_.clear();
+  dense_byte_packed_postings_.clear();
   dense_packed_postings_.clear();
   if (q_ <= 5) {
-    bool can_pack = items.size() <=
+    const bool compact_item_ids = items.size() <=
         static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
+    const bool byte_packable_item_ids =
+        items.size() <= (size_t{1} << 24);
+    bool byte_counts = true;
+    bool compact_counts = true;
     const size_t q_size = static_cast<size_t>(q_);
     for (const auto& item : items) {
-      if (item.sequence.size() >= q_size &&
-          item.sequence.size() - q_size + 1 >
-              std::numeric_limits<uint16_t>::max()) {
-        can_pack = false;
-        break;
-      }
+      const size_t total = item.sequence.size() < q_size
+                               ? 0
+                               : item.sequence.size() - q_size + 1;
+      byte_counts =
+          byte_counts && total <= std::numeric_limits<uint8_t>::max();
+      compact_counts =
+          compact_counts &&
+          total <= std::numeric_limits<uint16_t>::max();
     }
     const size_t code_count = size_t{1} << (2 * q_);
-    if (can_pack) {
+    if (byte_counts && !compact_item_ids && byte_packable_item_ids) {
+      dense_byte_packed_postings_.resize(code_count);
+    } else if (compact_counts && compact_item_ids) {
       dense_packed_postings_.resize(code_count);
     } else {
       dense_postings_.resize(code_count);
@@ -281,7 +290,12 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
          qgram_indexable});
     if (!qgram_indexable) continue;
     for (const auto& entry : signature.entries) {
-      if (!dense_packed_postings_.empty()) {
+      if (!dense_byte_packed_postings_.empty()) {
+        dense_byte_packed_postings_[static_cast<size_t>(entry.code)]
+            .push_back(
+                (static_cast<uint32_t>(internal_idx) << 8) |
+                static_cast<uint8_t>(entry.count));
+      } else if (!dense_packed_postings_.empty()) {
         dense_packed_postings_[static_cast<size_t>(entry.code)].push_back(
             (static_cast<uint32_t>(internal_idx) << 16) | entry.count);
       } else if (!dense_postings_.empty()) {
@@ -307,9 +321,11 @@ std::vector<size_t> QGramCountIndex::query(
   const size_t query_total = query_signature.total_qgrams;
   QGramQueryWorkspace local_workspace;
   QGramQueryWorkspace* ws = workspace ? workspace : &local_workspace;
-  // Packed postings are selected only when every indexed item has at most
+  // Compact postings are selected only when every indexed item has at most
   // UINT16_MAX q-grams. Shared counts cannot exceed the item's total.
-  const bool compact_shared = !dense_packed_postings_.empty();
+  const bool compact_shared =
+      !dense_byte_packed_postings_.empty() ||
+      !dense_packed_postings_.empty();
   ws->reset(items_.size(), compact_shared);
   const bool compact_seen =
       items_.size() <=
@@ -358,6 +374,13 @@ std::vector<size_t> QGramCountIndex::query(
           consume_posting(
               packed >> 16,
               packed & std::numeric_limits<uint16_t>::max());
+        }
+      } else if (!dense_byte_packed_postings_.empty()) {
+        if (query_entry.code >= dense_byte_packed_postings_.size()) continue;
+        for (uint32_t packed :
+             dense_byte_packed_postings_[
+                 static_cast<size_t>(query_entry.code)]) {
+          consume_posting(packed >> 8, packed & 0xffU);
         }
       } else if (!dense_postings_.empty()) {
         if (query_entry.code >= dense_postings_.size()) continue;

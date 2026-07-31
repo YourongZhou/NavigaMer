@@ -282,6 +282,12 @@ only a probe hint; candidate equality is confirmed byte-for-byte against the
 shared reference, making correctness independent of collisions. Ambiguous-base
 windows are counted before allocation, and the build-only table is released
 before occurrence sorting.
+
+Dense q-gram postings preserve the existing 16-bit item/count fast path through
+65,536 items. Above that boundary, short sequences with at most 255 q-grams use
+one lossless 32-bit `24-bit item index + 8-bit count` word per posting rather
+than the previous 8-byte pair. Inputs exceeding either bound automatically use
+the wide representation.
 Use `--query-fastq-out <path>` to export the deterministic generated queries
 with `source_pos=` read-header annotations for matched external baseline
 candidate-recovery checks.

@@ -243,8 +243,8 @@ void test_qgram_dense_postings_use_wide_fallbacks() {
   assert(many_candidates.size() == item_count);
   assert(many_candidates.front() == 0);
   assert(many_candidates.back() == item_count - 1);
-  assert(many_workspace.shared.size() == item_count);
-  assert(many_workspace.shared16.empty());
+  assert(many_workspace.shared.empty());
+  assert(many_workspace.shared16.size() == item_count);
   assert(many_workspace.seen_epoch.size() == item_count);
   assert(many_workspace.seen_epoch16.empty());
 

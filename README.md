@@ -239,6 +239,10 @@ slot per table bucket instead of a node-allocated `string_view` hash map. Its
 32-bit hash is only a lookup hint: every match is confirmed byte-for-byte against
 the shared reference, so hash collisions cannot merge leaves or reduce recall.
 The table is released before repeated-occurrence sorting.
+For q-gram candidate generation, shards above 65,536 items no longer promote
+every short-sequence posting from 4 to 8 bytes: up to 24 bits encode the item
+index and 8 bits encode the exact q-gram count in one 32-bit word. Wider or
+longer inputs retain the lossless fallback representation.
 Query loading validates signatures, counts, file bounds, layer ranges, shard
 coordinates, and the bundle checksum without rescanning every mapped node or
 edge; completed or resumed builds perform the full per-part validation.

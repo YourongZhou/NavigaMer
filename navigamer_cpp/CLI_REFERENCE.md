@@ -313,6 +313,11 @@ open-addressed table at no more than 7/8 load instead of a node-allocated
 shared reference, so 32-bit hash collisions do not affect correctness or recall.
 The temporary table is released before repeated-occurrence sorting.
 
+Dense q-gram postings remain 4-byte `16-bit item + 16-bit count` words through
+65,536 items. Larger short-sequence indexes use a lossless 4-byte
+`24-bit item + 8-bit count` word for up to 16,777,216 items; larger item IDs or
+q-gram counts fall back to the wide representation.
+
 **Required:** `--ref`, `--index`, `--shard-windows`
 
 | Flag | Default | Description |
