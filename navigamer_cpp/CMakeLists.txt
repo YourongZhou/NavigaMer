@@ -23,14 +23,13 @@ set(NAVIGAMER_EDLIB_INCLUDE
 
 # NavigaMer v8 C++ reference implementation.
 add_executable(navigamer
-  src/main.cpp
   src/structure.cpp
   src/tools.cpp
+  src/search_engine.cpp
   src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
-  src/search_engine.cpp
   src/io_utils.cpp
   src/experiment_utils.cpp
   src/map150.cpp
@@ -39,6 +38,7 @@ add_executable(navigamer
   src/sharded_index.cpp
   src/shard_router.cpp
   src/candidate_verifier.cpp
+  src/main.cpp
 )
 
 target_include_directories(navigamer PRIVATE

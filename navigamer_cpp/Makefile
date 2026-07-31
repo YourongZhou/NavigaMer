@@ -11,12 +11,12 @@ LDLIBS =
 EDLIB_SRC = third_party/edlib/src/edlib.cpp
 EDLIB_OBJ = $(EDLIB_SRC:.cpp=.o)
 EDLIB_DEP = $(EDLIB_OBJ:.o=.d)
-SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp src/index_persistence.cpp src/sharded_index.cpp src/shard_router.cpp src/candidate_verifier.cpp $(EDLIB_SRC) src/main.cpp
+SRC = src/structure.cpp src/tools.cpp src/search_engine.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp src/index_persistence.cpp src/sharded_index.cpp src/shard_router.cpp src/candidate_verifier.cpp $(EDLIB_SRC) src/main.cpp
 OBJ = $(SRC:.cpp=.o)
 DEP = $(OBJ:.o=.d)
 TARGET = navigamer
 
-LIB_SRC = src/structure.cpp src/tools.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/search_engine.cpp src/io_utils.cpp src/map150.cpp src/candidate_verifier.cpp $(EDLIB_SRC)
+LIB_SRC = src/structure.cpp src/tools.cpp src/search_engine.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/io_utils.cpp src/map150.cpp src/candidate_verifier.cpp $(EDLIB_SRC)
 LIB_OBJ = $(LIB_SRC:.cpp=.o)
 TEST_SRC = src/test_recall.cpp
 TEST_OBJ = $(TEST_SRC:.cpp=.o)

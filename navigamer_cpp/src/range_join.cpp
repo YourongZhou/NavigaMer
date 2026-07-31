@@ -243,14 +243,22 @@ std::string_view ExactRangeJoinIndex::item_sequence(
     size_t item_idx) const {
   if (item_storage_.index() == 0) {
     if (max_item_sequence_length_ == 0) return {};
+    const auto* reference_data =
+        reinterpret_cast<const char*>(item_storage_aux_);
     return std::string_view(
-        std::get<0>(item_storage_)[item_idx],
+        reference_data + std::get<0>(item_storage_)[item_idx],
         max_item_sequence_length_);
   }
   if (item_storage_.index() == 1) {
     return std::get<1>(item_storage_)[item_idx];
   }
   return owned_items_[item_idx].sequence;
+}
+
+size_t ExactRangeJoinIndex::min_item_sequence_length() const {
+  return item_storage_.index() == 0
+             ? max_item_sequence_length_
+             : static_cast<size_t>(item_storage_aux_);
 }
 
 void ExactRangeJoinIndex::reset_after_items_changed() {
@@ -266,7 +274,12 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
   seed_index_capacity_ =
       count <= static_cast<size_t>(
                            std::numeric_limits<uint32_t>::max());
-  if (enable_positional_postings_ && seed_index_capacity_) {
+  if (enable_positional_postings_ && seed_index_capacity_ &&
+      uniform_sequence_length != 0) {
+    seed_index_capacity_ =
+        uniform_sequence_length <=
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1;
+  } else if (enable_positional_postings_ && seed_index_capacity_) {
     for (size_t item_idx = 0; item_idx < count; ++item_idx) {
       if (item_sequence(item_idx).size() >
           static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1) {
@@ -279,7 +292,11 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
       count <= static_cast<size_t>(
                            std::numeric_limits<uint16_t>::max());
   positional_postings_use_32bit_ = seed_index_uses_16bit_;
-  if (positional_postings_use_32bit_) {
+  if (positional_postings_use_32bit_ && uniform_sequence_length != 0) {
+    positional_postings_use_32bit_ =
+        uniform_sequence_length <=
+        static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
+  } else if (positional_postings_use_32bit_) {
     for (size_t item_idx = 0; item_idx < count; ++item_idx) {
       if (item_sequence(item_idx).size() >
           static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1) {
@@ -288,19 +305,22 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
       }
     }
   }
-  min_item_sequence_length_ = count == 0
-                                  ? 0
-                                  : std::numeric_limits<size_t>::max();
+  size_t min_item_sequence_length =
+      count == 0 ? 0 : std::numeric_limits<size_t>::max();
   max_item_sequence_length_ =
       count == 0 ? 0 : uniform_sequence_length;
+  if (item_storage_.index() == 0 && count != 0) {
+    min_item_sequence_length = uniform_sequence_length;
+  }
   item_ids_strictly_increasing_ = true;
   qgram_ready_ = false;
+  if (item_storage_.index() == 0 && defer_qgram_build_) return;
   std::vector<QGramCountIndex::ItemView> qgram_items;
   if (!defer_qgram_build_) qgram_items.reserve(count);
   for (size_t item_idx = 0; item_idx < count; ++item_idx) {
     const auto sequence = item_sequence(item_idx);
-    min_item_sequence_length_ =
-        std::min(min_item_sequence_length_, sequence.size());
+    min_item_sequence_length =
+        std::min(min_item_sequence_length, sequence.size());
     max_item_sequence_length_ =
         std::max(max_item_sequence_length_, sequence.size());
     if (item_idx != 0 &&
@@ -310,6 +330,9 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
     if (!defer_qgram_build_) {
       qgram_items.push_back({item_id(item_idx), sequence});
     }
+  }
+  if (item_storage_.index() != 0) {
+    item_storage_aux_ = min_item_sequence_length;
   }
   if (!defer_qgram_build_) {
     qgram_index_.build_views(qgram_items);
@@ -356,7 +379,7 @@ bool ExactRangeJoinIndex::qgram_bound_is_vacuous(
           ? std::numeric_limits<size_t>::max()
           : query_sequence.size() + threshold;
   if (max_item_sequence_length_ < min_compatible_length ||
-      min_item_sequence_length_ > max_compatible_length) {
+      min_item_sequence_length() > max_compatible_length) {
     return true;
   }
 
@@ -784,17 +807,22 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
   result.used_full_scan = fallback;
   const auto query_length = static_cast<long long>(query_sequence.size());
   if (std::llabs(query_length -
-                 static_cast<long long>(min_item_sequence_length_)) <= tau &&
+                 static_cast<long long>(min_item_sequence_length())) <= tau &&
       std::llabs(query_length -
                  static_cast<long long>(max_item_sequence_length_)) <= tau) {
     result.candidate_item_ids.reserve(item_count());
   }
   {
     ScopedTimer length_timer(&result.range_length_filter_ms);
+    const size_t uniform_sequence_length =
+        item_storage_.index() == 0 ? max_item_sequence_length_ : 0;
     for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
-      const auto sequence = item_sequence(item_idx);
+      const size_t item_length =
+          uniform_sequence_length != 0
+              ? uniform_sequence_length
+              : item_sequence(item_idx).size();
       if (std::abs(static_cast<long long>(query_sequence.size()) -
-                   static_cast<long long>(sequence.size())) <= tau) {
+                   static_cast<long long>(item_length)) <= tau) {
         result.candidate_item_ids.push_back(item_id(item_idx));
       } else {
         result.length_filtered_items++;
@@ -1132,15 +1160,19 @@ RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
           static_cast<long long>(query_sequence.size());
       if (std::llabs(
               query_length -
-              static_cast<long long>(min_item_sequence_length_)) <= tau &&
+              static_cast<long long>(min_item_sequence_length())) <= tau &&
           std::llabs(
               query_length -
               static_cast<long long>(max_item_sequence_length_)) <= tau) {
         result.candidate_item_ids.reserve(item_count());
       }
+      const size_t uniform_sequence_length =
+          item_storage_.index() == 0 ? max_item_sequence_length_ : 0;
       for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
         const size_t item_length =
-            item_sequence(item_idx).size();
+            uniform_sequence_length != 0
+                ? uniform_sequence_length
+                : item_sequence(item_idx).size();
         if (std::llabs(
                 static_cast<long long>(query_sequence.size()) -
                 static_cast<long long>(item_length)) > tau) {
@@ -1189,9 +1221,38 @@ void ExactRangeJoinIndex::build_uniform_identity_views(
       static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
     throw std::length_error("range-join index exceeds 32-bit item capacity");
   }
+  uintptr_t reference_base = 0;
+  uintptr_t reference_end = 0;
+  if (!sequence_data.empty()) {
+    if (!sequence_data.front()) {
+      throw std::invalid_argument("range-join sequence pointer is null");
+    }
+    reference_base = reinterpret_cast<uintptr_t>(sequence_data.front());
+    reference_end = reference_base;
+    for (const char* sequence : sequence_data) {
+      if (!sequence) {
+        throw std::invalid_argument("range-join sequence pointer is null");
+      }
+      const uintptr_t address = reinterpret_cast<uintptr_t>(sequence);
+      reference_base = std::min(reference_base, address);
+      reference_end = std::max(reference_end, address);
+    }
+    if (reference_end - reference_base >
+        std::numeric_limits<uint32_t>::max()) {
+      throw std::length_error(
+          "range-join sequence pointers exceed 32-bit reference span");
+    }
+  }
+  std::vector<uint32_t> sequence_offsets;
+  sequence_offsets.reserve(sequence_data.size());
+  for (const char* sequence : sequence_data) {
+    sequence_offsets.push_back(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(sequence) - reference_base));
+  }
   owned_items_.clear();
   owned_items_.shrink_to_fit();
-  item_storage_ = std::move(sequence_data);
+  item_storage_ = std::move(sequence_offsets);
+  item_storage_aux_ = reference_base;
   max_item_sequence_length_ = sequence_length;
   external_item_ids_.clear();
   external_item_ids_.shrink_to_fit();

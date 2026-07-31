@@ -343,8 +343,8 @@ class Phase1DistanceCache {
       : entries_(sequence_count) {}
 
   void begin_query() {
-    if (epoch_ == std::numeric_limits<uint32_t>::max()) {
-      for (auto& entry : entries_) entry.epoch = 0;
+    if (epoch_ == kMaxEpoch) {
+      std::fill(entries_.begin(), entries_.end(), Entry{});
       epoch_ = 1;
     } else {
       epoch_++;
@@ -353,15 +353,16 @@ class Phase1DistanceCache {
 
   bool lookup(LeafId sequence_id, int tau, int* result) const {
     if (!result || sequence_id >= entries_.size()) return false;
-    const auto& entry = entries_[sequence_id];
+    const Entry& entry = entries_[sequence_id];
     if (entry.epoch != epoch_) return false;
-    if (entry.exact_distance >= 0) {
-      *result = entry.exact_distance <= tau
-                    ? entry.exact_distance
+    const int value = static_cast<int>(entry.value);
+    if (entry.exact != 0) {
+      *result = value <= tau
+                    ? value
                     : tau + 1;
       return true;
     }
-    if (entry.rejected_tau >= tau) {
+    if (value >= tau) {
       if (tau == std::numeric_limits<int>::max()) return false;
       *result = tau + 1;
       return true;
@@ -371,33 +372,35 @@ class Phase1DistanceCache {
 
   void store(LeafId sequence_id, int tau, int result) {
     if (sequence_id >= entries_.size()) return;
-    auto& entry = entries_[sequence_id];
-    if (entry.epoch != epoch_) {
-      entry.epoch = epoch_;
-      entry.exact_distance = -1;
-      entry.rejected_tau = -1;
-    }
+    Entry& entry = entries_[sequence_id];
     if (result <= tau) {
-      if (result <= std::numeric_limits<int16_t>::max()) {
-        entry.exact_distance = static_cast<int16_t>(result);
+      if (result >= 0 && result <= kMaxValue) {
+        entry = {epoch_, static_cast<uint8_t>(result), 1};
       }
-    } else if (tau <= std::numeric_limits<int16_t>::max()) {
-      entry.rejected_tau = std::max(
-          entry.rejected_tau, static_cast<int16_t>(tau));
+      return;
     }
+    if (tau < 0 || tau > kMaxValue) return;
+    uint8_t rejected_tau = static_cast<uint8_t>(tau);
+    if (entry.epoch == epoch_ && entry.exact == 0) {
+      rejected_tau = std::max(rejected_tau, entry.value);
+    }
+    entry = {epoch_, rejected_tau, 0};
   }
 
  private:
   struct Entry {
-    uint32_t epoch = 0;
-    int16_t exact_distance = -1;
-    int16_t rejected_tau = -1;
+    uint16_t epoch = 0;
+    uint8_t value = 0;
+    uint8_t exact = 0;
   };
-  static_assert(sizeof(Entry) == 8,
-                "phase1 distance-cache entry must remain 8 bytes");
+  static constexpr int kMaxValue = std::numeric_limits<uint8_t>::max();
+  static constexpr uint16_t kMaxEpoch =
+      std::numeric_limits<uint16_t>::max();
+  static_assert(sizeof(Entry) == 4,
+                "phase1 distance-cache entry must remain 4 bytes");
 
   std::vector<Entry> entries_;
-  uint32_t epoch_ = 0;
+  uint16_t epoch_ = 0;
 };
 
 struct Phase1BaseCountSignature {

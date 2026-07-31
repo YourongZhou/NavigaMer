@@ -97,6 +97,7 @@ class ExactRangeJoinIndex {
 
   void build(std::vector<RangeJoinItem> items);
   void build_views(std::vector<RangeJoinItemView> items);
+  // Every pointer must refer into the same stable backing allocation.
   void build_uniform_identity_views(
       std::vector<const char*> sequence_data, size_t sequence_length);
   void prepare_qgram();
@@ -118,12 +119,13 @@ class ExactRangeJoinIndex {
   RangeJoinConfig config_;
   std::vector<RangeJoinItem> owned_items_;
   using ItemStorage = std::variant<
-      std::vector<const char*>,
+      std::vector<uint32_t>,
       std::vector<std::string_view>,
       std::monostate>;
   // Fixed-length reference sequences are the production/query-side common
-  // case, so keep their compact pointers in the first variant alternative.
-  ItemStorage item_storage_ = std::vector<const char*>{};
+  // case, so keep one base pointer plus compact 32-bit offsets in the first
+  // variant alternative.
+  ItemStorage item_storage_ = std::vector<uint32_t>{};
   // Item IDs are 32-bit throughout the production graph. External view IDs
   // are implicit when they are exactly 0..N-1; owned IDs already live in
   // owned_items_ and need no second per-item table.
@@ -141,7 +143,10 @@ class ExactRangeJoinIndex {
   bool seed_index_capacity_ = true;
   bool seed_index_uses_16bit_ = true;
   bool positional_postings_use_32bit_ = true;
-  size_t min_item_sequence_length_ = 0;
+  // Uniform mode uses this word for the shared reference base; other modes
+  // use it for the minimum item length. This keeps the compact offset mode
+  // from increasing the range-index object size.
+  uintptr_t item_storage_aux_ = 0;
   size_t max_item_sequence_length_ = 0;
   bool item_ids_strictly_increasing_ = true;
   mutable QGramCountIndex qgram_index_;
@@ -154,6 +159,7 @@ class ExactRangeJoinIndex {
   size_t item_count() const;
   RangeJoinItemId item_id(size_t item_idx) const;
   std::string_view item_sequence(size_t item_idx) const;
+  size_t min_item_sequence_length() const;
   void reset_after_items_changed();
   bool qgram_bound_is_vacuous(
       std::string_view query_sequence, int tau,

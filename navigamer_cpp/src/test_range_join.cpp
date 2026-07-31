@@ -346,13 +346,24 @@ int main() {
   view_index.build_views(std::move(item_views));
   ExactRangeJoinIndex uniform_identity_view_index(
       config_for(RangeCandidateMode::Auto));
-  std::vector<const char*> uniform_identity_views;
-  uniform_identity_views.reserve(items.size());
+  std::string uniform_reference;
+  std::vector<uint32_t> uniform_identity_offsets;
+  uniform_reference.reserve(items.size() * items.front().sequence.size());
+  uniform_identity_offsets.reserve(items.size());
   for (const auto& item : items) {
-    uniform_identity_views.push_back(item.sequence.data());
+    uniform_identity_offsets.push_back(
+        static_cast<uint32_t>(uniform_reference.size()));
+    uniform_reference.append(item.sequence);
+  }
+  std::vector<const char*> uniform_identity_views;
+  uniform_identity_views.reserve(uniform_identity_offsets.size());
+  for (uint32_t offset : uniform_identity_offsets) {
+    uniform_identity_views.push_back(uniform_reference.data() + offset);
   }
   uniform_identity_view_index.build_uniform_identity_views(
       std::move(uniform_identity_views), items.front().sequence.size());
+  ExactRangeJoinIndex copied_uniform_identity_view_index =
+      uniform_identity_view_index;
 
   auto adaptive = index.query(items[0].sequence, 2);
   assert(!adaptive.used_full_scan);
@@ -402,6 +413,8 @@ int main() {
       auto view_result = view_index.query(query, tau);
       auto uniform_identity_view_result =
           uniform_identity_view_index.query(query, tau);
+      auto copied_uniform_identity_view_result =
+          copied_uniform_identity_view_index.query(query, tau);
       auto pigeonhole = pigeonhole_index.query(query, tau);
       auto qgram = qgram_index.query(query, tau);
       auto hybrid = hybrid_index.query(query, tau);
@@ -414,6 +427,10 @@ int main() {
       assert(uniform_identity_view_result.candidate_item_ids ==
              result.candidate_item_ids);
       assert(uniform_identity_view_result.mode_used == result.mode_used);
+      assert(copied_uniform_identity_view_result.candidate_item_ids ==
+             uniform_identity_view_result.candidate_item_ids);
+      assert(copied_uniform_identity_view_result.mode_used ==
+             uniform_identity_view_result.mode_used);
       assert(copied_result.candidate_item_ids == result.candidate_item_ids);
       assert(copied_result.mode_used == result.mode_used);
       assert(full.mode_used == RangeCandidateMode::FullScan);
@@ -559,6 +576,15 @@ int main() {
     rejected_wide_id = true;
   }
   assert(rejected_wide_id);
+
+  bool rejected_null_sequence = false;
+  try {
+    ExactRangeJoinIndex null_sequence_index;
+    null_sequence_index.build_uniform_identity_views({nullptr}, 5);
+  } catch (const std::invalid_argument&) {
+    rejected_null_sequence = true;
+  }
+  assert(rejected_null_sequence);
 
   std::cout << "range join tests passed\n";
   return 0;
