@@ -2740,14 +2740,6 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
           phase1_base_count_signature(child_sequences[child_idx]);
     }
 
-    std::vector<RangeJoinItemView> items;
-    items.reserve(parents.size());
-    for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
-      const auto& parent = build_nodes_[parents[parent_idx]];
-      items.push_back(
-          {parent_idx,
-           search_graph_view_.sequences.sequence(parent.center_sequence_id)});
-    }
     ExactRangeJoinIndex parent_index(
         range_config_.range_join, true, false, true);
     std::vector<int> seed_lengths;
@@ -2767,7 +2759,24 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
                        seed_lengths.end());
     {
       ScopedTimer timer(&stats_.phase2_index_build_ms);
-      parent_index.build_views(std::move(items));
+      if (search_graph_view_.sequences.fixed_sequence_length != 0) {
+        std::vector<const char*> parent_sequence_data;
+        parent_sequence_data.reserve(parent_sequences.size());
+        for (std::string_view sequence : parent_sequences) {
+          parent_sequence_data.push_back(sequence.data());
+        }
+        parent_index.build_uniform_identity_views(
+            std::move(parent_sequence_data),
+            search_graph_view_.sequences.fixed_sequence_length);
+      } else {
+        std::vector<RangeJoinItemView> items;
+        items.reserve(parent_sequences.size());
+        for (size_t parent_idx = 0;
+             parent_idx < parent_sequences.size(); ++parent_idx) {
+          items.push_back({parent_idx, parent_sequences[parent_idx]});
+        }
+        parent_index.build_views(std::move(items));
+      }
       parent_index.prepare_seed_lengths(seed_lengths);
     }
 
@@ -3222,21 +3231,38 @@ void BioGeometryIndexBuilder::attach_leaves(
     }
 
     if (actual_direction == LeafAttachDirection::SeqToWorld) {
-      std::vector<RangeJoinItemView> items;
-      items.reserve(finest_layer.size());
+      std::vector<RangeJoinItemView> item_views;
+      std::vector<const char*> uniform_sequence_data;
+      if (sequences.fixed_sequence_length != 0) {
+        uniform_sequence_data.reserve(finest_layer.size());
+        for (NodeId node_id : finest_layer) {
+          const auto& world = build_nodes_[node_id];
+          uniform_sequence_data.push_back(
+              sequences.sequence(world.center_sequence_id).data());
+        }
+      } else {
+        item_views.reserve(finest_layer.size());
+        for (size_t world_idx = 0;
+             world_idx < finest_layer.size(); ++world_idx) {
+          const NodeId node_id = finest_layer[world_idx];
+          const auto& world = build_nodes_[node_id];
+          item_views.push_back(
+              {world_idx,
+               sequences.sequence(world.center_sequence_id)});
+        }
+      }
       const int max_radius =
           finest_layer.empty() ? 0 : finest_radius;
-      for (size_t world_idx = 0; world_idx < finest_layer.size(); ++world_idx) {
-        const auto& world = build_nodes_[finest_layer[world_idx]];
-        items.push_back(
-            {world_idx,
-             search_graph_view_.sequences.sequence(
-                 world.center_sequence_id)});
-      }
       ExactRangeJoinIndex world_index(range_config_.range_join, true);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
-        world_index.build_views(std::move(items));
+        if (sequences.fixed_sequence_length != 0) {
+          world_index.build_uniform_identity_views(
+              std::move(uniform_sequence_data),
+              sequences.fixed_sequence_length);
+        } else {
+          world_index.build_views(std::move(item_views));
+        }
       }
       for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
         const LeafId sequence_id = static_cast<LeafId>(seq_idx);
@@ -3303,19 +3329,33 @@ void BioGeometryIndexBuilder::attach_leaves(
         ScopedTimer timer(&stats_.leaf_tuple_merge_sort_ms);
       }
     } else {
-      std::vector<RangeJoinItemView> items;
-      items.reserve(sequences.size());
-      for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
-        items.push_back({
-            seq_idx,
-            sequences.sequence(static_cast<LeafId>(seq_idx))});
+      std::vector<RangeJoinItemView> item_views;
+      std::vector<const char*> uniform_sequence_data;
+      if (sequences.fixed_sequence_length != 0) {
+        uniform_sequence_data.reserve(sequences.size());
+        for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
+          uniform_sequence_data.push_back(
+              sequences.sequence(static_cast<LeafId>(seq_idx)).data());
+        }
+      } else {
+        item_views.reserve(sequences.size());
+        for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
+          item_views.push_back(
+              {seq_idx,
+               sequences.sequence(static_cast<LeafId>(seq_idx))});
+        }
       }
-
       ExactRangeJoinIndex sequence_index(
           range_config_.range_join, true, true, false);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
-        sequence_index.build_views(std::move(items));
+        if (sequences.fixed_sequence_length != 0) {
+          sequence_index.build_uniform_identity_views(
+              std::move(uniform_sequence_data),
+              sequences.fixed_sequence_length);
+        } else {
+          sequence_index.build_views(std::move(item_views));
+        }
         std::vector<int> seed_lengths;
         seed_lengths.reserve(finest_layer.size());
         for (NodeId node_id : finest_layer) {

@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace navigamer {
@@ -94,6 +95,8 @@ class ExactRangeJoinIndex {
 
   void build(std::vector<RangeJoinItem> items);
   void build_views(std::vector<RangeJoinItemView> items);
+  void build_uniform_identity_views(
+      std::vector<const char*> sequence_data, size_t sequence_length);
   void prepare_qgram();
   void prepare_seed_lengths(const std::vector<int>& seed_lengths);
   RangeJoinQueryResult query(std::string_view query_sequence, int tau);
@@ -102,14 +105,12 @@ class ExactRangeJoinIndex {
       RangeJoinQueryWorkspace* workspace) const;
 
  private:
-  struct StoredItem {
-    size_t sequence_length = 0;
-    // Index into owned_items_, or an external character pointer represented
-    // as an integer when items_are_external_ is true.
-    uintptr_t sequence_location = 0;
+  struct OwnedItemRef {
+    size_t item_id = 0;
+    size_t owned_item_idx = 0;
   };
-  static_assert(sizeof(StoredItem) == 2 * sizeof(size_t),
-                "range-join stored items must remain two machine words");
+  static_assert(sizeof(OwnedItemRef) == 2 * sizeof(size_t),
+                "owned range-join item references must remain two words");
 
   using PostingLists16 =
       std::unordered_map<uint64_t, std::vector<uint16_t>>;
@@ -121,11 +122,16 @@ class ExactRangeJoinIndex {
 
   RangeJoinConfig config_;
   std::vector<RangeJoinItem> owned_items_;
-  std::vector<StoredItem> items_;
-  // External view IDs are implicit when they are exactly 0..N-1. Owned item
-  // IDs remain in owned_items_ and never need a second array.
+  using ItemStorage = std::variant<
+      std::vector<const char*>,
+      std::vector<std::string_view>,
+      std::vector<OwnedItemRef>>;
+  // Fixed-length reference sequences are the production/query-side common
+  // case, so keep their compact pointers in the first variant alternative.
+  ItemStorage item_storage_ = std::vector<const char*>{};
+  // External view IDs are implicit when they are exactly 0..N-1. Owned IDs
+  // live in the compact OwnedItemRef alternative above.
   std::vector<size_t> external_item_ids_;
-  bool items_are_external_ = false;
   std::unordered_map<int, PostingLists16> postings16_by_seed_len_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
   std::unordered_map<int, PositionalPostingLists>
@@ -149,8 +155,9 @@ class ExactRangeJoinIndex {
   bool enable_positional_postings_ = false;
   mutable std::shared_ptr<std::mutex> deferred_qgram_mutex_;
 
+  size_t item_count() const;
   size_t item_id(size_t item_idx) const;
-  std::string_view item_sequence(const StoredItem& item) const;
+  std::string_view item_sequence(size_t item_idx) const;
   void reset_after_items_changed();
   bool qgram_bound_is_vacuous(
       std::string_view query_sequence, int tau,

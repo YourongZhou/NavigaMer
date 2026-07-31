@@ -716,8 +716,15 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
         ParentSafeChildRouterIndex parent_index;
         parent_index.child_count = view.child_count(node_id);
         parent_index.max_child_radius = child_radius;
+        const bool uniform_sequences =
+            view.sequences.fixed_sequence_length != 0;
         std::vector<RangeJoinItemView> items;
-        items.reserve(view.child_count(node_id));
+        std::vector<const char*> uniform_sequence_data;
+        if (uniform_sequences) {
+          uniform_sequence_data.reserve(view.child_count(node_id));
+        } else {
+          items.reserve(view.child_count(node_id));
+        }
         const auto& node = view.node_records[node_id];
         const bool child_delta16 =
             view.child_ids_are_delta16(node_id);
@@ -747,16 +754,30 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
             usable = false;
             break;
           }
-          items.push_back(
-              {child_idx,
-               view.sequences.sequence(
-                   child.center_sequence_id)});
+          const std::string_view sequence =
+              view.sequences.sequence(child.center_sequence_id);
+          if (uniform_sequences) {
+            uniform_sequence_data.push_back(sequence.data());
+          } else {
+            items.push_back({child_idx, sequence});
+          }
         }
-        if (!usable || items.empty()) continue;
+        if (!usable ||
+            (uniform_sequences
+                 ? uniform_sequence_data.empty()
+                 : items.empty())) {
+          continue;
+        }
         ParentSafeChildRouterIndex::RadiusBucket bucket;
         bucket.radius = child_radius;
         bucket.range_index = ExactRangeJoinIndex(safe_child_config);
-        bucket.range_index.build_views(std::move(items));
+        if (uniform_sequences) {
+          bucket.range_index.build_uniform_identity_views(
+              std::move(uniform_sequence_data),
+              view.sequences.fixed_sequence_length);
+        } else {
+          bucket.range_index.build_views(std::move(items));
+        }
         bucket.range_index.prepare_qgram();
         if (safe_child_config.candidate_mode != RangeCandidateMode::FullScan) {
           bucket.range_index.prepare_seed_lengths(seed_lengths);
@@ -793,8 +814,15 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
     if (view.child_count(node_id) < 2) continue;
     ParentRouterHintIndex parent_index{
         ExactRangeJoinIndex(router_index_config), {}};
+    const bool uniform_sequences =
+        view.sequences.fixed_sequence_length != 0;
     std::vector<RangeJoinItemView> items;
-    items.reserve(view.child_count(node_id));
+    std::vector<const char*> uniform_sequence_data;
+    if (uniform_sequences) {
+      uniform_sequence_data.reserve(view.child_count(node_id));
+    } else {
+      items.reserve(view.child_count(node_id));
+    }
     const auto& node = view.node_records[node_id];
     const bool child_delta16 =
         view.child_ids_are_delta16(node_id);
@@ -811,19 +839,40 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
                  ? node_id + 1 + child_deltas[offset]
                  : child_ids32[offset];
     };
-    for (size_t child_idx = 0; child_idx < view.child_count(node_id); ++child_idx) {
+    bool usable = true;
+    for (size_t child_idx = 0;
+         child_idx < view.child_count(node_id); ++child_idx) {
       const NodeId child_id = child_at(child_idx);
-      if (child_id >= view.node_records.size()) continue;
+      if (child_id >= view.node_records.size()) {
+        usable = false;
+        break;
+      }
       const auto& child = view.node_records[child_id];
-      if (child.center_sequence_id >= view.sequences.size()) continue;
+      if (child.center_sequence_id >= view.sequences.size()) {
+        usable = false;
+        break;
+      }
       parent_index.child_item_ids_by_node_id.emplace(
           node_key(child_id), child_idx);
-      items.push_back(
-          {child_idx,
-           view.sequences.sequence(child.center_sequence_id)});
+      const std::string_view sequence =
+          view.sequences.sequence(child.center_sequence_id);
+      if (uniform_sequences) {
+        uniform_sequence_data.push_back(sequence.data());
+      } else {
+        items.push_back({child_idx, sequence});
+      }
     }
-    if (items.size() < 2) continue;
-    parent_index.range_index.build_views(std::move(items));
+    const size_t item_count = uniform_sequences
+                                  ? uniform_sequence_data.size()
+                                  : items.size();
+    if (!usable || item_count < 2) continue;
+    if (uniform_sequences) {
+      parent_index.range_index.build_uniform_identity_views(
+          std::move(uniform_sequence_data),
+          view.sequences.fixed_sequence_length);
+    } else {
+      parent_index.range_index.build_views(std::move(items));
+    }
     parent_index.range_index.prepare_qgram();
     parent_index.range_index.prepare_seed_lengths(seed_lengths);
     parent_router_hint_indexes_.emplace(
