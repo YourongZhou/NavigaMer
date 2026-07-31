@@ -138,8 +138,16 @@ void test_far_seed_occurrences_are_filtered_by_position() {
 }
 
 void test_packed_postings_promote_without_losing_candidates() {
-  navigamer::IncrementalPigeonholeIndex many_items({4, 4});
+  navigamer::IncrementalPigeonholeIndex packed_items({4, 4});
   const std::string short_sequence = "ACGT";
+  for (size_t idx = 0; idx < 300; ++idx) {
+    packed_items.append(idx, short_sequence);
+  }
+  const auto packed_result = packed_items.query(short_sequence, 0);
+  assert(packed_result.safe);
+  assert(packed_result.candidate_indices.size() == 300);
+
+  navigamer::IncrementalPigeonholeIndex many_items({4, 4});
   constexpr size_t item_count =
       static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 2;
   for (size_t idx = 0; idx < item_count; ++idx) {

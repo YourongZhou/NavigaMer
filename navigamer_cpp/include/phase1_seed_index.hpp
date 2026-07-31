@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -38,15 +39,28 @@ class IncrementalPigeonholeIndex {
   };
 
   struct SeedState {
-    struct WidePosting {
-      uint32_t item_idx = 0;
-      uint32_t position = 0;
+    enum class PostingStorage : uint8_t {
+      Compact16,
+      Packed32,
+      Wide,
     };
 
+    struct WidePostingEntry {
+      uint32_t item_idx = 0;
+      uint32_t position = 0;
+      uint32_t next = std::numeric_limits<uint32_t>::max();
+    };
+    static_assert(sizeof(WidePostingEntry) == 12,
+                  "wide phase1 posting entry must remain compact");
+
     size_t indexed_count = 0;
-    bool uses_packed_postings = true;
-    std::unordered_map<uint64_t, std::vector<uint32_t>> packed_postings;
-    std::unordered_map<uint64_t, std::vector<WidePosting>> wide_postings;
+    PostingStorage posting_storage = PostingStorage::Compact16;
+    std::unordered_map<uint64_t, uint16_t> compact_heads;
+    std::vector<uint32_t> compact_entries;
+    std::unordered_map<uint64_t, uint32_t> packed_heads;
+    std::vector<uint64_t> packed_entries;
+    std::unordered_map<uint64_t, uint32_t> wide_heads;
+    std::vector<WidePostingEntry> wide_entries;
     std::vector<uint32_t> unindexable_items;
   };
 
@@ -57,6 +71,7 @@ class IncrementalPigeonholeIndex {
   uint32_t epoch_ = 0;
 
   SeedState& ensure_state(int seed_len);
+  static void promote_to_packed_postings(SeedState& state);
   static void promote_to_wide_postings(SeedState& state);
   void index_item(SeedState& state, int seed_len, uint32_t item_idx);
   void begin_query();
