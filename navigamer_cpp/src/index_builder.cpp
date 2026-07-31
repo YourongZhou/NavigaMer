@@ -2537,7 +2537,9 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
           add_phase1_scan_stats(scan);
         };
 
-        if (range_config_.phase1_candidate_mode == Phase1CandidateMode::Scan) {
+        if (range_config_.phase1_candidate_mode == Phase1CandidateMode::Scan ||
+            candidates->size() <
+                range_config_.phase1_metric_min_fanout) {
           use_scan();
         } else {
           auto& group_index =
