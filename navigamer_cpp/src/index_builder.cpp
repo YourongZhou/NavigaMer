@@ -864,20 +864,34 @@ class Phase1CoverGroupIndex {
 
  private:
   struct ItemInfo {
-    size_t sequence_length = 0;
-    size_t total_qgrams = 0;
+    uint8_t sequence_length = 0;
+    uint8_t total_qgrams = 0;
     bool qgram_safe = false;
   };
+  static_assert(sizeof(ItemInfo) <= 4,
+                "phase1 q-gram item metadata must remain compact");
 
   struct MetricTreeNode {
     size_t item_idx = 0;
     std::unordered_map<int, size_t> children;
   };
 
-  struct QGramPosting {
-    uint32_t item_idx = 0;
-    uint32_t count = 0;
-  };
+  // Indexed sequences are at most 255 bases, so one byte is exact for the
+  // multiplicity. Oversized groups fall back before a 24-bit item id wraps.
+  using QGramPosting = uint32_t;
+  static constexpr uint32_t kQGramPostingMaxItem = 0x00ffffffU;
+
+  static QGramPosting pack_qgram_posting(uint32_t item_idx, uint8_t count) {
+    return (item_idx << 8) | count;
+  }
+
+  static uint32_t qgram_posting_item(QGramPosting posting) {
+    return posting >> 8;
+  }
+
+  static uint8_t qgram_posting_count(QGramPosting posting) {
+    return static_cast<uint8_t>(posting & 0xffU);
+  }
 
   std::string_view center_sequence(
       const std::vector<NodeId>& candidates, size_t idx) const {
@@ -905,7 +919,12 @@ class Phase1CoverGroupIndex {
     while (items_.size() < candidates.size()) {
       const size_t idx = items_.size();
       ItemInfo info;
-      info.sequence_length = center_sequence(candidates, idx).size();
+      const size_t sequence_length = center_sequence(candidates, idx).size();
+      if (sequence_length > std::numeric_limits<uint8_t>::max()) {
+        throw std::runtime_error(
+            "phase1 sequence length exceeds compact 8-bit storage");
+      }
+      info.sequence_length = static_cast<uint8_t>(sequence_length);
       items_.push_back(info);
       if (metric_built_ && items_.size() < config.phase1_qgram_min_fanout) {
         insert_metric_item(candidates, idx, config.distance_mode);
@@ -1011,6 +1030,7 @@ class Phase1CoverGroupIndex {
     qgram_postings_.clear();
     qgram_unsafe_indices_.clear();
     qgram_zero_total_indices_.clear();
+    qgram_index_available_ = true;
     min_safe_total_qgrams_ = std::numeric_limits<size_t>::max();
     qgram_q_ = q;
     qgram_built_ = true;
@@ -1067,23 +1087,43 @@ class Phase1CoverGroupIndex {
       int q) {
     if (idx >= items_.size()) return;
     const std::string_view sequence = center_sequence(candidates, idx);
+    if (sequence.size() > std::numeric_limits<uint8_t>::max()) {
+      qgram_index_available_ = false;
+      qgram_postings_.clear();
+      return;
+    }
     auto signature = compute_qgram_signature(sequence, q);
-    items_[idx].sequence_length = sequence.size();
+    if (signature.total_qgrams > std::numeric_limits<uint8_t>::max() ||
+        idx > kQGramPostingMaxItem) {
+      qgram_index_available_ = false;
+      qgram_postings_.clear();
+      return;
+    }
+    items_[idx].sequence_length = static_cast<uint8_t>(sequence.size());
     items_[idx].qgram_safe = signature.safe_for_pruning;
-    items_[idx].total_qgrams = signature.total_qgrams;
+    items_[idx].total_qgrams =
+        static_cast<uint8_t>(signature.total_qgrams);
+    if (!qgram_index_available_) return;
     if (!signature.safe_for_pruning) {
-      qgram_unsafe_indices_.push_back(idx);
+      qgram_unsafe_indices_.push_back(static_cast<uint32_t>(idx));
       return;
     }
     min_safe_total_qgrams_ =
         std::min(min_safe_total_qgrams_, signature.total_qgrams);
     if (signature.total_qgrams == 0) {
-      qgram_zero_total_indices_.push_back(idx);
+      qgram_zero_total_indices_.push_back(static_cast<uint32_t>(idx));
       return;
     }
     for (const auto& entry : signature.entries) {
+      if (entry.count > std::numeric_limits<uint8_t>::max()) {
+        qgram_index_available_ = false;
+        qgram_postings_.clear();
+        return;
+      }
       qgram_postings_[entry.code].push_back(
-          {static_cast<uint32_t>(idx), entry.count});
+          pack_qgram_posting(
+              static_cast<uint32_t>(idx),
+              static_cast<uint8_t>(entry.count)));
     }
   }
 
@@ -1093,7 +1133,7 @@ class Phase1CoverGroupIndex {
       qgram_seen_epoch_.resize(item_count, 0);
     }
     qgram_touched_.clear();
-    if (qgram_epoch_ == std::numeric_limits<uint32_t>::max()) {
+    if (qgram_epoch_ == std::numeric_limits<uint16_t>::max()) {
       std::fill(qgram_seen_epoch_.begin(), qgram_seen_epoch_.end(), 0);
       qgram_epoch_ = 1;
     } else {
@@ -1110,6 +1150,9 @@ class Phase1CoverGroupIndex {
     result.source = Phase1CoverSource::QGram;
     result.total_possible = candidates.size();
     ensure_qgram(candidates, config.range_join.qgram_q);
+    if (!qgram_index_available_) {
+      return fallback_scan_result(candidates.size());
+    }
 
     const int q = config.range_join.qgram_q;
     const auto query_signature = compute_qgram_signature(sequence, q);
@@ -1137,8 +1180,8 @@ class Phase1CoverGroupIndex {
     for (const auto& query_entry : query_signature.entries) {
       auto posting_it = qgram_postings_.find(query_entry.code);
       if (posting_it == qgram_postings_.end()) continue;
-      for (const auto& posting : posting_it->second) {
-        const size_t idx = posting.item_idx;
+      for (QGramPosting posting : posting_it->second) {
+        const size_t idx = qgram_posting_item(posting);
         if (idx >= items_.size()) continue;
         if (qgram_seen_epoch_[idx] != qgram_epoch_) {
           qgram_seen_epoch_[idx] = qgram_epoch_;
@@ -1148,18 +1191,21 @@ class Phase1CoverGroupIndex {
             return fallback_scan_result(candidates.size());
           }
         }
-        const uint32_t shared =
-            std::min(query_entry.count, posting.count);
-        if (qgram_shared_[idx] >
-            std::numeric_limits<uint32_t>::max() - shared) {
+        const uint32_t shared = std::min<uint32_t>(
+            query_entry.count, qgram_posting_count(posting));
+        const uint32_t remaining =
+            static_cast<uint32_t>(std::numeric_limits<uint8_t>::max()) -
+            qgram_shared_[idx];
+        if (shared > remaining) {
           return fallback_scan_result(candidates.size());
         }
-        qgram_shared_[idx] += shared;
+        qgram_shared_[idx] = static_cast<uint8_t>(
+            qgram_shared_[idx] + shared);
       }
     }
     result.qgram_touched_candidates = qgram_touched_.size();
 
-    for (size_t idx : qgram_touched_) {
+    for (uint32_t idx : qgram_touched_) {
       const auto& item = items_[idx];
       if (!phase1_length_compatible(sequence.size(),
                                     item.sequence_length, radius)) {
@@ -1180,8 +1226,8 @@ class Phase1CoverGroupIndex {
       }
     }
 
-    auto append_unprunable = [&](const std::vector<size_t>& indices) {
-      for (size_t idx : indices) {
+    auto append_unprunable = [&](const std::vector<uint32_t>& indices) {
+      for (uint32_t idx : indices) {
         if (idx >= items_.size()) continue;
         if (phase1_length_compatible(sequence.size(),
                                      items_[idx].sequence_length, radius)) {
@@ -1214,15 +1260,16 @@ class Phase1CoverGroupIndex {
   size_t metric_build_distance_calls_ = 0;
 
   bool qgram_built_ = false;
+  bool qgram_index_available_ = true;
   int qgram_q_ = 0;
   size_t min_safe_total_qgrams_ = std::numeric_limits<size_t>::max();
   std::unordered_map<uint64_t, std::vector<QGramPosting>> qgram_postings_;
-  std::vector<size_t> qgram_unsafe_indices_;
-  std::vector<size_t> qgram_zero_total_indices_;
-  std::vector<uint32_t> qgram_shared_;
-  std::vector<uint32_t> qgram_seen_epoch_;
-  std::vector<size_t> qgram_touched_;
-  uint32_t qgram_epoch_ = 1;
+  std::vector<uint32_t> qgram_unsafe_indices_;
+  std::vector<uint32_t> qgram_zero_total_indices_;
+  std::vector<uint8_t> qgram_shared_;
+  std::vector<uint16_t> qgram_seen_epoch_;
+  std::vector<uint32_t> qgram_touched_;
+  uint16_t qgram_epoch_ = 1;
 
   std::unique_ptr<IncrementalPigeonholeIndex> seed_index_;
   int seed_min_len_ = 0;
