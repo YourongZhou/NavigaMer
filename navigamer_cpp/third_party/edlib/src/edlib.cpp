@@ -984,7 +984,7 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
 
 
         // TODO: consider if this part is useful, it does not seem to help much
-        if (c % STRONG_REDUCE_NUM == 0) { // Every some columns do more expensive but more efficient reduction
+        if (c > 0 && c % STRONG_REDUCE_NUM == 0) { // Every some columns do more expensive but more efficient reduction
             while (lastBlock >= firstBlock) {
                 // If all cells outside of band, remove block
                 std::array<int, WORD_SIZE> scores = getBlockCellValues(blocks[bl]);
