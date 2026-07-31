@@ -104,15 +104,29 @@ struct ReferenceOccurrence {
 static_assert(sizeof(ReferenceOccurrence) == 8,
               "reference occurrence must remain an 8-byte value");
 
+struct ReferenceOccurrenceGroup {
+  LeafId sequence_id = INVALID_LEAF_ID;
+  uint32_t position_begin = 0;
+
+  bool operator==(const ReferenceOccurrenceGroup& other) const {
+    return sequence_id == other.sequence_id &&
+           position_begin == other.position_begin;
+  }
+};
+static_assert(sizeof(ReferenceOccurrenceGroup) == 8,
+              "reference occurrence group must remain an 8-byte value");
+
 // Canonical, pointer-free sequence storage for a finalized index. SequenceId is
 // implicit from the position in records/reference_records, so nodes, beacons,
 // leaf links, and search results only need a 32-bit integer reference.
 struct SequenceStore {
   std::vector<BioSequence> records;
   std::vector<ReferenceSequenceRecord> reference_records;
-  // Every non-representative occurrence is stored. Sorted by
-  // (sequence_id, source_pos), so unique windows pay no side-array cost.
-  std::vector<ReferenceOccurrence> additional_occurrences;
+  // A sequence with one extra position uses one compact pair. Sequences with
+  // two or more extras share one group record and a flat position array.
+  std::vector<ReferenceOccurrence> singleton_occurrences;
+  std::vector<ReferenceOccurrenceGroup> occurrence_groups;
+  std::vector<uint32_t> grouped_occurrence_positions;
   std::vector<ReferenceContig> reference_contigs;
   std::string reference_id;
   std::string reference_sequence;
@@ -169,9 +183,7 @@ struct SequenceStore {
   }
   std::vector<uint32_t> occurrence_positions(LeafId id) const {
     std::vector<uint32_t> positions;
-    const auto range = additional_occurrence_range(id);
-    positions.reserve(
-        static_cast<size_t>(std::distance(range.first, range.second)) + 1);
+    positions.reserve(additional_occurrence_count(id) + 1);
     for_each_occurrence(
         id, [&](uint32_t source_pos) {
           positions.push_back(source_pos);
@@ -182,32 +194,71 @@ struct SequenceStore {
   void for_each_occurrence(LeafId id, Visitor&& visit) const {
     const uint32_t representative =
         static_cast<uint32_t>(source_position(id));
-    const auto range = additional_occurrence_range(id);
     bool emitted_representative = false;
-    for (auto it = range.first; it != range.second; ++it) {
+    const auto emit_position = [&](uint32_t source_pos) {
       if (!emitted_representative &&
-          representative < it->source_pos) {
+          representative < source_pos) {
         visit(representative);
         emitted_representative = true;
       }
-      visit(it->source_pos);
-    }
-    if (!emitted_representative) visit(representative);
-  }
-  std::pair<std::vector<ReferenceOccurrence>::const_iterator,
-            std::vector<ReferenceOccurrence>::const_iterator>
-  additional_occurrence_range(LeafId id) const {
-    const auto first = std::lower_bound(
-        additional_occurrences.begin(), additional_occurrences.end(), id,
+      visit(source_pos);
+    };
+    const auto singleton = std::lower_bound(
+        singleton_occurrences.begin(), singleton_occurrences.end(), id,
         [](const ReferenceOccurrence& occurrence, LeafId sequence_id) {
           return occurrence.sequence_id < sequence_id;
         });
-    const auto last = std::upper_bound(
-        first, additional_occurrences.end(), id,
-        [](LeafId sequence_id, const ReferenceOccurrence& occurrence) {
-          return sequence_id < occurrence.sequence_id;
+    if (singleton != singleton_occurrences.end() &&
+        singleton->sequence_id == id) {
+      emit_position(singleton->source_pos);
+    } else {
+      const auto group = std::lower_bound(
+          occurrence_groups.begin(), occurrence_groups.end(), id,
+          [](const ReferenceOccurrenceGroup& occurrence_group,
+             LeafId sequence_id) {
+            return occurrence_group.sequence_id < sequence_id;
+          });
+      if (group != occurrence_groups.end() && group->sequence_id == id) {
+        const size_t group_idx =
+            static_cast<size_t>(group - occurrence_groups.begin());
+        const size_t position_end =
+            group_idx + 1 < occurrence_groups.size()
+                ? occurrence_groups[group_idx + 1].position_begin
+                : grouped_occurrence_positions.size();
+        for (size_t position_idx = group->position_begin;
+             position_idx < position_end; ++position_idx) {
+          emit_position(grouped_occurrence_positions[position_idx]);
+        }
+      }
+    }
+    if (!emitted_representative) visit(representative);
+  }
+  size_t additional_occurrence_count(LeafId id) const {
+    const auto singleton = std::lower_bound(
+        singleton_occurrences.begin(), singleton_occurrences.end(), id,
+        [](const ReferenceOccurrence& occurrence, LeafId sequence_id) {
+          return occurrence.sequence_id < sequence_id;
         });
-    return {first, last};
+    if (singleton != singleton_occurrences.end() &&
+        singleton->sequence_id == id) {
+      return 1;
+    }
+    const auto group = std::lower_bound(
+        occurrence_groups.begin(), occurrence_groups.end(), id,
+        [](const ReferenceOccurrenceGroup& occurrence_group,
+           LeafId sequence_id) {
+          return occurrence_group.sequence_id < sequence_id;
+        });
+    if (group == occurrence_groups.end() || group->sequence_id != id) {
+      return 0;
+    }
+    const size_t group_idx =
+        static_cast<size_t>(group - occurrence_groups.begin());
+    const size_t position_end =
+        group_idx + 1 < occurrence_groups.size()
+            ? occurrence_groups[group_idx + 1].position_begin
+            : grouped_occurrence_positions.size();
+    return position_end - group->position_begin;
   }
   std::string identifier(LeafId id) const {
     if (!reference_backed) return records.at(static_cast<size_t>(id)).id;

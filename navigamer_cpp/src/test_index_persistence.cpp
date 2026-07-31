@@ -4,6 +4,7 @@
 #include "search_engine.hpp"
 #include "structure.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <fstream>
@@ -280,10 +281,14 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 12);
+  assert(loaded.manifest.format_version == 13);
   assert(loaded_store.reference_contigs.size() == 2);
-  assert(loaded_store.additional_occurrences ==
-         store.additional_occurrences);
+  assert(loaded_store.singleton_occurrences ==
+         store.singleton_occurrences);
+  assert(loaded_store.occurrence_groups ==
+         store.occurrence_groups);
+  assert(loaded_store.grouped_occurrence_positions ==
+         store.grouped_occurrence_positions);
   assert(loaded_store.occurrence_positions(aaaa_id) ==
          std::vector<uint32_t>({0, 16, 21}));
 
@@ -316,6 +321,31 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   assert(unsampled_first.sequence_store().source_position(ordered_id) == 6);
   assert(unsampled_first.sequence_store().occurrence_positions(ordered_id) ==
          std::vector<uint32_t>({1, 6}));
+
+  navigamer::BioGeometryIndexBuilder grouped(
+      navigamer::HierarchyConfig({8, 4, 2}), build_config);
+  grouped.build_reference_windows(
+      "grouped", "CAAAACAAAACAAAACAAAA", 4, 2);
+  navigamer::LeafId grouped_id = navigamer::INVALID_LEAF_ID;
+  for (size_t sequence_idx = 0;
+       sequence_idx < grouped.sequence_store().size(); ++sequence_idx) {
+    const auto id = static_cast<navigamer::LeafId>(sequence_idx);
+    if (grouped.sequence_store().sequence(id) == "AAAA") {
+      grouped_id = id;
+      break;
+    }
+  }
+  assert(grouped_id != navigamer::INVALID_LEAF_ID);
+  assert(grouped.sequence_store().occurrence_positions(grouped_id) ==
+         std::vector<uint32_t>({1, 6, 11, 16}));
+  assert(grouped.sequence_store().additional_occurrence_count(grouped_id) ==
+         3);
+  assert(std::none_of(
+      grouped.sequence_store().singleton_occurrences.begin(),
+      grouped.sequence_store().singleton_occurrences.end(),
+      [&](const navigamer::ReferenceOccurrence& occurrence) {
+        return occurrence.sequence_id == grouped_id;
+      }));
 
   std::remove(fasta_path.c_str());
   std::remove(index_path.c_str());

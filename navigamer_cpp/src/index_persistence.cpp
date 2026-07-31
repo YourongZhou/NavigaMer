@@ -17,7 +17,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '2'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '3'};
 constexpr size_t kReferenceChunkBases = size_t{1} << 20;
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
@@ -265,7 +265,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 12) {
+  if (manifest.format_version != 13) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -597,11 +597,17 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
     for (const auto& sequence : store.reference_records) {
       write_pod<uint32_t>(out, sequence.source_pos);
     }
-    write_size(out, store.additional_occurrences.size());
-    for (const auto& occurrence : store.additional_occurrences) {
+    write_size(out, store.singleton_occurrences.size());
+    for (const auto& occurrence : store.singleton_occurrences) {
       write_pod<uint32_t>(out, occurrence.sequence_id);
       write_pod<uint32_t>(out, occurrence.source_pos);
     }
+    write_size(out, store.occurrence_groups.size());
+    for (const auto& group : store.occurrence_groups) {
+      write_pod<uint32_t>(out, group.sequence_id);
+      write_pod<uint32_t>(out, group.position_begin);
+    }
+    write_u32_vector(out, store.grouped_occurrence_positions);
     return;
   }
   for (const auto& sequence : store.records) {
@@ -718,30 +724,54 @@ SequenceStore read_sequence_store(std::istream& in) {
     store.records.push_back(std::move(sequence));
   }
   if (store.reference_backed) {
-    const size_t occurrence_count =
-        read_size(in, "sequence_store.additional_occurrence_count");
-    store.additional_occurrences.reserve(occurrence_count);
+    const size_t singleton_count =
+        read_size(in, "sequence_store.singleton_occurrence_count");
+    store.singleton_occurrences.reserve(singleton_count);
     ReferenceOccurrence previous;
     bool first = true;
     for (size_t occurrence_idx = 0;
-         occurrence_idx < occurrence_count; ++occurrence_idx) {
+         occurrence_idx < singleton_count; ++occurrence_idx) {
       ReferenceOccurrence occurrence;
       occurrence.sequence_id =
-          read_pod<uint32_t>(in, "reference_occurrence.sequence_id");
+          read_pod<uint32_t>(
+              in, "singleton_occurrence.sequence_id");
       occurrence.source_pos =
-          read_pod<uint32_t>(in, "reference_occurrence.source_pos");
+          read_pod<uint32_t>(
+              in, "singleton_occurrence.source_pos");
       if (occurrence.sequence_id >= store.reference_records.size() ||
           occurrence.source_pos >= store.reference_sequence.size() ||
           (!first &&
-           std::tie(occurrence.sequence_id, occurrence.source_pos) <=
-               std::tie(previous.sequence_id, previous.source_pos))) {
+           occurrence.sequence_id <= previous.sequence_id)) {
         throw std::runtime_error(
-            "reference-backed index has invalid occurrence ordering");
+            "reference-backed index has invalid singleton occurrences");
       }
-      store.additional_occurrences.push_back(occurrence);
+      store.singleton_occurrences.push_back(occurrence);
       previous = occurrence;
       first = false;
     }
+    const size_t group_count =
+        read_size(in, "sequence_store.occurrence_group_count");
+    store.occurrence_groups.reserve(group_count);
+    ReferenceOccurrenceGroup previous_group;
+    first = true;
+    for (size_t group_idx = 0; group_idx < group_count; ++group_idx) {
+      ReferenceOccurrenceGroup group;
+      group.sequence_id =
+          read_pod<uint32_t>(in, "occurrence_group.sequence_id");
+      group.position_begin =
+          read_pod<uint32_t>(in, "occurrence_group.position_begin");
+      if (group.sequence_id >= store.reference_records.size() ||
+          (!first &&
+           group.sequence_id <= previous_group.sequence_id)) {
+        throw std::runtime_error(
+            "reference-backed index has invalid occurrence groups");
+      }
+      store.occurrence_groups.push_back(group);
+      previous_group = group;
+      first = false;
+    }
+    store.grouped_occurrence_positions = read_u32_vector(
+        in, "sequence_store.grouped_occurrence_positions");
   }
   return store;
 }
@@ -887,7 +917,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 12) {
+  if (manifest.format_version != 13) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -931,7 +961,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 12;
+  stored.format_version = 13;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -952,7 +982,7 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 12) {
+  if (manifest.format_version != 13) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }

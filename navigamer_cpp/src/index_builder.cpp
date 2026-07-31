@@ -1463,28 +1463,78 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       }
     }
     LeafId previous_sequence_id = 0;
-    uint32_t previous_source_pos = 0;
     bool first_occurrence = true;
     for (const auto& occurrence :
-         view.sequences.additional_occurrences) {
+         view.sequences.singleton_occurrences) {
       if (occurrence.sequence_id >= sequence_count_ ||
           occurrence.source_pos ==
               view.sequences.reference_records[
                   occurrence.sequence_id].source_pos ||
           !is_valid_reference_window(occurrence.source_pos) ||
           (!first_occurrence &&
-           (occurrence.sequence_id < previous_sequence_id ||
-            (occurrence.sequence_id == previous_sequence_id &&
-             occurrence.source_pos <= previous_source_pos)))) {
+           occurrence.sequence_id <= previous_sequence_id)) {
         return false;
       }
       previous_sequence_id = occurrence.sequence_id;
-      previous_source_pos = occurrence.source_pos;
       first_occurrence = false;
+    }
+    size_t expected_position_begin = 0;
+    previous_sequence_id = 0;
+    first_occurrence = true;
+    for (size_t group_idx = 0;
+         group_idx < view.sequences.occurrence_groups.size(); ++group_idx) {
+      const auto& group = view.sequences.occurrence_groups[group_idx];
+      const size_t position_end =
+          group_idx + 1 < view.sequences.occurrence_groups.size()
+              ? view.sequences.occurrence_groups[group_idx + 1].position_begin
+              : view.sequences.grouped_occurrence_positions.size();
+      const auto singleton = std::lower_bound(
+          view.sequences.singleton_occurrences.begin(),
+          view.sequences.singleton_occurrences.end(), group.sequence_id,
+          [](const ReferenceOccurrence& occurrence, LeafId sequence_id) {
+            return occurrence.sequence_id < sequence_id;
+          });
+      if (group.sequence_id >= sequence_count_ ||
+          group.position_begin != expected_position_begin ||
+          position_end < group.position_begin ||
+          position_end >
+              view.sequences.grouped_occurrence_positions.size() ||
+          position_end - group.position_begin < 2 ||
+          (!first_occurrence &&
+           group.sequence_id <= previous_sequence_id) ||
+          (singleton != view.sequences.singleton_occurrences.end() &&
+           singleton->sequence_id == group.sequence_id)) {
+        return false;
+      }
+      uint32_t previous_position = 0;
+      bool first_position = true;
+      for (size_t position_idx = group.position_begin;
+           position_idx < position_end; ++position_idx) {
+        const uint32_t position =
+            view.sequences.grouped_occurrence_positions[position_idx];
+        if (position ==
+                view.sequences.reference_records[
+                    group.sequence_id].source_pos ||
+            !is_valid_reference_window(position) ||
+            (!first_position && position <= previous_position)) {
+          return false;
+        }
+        previous_position = position;
+        first_position = false;
+      }
+      expected_position_begin = position_end;
+      previous_sequence_id = group.sequence_id;
+      first_occurrence = false;
+    }
+    if (expected_position_begin !=
+        view.sequences.grouped_occurrence_positions.size()) {
+      return false;
     }
   } else {
     if (!view.sequences.reference_records.empty() ||
-        !view.sequences.additional_occurrences.empty() ||
+        !view.sequences.singleton_occurrences.empty() ||
+        !view.sequences.occurrence_groups.empty() ||
+        !view.sequences.grouped_occurrence_positions.empty() ||
         !view.sequences.reference_contigs.empty()) {
       return false;
     }
@@ -1716,7 +1766,9 @@ void BioGeometryIndexBuilder::initialize_sequence_store(
   auto& store = search_graph_view_.sequences;
   store.reference_backed = false;
   store.reference_records.clear();
-  store.additional_occurrences.clear();
+  store.singleton_occurrences.clear();
+  store.occurrence_groups.clear();
+  store.grouped_occurrence_positions.clear();
   store.reference_contigs.clear();
   store.reference_id.clear();
   store.reference_sequence.clear();
@@ -1770,7 +1822,9 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
   store.fixed_sequence_length = window_length;
   store.reference_backed = true;
   store.records.clear();
-  store.additional_occurrences.clear();
+  store.singleton_occurrences.clear();
+  store.occurrence_groups.clear();
+  store.grouped_occurrence_positions.clear();
 
   if (store.reference_sequence.size() >=
       static_cast<size_t>(UINT32_MAX)) {
@@ -1814,6 +1868,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
   store.reference_records.reserve(window_count);
   std::unordered_map<std::string_view, LeafId> sequence_ids;
   sequence_ids.reserve(window_count);
+  std::vector<ReferenceOccurrence> additional_occurrences;
   size_t processed_windows = 0;
   for (const auto& contig : store.reference_contigs) {
     const size_t contig_begin = contig.begin;
@@ -1839,7 +1894,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
         if (existing != sequence_ids.end()) {
           stats_.deduplicated++;
           if (stride == 1) {
-            store.additional_occurrences.push_back(
+            additional_occurrences.push_back(
                 {existing->second, static_cast<uint32_t>(start)});
           }
         } else {
@@ -1879,20 +1934,45 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
         const auto existing = sequence_ids.find(sequence);
         if (existing == sequence_ids.end()) continue;
         if (store.reference_records[existing->second].source_pos != start) {
-          store.additional_occurrences.push_back(
+          additional_occurrences.push_back(
               {existing->second, static_cast<uint32_t>(start)});
         }
       }
     }
   }
   std::sort(
-      store.additional_occurrences.begin(),
-      store.additional_occurrences.end(),
+      additional_occurrences.begin(),
+      additional_occurrences.end(),
       [](const ReferenceOccurrence& left,
          const ReferenceOccurrence& right) {
         return std::tie(left.sequence_id, left.source_pos) <
                std::tie(right.sequence_id, right.source_pos);
       });
+  for (size_t occurrence_begin = 0;
+       occurrence_begin < additional_occurrences.size();) {
+    size_t occurrence_end = occurrence_begin + 1;
+    while (occurrence_end < additional_occurrences.size() &&
+           additional_occurrences[occurrence_end].sequence_id ==
+               additional_occurrences[occurrence_begin].sequence_id) {
+      ++occurrence_end;
+    }
+    const size_t occurrence_count = occurrence_end - occurrence_begin;
+    if (occurrence_count == 1) {
+      store.singleton_occurrences.push_back(
+          additional_occurrences[occurrence_begin]);
+    } else {
+      store.occurrence_groups.push_back(
+          {additional_occurrences[occurrence_begin].sequence_id,
+           static_cast<uint32_t>(
+               store.grouped_occurrence_positions.size())});
+      for (size_t occurrence_idx = occurrence_begin;
+           occurrence_idx < occurrence_end; ++occurrence_idx) {
+        store.grouped_occurrence_positions.push_back(
+            additional_occurrences[occurrence_idx].source_pos);
+      }
+    }
+    occurrence_begin = occurrence_end;
+  }
   sequence_count_ = store.reference_records.size();
   stats_.unique_sequences = sequence_count_;
 }

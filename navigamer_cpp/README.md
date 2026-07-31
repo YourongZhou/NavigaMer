@@ -294,7 +294,7 @@ records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 12
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 13
 stores the shared reference as exact chunked 2-bit ACGT plus verbatim non-ACGT
 exceptions, keeps long literal inputs only as manifest fingerprints, and stores
 one child-center-to-beacon byte per MBB cell. The child-layer radius
@@ -309,6 +309,9 @@ array reuses the leaf ID offset. Beacon IDs use the narrowest exact per-node
 encoding: signed 8-bit or 16-bit deltas from the node center, falling back to a
 full 32-bit ID only when necessary. A finest-layer node's sole beacon is its
 center and consumes no side-array entry.
+Repeated reference positions use one pair for a singleton duplicate, while
+larger duplicate groups share one group offset and a flat 32-bit position
+array.
 
 ## Parameter sweeps
 
