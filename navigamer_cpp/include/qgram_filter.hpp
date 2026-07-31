@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -11,10 +12,10 @@ namespace navigamer {
 
 using QGramCounts = std::unordered_map<std::string, size_t>;
 
-QGramCounts compute_qgram_counts(const std::string& sequence, int q);
-size_t qgram_total(const std::string& sequence, int q);
+QGramCounts compute_qgram_counts(std::string_view sequence, int q);
+size_t qgram_total(std::string_view sequence, int q);
 size_t compute_qgram_l1(
-    const std::string& lhs, const std::string& rhs, int q);
+    std::string_view lhs, std::string_view rhs, int q);
 
 struct QGramEntry {
   uint64_t code = 0;
@@ -29,7 +30,7 @@ struct QGramSignature {
   std::vector<QGramEntry> entries;
 };
 
-QGramSignature compute_qgram_signature(const std::string& sequence, int q);
+QGramSignature compute_qgram_signature(std::string_view sequence, int q);
 size_t qgram_l1_distance(
     const QGramSignature& lhs, const QGramSignature& rhs);
 bool qgram_can_prune_edit_distance(
@@ -53,7 +54,7 @@ class QGramCountIndex {
 
   struct ItemView {
     size_t item_id = 0;
-    const std::string* sequence = nullptr;
+    std::string_view sequence;
   };
 
   struct QueryStats {
@@ -70,7 +71,7 @@ class QGramCountIndex {
   void build(const std::vector<Item>& items);
   void build_views(const std::vector<ItemView>& items);
   std::vector<size_t> query(
-      const std::string& query_sequence, int tau,
+      std::string_view query_sequence, int tau,
       QueryStats* stats = nullptr,
       QGramQueryWorkspace* workspace = nullptr) const;
 

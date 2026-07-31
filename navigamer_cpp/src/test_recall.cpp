@@ -153,6 +153,56 @@ TestResult run_test(const TestConfig& cfg) {
   return result;
 }
 
+TestResult run_reference_backed_test() {
+  constexpr size_t kSequenceLength = 20;
+  constexpr int kTolerance = 2;
+  constexpr size_t kQueryCount = 100;
+  std::mt19937 gen(8128);
+  const std::string reference = random_dna(700, gen);
+
+  navigamer::BioGeometryIndexBuilder builder(
+      navigamer::HierarchyConfig({12, 6, 3}));
+  builder.build_reference_windows(
+      "synthetic", reference, kSequenceLength, 1);
+  assert(builder.sequence_store().reference_backed);
+  for (const auto& record : builder.sequence_store().records) {
+    assert(record.seq.empty());
+  }
+
+  navigamer::BioGeometrySearchEngine engine(builder);
+  std::uniform_int_distribution<size_t> start_pick(
+      0, reference.size() - kSequenceLength);
+  TestResult result{};
+  result.total_queries = kQueryCount;
+  for (size_t query_idx = 0; query_idx < kQueryCount; ++query_idx) {
+    const size_t start = start_pick(gen);
+    navigamer::BioSequence query(
+        "reference_query_" + std::to_string(query_idx),
+        mutate(reference.substr(start, kSequenceLength), kTolerance, gen));
+    const auto [bf_res, bf_stats] =
+        engine.search_brute_force(query, kTolerance);
+    const auto [adaptive_res, adaptive_stats] =
+        engine.search_adaptive(query, kTolerance);
+    (void)bf_stats;
+    (void)adaptive_stats;
+
+    std::unordered_set<navigamer::LeafId> adaptive_ids;
+    for (const auto* hit : adaptive_res) {
+      adaptive_ids.insert(hit->sequence_id);
+    }
+    result.total_bf_hits += bf_res.size();
+    result.total_adaptive_hits += adaptive_res.size();
+    size_t missed = 0;
+    for (const auto* hit : bf_res) {
+      if (!adaptive_ids.count(hit->sequence_id)) missed++;
+    }
+    result.total_missed_hits += missed;
+    if (missed != 0) result.fn_queries++;
+  }
+  result.passed = result.total_missed_hits == 0;
+  return result;
+}
+
 }  // namespace
 
 int main() {
@@ -211,6 +261,23 @@ int main() {
               << " fn_queries=" << result.fn_queries
               << "/" << result.total_queries << ")\n";
   }
+
+  std::cerr << "Test " << (configs.size() + 1) << "/"
+            << (configs.size() + 1)
+            << ": reference-backed stride-1 windows ... ";
+  const auto reference_result = run_reference_backed_test();
+  if (reference_result.passed) {
+    std::cerr << "PASS";
+    pass_count++;
+  } else {
+    std::cerr << "FAIL";
+    fail_count++;
+  }
+  std::cerr << " (bf_hits=" << reference_result.total_bf_hits
+            << " adaptive_hits=" << reference_result.total_adaptive_hits
+            << " missed=" << reference_result.total_missed_hits
+            << " fn_queries=" << reference_result.fn_queries
+            << "/" << reference_result.total_queries << ")\n";
 
   std::cerr << "\n=== Summary: " << pass_count << " passed, "
             << fail_count << " failed ===\n";

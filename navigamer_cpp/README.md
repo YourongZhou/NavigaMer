@@ -283,7 +283,10 @@ The `build-scale` command rebuilds in memory for each requested reference prefix
 and writes phase timing, substep timing, construction counters, range candidate
 mode, and q-gram length to CSV. With one prefix and `--index`, it also writes a
 loadable persisted index whose manifest includes the reference fingerprint,
-actual prefix length, window length, and stride.
+actual prefix length, window length, and stride. Reference windows are
+reference-backed: each unique window stores a representative offset and all
+construction/search kernels consume `std::string_view` values into the single
+stored reference instead of owning one string per window.
 
 ## Parameter sweeps
 

@@ -7,6 +7,7 @@
 #include "structure.hpp"
 #include "tools.hpp"
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -493,7 +494,7 @@ class BioGeometrySearchEngine {
   int compute_center_distance_for_search(
       const BioSequence& query_seq,
       const std::string& node_id,
-      const std::string& center_sequence,
+      std::string_view center_sequence,
       int tau,
       bool after_mbb_filter) const;
   void process_node_adaptive_view(

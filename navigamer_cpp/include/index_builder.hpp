@@ -7,6 +7,7 @@
 #include "phase2_distance_verifier.hpp"
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace navigamer {
@@ -84,6 +85,10 @@ struct BuildRangeConfig {
 // integer reference.
 struct SequenceStore {
   std::vector<BioSequence> records;
+  std::string reference_id;
+  std::string reference_sequence;
+  size_t fixed_sequence_length = 0;
+  bool reference_backed = false;
 
   size_t size() const { return records.size(); }
   bool empty() const { return records.empty(); }
@@ -93,8 +98,14 @@ struct SequenceStore {
   const BioSequence& operator[](LeafId id) const {
     return records[static_cast<size_t>(id)];
   }
-  const std::string& sequence(LeafId id) const {
-    return records[static_cast<size_t>(id)].seq;
+  std::string_view sequence(LeafId id) const {
+    const auto& record = records[static_cast<size_t>(id)];
+    if (reference_backed && record.has_source_pos) {
+      return std::string_view(
+          reference_sequence.data() + record.source_pos,
+          fixed_sequence_length);
+    }
+    return record.seq;
   }
 };
 
@@ -165,6 +176,11 @@ class BioGeometryIndexBuilder {
 
   void build(const std::vector<std::shared_ptr<BioSequence>>& raw_sequences);
   void build(std::vector<std::shared_ptr<BioSequence>>&& raw_sequences);
+  void build_reference_windows(
+      std::string reference_id,
+      std::string reference_sequence,
+      size_t window_length,
+      size_t stride);
 
   struct Statistics {
     size_t added_sequences = 0;
@@ -325,9 +341,19 @@ class BioGeometryIndexBuilder {
   void initialize_sequence_store(
       const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
       bool consume_records);
+  void initialize_reference_sequence_store(
+      std::string reference_id,
+      std::string reference_sequence,
+      size_t window_length,
+      size_t stride,
+      BuildProgressReporter* progress);
   void build_impl(
       std::vector<std::shared_ptr<BioSequence>> raw_sequences,
-      bool consume_records);
+      bool consume_records,
+      std::string reference_id,
+      std::string reference_sequence,
+      size_t reference_window_length,
+      size_t reference_stride);
 
   void phase1_build_extended_sketch(BuildProgressReporter* progress);
   void phase2_inter_tier_rebinding(BuildProgressReporter* progress);

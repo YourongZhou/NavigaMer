@@ -10,7 +10,7 @@ namespace navigamer {
 
 namespace {
 
-bool encode_seed(const std::string& sequence, size_t start, int seed_len,
+bool encode_seed(std::string_view sequence, size_t start, int seed_len,
                  uint64_t& code) {
   if (seed_len <= 0 || seed_len > 32 ||
       start + static_cast<size_t>(seed_len) > sequence.size()) {
@@ -32,7 +32,7 @@ bool encode_seed(const std::string& sequence, size_t start, int seed_len,
   return true;
 }
 
-bool is_acgt(const std::string& sequence) {
+bool is_acgt(std::string_view sequence) {
   for (char base : sequence) {
     if (base != 'A' && base != 'C' && base != 'G' && base != 'T') return false;
   }
@@ -70,7 +70,7 @@ IncrementalPigeonholeIndex::IncrementalPigeonholeIndex(
 }
 
 void IncrementalPigeonholeIndex::append(size_t item_id,
-                                        const std::string& sequence) {
+                                        std::string_view sequence) {
   if (items_.size() >= std::numeric_limits<uint32_t>::max()) {
     throw std::overflow_error("phase1 seed index exceeds uint32 item capacity");
   }
@@ -114,7 +114,7 @@ void IncrementalPigeonholeIndex::promote_to_wide_postings(
 
 void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
                                             uint32_t item_idx) {
-  const std::string& sequence = items_[item_idx].sequence;
+  const std::string_view sequence = items_[item_idx].sequence;
   if (!is_acgt(sequence) ||
       sequence.size() < static_cast<size_t>(seed_len)) {
     state.unindexable_items.push_back(item_idx);
@@ -170,7 +170,7 @@ void IncrementalPigeonholeIndex::begin_query() {
 }
 
 Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
-    const std::string& sequence, int tau) {
+    std::string_view sequence, int tau) {
   if (tau < 0) {
     throw std::invalid_argument("phase1 seed threshold must be non-negative");
   }

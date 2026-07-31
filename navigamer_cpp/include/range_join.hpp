@@ -5,9 +5,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -41,7 +43,7 @@ struct RangeJoinItem {
 
 struct RangeJoinItemView {
   size_t item_id = 0;
-  const std::string* sequence = nullptr;
+  std::string_view sequence;
 };
 
 struct RangeJoinQueryResult {
@@ -95,16 +97,16 @@ class ExactRangeJoinIndex {
   void build_views(std::vector<RangeJoinItemView> items);
   void prepare_qgram();
   void prepare_seed_lengths(const std::vector<int>& seed_lengths);
-  RangeJoinQueryResult query(const std::string& query_sequence, int tau);
+  RangeJoinQueryResult query(std::string_view query_sequence, int tau);
   RangeJoinQueryResult query(
-      const std::string& query_sequence, int tau,
+      std::string_view query_sequence, int tau,
       RangeJoinQueryWorkspace* workspace) const;
 
  private:
   struct StoredItem {
     size_t item_id = 0;
-    size_t owned_item_idx = 0;
-    const std::string* external_sequence = nullptr;
+    size_t owned_item_idx = std::numeric_limits<size_t>::max();
+    std::string_view external_sequence;
   };
 
   using PostingLists16 =
@@ -138,19 +140,19 @@ class ExactRangeJoinIndex {
   bool enable_positional_postings_ = false;
   mutable std::shared_ptr<std::mutex> deferred_qgram_mutex_;
 
-  const std::string& item_sequence(const StoredItem& item) const;
+  std::string_view item_sequence(const StoredItem& item) const;
   void reset_after_items_changed();
   const QGramCountIndex& ensure_qgram_index() const;
   void prepare_postings_for_seed_len(int seed_len);
   bool query_needs_seed_postings(int seed_len) const;
   RangeJoinQueryResult full_scan(
-      const std::string& query_sequence, int tau, bool fallback) const;
+      std::string_view query_sequence, int tau, bool fallback) const;
   RangeJoinQueryResult pigeonhole_query(
-      const std::string& query_sequence, int tau, int block_len, int seed_len,
+      std::string_view query_sequence, int tau, int block_len, int seed_len,
       size_t early_abort_candidate_limit,
       RangeJoinQueryWorkspace* workspace) const;
   RangeJoinQueryResult qgram_query(
-      const std::string& query_sequence, int tau,
+      std::string_view query_sequence, int tau,
       RangeJoinQueryWorkspace* workspace) const;
   RangeJoinQueryResult hybrid_result(
       const RangeJoinQueryResult& pigeonhole,

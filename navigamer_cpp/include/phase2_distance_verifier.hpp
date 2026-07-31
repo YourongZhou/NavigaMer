@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace navigamer {
@@ -25,8 +26,8 @@ class Phase2DistanceVerifier {
   virtual ~Phase2DistanceVerifier() = default;
 
   virtual Phase2DistanceBatchResult verify(
-      const std::vector<const std::string*>& parent_sequences,
-      const std::vector<const std::string*>& child_sequences,
+      const std::vector<std::string_view>& parent_sequences,
+      const std::vector<std::string_view>& child_sequences,
       const std::vector<Phase2DistancePair>& pairs) = 0;
 };
 

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace navigamer {
@@ -21,12 +22,12 @@ enum class DistanceMode {
 const char* distance_mode_name(DistanceMode mode);
 DistanceMode parse_distance_mode(const std::string& value);
 
-int compute_distance(const std::string& a, const std::string& b);
+int compute_distance(std::string_view a, std::string_view b);
 int compute_distance(const BioSequence& a, const BioSequence& b);
-int compute_distance_bounded_dp(const std::string& a, const std::string& b,
+int compute_distance_bounded_dp(std::string_view a, std::string_view b,
                                 int tau);
-int compute_distance_edlib(const std::string& a, const std::string& b);
-int compute_distance_bounded_edlib(const std::string& a, const std::string& b,
+int compute_distance_edlib(std::string_view a, std::string_view b);
+int compute_distance_bounded_edlib(std::string_view a, std::string_view b,
                                    int tau);
 
 struct PreparedEdlibDnaPattern {
@@ -44,17 +45,17 @@ struct PreparedEdlibDnaPattern {
 };
 
 PreparedEdlibDnaPattern prepare_edlib_dna_pattern(
-    const std::string& pattern);
+    std::string_view pattern);
 int compute_distance_bounded_edlib_prepared(
     const PreparedEdlibDnaPattern& pattern,
-    const std::string& text,
+    std::string_view text,
     int tau);
 int compute_distance_edlib_prepared(
     const PreparedEdlibDnaPattern& pattern,
-    const std::string& text);
-bool compute_distance_bounded_myers_supported(const std::string& a,
-                                              const std::string& b);
-int compute_distance_bounded_myers(const std::string& a, const std::string& b,
+    std::string_view text);
+bool compute_distance_bounded_myers_supported(std::string_view a,
+                                              std::string_view b);
+int compute_distance_bounded_myers(std::string_view a, std::string_view b,
                                    int tau);
 
 struct PreparedMyersPattern {
@@ -65,16 +66,16 @@ struct PreparedMyersPattern {
   bool supported = false;
 };
 
-PreparedMyersPattern prepare_myers_pattern(const std::string& pattern);
+PreparedMyersPattern prepare_myers_pattern(std::string_view pattern);
 int compute_distance_bounded_myers_prepared(
     const PreparedMyersPattern& pattern,
-    const std::string& text,
+    std::string_view text,
     int tau);
 
-int compute_distance_bounded_with_mode(const std::string& a,
-                                       const std::string& b, int tau,
+int compute_distance_bounded_with_mode(std::string_view a,
+                                       std::string_view b, int tau,
                                        DistanceMode mode);
-int compute_distance_bounded(const std::string& a, const std::string& b, int tau);
+int compute_distance_bounded(std::string_view a, std::string_view b, int tau);
 
 // Farthest Point Sampling: choose k dispersed candidates.
 std::vector<size_t> farthest_point_sampling(

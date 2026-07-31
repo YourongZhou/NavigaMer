@@ -233,10 +233,11 @@ int main() {
 
   ExactRangeJoinIndex index(config_for(RangeCandidateMode::Auto));
   index.build(items);
+  ExactRangeJoinIndex copied_index = index;
   std::vector<RangeJoinItemView> item_views;
   item_views.reserve(items.size());
   for (const auto& item : items) {
-    item_views.push_back({item.item_id, &item.sequence});
+    item_views.push_back({item.item_id, item.sequence});
   }
   ExactRangeJoinIndex view_index(config_for(RangeCandidateMode::Auto));
   view_index.build_views(std::move(item_views));
@@ -285,6 +286,7 @@ int main() {
     for (size_t q_idx = 0; q_idx < 40; ++q_idx) {
       std::string query = mutate(items[q_idx].sequence, std::min(tau, 5), gen);
       auto result = index.query(query, tau);
+      auto copied_result = copied_index.query(query, tau);
       auto view_result = view_index.query(query, tau);
       auto pigeonhole = pigeonhole_index.query(query, tau);
       auto qgram = qgram_index.query(query, tau);
@@ -295,6 +297,8 @@ int main() {
                           qgram.candidate_item_ids));
       assert(view_result.candidate_item_ids == result.candidate_item_ids);
       assert(view_result.mode_used == result.mode_used);
+      assert(copied_result.candidate_item_ids == result.candidate_item_ids);
+      assert(copied_result.mode_used == result.mode_used);
       assert(full.mode_used == RangeCandidateMode::FullScan);
       assert(qgram.mode_used == RangeCandidateMode::QGramOnly);
       assert(hybrid.mode_used == RangeCandidateMode::Hybrid);

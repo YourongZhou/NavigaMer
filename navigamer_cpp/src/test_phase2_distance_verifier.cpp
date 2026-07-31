@@ -20,10 +20,10 @@ void test_cpu_batch_matches_direct_distance() {
       "TTTTTTTT",
       "AAAAACCA",
       "GGGGTTTA"};
-  const std::vector<const std::string*> parent_views = {
-      &parents[0], &parents[1], &parents[2]};
-  const std::vector<const std::string*> child_views = {
-      &children[0], &children[1], &children[2], &children[3]};
+  const std::vector<std::string_view> parent_views = {
+      parents[0], parents[1], parents[2]};
+  const std::vector<std::string_view> child_views = {
+      children[0], children[1], children[2], children[3]};
   const std::vector<Phase2DistancePair> pairs = {
       {0, 0, 1},
       {0, 1, 2},

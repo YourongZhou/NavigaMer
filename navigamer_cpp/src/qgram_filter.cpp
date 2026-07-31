@@ -10,24 +10,24 @@
 
 namespace navigamer {
 
-size_t qgram_total(const std::string& sequence, int q) {
+size_t qgram_total(std::string_view sequence, int q) {
   if (q <= 0) throw std::invalid_argument("q-gram length must be positive");
   const size_t q_size = static_cast<size_t>(q);
   return sequence.size() < q_size ? 0 : sequence.size() - q_size + 1;
 }
 
-QGramCounts compute_qgram_counts(const std::string& sequence, int q) {
+QGramCounts compute_qgram_counts(std::string_view sequence, int q) {
   QGramCounts counts;
   const size_t total = qgram_total(sequence, q);
   const size_t q_size = static_cast<size_t>(q);
   for (size_t pos = 0; pos < total; ++pos) {
-    counts[sequence.substr(pos, q_size)]++;
+    counts[std::string(sequence.substr(pos, q_size))]++;
   }
   return counts;
 }
 
 size_t compute_qgram_l1(
-    const std::string& lhs, const std::string& rhs, int q) {
+    std::string_view lhs, std::string_view rhs, int q) {
   const auto lhs_counts = compute_qgram_counts(lhs, q);
   const auto rhs_counts = compute_qgram_counts(rhs, q);
   std::unordered_set<std::string> grams;
@@ -47,7 +47,7 @@ size_t compute_qgram_l1(
   return l1;
 }
 
-QGramSignature compute_qgram_signature(const std::string& sequence, int q) {
+QGramSignature compute_qgram_signature(std::string_view sequence, int q) {
   QGramSignature signature;
   signature.q = q;
   signature.sequence_length = sequence.size();
@@ -205,7 +205,7 @@ void QGramCountIndex::build(const std::vector<Item>& items) {
   std::vector<ItemView> views;
   views.reserve(items.size());
   for (const auto& item : items) {
-    views.push_back({item.item_id, &item.sequence});
+    views.push_back({item.item_id, item.sequence});
   }
   build_views(views);
 }
@@ -220,8 +220,8 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
         static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
     const size_t q_size = static_cast<size_t>(q_);
     for (const auto& item : items) {
-      if (item.sequence && item.sequence->size() >= q_size &&
-          item.sequence->size() - q_size + 1 >
+      if (item.sequence.size() >= q_size &&
+          item.sequence.size() - q_size + 1 >
               std::numeric_limits<uint16_t>::max()) {
         can_pack = false;
         break;
@@ -246,11 +246,7 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
         item.item_id <= items_[internal_idx - 1].item_id) {
       item_ids_strictly_increasing_ = false;
     }
-    if (!item.sequence) {
-      items_.push_back({item.item_id, 0, 0, false});
-      continue;
-    }
-    const std::string& sequence = *item.sequence;
+    const std::string_view sequence = item.sequence;
     QGramSignature signature = compute_qgram_signature(sequence, q_);
     const bool qgram_indexable =
         posting_index_capacity && signature.safe_for_pruning;
@@ -274,7 +270,7 @@ void QGramCountIndex::build_views(const std::vector<ItemView>& items) {
 }
 
 std::vector<size_t> QGramCountIndex::query(
-    const std::string& query_sequence, int tau, QueryStats* stats,
+    std::string_view query_sequence, int tau, QueryStats* stats,
     QGramQueryWorkspace* workspace) const {
   if (tau < 0) throw std::invalid_argument("q-gram threshold must be non-negative");
 

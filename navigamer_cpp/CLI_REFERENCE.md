@@ -255,6 +255,8 @@ summary.
 Builds one index per requested reference prefix and writes construction timing
 plus construction counters to CSV. With `--index <file>`, exactly one prefix
 must be requested and the resulting reference-window index is serialized.
+Reference windows use one stored reference sequence plus representative
+offsets; they are not materialized as independent `std::string` objects.
 
 **Required:** `--ref`, `--prefix-lengths`, `--out`
 

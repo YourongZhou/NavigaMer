@@ -681,17 +681,22 @@ void run_build_scale(const std::string& ref_input,
 
   for (size_t requested_prefix : prefix_lengths) {
     const size_t actual_prefix = std::min(requested_prefix, ref_seq.size());
-    const std::string prefix_seq = ref_seq.substr(0, actual_prefix);
-    auto windows = build_reference_windows(ref_id, prefix_seq, window_size, stride);
-    const size_t window_count = windows.size();
+    std::string prefix_seq = ref_seq.substr(0, actual_prefix);
+    const size_t window_count =
+        actual_prefix < static_cast<size_t>(window_size)
+            ? 0
+            : 1 + (actual_prefix - static_cast<size_t>(window_size)) /
+                      static_cast<size_t>(stride);
     std::cerr << "build-scale: prefix_len=" << actual_prefix
               << " requested=" << requested_prefix
-              << " windows=" << windows.size()
+              << " windows=" << window_count
               << " window=" << window_size
               << " stride=" << stride << "\n";
 
     BioGeometryIndexBuilder builder(config, range_config);
-    builder.build(std::move(windows));
+    builder.build_reference_windows(
+        ref_id, std::move(prefix_seq),
+        static_cast<size_t>(window_size), static_cast<size_t>(stride));
     if (!index_path.empty()) {
       IndexBuildManifest manifest = make_reference_window_index_manifest(
           ref_input, actual_prefix, window_size, stride, config, range_config);
@@ -778,15 +783,28 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
   using namespace navigamer;
   BioGeometrySearchEngine engine(builder, search_config);
   BioSequence q("query", query_seq);
+  const auto& sequences = builder.sequence_store();
+  const auto print_hit = [&](const BioSequence* hit) {
+    const LeafId sequence_id = hit->sequence_id;
+    const std::string display_id =
+        !hit->id.empty()
+            ? hit->id
+            : sequences.reference_id + "_" +
+                  std::to_string(hit->source_pos);
+    std::cout << "  " << display_id << " dist="
+              << compute_distance(
+                     query_seq, sequences.sequence(sequence_id))
+              << "\n";
+  };
 
   if (mode == "greedy") {
     auto [res, st] = engine.search_greedy(q, tolerance);
     std::cout << "Greedy hits: " << res.size() << " (dist_calcs=" << st.dist_calc_count << ")\n";
-    for (const auto& h : res) std::cout << "  " << h->id << " dist=" << compute_distance(query_seq, h->seq) << "\n";
+    for (const auto& h : res) print_hit(h);
   } else if (mode == "exhaustive") {
     auto [res, st] = engine.search_exhaustive(q, tolerance);
     std::cout << "Exhaustive hits: " << res.size() << " (dist_calcs=" << st.dist_calc_count << ")\n";
-    for (const auto& h : res) std::cout << "  " << h->id << " dist=" << compute_distance(query_seq, h->seq) << "\n";
+    for (const auto& h : res) print_hit(h);
   } else {
     auto [res, st] = engine.search_adaptive(q, tolerance);
     std::cout << "Adaptive hits: " << res.size() << " (dist_calcs=" << st.dist_calc_count
@@ -907,7 +925,7 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
               << " center_distance_count=" << st.center_distance_count
               << " raw_candidate_count=" << st.raw_candidate_count
               << " result_count=" << st.result_count << ")\n";
-    for (const auto& h : res) std::cout << "  " << h->id << " dist=" << compute_distance(query_seq, h->seq) << "\n";
+    for (const auto& h : res) print_hit(h);
   }
 }
 
@@ -1398,6 +1416,7 @@ void run_query_index_batch(const std::string& index_path,
 
   std::vector<std::vector<std::string>> all_rows;
   std::vector<SearchStats> per_query_stats(queries.size());
+  const auto& sequence_store = loaded.builder.sequence_store();
   for (size_t qi = 0; qi < queries.size(); ++qi) {
     const auto& read = queries[qi];
     auto query_start = std::chrono::high_resolution_clock::now();
@@ -1436,8 +1455,28 @@ void run_query_index_batch(const std::string& index_path,
       all_rows.push_back(std::move(row));
     } else {
       for (const auto& hit : res) {
-        int ed = compute_distance(read->seq, hit->seq);
-        auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, *hit, ed);
+        const std::string_view hit_sequence =
+            sequence_store.sequence(hit->sequence_id);
+        int ed = compute_distance(read->seq, hit_sequence);
+        BioSequence materialized_hit = *hit;
+        materialized_hit.seq.assign(
+            hit_sequence.data(), hit_sequence.size());
+        if (materialized_hit.id.empty()) {
+          materialized_hit.id =
+              sequence_store.reference_id + "_" +
+              std::to_string(materialized_hit.source_pos);
+        }
+        if (sequence_store.reference_backed &&
+            materialized_hit.ref_positions.empty()) {
+          materialized_hit.add_occurrence(
+              sequence_store.reference_id,
+              static_cast<int>(materialized_hit.source_pos),
+              static_cast<int>(
+                  materialized_hit.source_pos + hit_sequence.size()),
+              "+");
+        }
+        auto rows = search_results_to_tsv_rows(
+            read->id, read->seq, 0, materialized_hit, ed);
         for (const auto& r : rows) {
           std::vector<std::string> row = {
               r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,

@@ -46,6 +46,13 @@ std::set<std::string> ids(const navigamer::SearchResult& hits) {
   return out;
 }
 
+std::set<navigamer::LeafId> sequence_ids(
+    const navigamer::SearchResult& hits) {
+  std::set<navigamer::LeafId> out;
+  for (const auto* hit : hits) out.insert(hit->sequence_id);
+  return out;
+}
+
 void assert_loaded_search_matches_built() {
   const std::string path = "/tmp/navigamer_test_index_persistence.navidx";
   std::remove(path.c_str());
@@ -165,12 +172,66 @@ void assert_reference_window_manifest_tracks_slicing_parameters() {
   assert(changed_stride.signature != manifest.signature);
 }
 
+void assert_reference_backed_index_round_trip() {
+  const std::string path =
+      "/tmp/navigamer_test_reference_backed.navidx";
+  std::remove(path.c_str());
+  const std::string reference =
+      "ACGTGCTAGCTAGGATCCGATGCTTACGATCGGCTAACGT"
+      "TTGACCGTACGATGGCATTCGACTAGCTTGACCTAGGCTA";
+  constexpr size_t kWindowLength = 16;
+
+  navigamer::BuildRangeConfig build_config;
+  navigamer::HierarchyConfig hierarchy({10, 5, 2});
+  navigamer::BioGeometryIndexBuilder built(hierarchy, build_config);
+  built.build_reference_windows(
+      "synthetic_ref", reference, kWindowLength, 1);
+  assert(built.sequence_store().reference_backed);
+  for (const auto& record : built.sequence_store().records) {
+    assert(record.seq.empty());
+  }
+
+  auto manifest = navigamer::make_reference_window_index_manifest(
+      reference, reference.size(), static_cast<int>(kWindowLength), 1,
+      hierarchy, build_config);
+  navigamer::save_index(path, built, manifest);
+  navigamer::LoadedIndex loaded = navigamer::load_index(path);
+  const auto& built_store = built.sequence_store();
+  const auto& loaded_store = loaded.builder.sequence_store();
+  assert(loaded_store.reference_backed);
+  assert(loaded_store.reference_id == "synthetic_ref");
+  assert(loaded_store.reference_sequence == reference);
+  assert(loaded_store.fixed_sequence_length == kWindowLength);
+  assert(loaded_store.size() == built_store.size());
+  for (size_t sequence_idx = 0;
+       sequence_idx < built_store.size(); ++sequence_idx) {
+    const auto id = static_cast<navigamer::LeafId>(sequence_idx);
+    assert(loaded_store.sequence(id) == built_store.sequence(id));
+    assert(loaded_store[id].seq.empty());
+  }
+
+  navigamer::BioGeometrySearchEngine engine(loaded.builder);
+  navigamer::BioSequence query(
+      "q_reference", reference.substr(7, kWindowLength));
+  const auto [brute_hits, brute_stats] =
+      engine.search_brute_force(query, 0);
+  const auto [adaptive_hits, adaptive_stats] =
+      engine.search_adaptive(query, 0);
+  (void)brute_stats;
+  (void)adaptive_stats;
+  assert(!brute_hits.empty());
+  assert(sequence_ids(adaptive_hits) == sequence_ids(brute_hits));
+
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main() {
   assert_loaded_search_matches_built();
   assert_manifest_matching_detects_reusable_index();
   assert_reference_window_manifest_tracks_slicing_parameters();
+  assert_reference_backed_index_round_trip();
   std::cout << "index persistence tests passed\n";
   return 0;
 }

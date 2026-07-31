@@ -53,7 +53,7 @@ void copy_seed_counters(RangeJoinQueryResult& target,
   target.pigeonhole_candidate_count = source.pigeonhole_candidate_count;
 }
 
-bool encode_dna_seed(const std::string& sequence, size_t start, int seed_len,
+bool encode_dna_seed(std::string_view sequence, size_t start, int seed_len,
                      uint64_t* code) {
   if (!code || seed_len <= 0 || seed_len > 32 ||
       start + static_cast<size_t>(seed_len) > sequence.size()) {
@@ -82,7 +82,7 @@ bool encode_dna_seed(const std::string& sequence, size_t start, int seed_len,
   return true;
 }
 
-bool is_acgt_sequence(const std::string& sequence) {
+bool is_acgt_sequence(std::string_view sequence) {
   for (char base : sequence) {
     if (base != 'A' && base != 'C' && base != 'G' && base != 'T') {
       return false;
@@ -170,7 +170,7 @@ void ExactRangeJoinIndex::build(std::vector<RangeJoinItem> items) {
   items_.reserve(owned_items_.size());
   for (size_t item_idx = 0; item_idx < owned_items_.size(); ++item_idx) {
     items_.push_back(
-        {owned_items_[item_idx].item_id, item_idx, nullptr});
+        {owned_items_[item_idx].item_id, item_idx, {}});
   }
   reset_after_items_changed();
 }
@@ -181,22 +181,18 @@ void ExactRangeJoinIndex::build_views(std::vector<RangeJoinItemView> items) {
   items_.clear();
   items_.reserve(items.size());
   for (const auto& item : items) {
-    if (!item.sequence) {
-      throw std::invalid_argument(
-          "range-join item view requires a sequence");
-    }
-    items_.push_back({item.item_id, 0, item.sequence});
+    items_.push_back(
+        {item.item_id, std::numeric_limits<size_t>::max(), item.sequence});
   }
   reset_after_items_changed();
 }
 
-const std::string& ExactRangeJoinIndex::item_sequence(
+std::string_view ExactRangeJoinIndex::item_sequence(
     const StoredItem& item) const {
-  if (item.external_sequence) return *item.external_sequence;
-  if (item.owned_item_idx >= owned_items_.size()) {
-    throw std::out_of_range("range-join owned item index out of range");
+  if (item.owned_item_idx < owned_items_.size()) {
+    return owned_items_[item.owned_item_idx].sequence;
   }
-  return owned_items_[item.owned_item_idx].sequence;
+  return item.external_sequence;
 }
 
 void ExactRangeJoinIndex::reset_after_items_changed() {
@@ -236,7 +232,7 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
   if (!defer_qgram_build_) qgram_items.reserve(items_.size());
   for (const auto& item : items_) {
     if (!defer_qgram_build_) {
-      qgram_items.push_back({item.item_id, &item_sequence(item)});
+      qgram_items.push_back({item.item_id, item_sequence(item)});
     }
   }
   if (!defer_qgram_build_) {
@@ -250,7 +246,7 @@ const QGramCountIndex& ExactRangeJoinIndex::ensure_qgram_index() const {
     std::vector<QGramCountIndex::ItemView> qgram_items;
     qgram_items.reserve(items_.size());
     for (const auto& item : items_) {
-      qgram_items.push_back({item.item_id, &item_sequence(item)});
+      qgram_items.push_back({item.item_id, item_sequence(item)});
     }
     qgram_index_.build_views(qgram_items);
     qgram_ready_ = true;
@@ -367,7 +363,8 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
     std::vector<uint64_t> item_codes;
     std::vector<uint64_t> rolling_codes;
     std::unordered_map<uint64_t, uint32_t> rolling_counts;
-    const std::string* previous_sequence = nullptr;
+    std::string_view previous_sequence;
+    bool has_previous_sequence = false;
     size_t rolling_head = 0;
     bool rolling_active = false;
     size_t consecutive_one_base_shifts = 0;
@@ -376,7 +373,7 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
             ? std::numeric_limits<uint64_t>::max()
             : (uint64_t{1} << (2 * seed_len)) - 1;
 
-    const auto initialize_rolling = [&](const std::string& sequence) {
+    const auto initialize_rolling = [&](std::string_view sequence) {
       const size_t code_count =
           sequence.size() - static_cast<size_t>(seed_len) + 1;
       rolling_codes.resize(code_count);
@@ -405,30 +402,30 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
       const CompactIndex compact_idx =
           static_cast<CompactIndex>(item_idx);
       if (sequence.size() < static_cast<size_t>(seed_len)) {
-        previous_sequence = nullptr;
+        has_previous_sequence = false;
         rolling_active = false;
         consecutive_one_base_shifts = 0;
         continue;
       }
       if (seed_len > 32 || !is_acgt_sequence(sequence)) {
         unindexable_items.push_back(compact_idx);
-        previous_sequence = nullptr;
+        has_previous_sequence = false;
         rolling_active = false;
         consecutive_one_base_shifts = 0;
         continue;
       }
       const bool shifted_one_base =
-          enable_shifted_window_postings_ && previous_sequence &&
-          previous_sequence->size() == sequence.size() &&
-          std::equal(previous_sequence->begin() + 1,
-                     previous_sequence->end(), sequence.begin());
+          enable_shifted_window_postings_ && has_previous_sequence &&
+          previous_sequence.size() == sequence.size() &&
+          std::equal(previous_sequence.begin() + 1,
+                     previous_sequence.end(), sequence.begin());
       consecutive_one_base_shifts =
           shifted_one_base ? consecutive_one_base_shifts + 1 : 0;
       if (shifted_one_base &&
           (rolling_active ||
            consecutive_one_base_shifts >=
                kMinShiftRunForRollingPostings)) {
-        if (!rolling_active) initialize_rolling(*previous_sequence);
+        if (!rolling_active) initialize_rolling(previous_sequence);
         const size_t code_count = rolling_codes.size();
         const uint64_t outgoing = rolling_codes[rolling_head];
         auto outgoing_count = rolling_counts.find(outgoing);
@@ -449,7 +446,8 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
         for (const auto& entry : rolling_counts) {
           postings[entry.first].push_back(compact_idx);
         }
-        previous_sequence = &sequence;
+        previous_sequence = sequence;
+        has_previous_sequence = true;
         continue;
       }
 
@@ -474,7 +472,8 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
       for (uint64_t item_code : item_codes) {
         postings[item_code].push_back(compact_idx);
       }
-      previous_sequence = &sequence;
+      previous_sequence = sequence;
+      has_previous_sequence = true;
       rolling_active = false;
     }
   };
@@ -522,7 +521,7 @@ bool ExactRangeJoinIndex::query_needs_seed_postings(int seed_len) const {
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::query(
-    const std::string& query_sequence, int tau) {
+    std::string_view query_sequence, int tau) {
   if (tau < 0) throw std::invalid_argument("range-join threshold must be non-negative");
 
   const int block_count = tau + 1;
@@ -539,7 +538,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::query(
-    const std::string& query_sequence, int tau,
+    std::string_view query_sequence, int tau,
     RangeJoinQueryWorkspace* workspace) const {
   if (tau < 0) throw std::invalid_argument("range-join threshold must be non-negative");
   RangeJoinQueryWorkspace local_workspace;
@@ -641,7 +640,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::query(
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
-    const std::string& query_sequence, int tau, bool fallback) const {
+    std::string_view query_sequence, int tau, bool fallback) const {
   RangeJoinQueryResult result;
   ScopedTimer full_timer(&result.range_full_scan_ms);
   result.mode_used = RangeCandidateMode::FullScan;
@@ -669,7 +668,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
-    const std::string& query_sequence, int tau, int block_len, int seed_len,
+    std::string_view query_sequence, int tau, int block_len, int seed_len,
     size_t early_abort_candidate_limit,
     RangeJoinQueryWorkspace* workspace) const {
   if (seed_len < config_.min_seed_len) {
@@ -934,7 +933,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::hybrid_result(
 }
 
 RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
-    const std::string& query_sequence, int tau,
+    std::string_view query_sequence, int tau,
     RangeJoinQueryWorkspace* workspace) const {
   QGramCountIndex::QueryStats stats;
   RangeJoinQueryResult result;

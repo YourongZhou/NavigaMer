@@ -25,6 +25,12 @@ does not allocate a temporary `WorldNode` pointer graph. Edit distance is in
 `navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in
 `navigamer_cpp/src/io_utils.cpp`.
 
+Reference-window builds keep one reference string plus a representative source
+offset per unique window. Distance, q-gram, seed-index, and range-join code read
+non-owning sequence views, so the index does not allocate one sequence string
+per reference window. Persisted format version 4 stores this reference-backed
+representation directly.
+
 ## Installation
 
 **Requirements:** Linux, **C++17**, **OpenMP**, optional **CMake >= 3.14**.

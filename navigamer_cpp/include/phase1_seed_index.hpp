@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -26,14 +27,14 @@ class IncrementalPigeonholeIndex {
  public:
   explicit IncrementalPigeonholeIndex(Phase1SeedIndexConfig config = {});
 
-  void append(size_t item_id, const std::string& sequence);
-  Phase1SeedQueryResult query(const std::string& sequence, int tau);
+  void append(size_t item_id, std::string_view sequence);
+  Phase1SeedQueryResult query(std::string_view sequence, int tau);
   size_t size() const { return items_.size(); }
 
  private:
   struct Item {
     size_t item_id = 0;
-    std::string sequence;
+    std::string_view sequence;
   };
 
   struct SeedState {
