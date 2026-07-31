@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '8'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '9'};
 constexpr size_t kReferenceChunkBases = size_t{1} << 20;
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
@@ -318,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 18) {
+  if (manifest.format_version != 19) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -914,7 +914,12 @@ void write_search_graph_view(std::ostream& out,
       out, view.node_count_overflows, "node_count_overflows");
   write_u32_vector(out, view.layer_begin);
   write_u32_vector(out, view.layer_end);
+  write_final_array(
+      out, view.child_id_deltas16, "child_id_deltas16");
   write_final_array(out, view.child_ids, "child_ids");
+  write_final_array(
+      out, view.child_delta16_node_bits,
+      "child_delta16_node_bits");
   write_final_array(out, view.leaf_ids, "leaf_ids");
   write_final_array(out, view.beacon_deltas8, "beacon_deltas8");
   write_final_array(out, view.beacon_deltas16, "beacon_deltas16");
@@ -939,8 +944,14 @@ SearchGraphView read_search_graph_view(
           in, mapping, "node_count_overflows");
   view.layer_begin = read_u32_vector(in, "layer_begin");
   view.layer_end = read_u32_vector(in, "layer_end");
+  view.child_id_deltas16 =
+      read_final_array<uint16_t>(
+          in, mapping, "child_id_deltas16");
   view.child_ids =
       read_final_array<NodeId>(in, mapping, "child_ids");
+  view.child_delta16_node_bits =
+      read_final_array<uint64_t>(
+          in, mapping, "child_delta16_node_bits");
   view.leaf_ids =
       read_final_array<LeafId>(in, mapping, "leaf_ids");
   view.beacon_deltas8 =
@@ -962,7 +973,9 @@ bool validate_structural_layout(
   const size_t layer_count =
       builder.hierarchy_config().primary_radii.size();
   if (view.layer_begin.size() != layer_count ||
-      view.layer_end.size() != layer_count) {
+      view.layer_end.size() != layer_count ||
+      view.child_delta16_node_bits.size() !=
+          (view.node_records.size() + 63) / 64) {
     return false;
   }
   uint32_t expected_begin = 0;
@@ -1047,7 +1060,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 18) {
+  if (manifest.format_version != 19) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1091,10 +1104,10 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 18;
+  stored.format_version = 19;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
-  stored.edge_count = view.child_ids.size();
+  stored.edge_count = view.edge_count();
   stored.leaf_link_count = view.leaf_ids.size();
   refresh_signature(stored);
 
@@ -1115,7 +1128,7 @@ LoadedIndex load_index(
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 18) {
+  if (manifest.format_version != 19) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1134,7 +1147,7 @@ LoadedIndex load_index(
       read_search_graph_view(in, mapping, validation);
   if (view.sequences.size() != manifest.sequence_count ||
       view.node_records.size() != manifest.world_node_count ||
-      view.child_ids.size() != manifest.edge_count ||
+      view.edge_count() != manifest.edge_count ||
       view.leaf_ids.size() != manifest.leaf_link_count) {
     throw std::runtime_error(
         "array index manifest counts do not match stored arrays");

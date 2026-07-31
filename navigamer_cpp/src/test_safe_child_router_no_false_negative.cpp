@@ -152,10 +152,9 @@ int main() {
   assert(used_router);
   std::set<std::string> candidate_set(candidate_ids.begin(), candidate_ids.end());
   const auto& view = builder.search_graph_view();
-  const auto& parent_record = view.node_records[parent];
   for (uint32_t offset = 0; offset < view.child_count(parent); ++offset) {
     const auto child_id =
-        view.child_ids[parent_record.child_begin() + offset];
+        view.child_id(parent, offset);
     const auto& child = view.node_records[child_id];
     const auto child_layer_it = std::upper_bound(
         view.layer_end.begin(), view.layer_end.end(), child_id);

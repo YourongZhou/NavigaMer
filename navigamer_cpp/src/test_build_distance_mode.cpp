@@ -46,8 +46,7 @@ std::vector<std::set<std::string>> edge_signature(
     } else {
       for (uint32_t offset = 0; offset < view.child_count(node_id); ++offset) {
         const auto& child =
-            view.node_records[
-                view.child_ids[node.child_begin() + offset]];
+            view.node_records[view.child_id(node_id, offset)];
         row.insert(view.sequences[child.center_sequence_id].id);
       }
     }

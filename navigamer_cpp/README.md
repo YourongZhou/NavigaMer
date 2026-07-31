@@ -160,7 +160,7 @@ periodic heartbeats but retains phase start/finish reports. `build-scale` can
 persist a reference-window index with `--index <file>` when exactly one prefix
 length is requested. Multiple prefixes with one output index are rejected.
 `build-sharded` instead partitions window starts into independently persisted
-v18 parts, each capped by `--shard-windows`. Reference slices overlap only
+v19 parts, each capped by `--shard-windows`. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
 contig. Valid completed parts are reused on restart, damaged parts are rebuilt,
@@ -219,7 +219,7 @@ quality-audit time only.
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v18 binary persistence and manifest signatures |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v19 binary persistence and manifest signatures |
 | `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, bundle manifests, and validated loading |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
@@ -234,8 +234,8 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v18 loads the finalized arrays directly; older files must be rebuilt.
-A `.navshard` bundle points to independently loadable v18 parts.
+Format v19 loads the finalized arrays directly; older files must be rebuilt.
+A `.navshard` bundle points to independently loadable v19 parts.
 `query-index` and `query-index-batch` search all parts in parallel and merge
 identical sequences and their occurrences. Bundle query loading validates
 signatures, counts, mapped file bounds, layer ranges, shard coordinates, and
@@ -308,7 +308,7 @@ records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 18
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 19
 stores the shared reference as exact chunked 2-bit ACGT plus verbatim non-ACGT
 exceptions, keeps long literal inputs only as manifest fingerprints, and stores
 one child-center-to-beacon byte per MBB cell. The child-layer radius
@@ -326,6 +326,10 @@ IDs use the narrowest exact per-node
 encoding: signed 8-bit or 16-bit deltas from the node center, falling back to a
 full 32-bit ID only when necessary. A finest-layer node's sole beacon is its
 center and consumes no side-array entry.
+Each parent uses 16-bit forward deltas for child node IDs when its complete
+child range fits. A one-bit-per-node bitmap selects that compact array;
+parents with any larger delta use the exact 32-bit child-ID array instead, so
+there is no truncation or additional graph-size limit.
 Repeated reference positions use one pair for a singleton duplicate, while
 larger duplicate groups share one group offset and a flat 32-bit position
 array.

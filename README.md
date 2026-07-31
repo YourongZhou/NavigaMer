@@ -40,7 +40,7 @@ without rescanning the reference. No per-window
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 18 stores the shared
+edit distance fits in one byte. Persisted format version 19 stores the shared
 reference as exact chunked 2-bit ACGT plus verbatim non-ACGT exceptions, and
 keeps long literal inputs in the manifest only as content fingerprints. It
 stores one child-center-to-beacon distance per MBB cell instead of separate
@@ -60,6 +60,11 @@ use the narrowest exact per-node representation: signed 8-bit or 16-bit deltas
 from the node center, with full 32-bit IDs only when needed. A finest-layer
 node's sole beacon is its center and occupies no side-array element. No
 per-edge distance vector is allocated before finalization.
+Parent-child links use exact 16-bit forward node-ID deltas when every child of
+that parent is representable; a one-bit-per-node bitmap selects the compact
+array, and any parent outside the range falls back to full 32-bit child IDs.
+This changes neither node IDs nor graph connectivity and never truncates an
+edge.
 Repeated reference positions use one pair for a singleton duplicate, while
 larger duplicate groups share one group offset and a flat 32-bit position
 array.
@@ -178,7 +183,7 @@ loads that persisted `.navidx` once and calls `navigamer query-index-batch`;
 without it, the bridge falls back to `navigamer benchmark` on reference windows.
 
 The C++ `build` and `query` commands support explicit persisted indexes with
-`--index <file>`. The v18 index file stores a manifest with input fingerprints
+`--index <file>`. The v19 index file stores a manifest with input fingerprints
 and construction parameters plus the canonical sequence, node, child, leaf,
 beacon, MBB, and leaf-beacon arrays. Older pointer-graph index files must be
 rebuilt. `query --index <file> --query <seq>` and
@@ -204,7 +209,7 @@ shards retain only the reference overlap required to materialize their last
 windows, so neither windows nor original contig coordinates are lost.
 Completed shard files are content- and parameter-validated and reused after an
 interrupted build; new shards are installed atomically. The final
-`.navshard` manifest contains relative paths to ordinary v18 `.navidx` parts.
+`.navshard` manifest contains relative paths to ordinary v19 `.navidx` parts.
 `query-index` and `query-index-batch` search the parts in parallel and merge
 identical sequences and all of their occurrences before reporting results.
 Query loading validates signatures, counts, file bounds, layer ranges, shard

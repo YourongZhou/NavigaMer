@@ -79,7 +79,9 @@ void assert_loaded_search_matches_built() {
   const auto& loaded_view = loaded.builder.search_graph_view();
   assert_mapped(loaded_view.node_records);
   assert_mapped(loaded_view.node_count_overflows);
+  assert_mapped(loaded_view.child_id_deltas16);
   assert_mapped(loaded_view.child_ids);
+  assert_mapped(loaded_view.child_delta16_node_bits);
   assert_mapped(loaded_view.leaf_ids);
   assert_mapped(loaded_view.beacon_deltas8);
   assert_mapped(loaded_view.beacon_deltas16);
@@ -329,7 +331,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 18);
+  assert(loaded.manifest.format_version == 19);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

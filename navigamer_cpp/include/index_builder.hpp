@@ -469,7 +469,8 @@ struct WorldNodeRecord {
 
   LeafId center_sequence_id = INVALID_LEAF_ID;
 
-  // Non-finest nodes address child_ids; finest nodes address leaf_ids.
+  // Non-finest nodes address child_id_deltas16 or child_ids; finest nodes
+  // address leaf_ids.
   // Primary layers are explicit, so the two mutually exclusive ranges share
   // one offset/count pair without a tag or query-time branch.
   uint32_t link_begin = 0;
@@ -552,7 +553,12 @@ struct SearchGraphView {
   std::vector<uint32_t> layer_begin;
   std::vector<uint32_t> layer_end;
 
+  // A parent uses 16-bit forward deltas when every child is within 65536
+  // subsequent node IDs, and otherwise falls back to absolute 32-bit IDs.
+  // One bit per node selects the representation without imposing an ID limit.
+  FinalArray<uint16_t> child_id_deltas16;
   FinalArray<NodeId> child_ids;
+  FinalArray<uint64_t> child_delta16_node_bits;
   FinalArray<LeafId> leaf_ids;
 
   FinalArray<uint8_t> child_beacon_dists;
@@ -603,6 +609,32 @@ struct SearchGraphView {
     node_count_overflows.push_back(
         {link_count_value, beacon_count_value});
     node.set_count_overflow(overflow_index, storage);
+  }
+
+  bool child_ids_are_delta16(NodeId node_id) const {
+    const size_t word = static_cast<size_t>(node_id) / 64;
+    return word < child_delta16_node_bits.size() &&
+           (child_delta16_node_bits[word] &
+            (uint64_t{1} << (node_id % 64))) != 0;
+  }
+  void set_child_ids_delta16(NodeId node_id) {
+    const size_t word = static_cast<size_t>(node_id) / 64;
+    if (word >= child_delta16_node_bits.size()) {
+      throw std::out_of_range("child-ID encoding bitmap is too small");
+    }
+    child_delta16_node_bits[word] |=
+        uint64_t{1} << (node_id % 64);
+  }
+  NodeId child_id(NodeId node_id, uint32_t child_offset) const {
+    const auto& node = node_records[node_id];
+    if (child_ids_are_delta16(node_id)) {
+      return node_id + 1 +
+             child_id_deltas16[node.child_begin() + child_offset];
+    }
+    return child_ids[node.child_begin() + child_offset];
+  }
+  size_t edge_count() const {
+    return child_id_deltas16.size() + child_ids.size();
   }
 
   LeafId beacon_sequence_id(NodeId node_id,

@@ -77,7 +77,7 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
           edges[view.sequences[parent.center_sequence_id].seq];
       for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
         const auto& child =
-            view.node_records[view.child_ids[parent.child_begin() + offset]];
+            view.node_records[view.child_id(parent_id, offset)];
         children.insert(view.sequences[child.center_sequence_id].seq);
       }
     }
@@ -101,7 +101,7 @@ OrderedLinkMap ordered_primary_edges(
       auto& children = edges[key];
       for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
         const auto& child =
-            view.node_records[view.child_ids[parent.child_begin() + offset]];
+            view.node_records[view.child_id(parent_id, offset)];
         children.push_back(view.sequences[child.center_sequence_id].seq);
       }
     }
@@ -228,7 +228,7 @@ Phase3BuildResult build_and_collect_phase3(
       if (!is_finest) {
         for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
           const auto& child =
-              view.node_records[view.child_ids[parent.child_begin() + offset]];
+              view.node_records[view.child_id(parent_id, offset)];
           row << view.sequences[child.center_sequence_id].seq << ';';
         }
       }

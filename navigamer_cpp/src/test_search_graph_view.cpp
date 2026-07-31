@@ -62,7 +62,9 @@ void assert_view_equivalent_to_original() {
                view.leaf_beacon_dists.size());
       } else {
         assert(record.child_begin() + link_count <=
-               view.child_ids.size());
+               (view.child_ids_are_delta16(node_id)
+                    ? view.child_id_deltas16.size()
+                    : view.child_ids.size()));
         assert(beacon_count <= link_count);
         assert(record.mbb_begin +
                    static_cast<size_t>(link_count) * beacon_count <=
@@ -247,6 +249,31 @@ void assert_node_count_overflow_is_exact() {
          navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
 }
 
+void assert_child_id_encodings_are_exact() {
+  navigamer::SearchGraphView view;
+  view.node_records.resize(2);
+  view.child_delta16_node_bits.assign(1, 0);
+  view.child_id_deltas16 = {0, UINT16_MAX};
+  view.child_ids = {70000, UINT32_MAX - 1};
+
+  view.node_records[0].link_begin = 0;
+  view.set_node_counts(
+      0, 2, 0,
+      navigamer::WorldNodeRecord::BeaconStorage::Delta8);
+  view.set_child_ids_delta16(0);
+  assert(view.child_id(0, 0) == 1);
+  assert(view.child_id(0, 1) == 65536);
+
+  view.node_records[1].link_begin = 0;
+  view.set_node_counts(
+      1, 2, 0,
+      navigamer::WorldNodeRecord::BeaconStorage::Delta8);
+  assert(!view.child_ids_are_delta16(1));
+  assert(view.child_id(1, 0) == 70000);
+  assert(view.child_id(1, 1) == UINT32_MAX - 1);
+  assert(view.edge_count() == 4);
+}
+
 }  // namespace
 
 int main() {
@@ -255,6 +282,7 @@ int main() {
   assert_max_byte_distance_is_recall_safe();
   assert_all_beacon_id_encodings_are_exact();
   assert_node_count_overflow_is_exact();
+  assert_child_id_encodings_are_exact();
   std::cout << "search graph view tests passed\n";
   return 0;
 }

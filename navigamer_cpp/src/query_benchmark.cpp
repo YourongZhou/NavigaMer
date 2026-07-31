@@ -899,7 +899,7 @@ bool node_subtree_has_hit(
   } else {
     for (uint32_t offset = 0; offset < view.child_count(node_id); ++offset) {
       if (node_subtree_has_hit(
-              view, view.child_ids[node.child_begin() + offset],
+              view, view.child_id(node_id, offset),
               hit_ids, memo)) {
         memo[node_id] = true;
         return true;
