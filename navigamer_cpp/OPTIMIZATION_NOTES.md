@@ -109,6 +109,26 @@ stopping threshold only when a larger distance cannot change the selected
 cover. Candidate ordering, best-distance comparison, and tie behavior are
 unchanged.
 
+### Cross-layer Phase 1 distance cache
+
+Problem: the same input sequence can be compared with the same world center
+again at a lower hierarchy layer or through a later hint. Phase 1 previously
+discarded the bounded exact result after each layer.
+
+Method: Phase 1 keeps an epoch-tagged array indexed by center sequence ID for
+the current input sequence. An accepted bounded check records the exact
+distance and can answer every later threshold. A rejected check at threshold
+`t` can answer only later checks whose threshold is at most `t`; a wider
+threshold is recomputed. Scans large enough to run in parallel do not access
+the mutable cache. The fixed benchmark reuses about 15,000 checks, and the
+16,000-base E. coli benchmark reuses about 123,000.
+
+Safety: a bounded exact result at most `t` is the true edit distance. A result
+greater than `t` proves rejection only for thresholds at most `t`. Cache
+entries are reset logically for every input sequence, so results are never
+shared across different queries. Parallel scans retain their former
+independent exact checks.
+
 ### Prepared DNA Edlib patterns
 
 Problem: the same sequence is compared against many targets in every build
@@ -212,6 +232,24 @@ stores only posting metadata.
 Safety: this changes ownership during one-time index construction only. The
 stored strings and all query-visible index contents are identical.
 
+### Lazy Phase 2 q-gram materialization
+
+Problem: every Phase 2 layer eagerly built both seed postings and a q-gram
+index, although many child queries are resolved by the pigeonhole index and
+never inspect q-grams.
+
+Method: the q-gram index is materialized on the first query that needs it.
+Construction is protected by the existing per-index mutex; after construction
+the immutable index is shared by worker queries. Seed-posting hash maps reserve
+one bucket per indexed item before insertion to avoid repeated small rehashes
+on the overlapping-window workload.
+
+Safety: only construction time changes. The deferred index is built from the
+same index-owned strings with the same q-gram code and count representation.
+An eager/deferred A/B build produced byte-identical 2.9 MB serialized indexes
+with SHA-256
+`ddd4ea35b53b7f12887ab21b2c7638d097df3a50cebcad4719edf9d35cd3bc0f`.
+
 ### Removal of speculative path-reuse distances
 
 Problem: with path reuse enabled, each visited non-leaf world computed an
@@ -234,18 +272,20 @@ On the fixed benchmark and release `-O2` build:
 | Measurement | Pointer-era baseline | Current | Change |
 | --- | ---: | ---: | ---: |
 | Mean adaptive query time | 19.096 ms | 1.332 ms | 14.3x faster |
-| Build time, 16 threads | about 2.39 s | about 0.473 s | about 5.1x faster |
-| Build time, 64 threads | about 2.39 s | about 0.387 s | about 6.2x faster |
-| Peak build RSS, 16 threads | about 94,500 KB | about 28,500 KB | about 70% lower |
+| Build time, 16 threads | about 2.39 s | about 0.409 s | about 5.8x faster |
+| Build time, 64 threads | about 2.39 s | about 0.320 s | about 7.5x faster |
+| Peak build RSS, 16 threads | about 94,500 KB | about 33,000 KB | about 65% lower |
 
 The query comparison uses identical query/hit/distance/reference-position
 fields. Build comparisons use identical structural counters. Timings should be
 read as same-host engineering measurements, not hardware-independent claims.
-An alternating 10-run query A/B comparison between the previous checkpoint and
-this one measured 1.3311 versus 1.3323 ms over 5,120 query samples, a 0.09%
-difference inside run-to-run noise; wall time was identical. Query semantic
+An alternating 10-run query A/B comparison between the pointer-free checkpoint
+and the exact-build optimizations measured 1.3311 versus 1.3323 ms over 5,120
+query samples, a 0.09% difference inside run-to-run noise; wall time was
+identical. The new build-only cache and lazy indexes are destroyed before
+search and do not change the persisted query representation. Query semantic
 fields were byte-identical to both the previous checkpoint and the fixed
-reference. At 64 build threads, peak RSS is about 32 MB because more
+reference. At 64 build threads, peak RSS is about 34 MB because more
 worker-local state is live concurrently.
 
 ## Why the 100x memory and 10x build targets are not met
@@ -259,13 +299,16 @@ whole-process RSS reduction is below the data-size lower bound for this
 benchmark.
 
 A 10x build target relative to 2.39 seconds is below 0.239 seconds. Phase 1
-currently takes about 0.153 seconds and is intentionally
+currently takes about 0.105 seconds and is intentionally
 insertion-order-dependent: each sequence selects the best current covering
 world, and creating or selecting that world changes the candidates available
 to later sequences and lower layers. Parallel snapshot construction would
 change the tree. At 64 threads, Phase 1 and Phase 2 together take about
-0.30 seconds, already exceeding the entire 10x budget before MBB construction,
-leaf attachment, input storage, and output materialization.
+0.23 seconds, leaving only about 9 ms of the 10x budget for Phase 0, MBB
+construction, leaf attachment, ID assignment, and graph materialization;
+those remaining exact stages currently take about 85 ms. Reaching 10x while
+preserving byte-identical topology therefore requires a materially faster
+exact-distance backend, not another container substitution.
 
 An allocation-only Edlib workspace prototype was rejected because it did not
 improve wall time. The successful prepared path is different: it also caches
@@ -274,7 +317,14 @@ Other rejected A/B experiments include non-owning range-item storage (about
 0.2 MB saved with added lifetime risk and no speed gain), direct construction
 of compact leaf q-grams (no stable gain), enabling the Phase 2 q-gram
 postfilter (about 0.625 s instead of 0.473 s), and speculative query path
-distances (roughly three times slower).
+distances (roughly three times slower). A prepared scalar Myers backend was
+more than twice as slow as prepared Edlib. A flat sorted `(seed,item)` array
+increased the fixed 64-thread build from about 0.32 seconds to about 0.42
+seconds; at 16 threads it used about 34 MB instead of roughly 28--29 MB because
+its 8-byte entry duplicated a seed for every posting. A safe 64-bin q-gram
+lower bound pruned only about 1% of Phase 2 pairs and slowed the 16,000-base
+build. Lower Phase 1 index thresholds, OpenMP schedule/affinity changes, and a
+CUDA Phase 2 prototype were also slower.
 
 Further large reductions would require a different contract or a new exact
 distance backend, for example a verified SIMD/GPU batch kernel, direct

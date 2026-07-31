@@ -264,6 +264,7 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
 
   if (seed_index_uses_16bit_) {
     PostingLists16 postings;
+    postings.reserve(items_.size());
     std::vector<uint16_t> unindexable_items;
     populate(postings, unindexable_items);
     postings16_by_seed_len_.emplace(seed_len, std::move(postings));
@@ -271,6 +272,7 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
         seed_len, std::move(unindexable_items));
   } else {
     PostingLists postings;
+    postings.reserve(items_.size());
     std::vector<uint32_t> unindexable_items;
     populate(postings, unindexable_items);
     postings_by_seed_len_.emplace(seed_len, std::move(postings));

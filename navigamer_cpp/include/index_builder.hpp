@@ -232,6 +232,7 @@ class BioGeometryIndexBuilder {
     size_t phase1_lower_bound_pruned_candidates = 0;
     size_t phase1_exact_distance_reused = 0;
     size_t phase1_exact_rejection_reused = 0;
+    size_t phase1_cross_layer_distance_reused = 0;
     size_t phase1_exact_distance_calls = 0;
     size_t phase1_best_cover_hits = 0;
     size_t phase1_cover_misses = 0;
