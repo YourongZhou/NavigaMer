@@ -360,7 +360,7 @@ std::vector<Map150Result> map150_reads_refpos(
     const HierarchyConfig& config) {
   auto windows = build_map150_reference_windows(ref_id, ref_seq);
   BioGeometryIndexBuilder builder(config);
-  builder.build(windows);
+  builder.build(std::move(windows));
   RefPositionLocator locator;
   return map150_reads_with_locator(ref_id, ref_seq, reads, tolerance, mode,
                                    config, locator, builder);

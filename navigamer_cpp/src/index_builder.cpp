@@ -14,6 +14,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -277,7 +278,7 @@ Phase1CoverScanResult find_best_phase1_cover(
     const Phase1BaseCountSignature& query_signature,
     Phase1DistanceCache* distance_cache,
     const PreparedEdlibDnaPattern* prepared_query,
-    const std::shared_ptr<BioSequence>& sequence,
+    const BioSequence& sequence,
     int radius,
     BuildDistanceMode distance_mode,
     const Phase1CoverScanResult& initial,
@@ -293,10 +294,10 @@ Phase1CoverScanResult find_best_phase1_cover(
     if (node_id >= nodes.size()) return;
     const auto& node = nodes[node_id];
     if (node.center_sequence_id >= sequences.size()) return;
-    const auto& center = sequences[node.center_sequence_id];
     local.candidate_scans++;
-    if (std::llabs(static_cast<long long>(sequence->seq.size()) -
-                   static_cast<long long>(center.seq.size())) >
+    if (std::llabs(static_cast<long long>(sequence.seq.size()) -
+                   static_cast<long long>(sequences.sequence(
+                       node.center_sequence_id).size())) >
         radius) {
       local.length_pruned++;
       return;
@@ -337,7 +338,8 @@ Phase1CoverScanResult find_best_phase1_cover(
     } else {
       local.exact_distance_calls++;
       dist = build_distance_bounded_prepared(
-          sequence->seq, center.seq, exact_tau, distance_mode, prepared_query);
+          sequence.seq, sequences.sequence(node.center_sequence_id), exact_tau,
+          distance_mode, prepared_query);
       if (distance_cache) {
         distance_cache->store(node.center_sequence_id, exact_tau, dist);
       }
@@ -394,7 +396,7 @@ Phase1CoverScanResult find_best_phase1_cover_by_indices(
     Phase1DistanceCache* distance_cache,
     const PreparedEdlibDnaPattern* prepared_query,
     const std::vector<size_t>& candidate_indices,
-    const std::shared_ptr<BioSequence>& sequence,
+    const BioSequence& sequence,
     int radius,
     BuildDistanceMode distance_mode,
     const Phase1CoverScanResult& initial,
@@ -412,10 +414,10 @@ Phase1CoverScanResult find_best_phase1_cover_by_indices(
     if (node_id >= nodes.size()) return;
     const auto& node = nodes[node_id];
     if (node.center_sequence_id >= sequences.size()) return;
-    const auto& center = sequences[node.center_sequence_id];
     local.candidate_scans++;
-    if (std::llabs(static_cast<long long>(sequence->seq.size()) -
-                   static_cast<long long>(center.seq.size())) >
+    if (std::llabs(static_cast<long long>(sequence.seq.size()) -
+                   static_cast<long long>(sequences.sequence(
+                       node.center_sequence_id).size())) >
         radius) {
       local.length_pruned++;
       return;
@@ -456,7 +458,8 @@ Phase1CoverScanResult find_best_phase1_cover_by_indices(
     } else {
       local.exact_distance_calls++;
       dist = build_distance_bounded_prepared(
-          sequence->seq, center.seq, exact_tau, distance_mode, prepared_query);
+          sequence.seq, sequences.sequence(node.center_sequence_id), exact_tau,
+          distance_mode, prepared_query);
       if (distance_cache) {
         distance_cache->store(node.center_sequence_id, exact_tau, dist);
       }
@@ -538,7 +541,7 @@ class Phase1CoverGroupIndex {
       const std::vector<NodeId>& candidates,
       const std::vector<BuildWorldNodeRecord>& nodes,
       const SequenceStore& sequences,
-      const std::shared_ptr<BioSequence>& sequence,
+      const BioSequence& sequence,
       int radius,
       const BuildRangeConfig& config) {
     nodes_ = &nodes;
@@ -603,7 +606,7 @@ class Phase1CoverGroupIndex {
     }
     const LeafId center_id = (*nodes_)[candidates[idx]].center_sequence_id;
     if (center_id >= sequences_->size()) return empty;
-    return (*sequences_)[center_id].seq;
+    return sequences_->sequence(center_id);
   }
 
   static Phase1CandidateQueryResult fallback_scan_result(size_t total_possible) {
@@ -680,7 +683,7 @@ class Phase1CoverGroupIndex {
 
   Phase1CandidateQueryResult query_metric(
       const std::vector<NodeId>& candidates,
-      const std::shared_ptr<BioSequence>& sequence,
+      const BioSequence& sequence,
       int radius,
       const BuildRangeConfig& config) {
     Phase1CandidateQueryResult result;
@@ -696,7 +699,7 @@ class Phase1CoverGroupIndex {
       stack.pop_back();
       const MetricTreeNode& node = metric_nodes_[node_idx];
       const int dist = build_distance(
-          sequence->seq, center_sequence(candidates, node.item_idx),
+          sequence.seq, center_sequence(candidates, node.item_idx),
           config.distance_mode);
       result.metric_distance_calls++;
       if (dist <= radius) result.candidate_indices.push_back(node.item_idx);
@@ -735,7 +738,7 @@ class Phase1CoverGroupIndex {
 
   Phase1CandidateQueryResult query_pigeonhole(
       const std::vector<NodeId>& candidates,
-      const std::shared_ptr<BioSequence>& sequence,
+      const BioSequence& sequence,
       int radius,
       const BuildRangeConfig& config) {
     Phase1CandidateQueryResult result;
@@ -759,7 +762,7 @@ class Phase1CoverGroupIndex {
       seed_synced_items_++;
     }
 
-    auto seed_result = seed_index_->query(sequence->seq, radius);
+    auto seed_result = seed_index_->query(sequence.seq, radius);
     result.seed_posting_entries_visited =
         seed_result.posting_entries_visited;
     result.pigeonhole_candidates = seed_result.candidate_indices.size();
@@ -817,7 +820,7 @@ class Phase1CoverGroupIndex {
 
   Phase1CandidateQueryResult query_qgram(
       const std::vector<NodeId>& candidates,
-      const std::shared_ptr<BioSequence>& sequence,
+      const BioSequence& sequence,
       int radius,
       const BuildRangeConfig& config) {
     Phase1CandidateQueryResult result;
@@ -826,7 +829,7 @@ class Phase1CoverGroupIndex {
     ensure_qgram(candidates, config.range_join.qgram_q);
 
     const int q = config.range_join.qgram_q;
-    const auto query_signature = compute_qgram_signature(sequence->seq, q);
+    const auto query_signature = compute_qgram_signature(sequence.seq, q);
     if (!query_signature.safe_for_pruning ||
         query_signature.total_qgrams == 0 ||
         min_safe_total_qgrams_ == std::numeric_limits<size_t>::max()) {
@@ -875,7 +878,7 @@ class Phase1CoverGroupIndex {
 
     for (size_t idx : qgram_touched_) {
       const auto& item = items_[idx];
-      if (!phase1_length_compatible(sequence->seq.size(),
+      if (!phase1_length_compatible(sequence.seq.size(),
                                     item.sequence_length, radius)) {
         continue;
       }
@@ -897,7 +900,7 @@ class Phase1CoverGroupIndex {
     auto append_unprunable = [&](const std::vector<size_t>& indices) {
       for (size_t idx : indices) {
         if (idx >= items_.size()) continue;
-        if (phase1_length_compatible(sequence->seq.size(),
+        if (phase1_length_compatible(sequence.seq.size(),
                                      items_[idx].sequence_length, radius)) {
           result.candidate_indices.push_back(idx);
         }
@@ -957,7 +960,7 @@ std::vector<int> make_auxiliary_radii(const std::vector<int>& primary_radii) {
 }
 
 std::vector<int> leaf_beacon_distances(
-    const std::shared_ptr<BioSequence>& leaf,
+    const BioSequence& leaf,
     const std::vector<LeafId>& beacons,
     const SequenceStore& sequences,
     int center_dist,
@@ -970,10 +973,11 @@ std::vector<int> leaf_beacon_distances(
     } else if (i == 0) {
       dists.push_back(center_dist);
     } else {
-      const auto& beacon = sequences[beacons[i]];
       dists.push_back(distance_mode == BuildDistanceMode::Edlib
-                          ? compute_distance_edlib(leaf->seq, beacon.seq)
-                          : compute_distance(leaf->seq, beacon.seq));
+                          ? compute_distance_edlib(
+                                leaf.seq, sequences.sequence(beacons[i]))
+                          : compute_distance(
+                                leaf.seq, sequences.sequence(beacons[i])));
     }
   }
   return dists;
@@ -1231,7 +1235,7 @@ void merge_phase2_local_stats(BioGeometryIndexBuilder::Statistics& target,
 }
 
 std::vector<int> leaf_beacon_distances_timed(
-    const std::shared_ptr<BioSequence>& leaf,
+    const BioSequence& leaf,
     const std::vector<LeafId>& beacons,
     const SequenceStore& sequences,
     int center_dist,
@@ -1533,10 +1537,15 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
 }
 
 std::vector<std::shared_ptr<BioSequence>> BioGeometryIndexBuilder::deduplicate(
-    const std::vector<std::shared_ptr<BioSequence>>& raw) {
+    std::vector<std::shared_ptr<BioSequence>> raw) {
   if (!range_config_.phase1_preserve_input_order) {
-    std::unordered_map<std::string, std::shared_ptr<BioSequence>> sequence_map;
+    std::unordered_map<std::string_view, std::shared_ptr<BioSequence>>
+        sequence_map;
+    sequence_map.reserve(raw.size());
     for (const auto& sequence : raw) {
+      if (!sequence) {
+        throw std::invalid_argument("null BioSequence in input");
+      }
       stats_.added_sequences++;
       auto it = sequence_map.find(sequence->seq);
       if (it == sequence_map.end()) {
@@ -1568,10 +1577,14 @@ std::vector<std::shared_ptr<BioSequence>> BioGeometryIndexBuilder::deduplicate(
     return unordered;
   }
 
-  std::unordered_map<std::string, size_t> sequence_indices;
+  std::unordered_map<std::string_view, size_t> sequence_indices;
+  sequence_indices.reserve(raw.size());
   std::vector<std::shared_ptr<BioSequence>> out;
   out.reserve(raw.size());
   for (const auto& seq : raw) {
+    if (!seq) {
+      throw std::invalid_argument("null BioSequence in input");
+    }
     stats_.added_sequences++;
     auto it = sequence_indices.find(seq->seq);
     if (it != sequence_indices.end()) {
@@ -1599,39 +1612,36 @@ std::vector<std::shared_ptr<BioSequence>> BioGeometryIndexBuilder::deduplicate(
 }
 
 void BioGeometryIndexBuilder::initialize_sequence_store(
-    const std::vector<std::shared_ptr<BioSequence>>& unique_seqs) {
-  std::vector<std::shared_ptr<BioSequence>> sequences;
-  sequences.reserve(unique_seqs.size());
-  for (const auto& sequence : unique_seqs) {
-    if (sequence) {
-      sequence->sequence_id = INVALID_LEAF_ID;
-      sequences.push_back(sequence);
-    }
-  }
-  std::sort(sequences.begin(), sequences.end(),
-            [](const std::shared_ptr<BioSequence>& left,
-               const std::shared_ptr<BioSequence>& right) {
-              return left->id < right->id;
-            });
-
-  sequence_count_ = sequences.size();
+    const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
+    bool consume_records) {
+  sequence_count_ = unique_seqs.size();
   search_graph_view_.sequences.records.resize(sequence_count_);
-  for (size_t sequence_idx = 0; sequence_idx < sequences.size();
+  for (size_t sequence_idx = 0; sequence_idx < unique_seqs.size();
        ++sequence_idx) {
+    if (!unique_seqs[sequence_idx]) {
+      throw std::invalid_argument("null BioSequence in deduplicated input");
+    }
     if (sequence_idx > static_cast<size_t>(INVALID_LEAF_ID - 1)) {
       throw std::runtime_error("too many sequences for 32-bit LeafId");
     }
     const LeafId sequence_id = static_cast<LeafId>(sequence_idx);
-    sequences[sequence_idx]->sequence_id = sequence_id;
-    search_graph_view_.sequences.records[sequence_id] =
-        *sequences[sequence_idx];
+    unique_seqs[sequence_idx]->sequence_id = sequence_id;
+    if (consume_records) {
+      search_graph_view_.sequences.records[sequence_id] =
+          std::move(*unique_seqs[sequence_idx]);
+      search_graph_view_.sequences.records[sequence_id].sequence_id =
+          sequence_id;
+    } else {
+      search_graph_view_.sequences.records[sequence_id] =
+          *unique_seqs[sequence_idx];
+    }
   }
 }
 
 void BioGeometryIndexBuilder::phase1_build_extended_sketch(
-    const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
     BuildProgressReporter* progress) {
-  if (progress) progress->begin_phase("phase1_sketch", unique_seqs.size());
+  const auto& sequences = search_graph_view_.sequences;
+  if (progress) progress->begin_phase("phase1_sketch", sequences.size());
   extended_layers_.assign(static_cast<size_t>(hierarchy_.num_expanded_layers()),
                           std::vector<NodeId>());
   std::unordered_map<NodeId, Phase1CoverGroupIndex> cover_group_indexes;
@@ -1647,7 +1657,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
   for (size_t sequence_id = 0;
        sequence_id < search_graph_view_.sequences.size(); ++sequence_id) {
     sequence_signatures[sequence_id] = phase1_base_count_signature(
-        search_graph_view_.sequences[sequence_id].seq);
+        search_graph_view_.sequences.sequence(sequence_id));
   }
   const auto phase1_start = Clock::now();
   Phase1DistanceCache distance_cache(search_graph_view_.sequences.size());
@@ -1664,20 +1674,19 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
     stats_.phase1_candidate_pairs += scan.exact_distance_calls;
   };
 
-  for (size_t sequence_idx = 0; sequence_idx < unique_seqs.size();
+  for (size_t sequence_idx = 0; sequence_idx < sequences.size();
        ++sequence_idx) {
-    const auto& sequence = unique_seqs[sequence_idx];
+    const auto& sequence =
+        sequences[static_cast<LeafId>(sequence_idx)];
     distance_cache.begin_query();
     PreparedEdlibDnaPattern prepared_query;
     const PreparedEdlibDnaPattern* prepared_query_ptr = nullptr;
     if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
-      prepared_query = prepare_edlib_dna_pattern(sequence->seq);
+      prepared_query = prepare_edlib_dna_pattern(sequence.seq);
       prepared_query_ptr = &prepared_query;
     }
     const Phase1BaseCountSignature query_signature =
-        sequence->sequence_id < sequence_signatures.size()
-            ? sequence_signatures[sequence->sequence_id]
-            : phase1_base_count_signature(sequence->seq);
+        sequence_signatures[sequence.sequence_id];
     NodeId parent = INVALID_NODE_ID;
     for (int layer_idx = 0; layer_idx < hierarchy_.num_expanded_layers(); ++layer_idx) {
       const int radius = expanded_radii_[static_cast<size_t>(layer_idx)];
@@ -1705,11 +1714,11 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               (*candidates)[hint.candidate_idx] == hint.node &&
               build_nodes_[hint.node].center_sequence_id <
                   search_graph_view_.sequences.size() &&
-              phase1_length_compatible(sequence->seq.size(),
-                                       search_graph_view_.sequences[
+              phase1_length_compatible(sequence.seq.size(),
+                                       search_graph_view_.sequences.sequence(
                                            build_nodes_[hint.node]
-                                               .center_sequence_id]
-                                           .seq.size(),
+                                               .center_sequence_id)
+                                           .size(),
                                        radius)) {
             stats_.phase1_hint_checks++;
             const LeafId hint_center_id =
@@ -1720,8 +1729,8 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               stats_.phase1_cross_layer_distance_reused++;
             } else {
               hint_distance = build_distance_bounded_prepared(
-                  sequence->seq,
-                  search_graph_view_.sequences[hint_center_id].seq,
+                  sequence.seq,
+                  search_graph_view_.sequences.sequence(hint_center_id),
                   radius,
                   range_config_.distance_mode, prepared_query_ptr);
               distance_cache.store(hint_center_id, radius, hint_distance);
@@ -1828,7 +1837,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
         const NodeId new_node_id =
             static_cast<NodeId>(build_nodes_.size());
         BuildWorldNodeRecord new_node;
-        new_node.center_sequence_id = sequence->sequence_id;
+        new_node.center_sequence_id = sequence.sequence_id;
         new_node.radius = radius;
         const bool is_primary = expanded_layer_is_primary(layer_idx);
         const int primary_idx = is_primary ? expanded_to_primary_index(layer_idx) : -1;
@@ -1859,15 +1868,15 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
 
     const size_t processed = sequence_idx + 1;
     if (progress &&
-        (processed % 1024 == 0 || processed == unique_seqs.size())) {
+        (processed % 1024 == 0 || processed == sequences.size())) {
       progress->set_completed(processed);
     }
-    if (unique_seqs.size() >= 100000 && processed % 100000 == 0) {
+    if (sequences.size() >= 100000 && processed % 100000 == 0) {
       const double percent =
           100.0 * static_cast<double>(processed) /
-          static_cast<double>(unique_seqs.size());
+          static_cast<double>(sequences.size());
       std::cerr << "    Phase1 progress: processed=" << processed << "/"
-                << unique_seqs.size() << " (" << std::fixed
+                << sequences.size() << " (" << std::fixed
                 << std::setprecision(1) << percent << "%)"
                 << " elapsed_s=" << std::setprecision(1)
                 << elapsed_ms_since(phase1_start) / 1000.0
@@ -1921,17 +1930,17 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
       build_nodes_[parent_id].child_ids.clear();
     }
 
-    std::vector<std::string> parent_sequences(parents.size());
-    std::vector<std::string> child_sequences(children.size());
+    std::vector<const std::string*> parent_sequences(parents.size());
+    std::vector<const std::string*> child_sequences(children.size());
     for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
       const auto& parent = build_nodes_[parents[parent_idx]];
       parent_sequences[parent_idx] =
-          search_graph_view_.sequences[parent.center_sequence_id].seq;
+          &search_graph_view_.sequences.sequence(parent.center_sequence_id);
     }
     for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
       const auto& child = build_nodes_[children[child_idx]];
       child_sequences[child_idx] =
-          search_graph_view_.sequences[child.center_sequence_id].seq;
+          &search_graph_view_.sequences.sequence(child.center_sequence_id);
     }
     const DistanceMode verifier_distance_mode =
         to_distance_mode(range_config_.distance_mode);
@@ -1992,21 +2001,21 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
     std::vector<Phase1BaseCountSignature> child_base_counts(children.size());
     for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
       parent_base_counts[parent_idx] =
-          phase1_base_count_signature(parent_sequences[parent_idx]);
+          phase1_base_count_signature(*parent_sequences[parent_idx]);
     }
     for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
       child_base_counts[child_idx] =
-          phase1_base_count_signature(child_sequences[child_idx]);
+          phase1_base_count_signature(*child_sequences[child_idx]);
     }
 
-    std::vector<RangeJoinItem> items;
+    std::vector<RangeJoinItemView> items;
     items.reserve(parents.size());
     int max_parent_radius = 0;
     for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
       const auto& parent = build_nodes_[parents[parent_idx]];
       items.push_back(
           {parent_idx,
-           search_graph_view_.sequences[parent.center_sequence_id].seq});
+           &search_graph_view_.sequences.sequence(parent.center_sequence_id)});
       max_parent_radius = std::max(max_parent_radius, parent.radius);
     }
     ExactRangeJoinIndex parent_index(
@@ -2016,7 +2025,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
     for (NodeId child_id : children) {
       const auto& child = build_nodes_[child_id];
       const auto& child_sequence =
-          search_graph_view_.sequences[child.center_sequence_id].seq;
+          search_graph_view_.sequences.sequence(child.center_sequence_id);
       const int query_tau = max_parent_radius + child.radius;
       const int block_count = query_tau + 1;
       const int block_len = static_cast<int>(
@@ -2029,7 +2038,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
                        seed_lengths.end());
     {
       ScopedTimer timer(&stats_.phase2_index_build_ms);
-      parent_index.build(std::move(items));
+      parent_index.build_views(std::move(items));
       parent_index.prepare_seed_lengths(seed_lengths);
     }
 
@@ -2043,14 +2052,16 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
         const auto& parent = build_nodes_[parents[parent_idx]];
         parent_qgram_signatures[parent_idx] =
             compute_qgram_signature(
-                search_graph_view_.sequences[parent.center_sequence_id].seq,
+                search_graph_view_.sequences.sequence(
+                    parent.center_sequence_id),
                 q);
       }
       for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
         const auto& child = build_nodes_[children[child_idx]];
         child_qgram_signatures[child_idx] =
             compute_qgram_signature(
-                search_graph_view_.sequences[child.center_sequence_id].seq,
+                search_graph_view_.sequences.sequence(
+                    child.center_sequence_id),
                 q);
       }
     }
@@ -2090,7 +2101,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
       for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
         auto& child = build_nodes_[children[child_idx]];
         const auto& child_sequence =
-            search_graph_view_.sequences[child.center_sequence_id].seq;
+            search_graph_view_.sequences.sequence(child.center_sequence_id);
 
         const int query_tau = max_parent_radius + child.radius;
         const auto query_start = Clock::now();
@@ -2103,7 +2114,8 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
         for (size_t parent_idx : candidates.candidate_item_ids) {
           auto& parent = build_nodes_[parents[parent_idx]];
           const auto& parent_sequence =
-              search_graph_view_.sequences[parent.center_sequence_id].seq;
+              search_graph_view_.sequences.sequence(
+                  parent.center_sequence_id);
           const int tau = parent.radius + child.radius;
           if (std::llabs(
                   static_cast<long long>(parent_sequence.size()) -
@@ -2280,7 +2292,8 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
                ++child_idx) {
             const auto& child = build_nodes_[node.child_ids[child_idx]];
             const auto& child_sequence =
-                search_graph_view_.sequences[child.center_sequence_id].seq;
+                search_graph_view_.sequences.sequence(
+                    child.center_sequence_id);
             PreparedEdlibDnaPattern prepared_child;
             const PreparedEdlibDnaPattern* prepared_child_ptr = nullptr;
             if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
@@ -2291,12 +2304,12 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
                 node.beacon_ids.size());
             for (LeafId beacon_id : node.beacon_ids) {
               const auto& beacon =
-                  search_graph_view_.sequences[beacon_id];
+                  search_graph_view_.sequences.sequence(beacon_id);
               int dist = prepared_child_ptr
                              ? compute_distance_edlib_prepared(
-                                   *prepared_child_ptr, beacon.seq)
+                                   *prepared_child_ptr, beacon)
                              : build_distance(
-                                   child_sequence, beacon.seq,
+                                   child_sequence, beacon,
                                    range_config_.distance_mode);
               MBB mbb;
               mbb.min_dist = std::max(0, dist - child.radius);
@@ -2370,10 +2383,10 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
 }
 
 void BioGeometryIndexBuilder::attach_leaves(
-    const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
     BuildProgressReporter* progress) {
+  const auto& sequences = search_graph_view_.sequences;
   auto& finest_layer = primary_layers_[static_cast<size_t>(finest_primary_layer_index())];
-  stats_.total_possible_leaf_pairs = finest_layer.size() * unique_seqs.size();
+  stats_.total_possible_leaf_pairs = finest_layer.size() * sequences.size();
   for (NodeId node_id : finest_layer) {
     auto& node = build_nodes_[node_id];
     node.leaf_ids.clear();
@@ -2387,14 +2400,14 @@ void BioGeometryIndexBuilder::attach_leaves(
     actual_direction = LeafAttachDirection::WorldToSeq;
   } else if (actual_direction == LeafAttachDirection::Auto) {
     actual_direction =
-        finest_layer.size() < unique_seqs.size()
+        finest_layer.size() < sequences.size()
             ? LeafAttachDirection::WorldToSeq
             : LeafAttachDirection::SeqToWorld;
   }
   stats_.leaf_attach_direction_used = actual_direction;
   const uint64_t progress_total =
       actual_direction == LeafAttachDirection::SeqToWorld
-          ? unique_seqs.size()
+          ? sequences.size()
           : finest_layer.size();
   if (progress) progress->begin_phase("phase4_attach", progress_total);
 
@@ -2413,7 +2426,7 @@ void BioGeometryIndexBuilder::attach_leaves(
           static_cast<size_t>(std::min(tid, thread_count - 1));
       auto& node = build_nodes_[finest_layer[layer_idx]];
       const std::string& center =
-          search_graph_view_.sequences[node.center_sequence_id].seq;
+          search_graph_view_.sequences.sequence(node.center_sequence_id);
       PreparedEdlibDnaPattern prepared_center;
       const PreparedEdlibDnaPattern* prepared_center_ptr = nullptr;
       if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
@@ -2422,20 +2435,20 @@ void BioGeometryIndexBuilder::attach_leaves(
       }
       {
         ScopedTimer verify_timer(&thread_exact_ms[timer_idx]);
-        for (size_t seq_idx = 0; seq_idx < unique_seqs.size(); ++seq_idx) {
-          const auto& seq = unique_seqs[seq_idx];
+        for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
+          const auto& seq = sequences[static_cast<LeafId>(seq_idx)];
           thread_exact_calls[timer_idx]++;
           int dist = build_distance_bounded_prepared(
-              center, seq->seq, node.radius, range_config_.distance_mode,
+              center, seq.seq, node.radius, range_config_.distance_mode,
               prepared_center_ptr);
           if (dist <= node.radius) {
             auto beacon_dists = leaf_beacon_distances_timed(
-                seq, node.beacon_ids, search_graph_view_.sequences, dist,
+                seq, node.beacon_ids, sequences, dist,
                 range_config_.distance_mode,
                 &thread_beacon_ms[timer_idx]);
             {
               ScopedTimer timer(&thread_tuple_ms[timer_idx]);
-              node.leaf_ids.push_back(seq->sequence_id);
+              node.leaf_ids.push_back(seq.sequence_id);
               node.leaf_beacon_dists.push_back(std::move(beacon_dists));
             }
           }
@@ -2458,12 +2471,10 @@ void BioGeometryIndexBuilder::attach_leaves(
     stats_.leaf_candidate_pairs = stats_.total_possible_leaf_pairs;
   } else {
     std::vector<Phase1BaseCountSignature> leaf_base_counts(
-        unique_seqs.size());
-    for (size_t seq_idx = 0; seq_idx < unique_seqs.size(); ++seq_idx) {
-      if (unique_seqs[seq_idx]) {
-        leaf_base_counts[seq_idx] =
-            phase1_base_count_signature(unique_seqs[seq_idx]->seq);
-      }
+        sequences.size());
+    for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
+      leaf_base_counts[seq_idx] = phase1_base_count_signature(
+          sequences.sequence(static_cast<LeafId>(seq_idx)));
     }
     std::vector<Phase1BaseCountSignature> world_base_counts(
         finest_layer.size());
@@ -2471,18 +2482,16 @@ void BioGeometryIndexBuilder::attach_leaves(
          ++world_idx) {
       const auto& world = build_nodes_[finest_layer[world_idx]];
       world_base_counts[world_idx] = phase1_base_count_signature(
-          search_graph_view_.sequences[world.center_sequence_id].seq);
+          search_graph_view_.sequences.sequence(world.center_sequence_id));
     }
     std::vector<Phase4QGramSignature> leaf_qgram_signatures;
     std::vector<Phase4QGramSignature> world_qgram_signatures;
     if (range_config_.leaf_qgram_postfilter) {
       const int q = range_config_.range_join.qgram_q;
-      leaf_qgram_signatures.resize(unique_seqs.size());
-      for (size_t seq_idx = 0; seq_idx < unique_seqs.size(); ++seq_idx) {
-        if (unique_seqs[seq_idx]) {
-          leaf_qgram_signatures[seq_idx] =
-              phase4_qgram_signature(unique_seqs[seq_idx]->seq, q);
-        }
+      leaf_qgram_signatures.resize(sequences.size());
+      for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
+        leaf_qgram_signatures[seq_idx] = phase4_qgram_signature(
+            sequences.sequence(static_cast<LeafId>(seq_idx)), q);
       }
       if (actual_direction == LeafAttachDirection::SeqToWorld) {
         world_qgram_signatures.resize(finest_layer.size());
@@ -2490,39 +2499,42 @@ void BioGeometryIndexBuilder::attach_leaves(
              ++world_idx) {
           const auto& world = build_nodes_[finest_layer[world_idx]];
           world_qgram_signatures[world_idx] = phase4_qgram_signature(
-              search_graph_view_.sequences[world.center_sequence_id].seq, q);
+              search_graph_view_.sequences.sequence(
+                  world.center_sequence_id),
+              q);
         }
       }
     }
 
     if (actual_direction == LeafAttachDirection::SeqToWorld) {
-      std::vector<RangeJoinItem> items;
+      std::vector<RangeJoinItemView> items;
       items.reserve(finest_layer.size());
       int max_radius = 0;
       for (size_t world_idx = 0; world_idx < finest_layer.size(); ++world_idx) {
         const auto& world = build_nodes_[finest_layer[world_idx]];
         items.push_back(
             {world_idx,
-             search_graph_view_.sequences[world.center_sequence_id].seq});
+             &search_graph_view_.sequences.sequence(
+                 world.center_sequence_id)});
         max_radius = std::max(max_radius, world.radius);
       }
       ExactRangeJoinIndex world_index(range_config_.range_join, true);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
-        world_index.build(std::move(items));
+        world_index.build_views(std::move(items));
       }
-      for (size_t seq_idx = 0; seq_idx < unique_seqs.size(); ++seq_idx) {
-        const auto& seq = unique_seqs[seq_idx];
+      for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
+        const auto& seq = sequences[static_cast<LeafId>(seq_idx)];
         PreparedEdlibDnaPattern prepared_sequence;
         const PreparedEdlibDnaPattern* prepared_sequence_ptr = nullptr;
         if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
-          prepared_sequence = prepare_edlib_dna_pattern(seq->seq);
+          prepared_sequence = prepare_edlib_dna_pattern(seq.seq);
           prepared_sequence_ptr = &prepared_sequence;
         }
         RangeJoinQueryResult candidates;
         {
           ScopedTimer timer(&stats_.leaf_candidate_query_ms);
-          candidates = world_index.query(seq->seq, max_radius);
+          candidates = world_index.query(seq.seq, max_radius);
         }
         accumulate_leaf_candidate_stats(stats_, candidates);
         {
@@ -2530,8 +2542,9 @@ void BioGeometryIndexBuilder::attach_leaves(
           for (size_t world_idx : candidates.candidate_item_ids) {
             auto& world = build_nodes_[finest_layer[world_idx]];
             const auto& center =
-                search_graph_view_.sequences[world.center_sequence_id].seq;
-            if (std::llabs(static_cast<long long>(seq->seq.size()) -
+                search_graph_view_.sequences.sequence(
+                    world.center_sequence_id);
+            if (std::llabs(static_cast<long long>(seq.seq.size()) -
                            static_cast<long long>(center.size())) >
                 world.radius) {
               stats_.leaf_length_pruned_pairs++;
@@ -2552,16 +2565,16 @@ void BioGeometryIndexBuilder::attach_leaves(
             }
             stats_.leaf_exact_distance_calls++;
             int dist = build_distance_bounded_prepared(
-                seq->seq, center, world.radius,
+                seq.seq, center, world.radius,
                 range_config_.distance_mode, prepared_sequence_ptr);
             if (dist <= world.radius) {
               auto beacon_dists = leaf_beacon_distances_timed(
-                  seq, world.beacon_ids, search_graph_view_.sequences, dist,
+                  seq, world.beacon_ids, sequences, dist,
                   range_config_.distance_mode,
                   &stats_.leaf_beacon_distance_ms);
               {
                 ScopedTimer timer(&stats_.leaf_tuple_emit_ms);
-                world.leaf_ids.push_back(seq->sequence_id);
+                world.leaf_ids.push_back(seq.sequence_id);
                 world.leaf_beacon_dists.push_back(std::move(beacon_dists));
               }
             }
@@ -2569,7 +2582,7 @@ void BioGeometryIndexBuilder::attach_leaves(
         }
         if (progress && seq_idx % 256 == 255) progress->advance(256);
       }
-      if (progress) progress->set_completed(unique_seqs.size());
+      if (progress) progress->set_completed(sequences.size());
       {
         ScopedTimer timer(&stats_.leaf_tuple_merge_sort_ms);
       }
@@ -2584,23 +2597,26 @@ void BioGeometryIndexBuilder::attach_leaves(
         std::vector<int> beacon_dists;
       };
 
-      std::vector<RangeJoinItem> items;
-      items.reserve(unique_seqs.size());
-      for (size_t seq_idx = 0; seq_idx < unique_seqs.size(); ++seq_idx) {
-        items.push_back({seq_idx, unique_seqs[seq_idx]->seq});
+      std::vector<RangeJoinItemView> items;
+      items.reserve(sequences.size());
+      for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
+        items.push_back({
+            seq_idx,
+            &sequences.sequence(static_cast<LeafId>(seq_idx))});
       }
 
       ExactRangeJoinIndex sequence_index(
           range_config_.range_join, true, true, false);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
-        sequence_index.build(std::move(items));
+        sequence_index.build_views(std::move(items));
         std::vector<int> seed_lengths;
         seed_lengths.reserve(finest_layer.size());
         for (NodeId node_id : finest_layer) {
           const auto& world = build_nodes_[node_id];
           const auto& center =
-              search_graph_view_.sequences[world.center_sequence_id].seq;
+              search_graph_view_.sequences.sequence(
+                  world.center_sequence_id);
           const int block_len = static_cast<int>(
               center.size() / static_cast<size_t>(world.radius + 1));
           seed_lengths.push_back(std::min(
@@ -2642,7 +2658,8 @@ void BioGeometryIndexBuilder::attach_leaves(
              ++world_idx) {
           const auto& world = build_nodes_[finest_layer[world_idx]];
           const auto& center =
-              search_graph_view_.sequences[world.center_sequence_id].seq;
+              search_graph_view_.sequences.sequence(
+                  world.center_sequence_id);
           PreparedEdlibDnaPattern prepared_center;
           const PreparedEdlibDnaPattern* prepared_center_ptr = nullptr;
           if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
@@ -2666,8 +2683,9 @@ void BioGeometryIndexBuilder::attach_leaves(
           {
             ScopedTimer verify_timer(&local_stats.leaf_exact_verify_ms);
             for (size_t seq_idx : candidates.candidate_item_ids) {
-              const auto& seq = unique_seqs[seq_idx];
-              if (std::llabs(static_cast<long long>(seq->seq.size()) -
+              const auto& seq =
+                  sequences[static_cast<LeafId>(seq_idx)];
+              if (std::llabs(static_cast<long long>(seq.seq.size()) -
                              static_cast<long long>(center.size())) >
                   world.radius) {
                 local_stats.leaf_length_pruned_pairs++;
@@ -2688,11 +2706,11 @@ void BioGeometryIndexBuilder::attach_leaves(
               }
               local_stats.leaf_exact_distance_calls++;
               const int dist = build_distance_bounded_prepared(
-                  center, seq->seq, world.radius,
+                  center, seq.seq, world.radius,
                   range_config_.distance_mode, prepared_center_ptr);
               if (dist <= world.radius) {
                 auto beacon_dists = leaf_beacon_distances_timed(
-                    seq, world.beacon_ids, search_graph_view_.sequences, dist,
+                    seq, world.beacon_ids, sequences, dist,
                     range_config_.distance_mode,
                     &local_stats.leaf_beacon_distance_ms);
                 ScopedTimer timer(&local_stats.leaf_tuple_emit_ms);
@@ -2726,7 +2744,7 @@ void BioGeometryIndexBuilder::attach_leaves(
           auto& world = build_nodes_[finest_layer[world_idx]];
           for (auto& tuple : tuples_by_world[world_idx]) {
             world.leaf_ids.push_back(
-                unique_seqs[tuple.seq_idx]->sequence_id);
+                static_cast<LeafId>(tuple.seq_idx));
             world.leaf_beacon_dists.push_back(
                 std::move(tuple.beacon_dists));
           }
@@ -3115,7 +3133,19 @@ void BioGeometryIndexBuilder::print_summary() const {
 
 void BioGeometryIndexBuilder::build(
     const std::vector<std::shared_ptr<BioSequence>>& raw_sequences) {
+  build_impl(raw_sequences, false);
+}
+
+void BioGeometryIndexBuilder::build(
+    std::vector<std::shared_ptr<BioSequence>>&& raw_sequences) {
+  build_impl(std::move(raw_sequences), true);
+}
+
+void BioGeometryIndexBuilder::build_impl(
+    std::vector<std::shared_ptr<BioSequence>> raw_sequences,
+    bool consume_records) {
   const auto build_start = Clock::now();
+  const size_t raw_sequence_count = raw_sequences.size();
   BuildProgressReporter progress(range_config_.progress_interval_seconds);
   stats_ = Statistics{};
   stats_.created_primary_nodes.assign(static_cast<size_t>(num_primary_layers()), 0);
@@ -3128,18 +3158,22 @@ void BioGeometryIndexBuilder::build(
                          std::vector<NodeId>());
   extended_layers_.clear();
 
-  std::cerr << "[Build generalized hierarchy] Starting for " << raw_sequences.size()
+  std::cerr << "[Build generalized hierarchy] Starting for " << raw_sequence_count
             << " sequences...\n";
   std::cerr << "  Phase 0: Deduplicating sequences...\n";
-  progress.begin_phase("phase0_dedup", raw_sequences.size());
+  progress.begin_phase("phase0_dedup", raw_sequence_count);
   std::vector<std::shared_ptr<BioSequence>> unique_seqs;
+  size_t unique_sequence_count = 0;
   {
     ScopedTimer timer(&stats_.phase0_dedup_ms);
-    unique_seqs = deduplicate(raw_sequences);
-    initialize_sequence_store(unique_seqs);
+    unique_seqs = deduplicate(std::move(raw_sequences));
+    unique_sequence_count = unique_seqs.size();
+    initialize_sequence_store(unique_seqs, consume_records);
+    std::vector<std::shared_ptr<BioSequence>>().swap(unique_seqs);
   }
   progress.finish_phase();
-  std::cerr << "    " << raw_sequences.size() << " -> " << unique_seqs.size() << " unique ("
+  std::cerr << "    " << raw_sequence_count << " -> "
+            << unique_sequence_count << " unique ("
             << stats_.deduplicated << " merged)\n";
 
   std::cerr << "  Phase 1: Extended hierarchy sketch (top-down)...\n";
@@ -3157,7 +3191,7 @@ void BioGeometryIndexBuilder::build(
   std::cerr << "\n";
   {
     ScopedTimer timer(&stats_.phase1_sketch_ms);
-    phase1_build_extended_sketch(unique_seqs, &progress);
+    phase1_build_extended_sketch(&progress);
   }
 
   std::cerr << "    Expanded layers:";
@@ -3181,7 +3215,7 @@ void BioGeometryIndexBuilder::build(
   std::cerr << "  Phase 4: Leaf attachment...\n";
   {
     ScopedTimer timer(&stats_.phase4_attach_ms);
-    attach_leaves(unique_seqs, &progress);
+    attach_leaves(&progress);
   }
   {
     ScopedTimer timer(&stats_.assign_ids_ms);

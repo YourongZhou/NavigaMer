@@ -39,6 +39,11 @@ struct RangeJoinItem {
   std::string sequence;
 };
 
+struct RangeJoinItemView {
+  size_t item_id = 0;
+  const std::string* sequence = nullptr;
+};
+
 struct RangeJoinQueryResult {
   std::vector<size_t> candidate_item_ids;
   bool used_full_scan = false;
@@ -87,6 +92,7 @@ class ExactRangeJoinIndex {
       bool enable_positional_postings = false);
 
   void build(std::vector<RangeJoinItem> items);
+  void build_views(std::vector<RangeJoinItemView> items);
   void prepare_qgram();
   void prepare_seed_lengths(const std::vector<int>& seed_lengths);
   RangeJoinQueryResult query(const std::string& query_sequence, int tau);
@@ -95,6 +101,12 @@ class ExactRangeJoinIndex {
       RangeJoinQueryWorkspace* workspace) const;
 
  private:
+  struct StoredItem {
+    size_t item_id = 0;
+    size_t owned_item_idx = 0;
+    const std::string* external_sequence = nullptr;
+  };
+
   using PostingLists16 =
       std::unordered_map<uint64_t, std::vector<uint16_t>>;
   using PostingLists = std::unordered_map<uint64_t, std::vector<uint32_t>>;
@@ -104,7 +116,8 @@ class ExactRangeJoinIndex {
       std::unordered_map<uint64_t, std::vector<uint64_t>>;
 
   RangeJoinConfig config_;
-  std::vector<RangeJoinItem> items_;
+  std::vector<RangeJoinItem> owned_items_;
+  std::vector<StoredItem> items_;
   std::unordered_map<int, PostingLists16> postings16_by_seed_len_;
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
   std::unordered_map<int, PositionalPostingLists>
@@ -125,6 +138,8 @@ class ExactRangeJoinIndex {
   bool enable_positional_postings_ = false;
   mutable std::shared_ptr<std::mutex> deferred_qgram_mutex_;
 
+  const std::string& item_sequence(const StoredItem& item) const;
+  void reset_after_items_changed();
   const QGramCountIndex& ensure_qgram_index() const;
   void prepare_postings_for_seed_len(int seed_len);
   bool query_needs_seed_postings(int seed_len) const;

@@ -20,6 +20,10 @@ void test_cpu_batch_matches_direct_distance() {
       "TTTTTTTT",
       "AAAAACCA",
       "GGGGTTTA"};
+  const std::vector<const std::string*> parent_views = {
+      &parents[0], &parents[1], &parents[2]};
+  const std::vector<const std::string*> child_views = {
+      &children[0], &children[1], &children[2], &children[3]};
   const std::vector<Phase2DistancePair> pairs = {
       {0, 0, 1},
       {0, 1, 2},
@@ -28,7 +32,7 @@ void test_cpu_batch_matches_direct_distance() {
 
   auto verifier =
       navigamer::make_phase2_distance_verifier(DistanceMode::Edlib);
-  const auto result = verifier->verify(parents, children, pairs);
+  const auto result = verifier->verify(parent_views, child_views, pairs);
 
   std::vector<size_t> expected;
   for (size_t i = 0; i < pairs.size(); ++i) {

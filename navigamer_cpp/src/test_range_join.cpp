@@ -221,6 +221,7 @@ int main() {
   using navigamer::RangeCandidateMode;
   using navigamer::RangeJoinConfig;
   using navigamer::RangeJoinItem;
+  using navigamer::RangeJoinItemView;
 
   test_parallel_range_join_queries_are_deterministic();
   test_shifted_window_postings_match_standard_index();
@@ -232,6 +233,13 @@ int main() {
 
   ExactRangeJoinIndex index(config_for(RangeCandidateMode::Auto));
   index.build(items);
+  std::vector<RangeJoinItemView> item_views;
+  item_views.reserve(items.size());
+  for (const auto& item : items) {
+    item_views.push_back({item.item_id, &item.sequence});
+  }
+  ExactRangeJoinIndex view_index(config_for(RangeCandidateMode::Auto));
+  view_index.build_views(std::move(item_views));
 
   auto adaptive = index.query(items[0].sequence, 2);
   assert(!adaptive.used_full_scan);
@@ -277,6 +285,7 @@ int main() {
     for (size_t q_idx = 0; q_idx < 40; ++q_idx) {
       std::string query = mutate(items[q_idx].sequence, std::min(tau, 5), gen);
       auto result = index.query(query, tau);
+      auto view_result = view_index.query(query, tau);
       auto pigeonhole = pigeonhole_index.query(query, tau);
       auto qgram = qgram_index.query(query, tau);
       auto hybrid = hybrid_index.query(query, tau);
@@ -284,6 +293,8 @@ int main() {
       assert(hybrid.candidate_item_ids ==
              intersection(pigeonhole.candidate_item_ids,
                           qgram.candidate_item_ids));
+      assert(view_result.candidate_item_ids == result.candidate_item_ids);
+      assert(view_result.mode_used == result.mode_used);
       assert(full.mode_used == RangeCandidateMode::FullScan);
       assert(qgram.mode_used == RangeCandidateMode::QGramOnly);
       assert(hybrid.mode_used == RangeCandidateMode::Hybrid);

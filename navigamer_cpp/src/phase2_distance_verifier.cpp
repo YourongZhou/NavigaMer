@@ -13,8 +13,8 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
       : distance_mode_(distance_mode) {}
 
   Phase2DistanceBatchResult verify(
-      const std::vector<std::string>& parent_sequences,
-      const std::vector<std::string>& child_sequences,
+      const std::vector<const std::string*>& parent_sequences,
+      const std::vector<const std::string*>& child_sequences,
       const std::vector<Phase2DistancePair>& pairs) override {
     Phase2DistanceBatchResult result;
     result.accepted_pair_indices.reserve(pairs.size());
@@ -37,7 +37,9 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
     for (size_t pair_idx = 0; pair_idx < pairs.size(); ++pair_idx) {
       const auto& pair = pairs[pair_idx];
       if (pair.parent_idx >= parent_sequences.size() ||
-          pair.child_idx >= child_sequences.size()) {
+          pair.child_idx >= child_sequences.size() ||
+          !parent_sequences[pair.parent_idx] ||
+          !child_sequences[pair.child_idx]) {
         throw std::out_of_range("phase2 distance pair index out of range");
       }
       int dist = 0;
@@ -46,19 +48,19 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
             prepare_parent ? pair.parent_idx : pair.child_idx;
         if (pattern_idx != prepared_idx) {
           prepared = prepare_edlib_dna_pattern(
-              prepare_parent ? parent_sequences[pair.parent_idx]
-                             : child_sequences[pair.child_idx]);
+              prepare_parent ? *parent_sequences[pair.parent_idx]
+                             : *child_sequences[pair.child_idx]);
           prepared_idx = pattern_idx;
         }
         dist = compute_distance_bounded_edlib_prepared(
             prepared,
-            prepare_parent ? child_sequences[pair.child_idx]
-                           : parent_sequences[pair.parent_idx],
+            prepare_parent ? *child_sequences[pair.child_idx]
+                           : *parent_sequences[pair.parent_idx],
             pair.tau);
       } else {
         dist = compute_distance_bounded_with_mode(
-            parent_sequences[pair.parent_idx],
-            child_sequences[pair.child_idx],
+            *parent_sequences[pair.parent_idx],
+            *child_sequences[pair.child_idx],
             pair.tau,
             distance_mode_);
       }

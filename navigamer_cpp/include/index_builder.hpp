@@ -93,6 +93,9 @@ struct SequenceStore {
   const BioSequence& operator[](LeafId id) const {
     return records[static_cast<size_t>(id)];
   }
+  const std::string& sequence(LeafId id) const {
+    return records[static_cast<size_t>(id)].seq;
+  }
 };
 
 // One fixed-size world record. Variable-length relationships live in the
@@ -161,6 +164,7 @@ class BioGeometryIndexBuilder {
                           const BuildRangeConfig& range_config);
 
   void build(const std::vector<std::shared_ptr<BioSequence>>& raw_sequences);
+  void build(std::vector<std::shared_ptr<BioSequence>>&& raw_sequences);
 
   struct Statistics {
     size_t added_sequences = 0;
@@ -317,19 +321,19 @@ class BioGeometryIndexBuilder {
   std::vector<std::vector<NodeId>> primary_layers_;
 
   std::vector<std::shared_ptr<BioSequence>> deduplicate(
-      const std::vector<std::shared_ptr<BioSequence>>& raw);
+      std::vector<std::shared_ptr<BioSequence>> raw);
   void initialize_sequence_store(
-      const std::vector<std::shared_ptr<BioSequence>>& unique_seqs);
-
-  void phase1_build_extended_sketch(
       const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
-      BuildProgressReporter* progress);
+      bool consume_records);
+  void build_impl(
+      std::vector<std::shared_ptr<BioSequence>> raw_sequences,
+      bool consume_records);
+
+  void phase1_build_extended_sketch(BuildProgressReporter* progress);
   void phase2_inter_tier_rebinding(BuildProgressReporter* progress);
   void phase3_collapse_and_compute_mbb(BuildProgressReporter* progress);
 
-  void attach_leaves(
-      const std::vector<std::shared_ptr<BioSequence>>& unique_seqs,
-      BuildProgressReporter* progress);
+  void attach_leaves(BuildProgressReporter* progress);
   void assign_integer_ids();
   void build_search_graph_view();
   void release_build_arrays();

@@ -683,6 +683,7 @@ void run_build_scale(const std::string& ref_input,
     const size_t actual_prefix = std::min(requested_prefix, ref_seq.size());
     const std::string prefix_seq = ref_seq.substr(0, actual_prefix);
     auto windows = build_reference_windows(ref_id, prefix_seq, window_size, stride);
+    const size_t window_count = windows.size();
     std::cerr << "build-scale: prefix_len=" << actual_prefix
               << " requested=" << requested_prefix
               << " windows=" << windows.size()
@@ -690,7 +691,7 @@ void run_build_scale(const std::string& ref_input,
               << " stride=" << stride << "\n";
 
     BioGeometryIndexBuilder builder(config, range_config);
-    builder.build(windows);
+    builder.build(std::move(windows));
     if (!index_path.empty()) {
       IndexBuildManifest manifest = make_reference_window_index_manifest(
           ref_input, actual_prefix, window_size, stride, config, range_config);
@@ -710,7 +711,7 @@ void run_build_scale(const std::string& ref_input,
 
     write_row({
         std::to_string(actual_prefix),
-        std::to_string(windows.size()),
+        std::to_string(window_count),
         std::to_string(stats.unique_sequences),
         std::to_string(builder.num_world_nodes()),
         std::to_string(finest_count),
@@ -1056,7 +1057,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
   std::cerr << "Index: " << index_seqs.size() << " windows from reference\n";
 
   BioGeometryIndexBuilder builder(config, range_config);
-  builder.build(index_seqs);
+  builder.build(std::move(index_seqs));
   BioGeometrySearchEngine engine(builder, search_config);
 
   auto queries = load_reads(query_input, ref_id);
@@ -1537,7 +1538,7 @@ void run_map150(const std::string& ref_input,
             << " locator=" << locator_kind << "\n";
 
   BioGeometryIndexBuilder builder(config, range_config);
-  builder.build(index_seqs);
+  builder.build(std::move(index_seqs));
 
   std::unique_ptr<OccurrenceLocator> locator;
   if (locator_kind == "refpos") {
@@ -2570,7 +2571,7 @@ int main(int argc, char** argv) {
           auto windows =
               build_reference_windows(ref_id, index_ref_seq, window_size, stride);
           navigamer::BioGeometryIndexBuilder builder(hierarchy, range_config);
-          builder.build(windows);
+          builder.build(std::move(windows));
           navigamer::save_index(report_index_path, builder, manifest);
           std::cerr << "Built report index: " << report_index_path << "\n";
         }
