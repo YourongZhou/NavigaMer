@@ -185,16 +185,19 @@ bool qgram_can_prune_edit_distance(
   return qgram_l1_distance(lhs, rhs) > 2 * q * threshold_tau;
 }
 
-void QGramQueryWorkspace::reset(size_t item_count) {
-  if (shared.size() != item_count) shared.assign(item_count, 0);
+void QGramQueryWorkspace::reset_seen(size_t item_count) {
   if (seen_epoch.size() != item_count) seen_epoch.assign(item_count, 0);
-  touched.clear();
   if (epoch == std::numeric_limits<uint32_t>::max()) {
     std::fill(seen_epoch.begin(), seen_epoch.end(), 0);
     epoch = 1;
   } else {
     epoch++;
   }
+}
+
+void QGramQueryWorkspace::reset(size_t item_count) {
+  if (shared.size() != item_count) shared.assign(item_count, 0);
+  reset_seen(item_count);
 }
 
 QGramCountIndex::QGramCountIndex(int q) : q_(q) {
@@ -290,7 +293,6 @@ std::vector<size_t> QGramCountIndex::query(
         if (ws->seen_epoch[internal_idx] != ws->epoch) {
           ws->seen_epoch[internal_idx] = ws->epoch;
           ws->shared[internal_idx] = 0;
-          ws->touched.push_back(internal_idx);
         }
         ws->shared[internal_idx] +=
             std::min(query_entry.count, count);

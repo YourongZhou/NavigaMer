@@ -39,9 +39,9 @@ bool qgram_can_prune_edit_distance(
 struct QGramQueryWorkspace {
   std::vector<size_t> shared;
   std::vector<uint32_t> seen_epoch;
-  std::vector<size_t> touched;
   uint32_t epoch = 1;
 
+  void reset_seen(size_t item_count);
   void reset(size_t item_count);
 };
 

@@ -124,17 +124,8 @@ RangeCandidateMode parse_range_candidate_mode(const std::string& value) {
 }
 
 void RangeJoinQueryWorkspace::reset_seed(size_t item_count) {
-  if (seed_seen_epoch.size() != item_count) {
-    seed_seen_epoch.assign(item_count, 0);
-    seed_epoch = 0;
-  }
+  qgram.reset_seen(item_count);
   seed_touched.clear();
-  if (seed_epoch == std::numeric_limits<uint32_t>::max()) {
-    std::fill(seed_seen_epoch.begin(), seed_seen_epoch.end(), 0);
-    seed_epoch = 1;
-  } else {
-    seed_epoch++;
-  }
 }
 
 ExactRangeJoinIndex::ExactRangeJoinIndex(
@@ -688,11 +679,11 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   if (!workspace) workspace = &local_workspace;
   workspace->reset_seed(items_.size());
   auto add_candidate = [&](uint32_t item_idx) {
-    if (item_idx >= workspace->seed_seen_epoch.size() ||
-        workspace->seed_seen_epoch[item_idx] == workspace->seed_epoch) {
+    if (item_idx >= workspace->qgram.seen_epoch.size() ||
+        workspace->qgram.seen_epoch[item_idx] == workspace->qgram.epoch) {
       return false;
     }
-    workspace->seed_seen_epoch[item_idx] = workspace->seed_epoch;
+    workspace->qgram.seen_epoch[item_idx] = workspace->qgram.epoch;
     workspace->seed_touched.push_back(item_idx);
     return true;
   };

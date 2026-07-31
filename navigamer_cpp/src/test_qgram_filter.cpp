@@ -186,7 +186,6 @@ void test_qgram_index_reuses_sparse_workspace() {
   assert(workspace.seen_epoch.size() == items.size());
   const auto* shared_storage = workspace.shared.data();
   const auto* seen_storage = workspace.seen_epoch.data();
-  assert(!workspace.touched.empty());
 
   navigamer::QGramCountIndex::QueryStats second_stats;
   auto second = index.query(items[1].sequence, 2, &second_stats, &workspace);

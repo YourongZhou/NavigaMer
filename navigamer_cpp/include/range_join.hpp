@@ -79,9 +79,7 @@ struct RangeJoinQueryResult {
 
 struct RangeJoinQueryWorkspace {
   QGramQueryWorkspace qgram;
-  std::vector<uint32_t> seed_seen_epoch;
   std::vector<uint32_t> seed_touched;
-  uint32_t seed_epoch = 1;
 
   void reset_seed(size_t item_count);
 };

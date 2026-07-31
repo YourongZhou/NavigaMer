@@ -123,6 +123,32 @@ void test_parallel_range_join_queries_are_deterministic() {
   assert(serial == parallel);
 }
 
+void test_seed_and_qgram_queries_share_workspace_safely() {
+  std::vector<navigamer::RangeJoinItem> items = {
+      {0, "ACGTACGTACGTACGTACGTACGTACGTACGT"},
+      {1, "ACGTACGTACGTACGTACGTACGTACGTTCGT"},
+      {2, "TTTTACGTACGTACGTACGTACGTACGTACGA"},
+      {3, "GGGGACGTACGTACGTACGTACGTACGTACCC"},
+  };
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode = navigamer::RangeCandidateMode::Auto;
+  config.min_seed_len = 4;
+  config.max_seed_len = 12;
+  config.qgram_q = 4;
+
+  navigamer::ExactRangeJoinIndex index(config);
+  index.build(items);
+  index.prepare_seed_lengths({12});
+  navigamer::RangeJoinQueryWorkspace shared_workspace;
+  for (int tau : {1, 10, 1, 10}) {
+    const auto reused =
+        index.query(items[0].sequence, tau, &shared_workspace);
+    const auto fresh = index.query(items[0].sequence, tau);
+    assert(reused.candidate_item_ids == fresh.candidate_item_ids);
+    assert(reused.mode_used == fresh.mode_used);
+  }
+}
+
 void test_shifted_window_postings_match_standard_index() {
   const std::string reference =
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -224,6 +250,7 @@ int main() {
   using navigamer::RangeJoinItemView;
 
   test_parallel_range_join_queries_are_deterministic();
+  test_seed_and_qgram_queries_share_workspace_safely();
   test_shifted_window_postings_match_standard_index();
   test_positional_postings_are_recall_safe();
 
