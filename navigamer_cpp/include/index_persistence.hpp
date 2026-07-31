@@ -11,7 +11,7 @@
 namespace navigamer {
 
 struct IndexBuildManifest {
-  uint32_t format_version = 16;
+  uint32_t format_version = 17;
   std::string signature;
   std::string ref_input;
   std::string reads_input;
@@ -48,6 +48,11 @@ struct LoadedIndex {
   IndexBuildManifest manifest;
 };
 
+enum class IndexLoadValidation {
+  Full,
+  Structural,
+};
+
 IndexBuildManifest make_index_manifest(
     const std::string& ref_input,
     const std::string& reads_input,
@@ -74,7 +79,10 @@ void save_index(const std::string& path,
                 const BioGeometryIndexBuilder& builder,
                 const IndexBuildManifest& manifest);
 
-LoadedIndex load_index(const std::string& path);
+LoadedIndex load_index(
+    const std::string& path,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
 
 }  // namespace navigamer
 

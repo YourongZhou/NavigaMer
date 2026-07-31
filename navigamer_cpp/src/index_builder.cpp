@@ -1866,6 +1866,11 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
     }
     const size_t contig_length =
         static_cast<size_t>(contig.end - contig.begin);
+    if (contig.source_begin >
+        std::numeric_limits<uint32_t>::max() - contig_length) {
+      throw std::invalid_argument(
+          "reference contig source coordinates exceed 32-bit storage");
+    }
     if (contig_length >= window_length) {
       window_count +=
           1 + (contig_length - window_length) / stride;

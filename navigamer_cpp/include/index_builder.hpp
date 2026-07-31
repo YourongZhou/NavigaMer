@@ -309,6 +309,11 @@ struct SequenceStore {
     }
     return records.at(static_cast<size_t>(id)).source_pos;
   }
+  size_t contig_source_position(size_t source_pos) const {
+    const auto& contig = contig_for_position(source_pos);
+    return static_cast<size_t>(contig.source_begin) +
+           source_pos - contig.begin;
+  }
   BwtInterval sa_interval(LeafId id) const {
     if (!reference_backed) {
       return records.at(static_cast<size_t>(id)).bwt_interval;
@@ -415,7 +420,7 @@ struct SequenceStore {
     const size_t global_pos = source_position(id);
     const auto& contig = contig_for_position(global_pos);
     return contig.id + "_" +
-           std::to_string(global_pos - contig.begin);
+           std::to_string(contig_source_position(global_pos));
   }
   BioSequence materialize(LeafId id) const {
     if (!reference_backed) return records.at(static_cast<size_t>(id));

@@ -600,7 +600,7 @@ GraphViewMode parse_graph_view_mode(const std::string& value) {
 }
 
 void SearchScratch::begin_query(size_t node_count) {
-  if (visited_epoch.size() != node_count) {
+  if (visited_epoch.size() < node_count) {
     visited_epoch.assign(node_count, 0);
     current_epoch = 0;
   }
@@ -646,6 +646,11 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
       std::find(q_values.begin(), q_values.end(),
                 config_.router_hint_qgram_q) == q_values.end()) {
     q_values.push_back(config_.router_hint_qgram_q);
+  }
+  if (q_values.empty() &&
+      !config_.router_hint_enabled &&
+      !config_.safe_child_router_enabled) {
+    return;
   }
 
   const auto& view = index_.search_graph_view();

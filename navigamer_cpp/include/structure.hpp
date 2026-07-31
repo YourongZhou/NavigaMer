@@ -43,6 +43,9 @@ struct ReferenceContig {
   std::string id;
   uint32_t begin = 0;
   uint32_t end = 0;
+  // Coordinate of `begin` in the original contig. Zero for an unsharded
+  // reference; non-zero for a stored shard slice.
+  uint32_t source_begin = 0;
 };
 
 // The atomic database object indexed by NavigaMer.

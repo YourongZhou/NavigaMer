@@ -16,6 +16,7 @@
 #include "map150.hpp"
 #include "query_benchmark.hpp"
 #include "index_persistence.hpp"
+#include "sharded_index.hpp"
 #include "candidate_verifier.hpp"
 #include <iostream>
 #include <fstream>
@@ -27,11 +28,13 @@
 #include <chrono>
 #include <cstring>
 #include <cmath>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
 #include <omp.h>
@@ -43,6 +46,7 @@ void usage(const char* prog) {
             << "  " << prog << " demo [--size N] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build-scale --ref <path|seq> --window 250 --stride 1 --prefix-lengths csv --out <csv> [--index <file>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " build-sharded --ref <path|seq> --window 250 --stride 1 --shard-windows N --index <manifest> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--index <file>] [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query-index --index <file> --query <seq> [--tolerance 2] [--mode adaptive]\n"
             << "  " << prog << " query-index-batch --index <file> --reads <fastq> [--tolerance 2] [--out <tsv>] [--path-trace-out <tsv>] [--mode adaptive]\n"
@@ -799,6 +803,48 @@ void run_build_scale(const std::string& ref_input,
   std::cerr << "build-scale rows: " << rows_written << "\n";
 }
 
+void run_build_sharded(
+    const std::string& ref_input,
+    int window_size,
+    int stride,
+    size_t max_shard_windows,
+    const std::string& index_path,
+    const navigamer::HierarchyConfig& hierarchy,
+    const navigamer::BuildRangeConfig& range_config) {
+  using namespace navigamer;
+  if (window_size <= 0 || stride <= 0) {
+    throw std::runtime_error(
+        "build-sharded window and stride must be positive");
+  }
+  if (max_shard_windows == 0) {
+    throw std::runtime_error(
+        "build-sharded requires positive --shard-windows");
+  }
+  if (index_path.empty()) {
+    throw std::runtime_error("build-sharded requires --index");
+  }
+  auto reference = load_reference_genome(ref_input);
+  if (reference.sequence.empty()) {
+    throw std::runtime_error("build-sharded reference is empty");
+  }
+  std::cerr << "Building sharded index: reference_bases="
+            << reference.sequence.size()
+            << " max_shard_windows=" << max_shard_windows
+            << " window=" << window_size
+            << " stride=" << stride << "\n";
+  const auto manifest = build_sharded_reference_index(
+      index_path, ref_input, reference.id, reference.sequence,
+      reference.contigs, static_cast<size_t>(window_size),
+      static_cast<size_t>(stride), max_shard_windows,
+      hierarchy, range_config);
+  std::cerr << "Sharded index saved: " << index_path
+            << " shards=" << manifest.shards.size()
+            << " windows=" << manifest.total_window_count
+            << " sequences=" << manifest.total_sequence_count
+            << " world_nodes=" << manifest.total_world_node_count
+            << "\n";
+}
+
 void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
                           const std::string& query_seq, int tolerance,
                           const std::string& mode,
@@ -817,7 +863,9 @@ void run_query_on_builder(const navigamer::BioGeometryIndexBuilder& builder,
       const auto& contig =
           sequences.contig_for_position(source_pos);
       display_id = contig.id + "_" +
-                   std::to_string(source_pos - contig.begin);
+                   std::to_string(
+                       static_cast<size_t>(contig.source_begin) +
+                       source_pos - contig.begin);
     }
     std::cout << "  " << display_id << " dist="
               << compute_distance(
@@ -965,6 +1013,105 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
                const std::string& index_path) {
   using namespace navigamer;
   if (!index_path.empty() && reads_input.empty()) {
+    if (is_sharded_index(index_path)) {
+      const auto manifest =
+          read_sharded_index_manifest(index_path);
+      auto shards = load_sharded_index(index_path, manifest);
+      std::cerr << "Loaded sharded index: " << index_path
+                << " shards=" << shards.size()
+                << " sequences=" << manifest.total_sequence_count
+                << " world_nodes="
+                << manifest.total_world_node_count << "\n";
+
+      std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
+      engines.reserve(shards.size());
+      for (auto& shard : shards) {
+        engines.push_back(
+            std::make_unique<BioGeometrySearchEngine>(
+                shard.builder, search_config));
+      }
+      BioSequence query("query", query_seq);
+      std::vector<std::pair<SearchResult, SearchStats>>
+          shard_results(shards.size());
+      std::vector<std::exception_ptr> shard_errors(shards.size());
+      const auto query_start =
+          std::chrono::high_resolution_clock::now();
+#pragma omp parallel for schedule(static) if(engines.size() > 1)
+      for (size_t shard_idx = 0;
+           shard_idx < engines.size(); ++shard_idx) {
+        try {
+          if (mode == "greedy") {
+            shard_results[shard_idx] =
+                engines[shard_idx]->search_greedy(
+                    query, tolerance);
+          } else if (mode == "exhaustive") {
+            shard_results[shard_idx] =
+                engines[shard_idx]->search_exhaustive(
+                    query, tolerance);
+          } else {
+            shard_results[shard_idx] =
+                engines[shard_idx]->search_adaptive(
+                    query, tolerance);
+          }
+        } catch (...) {
+          shard_errors[shard_idx] =
+              std::current_exception();
+        }
+      }
+      for (const auto& error : shard_errors) {
+        if (error) std::rethrow_exception(error);
+      }
+      const auto query_end =
+          std::chrono::high_resolution_clock::now();
+
+      struct DisplayHit {
+        std::string id;
+        std::string sequence;
+      };
+      std::vector<DisplayHit> hits;
+      std::unordered_map<std::string, size_t> hit_by_sequence;
+      size_t distance_calculations = 0;
+      for (size_t shard_idx = 0;
+           shard_idx < shard_results.size(); ++shard_idx) {
+        distance_calculations +=
+            shard_results[shard_idx].second.dist_calc_count;
+        const auto& store =
+            shards[shard_idx].builder.sequence_store();
+        for (LeafId hit_id :
+             shard_results[shard_idx].first) {
+          std::string sequence(store.sequence(hit_id));
+          auto inserted = hit_by_sequence.emplace(
+              sequence, hits.size());
+          if (inserted.second) {
+            hits.push_back(
+                {store.identifier(hit_id),
+                 std::move(sequence)});
+          }
+        }
+      }
+      const double query_time_ms =
+          std::chrono::duration<double, std::milli>(
+              query_end - query_start)
+              .count();
+      const char* mode_label =
+          mode == "greedy"
+              ? "Greedy"
+              : mode == "exhaustive"
+                    ? "Exhaustive"
+                    : "Adaptive";
+      std::cout << mode_label << " hits: " << hits.size()
+                << " (shards=" << shards.size()
+                << " dist_calcs=" << distance_calculations
+                << " query_time_ms="
+                << format_double(query_time_ms) << ")\n";
+      for (const auto& hit : hits) {
+        std::cout << "  " << hit.id << " dist="
+                  << compute_distance(
+                         query_seq, hit.sequence)
+                  << "\n";
+      }
+      return;
+    }
     LoadedIndex loaded = load_index(index_path);
     std::cerr << "Loaded index: " << index_path
               << " signature=" << loaded.manifest.signature
@@ -1418,6 +1565,229 @@ void run_query_index_batch(const std::string& index_path,
         "query-index-batch currently supports only --mode adaptive");
   }
 
+  if (is_sharded_index(index_path)) {
+    if (!path_trace_tsv.empty()) {
+      throw std::runtime_error(
+          "path traces are not defined across sharded node-id spaces");
+    }
+    const auto shard_manifest =
+        read_sharded_index_manifest(index_path);
+    auto loaded_shards =
+        load_sharded_index(index_path, shard_manifest);
+    std::cerr << "Loaded sharded index: " << index_path
+              << " shards=" << loaded_shards.size()
+              << " sequences="
+              << shard_manifest.total_sequence_count
+              << " world_nodes="
+              << shard_manifest.total_world_node_count << "\n";
+
+    auto queries = load_reads(query_input, "ref");
+    if (queries.empty()) {
+      std::cerr << "No query reads loaded.\n";
+      return;
+    }
+    std::cerr << "Queries: " << queries.size() << "\n";
+
+    std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
+    engines.reserve(loaded_shards.size());
+    for (auto& shard : loaded_shards) {
+      engines.push_back(std::make_unique<BioGeometrySearchEngine>(
+          shard.builder, search_config));
+    }
+
+    const std::vector<std::string> columns = {
+        "query_id", "hit_id", "distance", "ref_positions", "read_id",
+        "read_len", "ref_id", "strand", "query_start",
+        "reference_start", "aligned_length", "score", "edit_distance",
+        "query_fragment", "reference_fragment", "bwt_start", "bwt_end",
+        "dist_calcs", "leaf_verify_count", "candidate_count_for_prune",
+        "beacon_prune_count", "mbb_filter_mode",
+        "mbb_scan_child_checks", "mbb_rect_index_queries",
+        "mbb_rect_candidate_children", "mbb_rect_fallback_count",
+        "mbb_surviving_child_count", "query_path_class",
+        "path_contained_step_count", "path_overlap_step_count",
+        "path_uncovered_step_count", "search_qgram_prefilter_enabled",
+        "search_prefetch_enabled", "search_qgram_q", "result_count",
+        "query_time_ms"};
+
+    std::vector<std::vector<std::string>> all_rows;
+    for (const auto& read : queries) {
+      auto query_start =
+          std::chrono::high_resolution_clock::now();
+      std::vector<std::pair<SearchResult, SearchStats>>
+          shard_results(engines.size());
+      std::vector<std::exception_ptr> shard_errors(engines.size());
+#pragma omp parallel for schedule(static) if(engines.size() > 1)
+      for (size_t shard_idx = 0;
+           shard_idx < engines.size(); ++shard_idx) {
+        try {
+          shard_results[shard_idx] =
+              engines[shard_idx]->search_adaptive(
+                  *read, tolerance);
+        } catch (...) {
+          shard_errors[shard_idx] = std::current_exception();
+        }
+      }
+      for (const auto& error : shard_errors) {
+        if (error) std::rethrow_exception(error);
+      }
+      auto query_end =
+          std::chrono::high_resolution_clock::now();
+      const double query_time_ms =
+          std::chrono::duration<double, std::milli>(
+              query_end - query_start)
+              .count();
+
+      SearchStats combined;
+      for (const auto& shard_result : shard_results) {
+        const auto& stats = shard_result.second;
+        combined.search_qgram_prefilter_enabled =
+            combined.search_qgram_prefilter_enabled ||
+            stats.search_qgram_prefilter_enabled;
+        combined.search_prefetch_enabled =
+            combined.search_prefetch_enabled ||
+            stats.search_prefetch_enabled;
+        if (stats.search_qgram_prefilter_enabled) {
+          combined.search_qgram_q = stats.search_qgram_q;
+        }
+        combined.dist_calc_count += stats.dist_calc_count;
+        combined.leaf_verify_count += stats.leaf_verify_count;
+        combined.candidate_count_for_prune +=
+            stats.candidate_count_for_prune;
+        combined.beacon_prune_count += stats.beacon_prune_count;
+        combined.mbb_scan_child_checks +=
+            stats.mbb_scan_child_checks;
+        combined.mbb_rect_index_queries +=
+            stats.mbb_rect_index_queries;
+        combined.mbb_rect_candidate_children +=
+            stats.mbb_rect_candidate_children;
+        combined.mbb_rect_fallback_count +=
+            stats.mbb_rect_fallback_count;
+        combined.mbb_surviving_child_count +=
+            stats.mbb_surviving_child_count;
+        combined.path_contained_step_count +=
+            stats.path_contained_step_count;
+        combined.path_overlap_step_count +=
+            stats.path_overlap_step_count;
+        combined.path_uncovered_step_count +=
+            stats.path_uncovered_step_count;
+      }
+
+      std::vector<BioSequence> combined_hits;
+      std::unordered_map<std::string, size_t> hit_by_sequence;
+      for (size_t shard_idx = 0;
+           shard_idx < shard_results.size(); ++shard_idx) {
+        const auto& sequence_store =
+            loaded_shards[shard_idx].builder.sequence_store();
+        for (LeafId hit_id : shard_results[shard_idx].first) {
+          const std::string_view hit_sequence =
+              sequence_store.sequence(hit_id);
+          auto inserted = hit_by_sequence.emplace(
+              std::string(hit_sequence), combined_hits.size());
+          if (inserted.second) {
+            combined_hits.push_back(
+                sequence_store.materialize(hit_id));
+          }
+          BioSequence& materialized_hit =
+              combined_hits[inserted.first->second];
+          const auto add_occurrence =
+              [&](uint32_t occurrence) {
+                const auto& contig =
+                    sequence_store.contig_for_position(
+                        occurrence);
+                const size_t local_start =
+                    static_cast<size_t>(contig.source_begin) +
+                    occurrence - contig.begin;
+                if (local_start >
+                    static_cast<size_t>(
+                        std::numeric_limits<int>::max()) -
+                        hit_sequence.size()) {
+                  throw std::runtime_error(
+                      "reference occurrence exceeds "
+                      "RefPosition integer range");
+                }
+                materialized_hit.add_occurrence(
+                    contig.id,
+                    static_cast<int>(local_start),
+                    static_cast<int>(
+                        local_start + hit_sequence.size()),
+                    "+");
+              };
+          sequence_store.for_each_occurrence(
+              hit_id, add_occurrence);
+        }
+      }
+      combined.result_count = combined_hits.size();
+      const std::vector<std::string> search_stats = {
+          mbb_filter_mode_name(search_config.mbb_filter_mode),
+          std::to_string(combined.mbb_scan_child_checks),
+          std::to_string(combined.mbb_rect_index_queries),
+          std::to_string(combined.mbb_rect_candidate_children),
+          std::to_string(combined.mbb_rect_fallback_count),
+          std::to_string(combined.mbb_surviving_child_count),
+          combined.query_path_class(),
+          std::to_string(combined.path_contained_step_count),
+          std::to_string(combined.path_overlap_step_count),
+          std::to_string(combined.path_uncovered_step_count),
+          combined.search_qgram_prefilter_enabled ? "true" : "false",
+          combined.search_prefetch_enabled ? "true" : "false",
+          std::to_string(combined.search_qgram_q),
+          std::to_string(combined.result_count),
+          format_double(query_time_ms)};
+
+      for (const auto& materialized_hit : combined_hits) {
+        const int ed =
+            compute_distance(read->seq, materialized_hit.seq);
+        const auto rows = search_results_to_tsv_rows(
+            read->id, read->seq, 0, materialized_hit, ed);
+        for (const auto& result : rows) {
+          std::vector<std::string> row = {
+              result.query_id, result.hit_id,
+              result.distance_str,
+              result.ref_positions_json, result.read_id,
+              result.read_len, result.ref_id, result.strand,
+              result.query_start, result.reference_start,
+              result.aligned_length, result.score,
+              result.edit_distance, result.query_fragment,
+              result.reference_fragment, result.bwt_start,
+              result.bwt_end,
+              std::to_string(combined.dist_calc_count),
+              std::to_string(combined.leaf_verify_count),
+              std::to_string(
+                  combined.candidate_count_for_prune),
+              std::to_string(combined.beacon_prune_count)};
+          row.insert(
+              row.end(), search_stats.begin(),
+              search_stats.end());
+          all_rows.push_back(std::move(row));
+        }
+      }
+      if (combined_hits.empty()) {
+        std::vector<std::string> row = {
+            read->id, "", "", "", read->id,
+            std::to_string(
+                static_cast<int>(read->seq.size())),
+            "", "+", "0", "0", "0", "0", "", read->seq,
+            "", "-1", "-1",
+            std::to_string(combined.dist_calc_count),
+            std::to_string(combined.leaf_verify_count),
+            std::to_string(
+                combined.candidate_count_for_prune),
+            std::to_string(combined.beacon_prune_count)};
+        row.insert(
+            row.end(), search_stats.begin(),
+            search_stats.end());
+        all_rows.push_back(std::move(row));
+      }
+    }
+    if (!out_tsv.empty()) {
+      write_tsv(out_tsv, columns, all_rows);
+    }
+    std::cerr << "Batch query rows: " << all_rows.size()
+              << "\n";
+    return;
+  }
+
   LoadedIndex loaded = load_index(index_path);
   std::cerr << "Loaded index: " << index_path
             << " signature=" << loaded.manifest.signature
@@ -1498,7 +1868,8 @@ void run_query_index_batch(const std::string& index_path,
             const auto& contig =
                 sequence_store.contig_for_position(occurrence);
             const size_t local_start =
-                static_cast<size_t>(occurrence - contig.begin);
+                static_cast<size_t>(contig.source_begin) +
+                occurrence - contig.begin;
             if (local_start >
                 static_cast<size_t>(std::numeric_limits<int>::max()) -
                     hit_sequence.size()) {
@@ -1972,6 +2343,7 @@ int main(int argc, char** argv) {
   size_t phase1_metric_min_fanout = 12;
   size_t phase1_qgram_min_fanout = 12;
   size_t phase1_qgram_max_touched = 250000;
+  size_t max_shard_windows = 0;
   int progress_interval_seconds = 600;
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
@@ -2130,6 +2502,11 @@ int main(int argc, char** argv) {
     if (a == "--error-rates" && i + 1 < argc) { error_rates_csv = argv[++i]; continue; }
     if (a == "--tolerance-rates" && i + 1 < argc) { tolerance_rates_csv = argv[++i]; continue; }
     if (a == "--prefix-lengths" && i + 1 < argc) { prefix_lengths_csv = argv[++i]; continue; }
+    if (a == "--shard-windows" && i + 1 < argc) {
+      max_shard_windows =
+          parse_positive_size(argv[++i], "--shard-windows");
+      continue;
+    }
     if (a == "--primary-radii" && i + 1 < argc) { primary_radii_csv = argv[++i]; continue; }
     if (a == "--r-sw" && i + 1 < argc) { r_sw = std::atoi(argv[++i]); continue; }
     if (a == "--r-mw" && i + 1 < argc) { r_mw = std::atoi(argv[++i]); continue; }
@@ -2461,6 +2838,18 @@ int main(int argc, char** argv) {
       run_build_scale(ref_input, window_size, stride, prefix_lengths,
                       out_tsv, hierarchy, range_config,
                       leaf_attach_direction, index_path);
+      return 0;
+    }
+    if (cmd == "build-sharded") {
+      if (ref_input.empty() || index_path.empty() ||
+          max_shard_windows == 0) {
+        std::cerr << "build-sharded requires --ref, --index, and "
+                     "--shard-windows\n";
+        return 1;
+      }
+      run_build_sharded(
+          ref_input, window_size, stride, max_shard_windows,
+          index_path, hierarchy, range_config);
       return 0;
     }
     if (cmd == "query") {

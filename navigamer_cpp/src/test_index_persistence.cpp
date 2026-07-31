@@ -256,6 +256,18 @@ void assert_reference_backed_index_round_trip() {
   assert(!brute_hits.empty());
   assert(sequence_ids(adaptive_hits) == sequence_ids(brute_hits));
 
+  navigamer::LoadedIndex structurally_loaded =
+      navigamer::load_index(
+          path,
+          navigamer::IndexLoadValidation::Structural);
+  navigamer::BioGeometrySearchEngine structural_engine(
+      structurally_loaded.builder);
+  const auto [structural_hits, structural_stats] =
+      structural_engine.search_adaptive(query, 0);
+  (void)structural_stats;
+  assert(sequence_ids(structural_hits) ==
+         sequence_ids(brute_hits));
+
   std::remove(path.c_str());
 }
 
@@ -316,7 +328,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 16);
+  assert(loaded.manifest.format_version == 17);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

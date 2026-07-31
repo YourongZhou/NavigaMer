@@ -20,9 +20,10 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer demo   [--size N] [--primary-radii 30,15,5 | --r-sw 5 --r-mw 15 --r-lw 30]
 ./navigamer build  --ref <fasta|sequence> --reads <fastq|sequence> [--index index.navidx] [same primary-layer flags]
 ./navigamer build-scale --ref <fasta|sequence> --window 250 --stride 1 --prefix-lengths 50000 --out build_scale.csv [--index index.navidx] [same primary-layer flags]
+./navigamer build-sharded --ref <fasta|sequence> --window 250 --stride 1 --shard-windows N --index index.navshard [same primary-layer flags]
 ./navigamer query  --reads <fastq|sequence> --query <sequence> [--index index.navidx] [--tolerance 2] [--mode adaptive|greedy|exhaustive]
-./navigamer query-index --index index.navidx --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
-./navigamer query-index-batch --index index.navidx --reads <fastq> [--tolerance 2] [--out out.tsv] [--path-trace-out trace.tsv]
+./navigamer query-index --index <index.navidx|index.navshard> --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
+./navigamer query-index-batch --index <index.navidx|index.navshard> --reads <fastq> [--tolerance 2] [--out out.tsv] [--path-trace-out trace.tsv]
 ./navigamer run    --ref <fasta|sequence> --reads <fastq|sequence> [--tolerance 2] [--out out.tsv]
 ./navigamer map150 --ref <fasta|sequence> --reads <fastq|sequence> --tolerance <N> --out out.tsv [--locator refpos|seqan]
 ./navigamer benchmark --ref <fasta> --reads <fastq> [--tolerance 2] [--window 200] [--stride 1] [--out out.tsv]
@@ -158,6 +159,12 @@ default. `--progress-interval-seconds N` changes the interval; zero disables
 periodic heartbeats but retains phase start/finish reports. `build-scale` can
 persist a reference-window index with `--index <file>` when exactly one prefix
 length is requested. Multiple prefixes with one output index are rejected.
+`build-sharded` instead partitions window starts into independently persisted
+v17 parts, each capped by `--shard-windows`. Reference slices overlap only
+where needed to materialize boundary windows; every window start belongs to
+exactly one part and output coordinates remain relative to the original
+contig. Valid completed parts are reused on restart, damaged parts are rebuilt,
+and new parts are installed atomically.
 
 Indexed leaf attachment directly verifies range candidates by default. Use
 `--leaf-qgram-postfilter on` to apply a safe q-gram L1 necessary condition
@@ -212,7 +219,8 @@ quality-audit time only.
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v3 binary persistence and manifest signatures |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v17 binary persistence and manifest signatures |
+| `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, bundle manifests, and validated loading |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
 | `include/io_utils.hpp`, `src/io_utils.cpp` | FASTA/FASTQ load, TSV output |
@@ -226,8 +234,14 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v3 loads those arrays directly; v1/v2 files must be rebuilt.
-`query-index` is the
+Format v17 loads the finalized arrays directly; older files must be rebuilt.
+A `.navshard` bundle points to independently loadable v17 parts.
+`query-index` and `query-index-batch` search all parts in parallel and merge
+identical sequences and their occurrences. Bundle query loading validates
+signatures, counts, mapped file bounds, layer ranges, shard coordinates, and
+the bundle checksum without an O(total nodes) rescan; build/restart reuse still
+performs full part validation. Path tracing is not supported for a bundle
+because node IDs are shard-local. `query-index` is the
 pure load-and-search command for one query, so repeated invocations include
 index load time each time. Use `locality-benchmark --index <navidx> --ref
 <fasta> --out <tsv>` or the alias `query-locality-benchmark` to load once and
@@ -294,7 +308,7 @@ records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 16
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 17
 stores the shared reference as exact chunked 2-bit ACGT plus verbatim non-ACGT
 exceptions, keeps long literal inputs only as manifest fingerprints, and stores
 one child-center-to-beacon byte per MBB cell. The child-layer radius
@@ -303,7 +317,7 @@ equivalent to testing whether the two beacon distances differ by at most the
 child radius plus query tolerance. Leaf distances remain flat bytes, avoiding
 a separate heap allocation for every child or leaf row. Finest-layer
 construction also reuses the cleared child-ID buffer for leaf IDs. Finalized
-nodes remain 32 bytes so hot node indexing is a shift instead of a multiply;
+nodes remain 24 bytes and are addressed directly by array index;
 layer offsets imply the layer ID and both radii, while the aligned leaf-distance
 array reuses the leaf ID offset. Beacon IDs use the narrowest exact per-node
 encoding: signed 8-bit or 16-bit deltas from the node center, falling back to a
@@ -343,6 +357,7 @@ For long-sequence boundary studies, `boundary` outputs one aggregated TSV row pe
 | Search q-gram on/off and scan/rect equivalence | `make test_search_qgram && ./test_search_qgram_prefilter` |
 | Safe child router no-FN / candidate superset / fallback | `make test_safe_child_router && ./test_safe_child_router_no_false_negative` |
 | Persisted index round-trip and manifest matching | `make test_index_persistence && ./test_index_persistence_bin` |
+| Sharded window/coordinate equivalence, restart, repair, and no-FN queries | `make test_sharded_index` |
 | Phase2 CPU verifier behavior | `make test_phase2_distance_verifier && ./test_phase2_distance_verifier_bin` |
 | Build heartbeat formatting and timer | `make test_build_progress` |
 

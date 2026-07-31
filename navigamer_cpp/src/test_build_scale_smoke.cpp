@@ -370,6 +370,49 @@ int main() {
                {"chr1:0", "chr2:0", "chr2:5"}));
   }
 
+  const std::string sharded_index =
+      "/tmp/navigamer_build_scale_multicontig.navshard";
+  const std::string sharded_tsv =
+      "/tmp/navigamer_build_scale_multicontig_sharded.tsv";
+  const std::string sharded_build_command =
+      "./navigamer build-sharded --ref " + multicontig_fasta +
+      " --window 4 --stride 1 --shard-windows 2 "
+      "--primary-radii 8,4,2 --progress-interval-seconds 0 "
+      "--index " + sharded_index +
+      " >/tmp/navigamer_sharded_build.stdout "
+      "2>/tmp/navigamer_sharded_build.stderr";
+  assert(std::system(sharded_build_command.c_str()) == 0);
+  const std::string sharded_query_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index-batch --index " +
+      sharded_index + " --reads " + multicontig_reads +
+      " --tolerance 0 --out " + sharded_tsv +
+      " >/tmp/navigamer_sharded_query.stdout "
+      "2>/tmp/navigamer_sharded_query.stderr";
+  assert(std::system(sharded_query_command.c_str()) == 0);
+  {
+    std::ifstream tsv(sharded_tsv);
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    const auto output_header = split_tsv_line(line);
+    std::map<std::string, size_t> output_columns;
+    for (size_t i = 0; i < output_header.size(); ++i) {
+      output_columns[output_header[i]] = i;
+    }
+    std::vector<std::string> locations;
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      assert(row[output_columns.at("hit_id")] == "chr1_0");
+      assert(row[output_columns.at("result_count")] == "1");
+      locations.push_back(
+          row[output_columns.at("ref_id")] + ":" +
+          row[output_columns.at("reference_start")]);
+    }
+    assert(locations ==
+           std::vector<std::string>(
+               {"chr1:0", "chr2:0", "chr2:5"}));
+  }
+
   std::cout << "build-scale smoke tests passed\n";
   return 0;
 }

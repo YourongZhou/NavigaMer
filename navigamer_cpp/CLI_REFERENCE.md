@@ -68,7 +68,7 @@ Used by all pipelines that build the index:
 | `--planner-allow-direct-qgram-verify` | `1` | Reserved switch for future direct q-gram verification planning; current implementation remains exact traversal only |
 | `--proximal-oracle` | `0` | Enable (`1`) or disable (`0`) query-benchmark proximal-anchor oracle diagnostics; instrumentation only |
 | `--proximal-oracle-k` | `1,2,4` | Comma-separated k values recorded in query-benchmark configuration; TSV currently emits k1/k2/k4 envelope columns |
-| `--index` | *(none)* | Persisted NavigaMer index path for `build`, single-prefix `build-scale`, `query`, and `query-index` |
+| `--index` | *(none)* | Persisted NavigaMer index or shard-manifest path for `build`, single-prefix `build-scale`, `build-sharded`, `query`, and `query-index` |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
@@ -230,7 +230,7 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 ### `build`
 
 Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
-provided, writes an array-format v3 binary index with a manifest signature,
+provided, writes an array-format v17 binary index with a manifest signature,
 build parameters, input fingerprints, sequence records, layer ranges,
 child/leaf/beacon ID arrays, MBB rows, and leaf-beacon distance rows. Older
 pointer-graph index formats are rejected and must be rebuilt.
@@ -280,6 +280,30 @@ Heartbeat lines include timestamp, phase, completed/total work items,
 percentage, elapsed time, observed rate, and ETA. Progress output never changes
 the CSV shape or persisted-index signature.
 
+### `build-sharded`
+
+Builds a lossless reference-window bundle for inputs that would exceed one
+index's 32-bit node, relationship, or MBB-array limits. Each window start is
+assigned to exactly one part. Adjacent parts store only the reference overlap
+needed to materialize boundary windows, and every emitted coordinate remains
+relative to the original contig.
+
+Each part is an ordinary v17 `.navidx` file. A completed part is reused only
+after its input fingerprint, construction signature, reference slice, contig,
+and source coordinates validate. Damaged or incompatible parts are rebuilt,
+and newly completed parts are installed atomically. The final `.navshard`
+manifest is written only after all parts are valid.
+
+**Required:** `--ref`, `--index`, `--shard-windows`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--window` | `200` | Reference-window length |
+| `--stride` | `1` | Step between window starts |
+| `--shard-windows` | *(required)* | Maximum number of window starts assigned to one shard |
+| `--index` | *(required)* | Output `.navshard` manifest; part files are created beside it |
+| `--progress-interval-seconds` | `600` | Periodic progress interval inside each shard build |
+
 ### `query`
 
 Builds an index from `--reads`, then searches for `--query`. With
@@ -300,9 +324,10 @@ that path. With `--index` and no `--reads`, `query` loads the index directly.
 
 ### `query-index`
 
-Loads a persisted index and searches `--query`. This command never rebuilds and
-does not accept `--reads`; use `query --reads ... --index ...` for automatic
-reuse-or-rebuild behavior.
+Loads a persisted index or `.navshard` bundle and searches `--query`. Bundle
+parts are searched in parallel and identical hit sequences are merged. This
+command never rebuilds and does not accept `--reads`; use
+`query --reads ... --index ...` for automatic reuse-or-rebuild behavior.
 
 **Required:** `--index`, `--query`
 
@@ -313,20 +338,24 @@ reuse-or-rebuild behavior.
 
 ### `query-index-batch`
 
-Loads one persisted index and searches every record in `--reads` without
-reloading or rebuilding the index between queries. This is the warm-load batch
-entry point used for source-sorted, duplicated-read, and near-repeat locality
+Loads one persisted index or `.navshard` bundle and searches every record in
+`--reads` without reloading or rebuilding between queries. Bundle parts are
+searched in parallel; identical sequences and all of their original-contig
+occurrences are merged before TSV output. This is the warm-load batch entry
+point used for source-sorted, duplicated-read, and near-repeat locality
 experiments. It currently supports `--mode adaptive` only; every emitted hit is
 still produced by final bounded exact edit-distance verification.
+Bundle loading checks manifests, mapped ranges, compact layer layout, shard
+coordinates, and checksums without touching every persisted node and edge.
 
-**Required:** `--index`, `--reads`, `--out`
+**Required:** `--index`, `--reads`
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--tolerance` | `2` | Max edit distance |
 | `--mode` | `adaptive` | Currently only `adaptive` is accepted |
-| `--out` | required | Per-query hit/stat TSV |
-| `--path-trace-out` | *(none)* | Optional locality trace TSV with world/leaf paths and adjacent-query overlap summaries |
+| `--out` | *(none)* | Optional per-query hit/stat TSV |
+| `--path-trace-out` | *(none)* | Optional locality trace TSV for one `.navidx`; rejected for `.navshard` because node IDs are shard-local |
 
 The main TSV includes query latency, result counts, adaptive work counters,
 `search_prefetch_enabled`, and path-class counters such as
@@ -722,6 +751,7 @@ rebinding.
 | `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_build_timing_stats` | Construction timing field and summary smoke checks |
 | `test_build_scale_smoke` | `build-scale` CSV timing smoke check |
+| `test_sharded_index_bin` | Monolithic/sharded window and coordinate equivalence, restart/repair, and adaptive no-FN checks |
 | `test_build_progress_bin` | Timestamped build progress formatting, forced boundaries, and periodic heartbeat |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |

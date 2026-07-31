@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '6'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '7'};
 constexpr size_t kReferenceChunkBases = size_t{1} << 20;
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
@@ -318,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 16) {
+  if (manifest.format_version != 17) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -719,6 +719,7 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
       write_string(out, contig.id);
       write_pod<uint32_t>(out, contig.begin);
       write_pod<uint32_t>(out, contig.end);
+      write_pod<uint32_t>(out, contig.source_begin);
     }
   }
   if (store.reference_backed) {
@@ -756,7 +757,8 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
 
 SequenceStore read_sequence_store(
     std::istream& in,
-    const std::shared_ptr<MappedIndexFile>& mapping) {
+    const std::shared_ptr<MappedIndexFile>& mapping,
+    IndexLoadValidation validation) {
   SequenceStore store;
   store.reference_backed =
       read_bool(in, "sequence_store.reference_backed");
@@ -783,11 +785,20 @@ SequenceStore read_sequence_store(
           read_pod<uint32_t>(in, "reference_contig.begin");
       contig.end =
           read_pod<uint32_t>(in, "reference_contig.end");
+      contig.source_begin =
+          read_pod<uint32_t>(in, "reference_contig.source_begin");
       if (contig.id.empty() || contig.begin != expected_begin ||
           contig.end < contig.begin ||
           contig.end > store.reference_sequence.size()) {
         throw std::runtime_error(
             "reference-backed index has invalid contig layout");
+      }
+      const size_t contig_length =
+          static_cast<size_t>(contig.end - contig.begin);
+      if (contig.source_begin >
+          std::numeric_limits<uint32_t>::max() - contig_length) {
+        throw std::runtime_error(
+            "reference-backed index has invalid source coordinates");
       }
       expected_begin = contig.end;
       store.reference_contigs.push_back(std::move(contig));
@@ -803,14 +814,16 @@ SequenceStore read_sequence_store(
     store.reference_records =
         read_final_array<ReferenceSequenceRecord>(
             in, mapping, "sequence_store.reference_records");
-    for (const auto& sequence : store.reference_records) {
-      if (sequence.source_pos >
-              store.reference_sequence.size() ||
-          store.fixed_sequence_length >
-              store.reference_sequence.size() -
-                  sequence.source_pos) {
-        throw std::runtime_error(
-            "reference-backed sequence lies outside stored reference");
+    if (validation == IndexLoadValidation::Full) {
+      for (const auto& sequence : store.reference_records) {
+        if (sequence.source_pos >
+                store.reference_sequence.size() ||
+            store.fixed_sequence_length >
+                store.reference_sequence.size() -
+                    sequence.source_pos) {
+          throw std::runtime_error(
+              "reference-backed sequence lies outside stored reference");
+        }
       }
     }
   } else {
@@ -853,33 +866,37 @@ SequenceStore read_sequence_store(
     store.singleton_occurrences =
         read_final_array<ReferenceOccurrence>(
             in, mapping, "sequence_store.singleton_occurrences");
-    ReferenceOccurrence previous;
-    bool first = true;
-    for (const auto& occurrence : store.singleton_occurrences) {
-      if (occurrence.sequence_id >= store.reference_records.size() ||
-          occurrence.source_pos >= store.reference_sequence.size() ||
-          (!first &&
-           occurrence.sequence_id <= previous.sequence_id)) {
-        throw std::runtime_error(
-            "reference-backed index has invalid singleton occurrences");
+    if (validation == IndexLoadValidation::Full) {
+      ReferenceOccurrence previous;
+      bool first = true;
+      for (const auto& occurrence : store.singleton_occurrences) {
+        if (occurrence.sequence_id >= store.reference_records.size() ||
+            occurrence.source_pos >= store.reference_sequence.size() ||
+            (!first &&
+             occurrence.sequence_id <= previous.sequence_id)) {
+          throw std::runtime_error(
+              "reference-backed index has invalid singleton occurrences");
+        }
+        previous = occurrence;
+        first = false;
       }
-      previous = occurrence;
-      first = false;
     }
     store.occurrence_groups =
         read_final_array<ReferenceOccurrenceGroup>(
             in, mapping, "sequence_store.occurrence_groups");
-    ReferenceOccurrenceGroup previous_group;
-    first = true;
-    for (const auto& group : store.occurrence_groups) {
-      if (group.sequence_id >= store.reference_records.size() ||
-          (!first &&
-           group.sequence_id <= previous_group.sequence_id)) {
-        throw std::runtime_error(
-            "reference-backed index has invalid occurrence groups");
+    if (validation == IndexLoadValidation::Full) {
+      ReferenceOccurrenceGroup previous_group;
+      bool first = true;
+      for (const auto& group : store.occurrence_groups) {
+        if (group.sequence_id >= store.reference_records.size() ||
+            (!first &&
+             group.sequence_id <= previous_group.sequence_id)) {
+          throw std::runtime_error(
+              "reference-backed index has invalid occurrence groups");
+        }
+        previous_group = group;
+        first = false;
       }
-      previous_group = group;
-      first = false;
     }
     store.grouped_occurrence_positions =
         read_final_array<uint32_t>(
@@ -908,9 +925,11 @@ void write_search_graph_view(std::ostream& out,
 
 SearchGraphView read_search_graph_view(
     std::istream& in,
-    const std::shared_ptr<MappedIndexFile>& mapping) {
+    const std::shared_ptr<MappedIndexFile>& mapping,
+    IndexLoadValidation validation) {
   SearchGraphView view;
-  view.sequences = read_sequence_store(in, mapping);
+  view.sequences =
+      read_sequence_store(in, mapping, validation);
   view.node_records = read_final_array<WorldNodeRecord>(
       in, mapping, "node_records");
   view.layer_begin = read_u32_vector(in, "layer_begin");
@@ -930,6 +949,27 @@ SearchGraphView read_search_graph_view(
   view.leaf_beacon_dists =
       read_final_array<uint8_t>(in, mapping, "leaf_beacon_dists");
   return view;
+}
+
+bool validate_structural_layout(
+    const BioGeometryIndexBuilder& builder) {
+  const auto& view = builder.search_graph_view();
+  const size_t layer_count =
+      builder.hierarchy_config().primary_radii.size();
+  if (view.layer_begin.size() != layer_count ||
+      view.layer_end.size() != layer_count) {
+    return false;
+  }
+  uint32_t expected_begin = 0;
+  for (size_t layer = 0; layer < layer_count; ++layer) {
+    if (view.layer_begin[layer] != expected_begin ||
+        view.layer_end[layer] < view.layer_begin[layer] ||
+        view.layer_end[layer] > view.node_records.size()) {
+      return false;
+    }
+    expected_begin = view.layer_end[layer];
+  }
+  return expected_begin == view.node_records.size();
 }
 
 }  // namespace
@@ -1002,7 +1042,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 16) {
+  if (manifest.format_version != 17) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1046,7 +1086,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 16;
+  stored.format_version = 17;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -1062,13 +1102,15 @@ void save_index(const std::string& path,
   if (!out) throw std::runtime_error("failed to write index output: " + path);
 }
 
-LoadedIndex load_index(const std::string& path) {
+LoadedIndex load_index(
+    const std::string& path,
+    IndexLoadValidation validation) {
   const auto mapping = map_index_file(path);
   std::ifstream in(path, std::ios::binary);
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 16) {
+  if (manifest.format_version != 17) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1083,7 +1125,8 @@ LoadedIndex load_index(const std::string& path) {
       HierarchyConfig(manifest.primary_radii, manifest.auxiliary_radii),
       range_config);
 
-  SearchGraphView view = read_search_graph_view(in, mapping);
+  SearchGraphView view =
+      read_search_graph_view(in, mapping, validation);
   if (view.sequences.size() != manifest.sequence_count ||
       view.node_records.size() != manifest.world_node_count ||
       view.child_ids.size() != manifest.edge_count ||
@@ -1094,7 +1137,12 @@ LoadedIndex load_index(const std::string& path) {
   IndexPersistenceAccess::reset_loaded_array_state(
       builder, std::move(view), manifest);
 
-  if (!builder.validate_integer_ids() || !builder.validate_search_graph_view()) {
+  const bool valid =
+      validation == IndexLoadValidation::Full
+          ? builder.validate_integer_ids() &&
+                builder.validate_search_graph_view()
+          : validate_structural_layout(builder);
+  if (!valid) {
     throw std::runtime_error("loaded NavigaMer index failed validation");
   }
 

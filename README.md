@@ -37,7 +37,7 @@ without rescanning the reference. No per-window
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 16 stores the shared
+edit distance fits in one byte. Persisted format version 17 stores the shared
 reference as exact chunked 2-bit ACGT plus verbatim non-ACGT exceptions, and
 keeps long literal inputs in the manifest only as content fingerprints. It
 stores one child-center-to-beacon distance per MBB cell instead of separate
@@ -46,7 +46,7 @@ child-layer radius; equivalently, a child survives exactly when the two beacon
 distances
 differ by at most `child_radius + tolerance`. Leaf distances are also flat
 bytes, and finest-layer nodes reuse their cleared child buffer for leaf IDs.
-Finalized nodes remain cache-friendly 32-byte records containing only the
+Finalized nodes remain cache-friendly 24-byte records containing only the
 center ID and shared array offsets/counts. Layer arrays imply both the layer ID
 and its radii, while
 `leaf_begin` also addresses the aligned leaf-distance array. Parent beacon IDs
@@ -96,6 +96,8 @@ cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
 ./navigamer build --ref ref --reads ACGTACGTACGTACGT --index /tmp/navigamer.navidx
 ./navigamer query-index --index /tmp/navigamer.navidx --query ACGTACGTACGTACGT --tolerance 2
+./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000000 --index /tmp/human.navshard
+./navigamer query-index-batch --index /tmp/human.navshard --reads reads.fastq --tolerance 2 --out /tmp/hits.tsv
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
@@ -169,7 +171,7 @@ loads that persisted `.navidx` once and calls `navigamer query-index-batch`;
 without it, the bridge falls back to `navigamer benchmark` on reference windows.
 
 The C++ `build` and `query` commands support explicit persisted indexes with
-`--index <file>`. The v3 index file stores a manifest with input fingerprints
+`--index <file>`. The v17 index file stores a manifest with input fingerprints
 and construction parameters plus the canonical sequence, node, child, leaf,
 beacon, MBB, and leaf-beacon arrays. Older pointer-graph index files must be
 rebuilt. `query --index <file> --query <seq>` and
@@ -188,6 +190,21 @@ path are rejected instead of overwriting the file. Builds emit timestamped
 phase progress to stderr every 600 seconds by default; use
 `--progress-interval-seconds N` to change the interval or `0` to disable
 periodic heartbeats while retaining phase-boundary reports.
+
+For references that exceed one index's 32-bit array limits,
+`build-sharded` assigns each valid window start to exactly one shard. Adjacent
+shards retain only the reference overlap required to materialize their last
+windows, so neither windows nor original contig coordinates are lost.
+Completed shard files are content- and parameter-validated and reused after an
+interrupted build; new shards are installed atomically. The final
+`.navshard` manifest contains relative paths to ordinary v17 `.navidx` parts.
+`query-index` and `query-index-batch` search the parts in parallel and merge
+identical sequences and all of their occurrences before reporting results.
+Query loading validates signatures, counts, file bounds, layer ranges, shard
+coordinates, and the bundle checksum without rescanning every mapped node or
+edge; completed or resumed builds perform the full per-part validation.
+Path traces are unavailable for a shard bundle because node IDs are local to
+each part.
 
 Indexed construction supports exact `auto`, `pigeonhole`, `qgram`, `hybrid`,
 and `full` candidate modes. Q-gram filtering uses the necessary condition
