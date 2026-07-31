@@ -365,6 +365,14 @@ void test_seed_router_no_false_negatives() {
   assert(router.packed_shard_ids.is_mapped());
   const auto shards = navigamer::load_sharded_index(
       bundle.string(), rebuilt_manifest);
+  const auto subset = navigamer::load_sharded_index(
+      bundle.string(), rebuilt_manifest,
+      std::vector<uint32_t>{1, 3});
+  assert(subset.size() == 2);
+  assert(subset[0].builder.num_sequences() ==
+         rebuilt_manifest.shards[1].sequence_count);
+  assert(subset[1].builder.num_sequences() ==
+         rebuilt_manifest.shards[3].sequence_count);
 
   const std::vector<size_t> source_positions = {
       0, 1, 50, 98, 99, 100, 101, 198, 199,

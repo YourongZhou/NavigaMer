@@ -1022,7 +1022,6 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
     if (is_sharded_index(index_path)) {
       const auto manifest =
           read_sharded_index_manifest(index_path);
-      auto shards = load_sharded_index(index_path, manifest);
       ShardedSeedRouter shard_router;
       try {
         shard_router = load_sharded_seed_router(
@@ -1031,8 +1030,22 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
         std::cerr << "Shard router disabled: " << error.what()
                   << " (searching all shards)\n";
       }
+      BioSequence query("query", query_seq);
+      const auto route = shard_router.select(query.seq, tolerance);
+      std::vector<uint32_t> active_shard_ids;
+      if (route.enabled) {
+        active_shard_ids = route.shard_ids;
+      } else {
+        active_shard_ids.resize(manifest.shards.size());
+        std::iota(
+            active_shard_ids.begin(), active_shard_ids.end(),
+            uint32_t{0});
+      }
+      auto shards = load_sharded_index(
+          index_path, manifest, active_shard_ids);
       std::cerr << "Loaded sharded index: " << index_path
                 << " shards=" << shards.size()
+                << "/" << manifest.shards.size()
                 << " sequences=" << manifest.total_sequence_count
                 << " world_nodes="
                 << manifest.total_world_node_count << "\n";
@@ -1044,10 +1057,7 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
             std::make_unique<BioGeometrySearchEngine>(
                 shard.builder, search_config));
       }
-      BioSequence query("query", query_seq);
-      const auto route = shard_router.select(query.seq, tolerance);
-      const size_t active_shard_count =
-          route.enabled ? route.shard_ids.size() : shards.size();
+      const size_t active_shard_count = shards.size();
       std::vector<std::pair<SearchResult, SearchStats>>
           shard_results(active_shard_count);
       std::vector<std::exception_ptr> shard_errors(active_shard_count);
@@ -1056,20 +1066,18 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
 #pragma omp parallel for schedule(static) if(active_shard_count > 1)
       for (size_t active_idx = 0;
            active_idx < active_shard_count; ++active_idx) {
-        const size_t shard_idx =
-            route.enabled ? route.shard_ids[active_idx] : active_idx;
         try {
           if (mode == "greedy") {
             shard_results[active_idx] =
-                engines[shard_idx]->search_greedy(
+                engines[active_idx]->search_greedy(
                     query, tolerance);
           } else if (mode == "exhaustive") {
             shard_results[active_idx] =
-                engines[shard_idx]->search_exhaustive(
+                engines[active_idx]->search_exhaustive(
                     query, tolerance);
           } else {
             shard_results[active_idx] =
-                engines[shard_idx]->search_adaptive(
+                engines[active_idx]->search_adaptive(
                     query, tolerance);
           }
         } catch (...) {
@@ -1092,12 +1100,10 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
       size_t distance_calculations = 0;
       for (size_t active_idx = 0;
            active_idx < shard_results.size(); ++active_idx) {
-        const size_t shard_idx =
-            route.enabled ? route.shard_ids[active_idx] : active_idx;
         distance_calculations +=
             shard_results[active_idx].second.dist_calc_count;
         const auto& store =
-            shards[shard_idx].builder.sequence_store();
+            shards[active_idx].builder.sequence_store();
         for (LeafId hit_id :
              shard_results[active_idx].first) {
           std::string sequence(store.sequence(hit_id));
@@ -1123,7 +1129,7 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
       std::cout << mode_label << " hits: " << hits.size()
                 << " (shards="
                 << active_shard_count
-                << "/" << shards.size()
+                << "/" << manifest.shards.size()
                 << " dist_calcs=" << distance_calculations
                 << " query_time_ms="
                 << format_double(query_time_ms) << ")\n";
@@ -1595,8 +1601,6 @@ void run_query_index_batch(const std::string& index_path,
     }
     const auto shard_manifest =
         read_sharded_index_manifest(index_path);
-    auto loaded_shards =
-        load_sharded_index(index_path, shard_manifest);
     ShardedSeedRouter shard_router;
     try {
       shard_router = load_sharded_seed_router(
@@ -1605,12 +1609,6 @@ void run_query_index_batch(const std::string& index_path,
       std::cerr << "Shard router disabled: " << error.what()
                 << " (searching all shards)\n";
     }
-    std::cerr << "Loaded sharded index: " << index_path
-              << " shards=" << loaded_shards.size()
-              << " sequences="
-              << shard_manifest.total_sequence_count
-              << " world_nodes="
-              << shard_manifest.total_world_node_count << "\n";
 
     auto queries = load_reads(query_input, "ref");
     if (queries.empty()) {
@@ -1619,13 +1617,85 @@ void run_query_index_batch(const std::string& index_path,
     }
     std::cerr << "Queries: " << queries.size() << "\n";
 
+    std::vector<ShardRouteSelection> query_routes;
+    query_routes.reserve(queries.size());
+    std::vector<double> query_route_ms;
+    query_route_ms.reserve(queries.size());
+    std::vector<uint8_t> required_shard_bits(
+        shard_manifest.shards.size(), uint8_t{0});
+    bool load_all_shards = false;
+    size_t routed_queries = 0;
+    for (const auto& query : queries) {
+      const auto route_start =
+          std::chrono::high_resolution_clock::now();
+      auto route = shard_router.select(query->seq, tolerance);
+      const auto route_end =
+          std::chrono::high_resolution_clock::now();
+      query_route_ms.push_back(
+          std::chrono::duration<double, std::milli>(
+              route_end - route_start)
+              .count());
+      if (!route.enabled) {
+        load_all_shards = true;
+      } else {
+        ++routed_queries;
+        for (uint32_t shard_id : route.shard_ids) {
+          required_shard_bits[shard_id] = 1;
+        }
+      }
+      query_routes.push_back(std::move(route));
+    }
+
+    std::vector<uint32_t> loaded_shard_ids;
+    if (load_all_shards) {
+      loaded_shard_ids.resize(shard_manifest.shards.size());
+      std::iota(
+          loaded_shard_ids.begin(), loaded_shard_ids.end(),
+          uint32_t{0});
+    } else {
+      for (size_t shard_id = 0;
+           shard_id < required_shard_bits.size(); ++shard_id) {
+        if (required_shard_bits[shard_id]) {
+          loaded_shard_ids.push_back(
+              static_cast<uint32_t>(shard_id));
+        }
+      }
+    }
+    std::vector<uint32_t> shard_to_loaded(
+        shard_manifest.shards.size(), UINT32_MAX);
+    for (size_t loaded_idx = 0;
+         loaded_idx < loaded_shard_ids.size(); ++loaded_idx) {
+      shard_to_loaded[loaded_shard_ids[loaded_idx]] =
+          static_cast<uint32_t>(loaded_idx);
+    }
+    for (auto& route : query_routes) {
+      if (!route.enabled) continue;
+      for (uint32_t& shard_id : route.shard_ids) {
+        const uint32_t loaded_idx = shard_to_loaded[shard_id];
+        if (loaded_idx == UINT32_MAX) {
+          throw std::runtime_error(
+              "routed shard was not selected for loading");
+        }
+        shard_id = loaded_idx;
+      }
+    }
+
+    auto loaded_shards = load_sharded_index(
+        index_path, shard_manifest, loaded_shard_ids);
+    std::cerr << "Loaded sharded index: " << index_path
+              << " shards=" << loaded_shards.size()
+              << "/" << shard_manifest.shards.size()
+              << " sequences="
+              << shard_manifest.total_sequence_count
+              << " world_nodes="
+              << shard_manifest.total_world_node_count << "\n";
+
     std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
     engines.reserve(loaded_shards.size());
     for (auto& shard : loaded_shards) {
       engines.push_back(std::make_unique<BioGeometrySearchEngine>(
           shard.builder, search_config));
     }
-    size_t routed_queries = 0;
     size_t searched_shards = 0;
 
     const std::vector<std::string> columns = {
@@ -1644,13 +1714,14 @@ void run_query_index_batch(const std::string& index_path,
         "query_time_ms"};
 
     std::vector<std::vector<std::string>> all_rows;
-    for (const auto& read : queries) {
+    for (size_t query_idx = 0;
+         query_idx < queries.size(); ++query_idx) {
+      const auto& read = queries[query_idx];
       auto query_start =
           std::chrono::high_resolution_clock::now();
-      const auto route = shard_router.select(read->seq, tolerance);
+      const auto& route = query_routes[query_idx];
       const size_t active_shard_count =
           route.enabled ? route.shard_ids.size() : engines.size();
-      if (route.enabled) ++routed_queries;
       searched_shards += active_shard_count;
       std::vector<std::pair<SearchResult, SearchStats>>
           shard_results(active_shard_count);
@@ -1676,7 +1747,7 @@ void run_query_index_batch(const std::string& index_path,
       const double query_time_ms =
           std::chrono::duration<double, std::milli>(
               query_end - query_start)
-              .count();
+              .count() + query_route_ms[query_idx];
 
       SearchStats combined;
       for (const auto& shard_result : shard_results) {
@@ -1829,7 +1900,8 @@ void run_query_index_batch(const std::string& index_path,
               << " routed_queries=" << routed_queries
               << "/" << queries.size()
               << " searched_shards=" << searched_shards
-              << "/" << queries.size() * engines.size()
+              << "/" <<
+                  queries.size() * shard_manifest.shards.size()
               << "\n";
     return;
   }

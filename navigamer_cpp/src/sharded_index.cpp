@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <numeric>
 #include <omp.h>
 #include <queue>
 #include <sstream>
@@ -1302,41 +1303,62 @@ ShardedIndexManifest build_sharded_reference_index(
   return manifest;
 }
 
+LoadedIndex load_sharded_index_part(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    uint32_t shard_id) {
+  if (shard_id >= manifest.shards.size()) {
+    throw std::out_of_range("sharded index part ID is out of range");
+  }
+  const auto& descriptor = manifest.shards[shard_id];
+  LoadedIndex loaded = load_index(
+      resolve_index_shard_path(
+          manifest_path, descriptor.path),
+      IndexLoadValidation::Structural);
+  const auto& store = loaded.builder.sequence_store();
+  if (!store.reference_backed ||
+      loaded.manifest.signature != manifest.part_signature ||
+      store.fixed_sequence_length != manifest.window_length ||
+      store.reference_contigs.size() != 1) {
+    throw std::runtime_error(
+        "sharded index part has incompatible sequence storage");
+  }
+  const auto& contig = store.reference_contigs.front();
+  const size_t source_end =
+      static_cast<size_t>(contig.source_begin) +
+      contig.end - contig.begin;
+  if (contig.id != descriptor.ref_id ||
+      contig.source_begin != descriptor.source_begin ||
+      source_end != descriptor.source_end ||
+      store.size() != descriptor.sequence_count ||
+      loaded.builder.num_world_nodes() !=
+          descriptor.world_node_count) {
+    throw std::runtime_error(
+        "sharded index part does not match its descriptor");
+  }
+  return loaded;
+}
+
+std::vector<LoadedIndex> load_sharded_index(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    const std::vector<uint32_t>& shard_ids) {
+  validate_manifest(manifest);
+  std::vector<LoadedIndex> loaded;
+  loaded.reserve(shard_ids.size());
+  for (uint32_t shard_id : shard_ids) {
+    loaded.push_back(load_sharded_index_part(
+        manifest_path, manifest, shard_id));
+  }
+  return loaded;
+}
+
 std::vector<LoadedIndex> load_sharded_index(
     const std::string& manifest_path,
     const ShardedIndexManifest& manifest) {
-  validate_manifest(manifest);
-  std::vector<LoadedIndex> loaded;
-  loaded.reserve(manifest.shards.size());
-  for (const auto& descriptor : manifest.shards) {
-    loaded.push_back(load_index(
-        resolve_index_shard_path(
-            manifest_path, descriptor.path),
-        IndexLoadValidation::Structural));
-    const auto& store = loaded.back().builder.sequence_store();
-    if (!store.reference_backed ||
-        loaded.back().manifest.signature !=
-            manifest.part_signature ||
-        store.fixed_sequence_length != manifest.window_length ||
-        store.reference_contigs.size() != 1) {
-      throw std::runtime_error(
-          "sharded index part has incompatible sequence storage");
-    }
-    const auto& contig = store.reference_contigs.front();
-    const size_t source_end =
-        static_cast<size_t>(contig.source_begin) +
-        contig.end - contig.begin;
-    if (contig.id != descriptor.ref_id ||
-        contig.source_begin != descriptor.source_begin ||
-        source_end != descriptor.source_end ||
-        store.size() != descriptor.sequence_count ||
-        loaded.back().builder.num_world_nodes() !=
-            descriptor.world_node_count) {
-      throw std::runtime_error(
-          "sharded index part does not match its descriptor");
-    }
-  }
-  return loaded;
+  std::vector<uint32_t> shard_ids(manifest.shards.size());
+  std::iota(shard_ids.begin(), shard_ids.end(), uint32_t{0});
+  return load_sharded_index(manifest_path, manifest, shard_ids);
 }
 
 }  // namespace navigamer

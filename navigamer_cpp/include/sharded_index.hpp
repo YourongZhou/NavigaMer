@@ -95,6 +95,11 @@ std::vector<LoadedIndex> load_sharded_index(
     const std::string& manifest_path,
     const ShardedIndexManifest& manifest);
 
+std::vector<LoadedIndex> load_sharded_index(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    const std::vector<uint32_t>& shard_ids);
+
 }  // namespace navigamer
 
 #endif  // NAVIGAMER_SHARDED_INDEX_HPP

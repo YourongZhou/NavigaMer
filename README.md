@@ -230,8 +230,10 @@ containing at least one seed minimizer. The pigeonhole principle makes this a
 necessary condition for an edit-distance
 hit, not a heuristic. Short or ambiguous unsupported queries, and missing or
 invalid router sidecars, conservatively search every shard. `query-index` and
-`query-index-batch` search the selected parts in parallel and merge identical
-sequences and all of their occurrences before reporting results.
+`query-index-batch` load only the routed shard or the union required by the
+batch, search those parts in parallel, and merge identical sequences and all
+of their occurrences before reporting results. A fallback query loads every
+shard to preserve recall.
 Router construction writes each completed shard's sorted 32-bit minimizer list
 to a page-aligned temporary spool, then memory-maps and k-way merges the lists
 directly into the sidecar. Consumed pages are released as the merge advances,

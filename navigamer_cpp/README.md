@@ -249,7 +249,9 @@ within edit distance `d` must contain one whole block exactly, so omitting
 shards without any of those minimizers is no-FN-safe. Unsupported
 short/ambiguous queries or an unavailable sidecar fall
 back to every part. `query-index` and `query-index-batch` search selected parts
-in parallel and merge identical sequences and their occurrences. Bundle query
+in parallel and merge identical sequences and their occurrences. Single-query
+loading maps only routed parts; batch loading maps the union of all routed
+parts. Any fallback query conservatively loads every part. Bundle query
 loading validates signatures, counts, mapped file bounds, layer ranges, shard coordinates, and
 the bundle checksum without an O(total nodes) rescan; build/restart reuse still
 performs full part validation. Path tracing is not supported for a bundle
