@@ -1,12 +1,15 @@
 #include "index_persistence.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 
@@ -14,7 +17,9 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '1'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '1', '2'};
+constexpr size_t kReferenceChunkBases = size_t{1} << 20;
+constexpr size_t kMaxStoredInputDescriptor = 4096;
 
 template <typename T>
 void write_pod(std::ostream& out, const T& value) {
@@ -112,8 +117,27 @@ bool file_exists(const std::string& path) {
   return in.good();
 }
 
+bool is_literal_fingerprint(const std::string& value) {
+  constexpr std::string_view prefix = "literal:";
+  if (value.compare(0, prefix.size(), prefix) != 0) return false;
+  const size_t separator = value.find(':', prefix.size());
+  if (separator == std::string::npos ||
+      separator == prefix.size() ||
+      value.size() - separator - 1 != 16) {
+    return false;
+  }
+  for (size_t i = prefix.size(); i < separator; ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(value[i]))) return false;
+  }
+  for (size_t i = separator + 1; i < value.size(); ++i) {
+    if (!std::isxdigit(static_cast<unsigned char>(value[i]))) return false;
+  }
+  return true;
+}
+
 std::string fingerprint_input(const std::string& value) {
   if (!file_exists(value)) {
+    if (is_literal_fingerprint(value)) return value;
     return "literal:" + std::to_string(value.size()) + ":" + hash_string(value);
   }
 
@@ -241,7 +265,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 11) {
+  if (manifest.format_version != 12) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -444,11 +468,122 @@ std::vector<uint8_t> read_u8_vector(
   return values;
 }
 
+uint8_t packed_base_code(char base, bool* canonical) {
+  *canonical = true;
+  switch (base) {
+    case 'A': return 0;
+    case 'C': return 1;
+    case 'G': return 2;
+    case 'T': return 3;
+    default:
+      *canonical = false;
+      return 0;
+  }
+}
+
+void write_packed_reference(std::ostream& out,
+                            const std::string& reference) {
+  write_size(out, reference.size());
+  const size_t chunk_count =
+      reference.size() / kReferenceChunkBases +
+      (reference.size() % kReferenceChunkBases != 0);
+  write_size(out, chunk_count);
+  for (size_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
+    const size_t chunk_begin = chunk_idx * kReferenceChunkBases;
+    const size_t chunk_bases = std::min(
+        kReferenceChunkBases, reference.size() - chunk_begin);
+    std::vector<uint8_t> packed((chunk_bases + 3) / 4, 0);
+    std::vector<uint8_t> exception_mask((chunk_bases + 7) / 8, 0);
+    std::vector<uint8_t> exceptions;
+    for (size_t offset = 0; offset < chunk_bases; ++offset) {
+      bool canonical = false;
+      const char base = reference[chunk_begin + offset];
+      const uint8_t code = packed_base_code(base, &canonical);
+      packed[offset / 4] |=
+          static_cast<uint8_t>(code << (2 * (offset % 4)));
+      if (!canonical) {
+        exception_mask[offset / 8] |=
+            static_cast<uint8_t>(uint8_t{1} << (offset % 8));
+        exceptions.push_back(static_cast<uint8_t>(base));
+      }
+    }
+    if (exceptions.empty()) exception_mask.clear();
+    write_size(out, chunk_bases);
+    write_u8_vector(out, packed);
+    write_u8_vector(out, exception_mask);
+    write_u8_vector(out, exceptions);
+  }
+}
+
+std::string read_packed_reference(std::istream& in) {
+  const size_t reference_size =
+      read_size(in, "sequence_store.reference_size");
+  const size_t chunk_count =
+      read_size(in, "sequence_store.reference_chunk_count");
+  const size_t expected_chunk_count =
+      reference_size / kReferenceChunkBases +
+      (reference_size % kReferenceChunkBases != 0);
+  if (chunk_count != expected_chunk_count) {
+    throw std::runtime_error(
+        "reference-backed index has invalid packed chunk count");
+  }
+
+  static constexpr std::array<char, 4> kBases = {'A', 'C', 'G', 'T'};
+  std::string reference(reference_size, '\0');
+  size_t chunk_begin = 0;
+  for (size_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
+    const size_t expected_chunk_bases = std::min(
+        kReferenceChunkBases, reference_size - chunk_begin);
+    const size_t chunk_bases =
+        read_size(in, "sequence_store.reference_chunk_bases");
+    if (chunk_bases != expected_chunk_bases) {
+      throw std::runtime_error(
+          "reference-backed index has invalid packed chunk length");
+    }
+    const auto packed =
+        read_u8_vector(in, "sequence_store.reference_packed_bases");
+    const auto exception_mask =
+        read_u8_vector(in, "sequence_store.reference_exception_mask");
+    const auto exceptions =
+        read_u8_vector(in, "sequence_store.reference_exceptions");
+    if (packed.size() != (chunk_bases + 3) / 4 ||
+        (!exception_mask.empty() &&
+         exception_mask.size() != (chunk_bases + 7) / 8) ||
+        (exception_mask.empty() && !exceptions.empty())) {
+      throw std::runtime_error(
+          "reference-backed index has invalid packed reference arrays");
+    }
+
+    size_t exception_idx = 0;
+    for (size_t offset = 0; offset < chunk_bases; ++offset) {
+      const uint8_t code = static_cast<uint8_t>(
+          (packed[offset / 4] >> (2 * (offset % 4))) & 3);
+      char base = kBases[code];
+      if (!exception_mask.empty() &&
+          (exception_mask[offset / 8] &
+           static_cast<uint8_t>(uint8_t{1} << (offset % 8)))) {
+        if (exception_idx >= exceptions.size()) {
+          throw std::runtime_error(
+              "reference-backed index has truncated reference exceptions");
+        }
+        base = static_cast<char>(exceptions[exception_idx++]);
+      }
+      reference[chunk_begin + offset] = base;
+    }
+    if (exception_idx != exceptions.size()) {
+      throw std::runtime_error(
+          "reference-backed index has excess reference exceptions");
+    }
+    chunk_begin += chunk_bases;
+  }
+  return reference;
+}
+
 void write_sequence_store(std::ostream& out, const SequenceStore& store) {
   write_bool(out, store.reference_backed);
   if (store.reference_backed) {
     write_string(out, store.reference_id);
-    write_string(out, store.reference_sequence);
+    write_packed_reference(out, store.reference_sequence);
     write_size(out, store.fixed_sequence_length);
     write_size(out, store.reference_contigs.size());
     for (const auto& contig : store.reference_contigs) {
@@ -495,7 +630,7 @@ SequenceStore read_sequence_store(std::istream& in) {
     store.reference_id =
         read_string(in, "sequence_store.reference_id");
     store.reference_sequence =
-        read_string(in, "sequence_store.reference_sequence");
+        read_packed_reference(in);
     store.fixed_sequence_length =
         read_size(in, "sequence_store.fixed_sequence_length");
     if (store.fixed_sequence_length == 0) {
@@ -690,10 +825,17 @@ IndexBuildManifest make_index_manifest(
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config) {
   IndexBuildManifest manifest;
-  manifest.ref_input = ref_input;
-  manifest.reads_input = reads_input;
   manifest.ref_fingerprint = fingerprint_input(ref_input);
   manifest.reads_fingerprint = fingerprint_input(reads_input);
+  manifest.ref_input =
+      !file_exists(ref_input) && ref_input.size() > kMaxStoredInputDescriptor
+          ? manifest.ref_fingerprint
+          : ref_input;
+  manifest.reads_input =
+      !file_exists(reads_input) &&
+              reads_input.size() > kMaxStoredInputDescriptor
+          ? manifest.reads_fingerprint
+          : reads_input;
   manifest.primary_radii = hierarchy.primary_radii;
   manifest.auxiliary_radii = hierarchy.auxiliary_radii;
   manifest.link_mode = build_range_mode_name(range_config.link_mode);
@@ -745,7 +887,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 11) {
+  if (manifest.format_version != 12) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -789,7 +931,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 11;
+  stored.format_version = 12;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -810,7 +952,7 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 11) {
+  if (manifest.format_version != 12) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }

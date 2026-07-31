@@ -280,7 +280,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 11);
+  assert(loaded.manifest.format_version == 12);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.additional_occurrences ==
          store.additional_occurrences);
@@ -321,6 +321,44 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   std::remove(index_path.c_str());
 }
 
+void assert_chunked_reference_encoding_is_exact() {
+  const std::string index_path =
+      "/tmp/navigamer_test_chunked_reference.navidx";
+  std::remove(index_path.c_str());
+
+  constexpr size_t kChunkBoundary = size_t{1} << 20;
+  std::string reference(kChunkBoundary + 37, 'C');
+  reference.replace(0, 4, "ACGT");
+  reference[kChunkBoundary - 1] = 'N';
+  reference[kChunkBoundary] = 'R';
+  reference[kChunkBoundary + 1] = 'a';
+
+  navigamer::BuildRangeConfig build_config;
+  navigamer::HierarchyConfig hierarchy({8, 4, 2});
+  navigamer::BioGeometryIndexBuilder built(hierarchy, build_config);
+  built.build_reference_windows(
+      "chunked", reference, 4, reference.size());
+  auto manifest = navigamer::make_reference_window_index_manifest(
+      reference, reference.size(), 4,
+      static_cast<int>(reference.size()), hierarchy, build_config);
+  assert(manifest.ref_input.size() < reference.size());
+  navigamer::save_index(index_path, built, manifest);
+
+  std::ifstream stored(index_path, std::ios::binary | std::ios::ate);
+  assert(stored);
+  assert(static_cast<size_t>(stored.tellg()) < reference.size());
+
+  const auto loaded = navigamer::load_index(index_path);
+  assert(loaded.builder.sequence_store().reference_sequence == reference);
+  assert(loaded.builder.validate_integer_ids());
+  const auto reconstructed_manifest =
+      navigamer::make_reference_window_index_manifest(
+          loaded.manifest.ref_input, reference.size(), 4,
+          static_cast<int>(reference.size()), hierarchy, build_config);
+  assert(reconstructed_manifest.signature == loaded.manifest.signature);
+  std::remove(index_path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -329,6 +367,7 @@ int main() {
   assert_reference_window_manifest_tracks_slicing_parameters();
   assert_reference_backed_index_round_trip();
   assert_multicontig_invalid_base_and_occurrence_round_trip();
+  assert_chunked_reference_encoding_is_exact();
   std::cout << "index persistence tests passed\n";
   return 0;
 }
