@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -14,17 +16,48 @@
 #include <type_traits>
 #include <utility>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace navigamer {
 
 namespace {
 
 constexpr std::array<char, 8> kShardMagic = {
-    'N', 'G', 'S', 'H', 'R', 'D', '0', '1'};
-constexpr uint32_t kShardFormatVersion = 1;
+    'N', 'G', 'S', 'H', 'R', 'D', '0', '2'};
+constexpr std::array<char, 8> kRouterMagic = {
+    'N', 'G', 'R', 'O', 'U', 'T', '0', '1'};
+constexpr uint32_t kShardFormatVersion = 2;
+constexpr uint32_t kRouterFormatVersion = 1;
+constexpr uint32_t kRouterK = 16;
+constexpr uint32_t kRouterWindow = 64;
 constexpr uint64_t kMaxShardCount = uint64_t{1} << 20;
 constexpr uint64_t kMaxStringLength = uint64_t{1} << 30;
 constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
 constexpr uint64_t kFnvPrime = 1099511628211ULL;
+
+class MappedRouterFile {
+ public:
+  MappedRouterFile(void* address, size_t size)
+      : address_(address), size_(size) {}
+  ~MappedRouterFile() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (address_ && size_ != 0) munmap(address_, size_);
+#endif
+  }
+  const uint8_t* data() const {
+    return static_cast<const uint8_t*>(address_);
+  }
+  size_t size() const { return size_; }
+
+ private:
+  void* address_ = nullptr;
+  size_t size_ = 0;
+};
 
 template <typename T>
 void write_pod(std::ostream& out, T value) {
@@ -111,6 +144,10 @@ uint64_t manifest_checksum(
   hash_pod<uint64_t>(&hash, manifest.total_window_count);
   hash_pod<uint64_t>(&hash, manifest.total_sequence_count);
   hash_pod<uint64_t>(&hash, manifest.total_world_node_count);
+  hash_pod<uint32_t>(&hash, manifest.router_k);
+  hash_pod<uint32_t>(&hash, manifest.router_window);
+  hash_pod<uint64_t>(&hash, manifest.router_entry_count);
+  hash_pod<uint64_t>(&hash, manifest.router_checksum);
   hash_string(&hash, manifest.part_signature);
   hash_pod<uint64_t>(&hash, manifest.shards.size());
   for (const auto& shard : manifest.shards) {
@@ -123,6 +160,116 @@ uint64_t manifest_checksum(
     hash_pod<uint64_t>(&hash, shard.world_node_count);
   }
   return hash;
+}
+
+std::filesystem::path router_output_path(
+    const std::filesystem::path& bundle_path) {
+  return bundle_path.string() + ".route";
+}
+
+uint64_t router_checksum(
+    uint32_t k, uint32_t window, uint32_t shard_count,
+    const uint64_t* entries, size_t entry_count) {
+  if (entry_count >
+      std::numeric_limits<size_t>::max() / sizeof(uint64_t)) {
+    throw std::runtime_error("shard router checksum size overflow");
+  }
+  uint64_t hash = kFnvOffset;
+  hash_pod<uint32_t>(&hash, kRouterFormatVersion);
+  hash_pod<uint32_t>(&hash, k);
+  hash_pod<uint32_t>(&hash, window);
+  hash_pod<uint32_t>(&hash, shard_count);
+  hash_pod<uint64_t>(&hash, entry_count);
+  if (entry_count != 0) {
+    hash_bytes(&hash, entries, entry_count * sizeof(uint64_t));
+  }
+  return hash;
+}
+
+int dna_code(char base) {
+  switch (base) {
+    case 'A': case 'a': return 0;
+    case 'C': case 'c': return 1;
+    case 'G': case 'g': return 2;
+    case 'T': case 't': return 3;
+    default: return -1;
+  }
+}
+
+bool exact_minimizer_code(
+    std::string_view sequence, uint32_t k, uint32_t window,
+    uint32_t* minimizer) {
+  if (!minimizer || k == 0 || k > 16 || window < k ||
+      sequence.size() != window) {
+    return false;
+  }
+  const uint64_t mask =
+      k == 16 ? UINT32_MAX : ((uint64_t{1} << (2 * k)) - 1);
+  uint64_t code = 0;
+  size_t valid = 0;
+  uint32_t best = UINT32_MAX;
+  for (char base : sequence) {
+    const int value = dna_code(base);
+    if (value < 0) return false;
+    code = ((code << 2) | static_cast<uint64_t>(value)) & mask;
+    if (++valid >= k) {
+      best = std::min(best, static_cast<uint32_t>(code));
+    }
+  }
+  *minimizer = best;
+  return true;
+}
+
+std::vector<uint32_t> reference_minimizers(
+    std::string_view sequence, uint32_t k, uint32_t window) {
+  std::vector<uint32_t> minimizers;
+  if (k == 0 || k > 16 || window < k ||
+      sequence.size() < window) {
+    return minimizers;
+  }
+  const size_t qmers_per_window = window - k + 1;
+  const uint64_t mask =
+      k == 16 ? UINT32_MAX : ((uint64_t{1} << (2 * k)) - 1);
+  std::deque<std::pair<size_t, uint32_t>> minimum_queue;
+  uint64_t code = 0;
+  size_t valid_bases = 0;
+  for (size_t pos = 0; pos < sequence.size(); ++pos) {
+    const int value = dna_code(sequence[pos]);
+    if (value < 0) {
+      code = 0;
+      valid_bases = 0;
+      minimum_queue.clear();
+      continue;
+    }
+    code = ((code << 2) | static_cast<uint64_t>(value)) & mask;
+    ++valid_bases;
+    if (valid_bases < k) continue;
+    const size_t qmer_start = pos + 1 - k;
+    const uint32_t qmer_code = static_cast<uint32_t>(code);
+    while (!minimum_queue.empty() &&
+           minimum_queue.back().second >= qmer_code) {
+      minimum_queue.pop_back();
+    }
+    minimum_queue.emplace_back(qmer_start, qmer_code);
+    const size_t first_qmer =
+        qmer_start + 1 >= qmers_per_window
+            ? qmer_start + 1 - qmers_per_window
+            : 0;
+    while (!minimum_queue.empty() &&
+           minimum_queue.front().first < first_qmer) {
+      minimum_queue.pop_front();
+    }
+    if (valid_bases >= window &&
+        (minimizers.empty() ||
+         minimizers.back() != minimum_queue.front().second)) {
+      minimizers.push_back(minimum_queue.front().second);
+    }
+  }
+  std::sort(minimizers.begin(), minimizers.end());
+  minimizers.erase(
+      std::unique(minimizers.begin(), minimizers.end()),
+      minimizers.end());
+  return minimizers;
 }
 
 std::filesystem::path shard_output_path(
@@ -200,6 +347,80 @@ void install_shard_atomically(
   }
 }
 
+void save_router_sidecar(
+    const std::filesystem::path& path,
+    uint32_t k, uint32_t window, uint32_t shard_count,
+    const std::vector<uint64_t>& entries, uint64_t checksum) {
+  const std::filesystem::path temporary = path.string() + ".tmp";
+  {
+    std::ofstream out(temporary, std::ios::binary);
+    if (!out) {
+      throw std::runtime_error("unable to open shard router output");
+    }
+    out.write(kRouterMagic.data(),
+              static_cast<std::streamsize>(kRouterMagic.size()));
+    write_pod<uint32_t>(out, kRouterFormatVersion);
+    write_pod<uint32_t>(out, k);
+    write_pod<uint32_t>(out, window);
+    write_pod<uint32_t>(out, shard_count);
+    write_pod<uint64_t>(out, entries.size());
+    write_pod<uint64_t>(out, checksum);
+    if (!entries.empty()) {
+      if (entries.size() >
+          static_cast<size_t>(
+              std::numeric_limits<std::streamsize>::max()) /
+              sizeof(uint64_t)) {
+        throw std::runtime_error(
+            "shard router exceeds stream size limit");
+      }
+      out.write(reinterpret_cast<const char*>(entries.data()),
+                static_cast<std::streamsize>(
+                    entries.size() * sizeof(uint64_t)));
+    }
+    out.close();
+    if (!out) {
+      throw std::runtime_error("failed to finalize shard router output");
+    }
+  }
+  std::error_code error;
+  std::filesystem::rename(temporary, path, error);
+  if (error) {
+    std::filesystem::remove(temporary);
+    throw std::runtime_error(
+        "unable to install shard router: " + error.message());
+  }
+}
+
+std::vector<uint64_t> build_router_entries(
+    const std::string& reference_sequence,
+    const std::vector<ShardBuildSpec>& specs,
+    uint32_t k, uint32_t window) {
+  if (specs.size() > std::numeric_limits<uint32_t>::max()) {
+    throw std::runtime_error("too many shards for seed router");
+  }
+  std::vector<uint64_t> entries;
+  for (size_t shard_idx = 0; shard_idx < specs.size(); ++shard_idx) {
+    const auto& spec = specs[shard_idx];
+    const std::string_view slice(
+        reference_sequence.data() + spec.slice_begin,
+        spec.slice_end - spec.slice_begin);
+    const auto minimizers = reference_minimizers(slice, k, window);
+    if (minimizers.size() >
+        std::numeric_limits<size_t>::max() - entries.size()) {
+      throw std::runtime_error("shard router entry count overflow");
+    }
+    entries.reserve(entries.size() + minimizers.size());
+    for (uint32_t code : minimizers) {
+      entries.push_back(
+          (static_cast<uint64_t>(code) << 32) |
+          static_cast<uint32_t>(shard_idx));
+    }
+  }
+  std::sort(entries.begin(), entries.end());
+  entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
+  return entries;
+}
+
 void validate_manifest(const ShardedIndexManifest& manifest) {
   if (manifest.format_version != kShardFormatVersion) {
     throw std::runtime_error(
@@ -212,6 +433,23 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
   if (manifest.part_signature.empty() ||
       manifest.shards.empty()) {
     throw std::runtime_error("sharded index contains no shards");
+  }
+  if (manifest.shards.size() > std::numeric_limits<uint32_t>::max()) {
+    throw std::runtime_error("sharded index has too many router targets");
+  }
+  const bool has_router = manifest.router_entry_count != 0;
+  if (has_router) {
+    if (manifest.router_k == 0 || manifest.router_k > 16 ||
+        manifest.router_window < manifest.router_k ||
+        manifest.router_window > manifest.window_length ||
+        manifest.router_checksum == 0) {
+      throw std::runtime_error(
+          "sharded index has invalid seed router metadata");
+    }
+  } else if (manifest.router_k != 0 || manifest.router_window != 0 ||
+             manifest.router_checksum != 0) {
+    throw std::runtime_error(
+        "sharded index has inconsistent empty router metadata");
   }
   size_t total_windows = 0;
   size_t total_sequences = 0;
@@ -269,6 +507,67 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
 
 }  // namespace
 
+ShardRouteSelection ShardedSeedRouter::select(
+    std::string_view query, int tolerance) const {
+  ShardRouteSelection selection;
+  if (!enabled() || tolerance < 0 || query.empty()) {
+    return selection;
+  }
+  const size_t partition_count =
+      static_cast<size_t>(tolerance) + 1;
+  if (partition_count == 0 || partition_count > query.size() ||
+      query.size() / partition_count < window) {
+    return selection;
+  }
+
+  std::vector<uint32_t> minimizers;
+  minimizers.reserve(partition_count);
+  for (size_t partition = 0; partition < partition_count;
+       ++partition) {
+    const size_t begin = partition * query.size() / partition_count;
+    const size_t end =
+        (partition + 1) * query.size() / partition_count;
+    const size_t seed_begin = begin + (end - begin - window) / 2;
+    uint32_t minimizer = 0;
+    if (!exact_minimizer_code(
+            query.substr(seed_begin, window), k, window,
+            &minimizer)) {
+      return ShardRouteSelection{};
+    }
+    minimizers.push_back(minimizer);
+  }
+  std::sort(minimizers.begin(), minimizers.end());
+  minimizers.erase(
+      std::unique(minimizers.begin(), minimizers.end()),
+      minimizers.end());
+
+  for (uint32_t minimizer : minimizers) {
+    const uint64_t first_key =
+        static_cast<uint64_t>(minimizer) << 32;
+    const auto first =
+        std::lower_bound(entries.begin(), entries.end(), first_key);
+    const auto last =
+        minimizer == UINT32_MAX
+            ? entries.end()
+            : std::lower_bound(
+                  first, entries.end(),
+                  static_cast<uint64_t>(minimizer + 1) << 32);
+    for (auto entry = first; entry != last; ++entry) {
+      const uint32_t shard_id = static_cast<uint32_t>(*entry);
+      if (shard_id >= shard_count) {
+        return ShardRouteSelection{};
+      }
+      selection.shard_ids.push_back(shard_id);
+    }
+  }
+  std::sort(selection.shard_ids.begin(), selection.shard_ids.end());
+  selection.shard_ids.erase(
+      std::unique(selection.shard_ids.begin(), selection.shard_ids.end()),
+      selection.shard_ids.end());
+  selection.enabled = true;
+  return selection;
+}
+
 bool is_sharded_index(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) return false;
@@ -298,6 +597,10 @@ void save_sharded_index_manifest(
     write_pod<uint64_t>(out, manifest.total_window_count);
     write_pod<uint64_t>(out, manifest.total_sequence_count);
     write_pod<uint64_t>(out, manifest.total_world_node_count);
+    write_pod<uint32_t>(out, manifest.router_k);
+    write_pod<uint32_t>(out, manifest.router_window);
+    write_pod<uint64_t>(out, manifest.router_entry_count);
+    write_pod<uint64_t>(out, manifest.router_checksum);
     write_string(out, manifest.part_signature);
     write_pod<uint64_t>(out, manifest.shards.size());
     for (const auto& shard : manifest.shards) {
@@ -348,6 +651,14 @@ ShardedIndexManifest read_sharded_index_manifest(
       read_size(in, "total_sequence_count");
   manifest.total_world_node_count =
       read_size(in, "total_world_node_count");
+  manifest.router_k =
+      read_pod<uint32_t>(in, "router_k");
+  manifest.router_window =
+      read_pod<uint32_t>(in, "router_window");
+  manifest.router_entry_count =
+      read_size(in, "router_entry_count");
+  manifest.router_checksum =
+      read_pod<uint64_t>(in, "router_checksum");
   manifest.part_signature =
       read_string(in, "part_signature");
   const uint64_t shard_count =
@@ -393,6 +704,116 @@ std::string resolve_index_shard_path(
   if (part.is_absolute()) return part.string();
   return (std::filesystem::path(manifest_path).parent_path() /
           part).string();
+}
+
+ShardedSeedRouter load_sharded_seed_router(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest) {
+  validate_manifest(manifest);
+  ShardedSeedRouter router;
+  if (manifest.router_entry_count == 0) return router;
+  if (manifest.router_entry_count >
+      (std::numeric_limits<size_t>::max() - 40) /
+          sizeof(uint64_t)) {
+    throw std::runtime_error("shard router size overflow");
+  }
+  const size_t expected_size =
+      40 + manifest.router_entry_count * sizeof(uint64_t);
+  const auto path = router_output_path(manifest_path);
+
+#if defined(__unix__) || defined(__APPLE__)
+  const int fd = open(path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    throw std::runtime_error("unable to open shard router sidecar");
+  }
+  struct stat status {};
+  if (fstat(fd, &status) != 0 || status.st_size < 0 ||
+      static_cast<uint64_t>(status.st_size) != expected_size) {
+    close(fd);
+    throw std::runtime_error("invalid shard router sidecar size");
+  }
+  void* address = mmap(
+      nullptr, expected_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if (address == MAP_FAILED) {
+    throw std::runtime_error("unable to map shard router sidecar");
+  }
+  auto mapping = std::make_shared<MappedRouterFile>(
+      address, expected_size);
+  const uint8_t* bytes = mapping->data();
+  const auto read_field = [&bytes](auto* value) {
+    std::memcpy(value, bytes, sizeof(*value));
+    bytes += sizeof(*value);
+  };
+  std::array<char, 8> magic{};
+  uint32_t version = 0;
+  uint32_t stored_k = 0;
+  uint32_t stored_window = 0;
+  uint32_t stored_shard_count = 0;
+  uint64_t stored_entry_count = 0;
+  uint64_t stored_checksum = 0;
+  read_field(&magic);
+  read_field(&version);
+  read_field(&stored_k);
+  read_field(&stored_window);
+  read_field(&stored_shard_count);
+  read_field(&stored_entry_count);
+  read_field(&stored_checksum);
+  if (magic != kRouterMagic || version != kRouterFormatVersion ||
+      stored_k != manifest.router_k ||
+      stored_window != manifest.router_window ||
+      stored_shard_count != manifest.shards.size() ||
+      stored_entry_count != manifest.router_entry_count ||
+      stored_checksum != manifest.router_checksum) {
+    throw std::runtime_error("shard router metadata mismatch");
+  }
+  router.k = stored_k;
+  router.window = stored_window;
+  router.shard_count = stored_shard_count;
+  router.entries.set_mapped(
+      mapping, reinterpret_cast<const uint64_t*>(bytes),
+      manifest.router_entry_count);
+#else
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("unable to open shard router sidecar");
+  }
+  std::array<char, 8> magic{};
+  in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+  const uint32_t version = read_pod<uint32_t>(in, "router.version");
+  const uint32_t stored_k = read_pod<uint32_t>(in, "router.k");
+  const uint32_t stored_window =
+      read_pod<uint32_t>(in, "router.window");
+  const uint32_t stored_shard_count =
+      read_pod<uint32_t>(in, "router.shard_count");
+  const size_t stored_entry_count =
+      read_size(in, "router.entry_count");
+  const uint64_t stored_checksum =
+      read_pod<uint64_t>(in, "router.checksum");
+  if (magic != kRouterMagic || version != kRouterFormatVersion ||
+      stored_k != manifest.router_k ||
+      stored_window != manifest.router_window ||
+      stored_shard_count != manifest.shards.size() ||
+      stored_entry_count != manifest.router_entry_count ||
+      stored_checksum != manifest.router_checksum) {
+    throw std::runtime_error("shard router metadata mismatch");
+  }
+  std::vector<uint64_t> values(stored_entry_count);
+  in.read(reinterpret_cast<char*>(values.data()),
+          static_cast<std::streamsize>(
+              values.size() * sizeof(uint64_t)));
+  if (!in || in.peek() != std::char_traits<char>::eof() ||
+      router_checksum(
+          stored_k, stored_window, stored_shard_count,
+          values.data(), values.size()) != stored_checksum) {
+    throw std::runtime_error("invalid shard router contents");
+  }
+  router.k = stored_k;
+  router.window = stored_window;
+  router.shard_count = stored_shard_count;
+  router.entries.set_owned(std::move(values));
+#endif
+  return router;
 }
 
 ShardedIndexManifest build_sharded_reference_index(
@@ -595,6 +1016,24 @@ ShardedIndexManifest build_sharded_reference_index(
     manifest.total_sequence_count += descriptor.sequence_count;
     manifest.total_world_node_count += descriptor.world_node_count;
     manifest.shards.push_back(std::move(descriptor));
+  }
+  if (specs.size() > 1 && window_length >= kRouterWindow) {
+    auto router_entries = build_router_entries(
+        reference_sequence, specs, kRouterK, kRouterWindow);
+    if (!router_entries.empty()) {
+      manifest.router_k = kRouterK;
+      manifest.router_window = kRouterWindow;
+      manifest.router_entry_count = router_entries.size();
+      manifest.router_checksum = router_checksum(
+          manifest.router_k, manifest.router_window,
+          static_cast<uint32_t>(manifest.shards.size()),
+          router_entries.data(), router_entries.size());
+      save_router_sidecar(
+          router_output_path(bundle), manifest.router_k,
+          manifest.router_window,
+          static_cast<uint32_t>(manifest.shards.size()),
+          router_entries, manifest.router_checksum);
+    }
   }
   save_sharded_index_manifest(bundle_path, manifest);
   return manifest;

@@ -160,7 +160,7 @@ periodic heartbeats but retains phase start/finish reports. `build-scale` can
 persist a reference-window index with `--index <file>` when exactly one prefix
 length is requested. Multiple prefixes with one output index are rejected.
 `build-sharded` instead partitions window starts into independently persisted
-v19 parts, each capped by `--shard-windows`. Reference slices overlap only
+v20 parts, each capped by `--shard-windows`. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
 contig. Valid completed parts are reused on restart, damaged parts are rebuilt,
@@ -224,8 +224,8 @@ quality-audit time only.
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v19 binary persistence and manifest signatures |
-| `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, bundle manifests, and validated loading |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v20 binary persistence and manifest signatures |
+| `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, exact-minimizer shard routing, bundle manifests, and validated loading |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
 | `include/io_utils.hpp`, `src/io_utils.cpp` | FASTA/FASTQ load, TSV output |
@@ -239,11 +239,16 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v19 loads the finalized arrays directly; older files must be rebuilt.
-A `.navshard` bundle points to independently loadable v19 parts.
-`query-index` and `query-index-batch` search all parts in parallel and merge
-identical sequences and their occurrences. Bundle query loading validates
-signatures, counts, mapped file bounds, layer ranges, shard coordinates, and
+Format v20 loads the finalized arrays directly; older files must be rebuilt.
+A `.navshard` bundle points to independently loadable v20 parts and, when it
+has multiple shards and windows of at least 64 bases, a memory-mapped
+`.route` sidecar. The router uses 16-mer minimizers from 64-base seeds in
+`d + 1` disjoint query blocks. Any target within edit distance `d` must contain
+one whole block exactly, so omitting shards without all of those minimizers is
+no-FN-safe. Unsupported short/ambiguous queries or an unavailable sidecar fall
+back to every part. `query-index` and `query-index-batch` search selected parts
+in parallel and merge identical sequences and their occurrences. Bundle query
+loading validates signatures, counts, mapped file bounds, layer ranges, shard coordinates, and
 the bundle checksum without an O(total nodes) rescan; build/restart reuse still
 performs full part validation. Path tracing is not supported for a bundle
 because node IDs are shard-local. `query-index` is the
@@ -373,7 +378,7 @@ For long-sequence boundary studies, `boundary` outputs one aggregated TSV row pe
 | Search q-gram on/off and scan/rect equivalence | `make test_search_qgram && ./test_search_qgram_prefilter` |
 | Safe child router no-FN / candidate superset / fallback | `make test_safe_child_router && ./test_safe_child_router_no_false_negative` |
 | Persisted index round-trip and manifest matching | `make test_index_persistence && ./test_index_persistence_bin` |
-| Sharded window/coordinate equivalence, restart, repair, and no-FN queries | `make test_sharded_index` |
+| Sharded window/coordinate equivalence, restart/repair, substitution/indel router no-FN, and fallback | `make test_sharded_index` |
 | Phase2 CPU verifier behavior | `make test_phase2_distance_verifier && ./test_phase2_distance_verifier_bin` |
 | Build heartbeat formatting and timer | `make test_build_progress` |
 

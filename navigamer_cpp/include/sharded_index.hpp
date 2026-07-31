@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace navigamer {
@@ -21,14 +22,39 @@ struct IndexShardDescriptor {
 };
 
 struct ShardedIndexManifest {
-  uint32_t format_version = 1;
+  uint32_t format_version = 2;
   size_t window_length = 0;
   size_t stride = 0;
   size_t total_window_count = 0;
   size_t total_sequence_count = 0;
   size_t total_world_node_count = 0;
+  uint32_t router_k = 0;
+  uint32_t router_window = 0;
+  size_t router_entry_count = 0;
+  uint64_t router_checksum = 0;
   std::string part_signature;
   std::vector<IndexShardDescriptor> shards;
+};
+
+struct ShardRouteSelection {
+  bool enabled = false;
+  std::vector<uint32_t> shard_ids;
+};
+
+// Sorted packed (minimizer_code, shard_id) pairs are memory-mapped from the
+// router sidecar. Exact query blocks provide a no-false-negative necessary
+// condition; unsupported queries conservatively disable routing.
+struct ShardedSeedRouter {
+  uint32_t k = 0;
+  uint32_t window = 0;
+  uint32_t shard_count = 0;
+  FinalArray<uint64_t> entries;
+
+  bool enabled() const {
+    return k != 0 && window >= k && shard_count != 0 && !entries.empty();
+  }
+  ShardRouteSelection select(
+      std::string_view query, int tolerance) const;
 };
 
 bool is_sharded_index(const std::string& path);
@@ -43,6 +69,10 @@ ShardedIndexManifest read_sharded_index_manifest(
 std::string resolve_index_shard_path(
     const std::string& manifest_path,
     const std::string& shard_path);
+
+ShardedSeedRouter load_sharded_seed_router(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest);
 
 ShardedIndexManifest build_sharded_reference_index(
     const std::string& bundle_path,
