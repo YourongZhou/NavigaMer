@@ -61,7 +61,7 @@ void assert_view_equivalent_to_original() {
       assert(record.mbb_begin +
                  static_cast<size_t>(record.child_count) *
                      record.beacon_count <=
-             view.mbb_lo.size());
+             view.child_beacon_dists.size());
       assert(record.leaf_beacon_begin +
                  static_cast<size_t>(record.leaf_count) *
                      record.beacon_count <=
@@ -135,7 +135,7 @@ void assert_flat_search_matches_original() {
   }
 }
 
-void assert_saturated_byte_bounds_are_recall_safe() {
+void assert_max_byte_distance_is_recall_safe() {
   auto sequences =
       std::vector<std::shared_ptr<navigamer::BioSequence>>{
           std::make_shared<navigamer::BioSequence>(
@@ -149,14 +149,11 @@ void assert_saturated_byte_bounds_are_recall_safe() {
       navigamer::HierarchyConfig({255, 254}));
   builder.build(std::move(sequences));
   const auto& view = builder.search_graph_view();
-  bool saw_saturated_upper_bound = false;
-  for (uint8_t upper : view.mbb_hi) {
-    if (upper == 255) {
-      saw_saturated_upper_bound = true;
-      break;
-    }
-  }
-  assert(saw_saturated_upper_bound);
+  assert(std::find(
+             view.child_beacon_dists.begin(),
+             view.child_beacon_dists.end(),
+             static_cast<uint8_t>(255)) !=
+         view.child_beacon_dists.end());
 
   for (navigamer::SimdMode simd_mode :
        {navigamer::SimdMode::Scalar,
@@ -185,7 +182,7 @@ void assert_saturated_byte_bounds_are_recall_safe() {
 int main() {
   assert_view_equivalent_to_original();
   assert_flat_search_matches_original();
-  assert_saturated_byte_bounds_are_recall_safe();
+  assert_max_byte_distance_is_recall_safe();
   std::cout << "search graph view tests passed\n";
   return 0;
 }

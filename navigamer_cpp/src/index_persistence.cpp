@@ -13,7 +13,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '8'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '0', '9'};
 
 template <typename T>
 void write_pod(std::ostream& out, const T& value) {
@@ -240,7 +240,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 8) {
+  if (manifest.format_version != 9) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -572,7 +572,7 @@ void write_node_records(
     write_pod<uint32_t>(out, record.center_sequence_id);
     write_pod<int32_t>(out, static_cast<int32_t>(record.radius));
     write_pod<int32_t>(
-        out, static_cast<int32_t>(record.expanded_layer_index));
+        out, static_cast<int32_t>(record.child_radius));
     write_pod<int32_t>(
         out, static_cast<int32_t>(record.primary_layer_index));
     write_pod<uint32_t>(out, record.child_begin);
@@ -593,9 +593,9 @@ std::vector<WorldNodeRecord> read_node_records(std::istream& in) {
     record.center_sequence_id =
         read_pod<uint32_t>(in, "node.center_sequence_id");
     record.radius = static_cast<int>(read_pod<int32_t>(in, "node.radius"));
-    record.expanded_layer_index =
+    record.child_radius =
         static_cast<int>(read_pod<int32_t>(
-            in, "node.expanded_layer_index"));
+            in, "node.child_radius"));
     record.primary_layer_index =
         static_cast<int>(read_pod<int32_t>(
             in, "node.primary_layer_index"));
@@ -621,8 +621,7 @@ void write_search_graph_view(std::ostream& out,
   write_u32_vector(out, view.child_ids);
   write_u32_vector(out, view.leaf_ids);
   write_u32_vector(out, view.beacon_ids);
-  write_u8_vector(out, view.mbb_lo);
-  write_u8_vector(out, view.mbb_hi);
+  write_u8_vector(out, view.child_beacon_dists);
   write_u8_vector(out, view.leaf_beacon_dists);
 }
 
@@ -635,8 +634,8 @@ SearchGraphView read_search_graph_view(std::istream& in) {
   view.child_ids = read_u32_vector(in, "child_ids");
   view.leaf_ids = read_u32_vector(in, "leaf_ids");
   view.beacon_ids = read_u32_vector(in, "beacon_ids");
-  view.mbb_lo = read_u8_vector(in, "mbb_lo");
-  view.mbb_hi = read_u8_vector(in, "mbb_hi");
+  view.child_beacon_dists =
+      read_u8_vector(in, "child_beacon_dists");
   view.leaf_beacon_dists =
       read_u8_vector(in, "leaf_beacon_dists");
   return view;
@@ -705,7 +704,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 8) {
+  if (manifest.format_version != 9) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -749,7 +748,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 8;
+  stored.format_version = 9;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.child_ids.size();
@@ -770,7 +769,7 @@ LoadedIndex load_index(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 8) {
+  if (manifest.format_version != 9) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }

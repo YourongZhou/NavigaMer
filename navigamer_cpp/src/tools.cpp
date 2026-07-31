@@ -11,6 +11,12 @@
 
 namespace navigamer {
 
+#if defined(__GNUC__) || defined(__clang__)
+#define NAVIGAMER_DISTANCE_HOT_ALIGN __attribute__((aligned(128)))
+#else
+#define NAVIGAMER_DISTANCE_HOT_ALIGN
+#endif
+
 const char* distance_mode_name(DistanceMode mode) {
   switch (mode) {
     case DistanceMode::DP:
@@ -33,6 +39,7 @@ DistanceMode parse_distance_mode(const std::string& value) {
   throw std::invalid_argument("distance mode must be dp, myers, edlib, or auto");
 }
 
+NAVIGAMER_DISTANCE_HOT_ALIGN
 int compute_distance(std::string_view a, std::string_view b) {
   const size_t m = a.size();
   const size_t n = b.size();
@@ -509,5 +516,7 @@ void shuffle_indices(std::vector<size_t>& indices, unsigned seed) {
   std::mt19937 gen(seed);
   std::shuffle(indices.begin(), indices.end(), gen);
 }
+
+#undef NAVIGAMER_DISTANCE_HOT_ALIGN
 
 }  // namespace navigamer

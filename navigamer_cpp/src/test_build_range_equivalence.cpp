@@ -235,7 +235,9 @@ Phase3BuildResult build_and_collect_phase3(
                               static_cast<size_t>(dim) *
                                   parent.child_count +
                               child;
-          row << view.mbb_lo[flat] << ',' << view.mbb_hi[flat] << ';';
+          row << static_cast<int>(
+                     view.child_beacon_dists[flat])
+              << ';';
         }
         row << '/';
       }

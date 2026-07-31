@@ -15,8 +15,7 @@
 namespace navigamer {
 namespace {
 
-void validate_inputs(const uint8_t* lo_by_dim,
-                     const uint8_t* hi_by_dim,
+void validate_inputs(const uint8_t* center_dist_by_dim,
                      size_t child_count,
                      size_t dim,
                      const int* query_beacon_dists) {
@@ -24,7 +23,7 @@ void validate_inputs(const uint8_t* lo_by_dim,
     throw std::invalid_argument("MBB child_count exceeds uint32_t output range");
   }
   if (child_count == 0 || dim == 0) return;
-  if (!lo_by_dim || !hi_by_dim || !query_beacon_dists) {
+  if (!center_dist_by_dim || !query_beacon_dists) {
     throw std::invalid_argument("MBB filter received null input");
   }
 }
@@ -42,8 +41,7 @@ void validate_leaf_inputs(const uint8_t* dist_by_dim,
   }
 }
 
-std::vector<uint32_t> filter_scalar(const uint8_t* lo_by_dim,
-                                    const uint8_t* hi_by_dim,
+std::vector<uint32_t> filter_scalar(const uint8_t* center_dist_by_dim,
                                     size_t child_count,
                                     size_t dim,
                                     const int* query_beacon_dists,
@@ -62,7 +60,8 @@ std::vector<uint32_t> filter_scalar(const uint8_t* lo_by_dim,
       const int64_t query_hi =
           static_cast<int64_t>(query_beacon_dists[dim_idx]) +
           tolerance;
-      if (hi_by_dim[flat] < query_lo || lo_by_dim[flat] > query_hi) {
+      if (center_dist_by_dim[flat] < query_lo ||
+          center_dist_by_dim[flat] > query_hi) {
         ok = false;
         break;
       }
@@ -104,13 +103,13 @@ std::vector<uint32_t> filter_leaf_scalar(const uint8_t* dist_by_dim,
 
 #if NAVIGAMER_HAS_AVX2_TARGET
 __attribute__((target("avx2")))
-std::vector<uint32_t> filter_avx2(const uint8_t* lo_by_dim,
-                                  const uint8_t* hi_by_dim,
-                                  size_t child_count,
-                                  size_t dim,
-                                  const int* query_beacon_dists,
-                                  int32_t tolerance,
-                                  MBBFilterSimdStats* stats) {
+std::vector<uint32_t> filter_avx2(
+    const uint8_t* center_dist_by_dim,
+    size_t child_count,
+    size_t dim,
+    const int* query_beacon_dists,
+    int32_t tolerance,
+    MBBFilterSimdStats* stats) {
   constexpr size_t kWidth = 32;
   std::vector<uint32_t> survivors;
   survivors.reserve(child_count);
@@ -142,13 +141,10 @@ std::vector<uint32_t> filter_avx2(const uint8_t* lo_by_dim,
           std::min<int64_t>(
               std::numeric_limits<uint8_t>::max(), query_upper));
       const size_t flat = dim_idx * child_count + child_idx;
-      const __m256i lo = _mm256_xor_si256(
+      const __m256i center_dist = _mm256_xor_si256(
           _mm256_loadu_si256(
-              reinterpret_cast<const __m256i*>(lo_by_dim + flat)),
-          unsigned_bias);
-      const __m256i hi = _mm256_xor_si256(
-          _mm256_loadu_si256(
-              reinterpret_cast<const __m256i*>(hi_by_dim + flat)),
+              reinterpret_cast<const __m256i*>(
+                  center_dist_by_dim + flat)),
           unsigned_bias);
       const __m256i query_lo = _mm256_xor_si256(
           _mm256_set1_epi8(static_cast<char>(bounded_lower)),
@@ -157,8 +153,8 @@ std::vector<uint32_t> filter_avx2(const uint8_t* lo_by_dim,
           _mm256_set1_epi8(static_cast<char>(bounded_upper)),
           unsigned_bias);
       const __m256i failed = _mm256_or_si256(
-          _mm256_cmpgt_epi8(query_lo, hi),
-          _mm256_cmpgt_epi8(lo, query_hi));
+          _mm256_cmpgt_epi8(query_lo, center_dist),
+          _mm256_cmpgt_epi8(center_dist, query_hi));
       alive = _mm256_and_si256(
           alive, _mm256_cmpeq_epi8(failed, zero));
       if (_mm256_movemask_epi8(alive) == 0) break;
@@ -194,17 +190,14 @@ std::vector<uint32_t> filter_avx2(const uint8_t* lo_by_dim,
           std::min<int64_t>(
               std::numeric_limits<uint8_t>::max(), query_upper));
       const size_t flat = dim_idx * child_count + child_idx;
-      const __m256i lo = _mm256_cvtepu8_epi16(
+      const __m256i center_dist = _mm256_cvtepu8_epi16(
           _mm_loadu_si128(reinterpret_cast<const __m128i*>(
-              lo_by_dim + flat)));
-      const __m256i hi = _mm256_cvtepu8_epi16(
-          _mm_loadu_si128(reinterpret_cast<const __m128i*>(
-              hi_by_dim + flat)));
+              center_dist_by_dim + flat)));
       const __m256i failed = _mm256_or_si256(
           _mm256_cmpgt_epi16(
-              _mm256_set1_epi16(bounded_lower), hi),
+              _mm256_set1_epi16(bounded_lower), center_dist),
           _mm256_cmpgt_epi16(
-              lo, _mm256_set1_epi16(bounded_upper)));
+              center_dist, _mm256_set1_epi16(bounded_upper)));
       alive = _mm256_and_si256(
           alive, _mm256_cmpeq_epi16(failed, zero));
       if (_mm256_movemask_epi8(alive) == 0) break;
@@ -237,20 +230,17 @@ std::vector<uint32_t> filter_avx2(const uint8_t* lo_by_dim,
         break;
       }
       const size_t flat = dim_idx * child_count + child_idx;
-      const __m256i lo = _mm256_cvtepu8_epi32(
+      const __m256i center_dist = _mm256_cvtepu8_epi32(
           _mm_loadl_epi64(reinterpret_cast<const __m128i*>(
-              lo_by_dim + flat)));
-      const __m256i hi = _mm256_cvtepu8_epi32(
-          _mm_loadl_epi64(reinterpret_cast<const __m128i*>(
-              hi_by_dim + flat)));
+              center_dist_by_dim + flat)));
       const __m256i query_lo = _mm256_set1_epi32(
           static_cast<int32_t>(std::max<int64_t>(0, query_lower)));
       const __m256i query_hi = _mm256_set1_epi32(
           static_cast<int32_t>(std::min<int64_t>(
               std::numeric_limits<uint8_t>::max(), query_upper)));
       const __m256i failed = _mm256_or_si256(
-          _mm256_cmpgt_epi32(query_lo, hi),
-          _mm256_cmpgt_epi32(lo, query_hi));
+          _mm256_cmpgt_epi32(query_lo, center_dist),
+          _mm256_cmpgt_epi32(center_dist, query_hi));
       alive = _mm256_and_si256(
           alive, _mm256_cmpeq_epi32(failed, zero));
       if (_mm256_movemask_epi8(alive) == 0) break;
@@ -279,7 +269,8 @@ std::vector<uint32_t> filter_avx2(const uint8_t* lo_by_dim,
         const int64_t query_hi =
             static_cast<int64_t>(query_beacon_dists[dim_idx]) +
             tolerance;
-        if (hi_by_dim[flat] < query_lo || lo_by_dim[flat] > query_hi) {
+        if (center_dist_by_dim[flat] < query_lo ||
+            center_dist_by_dim[flat] > query_hi) {
           ok = false;
           break;
         }
@@ -506,31 +497,39 @@ bool simd_avx2_runtime_supported() {
 }
 
 std::vector<uint32_t> filter_mbb_survivors(
-    const uint8_t* lo_by_dim,
-    const uint8_t* hi_by_dim,
+    const uint8_t* center_dist_by_dim,
     size_t child_count,
     size_t dim,
     const int* query_beacon_dists,
+    int32_t child_radius,
     int32_t tolerance,
     SimdMode mode,
     MBBFilterSimdStats* stats) {
-  validate_inputs(lo_by_dim, hi_by_dim, child_count, dim, query_beacon_dists);
+  validate_inputs(center_dist_by_dim, child_count, dim,
+                  query_beacon_dists);
+  if (child_radius < 0) {
+    throw std::invalid_argument("MBB child radius must be nonnegative");
+  }
+  const int32_t effective_tolerance = static_cast<int32_t>(
+      std::min<int64_t>(
+          std::numeric_limits<int32_t>::max(),
+          static_cast<int64_t>(child_radius) + tolerance));
   if (mode == SimdMode::Scalar || child_count == 0) {
-    return filter_scalar(lo_by_dim, hi_by_dim, child_count, dim,
-                         query_beacon_dists, tolerance, stats);
+    return filter_scalar(center_dist_by_dim, child_count, dim,
+                         query_beacon_dists, effective_tolerance, stats);
   }
 
 #if NAVIGAMER_HAS_AVX2_TARGET
   if ((mode == SimdMode::Auto || mode == SimdMode::AVX2) &&
       simd_avx2_runtime_supported()) {
-    return filter_avx2(lo_by_dim, hi_by_dim, child_count, dim,
-                       query_beacon_dists, tolerance, stats);
+    return filter_avx2(center_dist_by_dim, child_count, dim,
+                       query_beacon_dists, effective_tolerance, stats);
   }
 #endif
 
   if (stats) ++stats->simd_fallbacks;
-  return filter_scalar(lo_by_dim, hi_by_dim, child_count, dim,
-                       query_beacon_dists, tolerance, stats);
+  return filter_scalar(center_dist_by_dim, child_count, dim,
+                       query_beacon_dists, effective_tolerance, stats);
 }
 
 std::vector<uint32_t> filter_leaf_beacon_survivors(

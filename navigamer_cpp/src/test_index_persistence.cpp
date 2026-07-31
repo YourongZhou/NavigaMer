@@ -280,7 +280,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 8);
+  assert(loaded.manifest.format_version == 9);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.additional_occurrences ==
          store.additional_occurrences);

@@ -234,7 +234,7 @@ struct SequenceStore {
 struct WorldNodeRecord {
   LeafId center_sequence_id = INVALID_LEAF_ID;
   int radius = 0;
-  int expanded_layer_index = -1;
+  int child_radius = 0;
   int primary_layer_index = -1;
 
   uint32_t child_begin = 0;
@@ -264,8 +264,8 @@ struct BuildWorldNodeRecord {
   std::vector<LeafId> beacon_ids;
   // Dimension-major, matching SearchGraphView directly:
   // [beacon_index * child_count + child_index].
-  // Each uint16_t packs lower in bits 0..7 and upper in bits 8..15.
-  std::vector<uint16_t> child_mbb_bounds;
+  // Stores d(child center, beacon); the child radius reconstructs the MBB.
+  std::vector<uint8_t> child_beacon_dists;
   // Dimension-major: [beacon_index * leaf_count + leaf_index].
   std::vector<uint8_t> leaf_beacon_dists;
 };
@@ -281,8 +281,7 @@ struct SearchGraphView {
   std::vector<NodeId> child_ids;
   std::vector<LeafId> leaf_ids;
 
-  std::vector<uint8_t> mbb_lo;
-  std::vector<uint8_t> mbb_hi;
+  std::vector<uint8_t> child_beacon_dists;
   std::vector<LeafId> beacon_ids;
 
   std::vector<uint8_t> leaf_beacon_dists;
