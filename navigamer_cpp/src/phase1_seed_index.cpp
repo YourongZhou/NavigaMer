@@ -125,7 +125,7 @@ void IncrementalPigeonholeIndex::promote_to_compact24_postings(
       compact24_head = new_idx;
       compact_idx = static_cast<uint16_t>(entry);
     }
-    state.compact24_heads.get_or_insert(code) = compact24_head;
+    state.compact24_heads.set(code, compact24_head);
   });
   state.compact_heads.clear_and_release();
   state.compact_entries.clear();
@@ -269,18 +269,13 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
       head = entry_idx;
     } else if (state.posting_storage ==
                SeedState::PostingStorage::Compact24) {
-      uint32_t& head = state.compact24_heads.get_or_insert(code);
       const uint32_t entry_idx =
           static_cast<uint32_t>(state.compact24_entries.size());
       SeedState::Compact24PostingEntry entry;
       entry.item_idx = static_cast<uint16_t>(item_idx);
       entry.position = static_cast<uint8_t>(start);
-      entry.set_next(
-          head == std::numeric_limits<uint32_t>::max()
-              ? kInvalidCompact24PostingIndex
-              : head);
+      entry.set_next(state.compact24_heads.exchange(code, entry_idx));
       state.compact24_entries.push_back(entry);
-      head = entry_idx;
     } else if (state.posting_storage ==
                SeedState::PostingStorage::Packed32) {
       if (state.packed_entries.size() >= kInvalidPostingIndex) {

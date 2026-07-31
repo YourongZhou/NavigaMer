@@ -128,6 +128,155 @@ class IncrementalPigeonholeIndex {
     size_t size_ = 0;
   };
 
+  // The normal human-genome path uses seed lengths up to 20, so the 40-bit
+  // DNA code and Compact24's 24-bit posting head fit in one exact 64-bit slot.
+  // A wider key promotes the whole table to the generic representation.
+  class Compact24PostingHeadMap {
+   public:
+    static constexpr uint32_t invalid_head() { return 0x00ffffffU; }
+
+    size_t size() const { return wide_ ? wide_heads_.size() : size_; }
+
+    void reserve(size_t expected_size) {
+      if (wide_) {
+        wide_heads_.reserve(expected_size);
+        return;
+      }
+      size_t capacity = 16;
+      while (capacity * 7 / 10 < expected_size) {
+        if (capacity > std::numeric_limits<size_t>::max() / 2) {
+          throw std::length_error("phase1 compact24 head table is too large");
+        }
+        capacity *= 2;
+      }
+      if (capacity > slots_.size()) rehash(capacity);
+    }
+
+    uint32_t find(uint64_t key) const {
+      if (wide_) return wide_heads_.find(key);
+      if (key > max_packed_key() || slots_.empty()) return invalid_head();
+      const size_t mask = slots_.size() - 1;
+      size_t slot_idx = hash_key(key) & mask;
+      while (slot_head(slots_[slot_idx]) != invalid_head()) {
+        if (slot_key(slots_[slot_idx]) == key) {
+          return slot_head(slots_[slot_idx]);
+        }
+        slot_idx = (slot_idx + 1) & mask;
+      }
+      return invalid_head();
+    }
+
+    uint32_t exchange(uint64_t key, uint32_t new_head) {
+      if (new_head >= invalid_head()) {
+        throw std::overflow_error("phase1 compact24 posting head overflow");
+      }
+      if (!wide_ && key > max_packed_key()) promote_to_wide();
+      if (wide_) {
+        uint32_t& head = wide_heads_.get_or_insert(key);
+        const uint32_t previous = head;
+        head = new_head;
+        return previous == std::numeric_limits<uint32_t>::max()
+                   ? invalid_head()
+                   : previous;
+      }
+      if (slots_.empty() || (size_ + 1) * 10 > slots_.size() * 7) {
+        if (!slots_.empty() &&
+            slots_.size() > std::numeric_limits<size_t>::max() / 2) {
+          throw std::length_error("phase1 compact24 head table is too large");
+        }
+        rehash(slots_.empty() ? 16 : slots_.size() * 2);
+      }
+      const size_t mask = slots_.size() - 1;
+      size_t slot_idx = hash_key(key) & mask;
+      while (slot_head(slots_[slot_idx]) != invalid_head()) {
+        if (slot_key(slots_[slot_idx]) == key) {
+          const uint32_t previous = slot_head(slots_[slot_idx]);
+          slots_[slot_idx] = pack_slot(key, new_head);
+          return previous;
+        }
+        slot_idx = (slot_idx + 1) & mask;
+      }
+      slots_[slot_idx] = pack_slot(key, new_head);
+      size_++;
+      return invalid_head();
+    }
+
+    void set(uint64_t key, uint32_t head) {
+      (void)exchange(key, head);
+    }
+
+    template <typename Fn>
+    void for_each(Fn&& fn) const {
+      if (wide_) {
+        wide_heads_.for_each(std::forward<Fn>(fn));
+        return;
+      }
+      for (uint64_t slot : slots_) {
+        const uint32_t head = slot_head(slot);
+        if (head != invalid_head()) fn(slot_key(slot), head);
+      }
+    }
+
+    void clear_and_release() {
+      slots_.clear();
+      slots_.shrink_to_fit();
+      wide_heads_.clear_and_release();
+      size_ = 0;
+      wide_ = false;
+    }
+
+   private:
+    static constexpr uint64_t max_packed_key() {
+      return (UINT64_C(1) << 40) - 1;
+    }
+    static constexpr uint64_t head_mask() { return invalid_head(); }
+    static uint64_t pack_slot(uint64_t key, uint32_t head) {
+      return (key << 24) | head;
+    }
+    static uint64_t slot_key(uint64_t slot) { return slot >> 24; }
+    static uint32_t slot_head(uint64_t slot) {
+      return static_cast<uint32_t>(slot & head_mask());
+    }
+    static size_t hash_key(uint64_t key) {
+      key ^= key >> 30;
+      key *= UINT64_C(0xbf58476d1ce4e5b9);
+      key ^= key >> 27;
+      key *= UINT64_C(0x94d049bb133111eb);
+      key ^= key >> 31;
+      return static_cast<size_t>(key);
+    }
+
+    void rehash(size_t capacity) {
+      if (capacity < 16) capacity = 16;
+      std::vector<uint64_t> old_slots = std::move(slots_);
+      slots_.assign(capacity, invalid_head());
+      size_ = 0;
+      for (uint64_t slot : old_slots) {
+        const uint32_t head = slot_head(slot);
+        if (head != invalid_head()) set(slot_key(slot), head);
+      }
+    }
+
+    void promote_to_wide() {
+      wide_heads_.reserve(size_);
+      for (uint64_t slot : slots_) {
+        const uint32_t head = slot_head(slot);
+        if (head != invalid_head()) {
+          wide_heads_.get_or_insert(slot_key(slot)) = head;
+        }
+      }
+      slots_.clear();
+      slots_.shrink_to_fit();
+      size_ = 0;
+      wide_ = true;
+    }
+
+    std::vector<uint64_t> slots_;
+    PostingHeadMap<uint32_t> wide_heads_;
+    size_t size_ = 0;
+    bool wide_ = false;
+  };
+
   struct Item {
     size_t item_id = 0;
     std::string_view sequence;
@@ -174,7 +323,7 @@ class IncrementalPigeonholeIndex {
     PostingStorage posting_storage = PostingStorage::Compact16;
     PostingHeadMap<uint16_t> compact_heads;
     std::vector<uint32_t> compact_entries;
-    PostingHeadMap<uint32_t> compact24_heads;
+    Compact24PostingHeadMap compact24_heads;
     std::vector<Compact24PostingEntry> compact24_entries;
     PostingHeadMap<uint32_t> packed_heads;
     std::vector<uint64_t> packed_entries;

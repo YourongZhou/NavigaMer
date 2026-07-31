@@ -147,13 +147,16 @@ void test_packed_postings_promote_without_losing_candidates() {
   assert(packed_result.safe);
   assert(packed_result.candidate_indices.size() == 300);
 
-  navigamer::IncrementalPigeonholeIndex many_items({4, 4});
+  // A 21-mer all-T code exceeds 40 bits. This exercises the exact wide-key
+  // head-table fallback and then the Compact24 -> Packed32 posting promotion.
+  navigamer::IncrementalPigeonholeIndex many_items({21, 21});
+  const std::string wide_key_sequence(21, 'T');
   constexpr size_t item_count =
       static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 2;
   for (size_t idx = 0; idx < item_count; ++idx) {
-    many_items.append(idx, short_sequence);
+    many_items.append(idx, wide_key_sequence);
   }
-  const auto many_result = many_items.query(short_sequence, 0);
+  const auto many_result = many_items.query(wide_key_sequence, 0);
   assert(many_result.safe);
   assert(many_result.candidate_indices.size() == item_count);
   assert(many_result.candidate_indices.front() == 0);
