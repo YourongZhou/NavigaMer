@@ -192,6 +192,33 @@ void test_vacuous_qgram_bound_skips_deferred_postings() {
          (std::vector<size_t>{10, 20, 30, 40}));
 }
 
+void test_external_views_preserve_sparse_item_ids() {
+  const std::vector<std::string> sequences = {
+      std::string(32, 'A'),
+      std::string(32, 'C'),
+      std::string(32, 'G'),
+  };
+  std::vector<navigamer::RangeJoinItemView> views = {
+      {90, sequences[0]},
+      {7, sequences[1]},
+      {42, sequences[2]},
+  };
+  auto config = config_for(navigamer::RangeCandidateMode::QGramOnly);
+  config.qgram_q = 4;
+  navigamer::ExactRangeJoinIndex index(config, true);
+  index.build_views(std::move(views));
+
+  const auto selective = index.query(sequences[1], 0);
+  assert(selective.candidate_item_ids == (std::vector<size_t>{7}));
+  const auto vacuous = index.query(sequences[1], 8);
+  assert(vacuous.candidate_item_ids ==
+         (std::vector<size_t>{7, 42, 90}));
+
+  navigamer::ExactRangeJoinIndex copied = index;
+  assert(copied.query(sequences[1], 0).candidate_item_ids ==
+         selective.candidate_item_ids);
+}
+
 void test_shifted_window_postings_match_standard_index() {
   const std::string reference =
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -295,6 +322,7 @@ int main() {
   test_parallel_range_join_queries_are_deterministic();
   test_seed_and_qgram_queries_share_workspace_safely();
   test_vacuous_qgram_bound_skips_deferred_postings();
+  test_external_views_preserve_sparse_item_ids();
   test_shifted_window_postings_match_standard_index();
   test_positional_postings_are_recall_safe();
 

@@ -166,11 +166,14 @@ ExactRangeJoinIndex::ExactRangeJoinIndex(
 
 void ExactRangeJoinIndex::build(std::vector<RangeJoinItem> items) {
   owned_items_ = std::move(items);
+  items_are_external_ = false;
+  external_item_ids_.clear();
+  external_item_ids_.shrink_to_fit();
   items_.clear();
   items_.reserve(owned_items_.size());
   for (size_t item_idx = 0; item_idx < owned_items_.size(); ++item_idx) {
     items_.push_back(
-        {owned_items_[item_idx].item_id, item_idx, {}});
+        {owned_items_[item_idx].sequence.size(), item_idx});
   }
   reset_after_items_changed();
 }
@@ -178,21 +181,51 @@ void ExactRangeJoinIndex::build(std::vector<RangeJoinItem> items) {
 void ExactRangeJoinIndex::build_views(std::vector<RangeJoinItemView> items) {
   owned_items_.clear();
   owned_items_.shrink_to_fit();
+  items_are_external_ = true;
+  external_item_ids_.clear();
+  bool identity_item_ids = true;
+  for (size_t item_idx = 0; item_idx < items.size(); ++item_idx) {
+    if (items[item_idx].item_id != item_idx) {
+      identity_item_ids = false;
+      break;
+    }
+  }
+  if (!identity_item_ids) {
+    external_item_ids_.reserve(items.size());
+    for (const auto& item : items) {
+      external_item_ids_.push_back(item.item_id);
+    }
+  } else {
+    external_item_ids_.shrink_to_fit();
+  }
   items_.clear();
   items_.reserve(items.size());
   for (const auto& item : items) {
-    items_.push_back(
-        {item.item_id, std::numeric_limits<size_t>::max(), item.sequence});
+    items_.push_back({
+        item.sequence.size(),
+        reinterpret_cast<uintptr_t>(item.sequence.data())});
   }
   reset_after_items_changed();
 }
 
+size_t ExactRangeJoinIndex::item_id(size_t item_idx) const {
+  if (!items_are_external_) {
+    return owned_items_[item_idx].item_id;
+  }
+  return external_item_ids_.empty()
+             ? item_idx
+             : external_item_ids_[item_idx];
+}
+
 std::string_view ExactRangeJoinIndex::item_sequence(
     const StoredItem& item) const {
-  if (item.owned_item_idx < owned_items_.size()) {
-    return owned_items_[item.owned_item_idx].sequence;
+  if (!items_are_external_) {
+    return owned_items_[item.sequence_location].sequence;
   }
-  return item.external_sequence;
+  if (item.sequence_length == 0) return {};
+  return std::string_view(
+      reinterpret_cast<const char*>(item.sequence_location),
+      item.sequence_length);
 }
 
 void ExactRangeJoinIndex::reset_after_items_changed() {
@@ -242,11 +275,12 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
         std::min(min_item_sequence_length_, sequence.size());
     max_item_sequence_length_ =
         std::max(max_item_sequence_length_, sequence.size());
-    if (item_idx != 0 && item.item_id <= items_[item_idx - 1].item_id) {
+    if (item_idx != 0 &&
+        item_id(item_idx) <= item_id(item_idx - 1)) {
       item_ids_strictly_increasing_ = false;
     }
     if (!defer_qgram_build_) {
-      qgram_items.push_back({item.item_id, sequence});
+      qgram_items.push_back({item_id(item_idx), sequence});
     }
   }
   if (!defer_qgram_build_) {
@@ -320,8 +354,9 @@ const QGramCountIndex& ExactRangeJoinIndex::ensure_qgram_index() const {
   const auto build_qgram = [this]() {
     std::vector<QGramCountIndex::ItemView> qgram_items;
     qgram_items.reserve(items_.size());
-    for (const auto& item : items_) {
-      qgram_items.push_back({item.item_id, item_sequence(item)});
+    for (size_t item_idx = 0; item_idx < items_.size(); ++item_idx) {
+      qgram_items.push_back(
+          {item_id(item_idx), item_sequence(items_[item_idx])});
     }
     qgram_index_.build_views(qgram_items);
     qgram_ready_ = true;
@@ -722,11 +757,11 @@ RangeJoinQueryResult ExactRangeJoinIndex::full_scan(
   result.used_full_scan = fallback;
   {
     ScopedTimer length_timer(&result.range_length_filter_ms);
-    for (const auto& item : items_) {
-      const auto& sequence = item_sequence(item);
+    for (size_t item_idx = 0; item_idx < items_.size(); ++item_idx) {
+      const auto& sequence = item_sequence(items_[item_idx]);
       if (std::abs(static_cast<long long>(query_sequence.size()) -
                    static_cast<long long>(sequence.size())) <= tau) {
-        result.candidate_item_ids.push_back(item.item_id);
+        result.candidate_item_ids.push_back(item_id(item_idx));
       } else {
         result.length_filtered_items++;
       }
@@ -986,7 +1021,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
         const auto& sequence = item_sequence(item);
         if (std::abs(static_cast<long long>(query_sequence.size()) -
                      static_cast<long long>(sequence.size())) <= tau) {
-          result.candidate_item_ids.push_back(item.item_id);
+          result.candidate_item_ids.push_back(item_id(item_idx));
         } else {
           result.length_filtered_items++;
           result.seed_length_pruned_candidates++;
@@ -1060,15 +1095,16 @@ RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
       const bool posting_index_capacity =
           items_.size() <= static_cast<size_t>(
                                std::numeric_limits<uint32_t>::max());
-      for (const auto& item : items_) {
-        const size_t item_length = item_sequence(item).size();
+      for (size_t item_idx = 0; item_idx < items_.size(); ++item_idx) {
+        const size_t item_length =
+            item_sequence(items_[item_idx]).size();
         if (std::llabs(
                 static_cast<long long>(query_sequence.size()) -
                 static_cast<long long>(item_length)) > tau) {
           stats.length_filtered_items++;
           continue;
         }
-        result.candidate_item_ids.push_back(item.item_id);
+        result.candidate_item_ids.push_back(item_id(item_idx));
         const size_t item_total =
             item_length < q_size ? 0 : item_length - q_size + 1;
         if (!full_scan_fallback && posting_index_capacity &&
