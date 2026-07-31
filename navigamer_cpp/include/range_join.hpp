@@ -132,6 +132,9 @@ class ExactRangeJoinIndex {
   bool seed_index_capacity_ = true;
   bool seed_index_uses_16bit_ = true;
   bool positional_postings_use_32bit_ = true;
+  size_t min_item_sequence_length_ = 0;
+  size_t max_item_sequence_length_ = 0;
+  bool item_ids_strictly_increasing_ = true;
   mutable QGramCountIndex qgram_index_;
   mutable bool qgram_ready_ = false;
   bool defer_qgram_build_ = false;
@@ -141,6 +144,9 @@ class ExactRangeJoinIndex {
 
   std::string_view item_sequence(const StoredItem& item) const;
   void reset_after_items_changed();
+  bool qgram_bound_is_vacuous(
+      std::string_view query_sequence, int tau,
+      bool* full_scan_fallback, size_t* query_total) const;
   const QGramCountIndex& ensure_qgram_index() const;
   void prepare_postings_for_seed_len(int seed_len);
   bool query_needs_seed_postings(int seed_len) const;

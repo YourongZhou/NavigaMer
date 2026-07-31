@@ -158,6 +158,40 @@ void test_seed_and_qgram_queries_share_workspace_safely() {
   assert(shared_workspace.seed_touched16.empty());
 }
 
+void test_vacuous_qgram_bound_skips_deferred_postings() {
+  std::vector<navigamer::RangeJoinItem> items = {
+      {10, std::string(100, 'A')},
+      {20, std::string(100, 'C')},
+      {30, std::string(100, 'G')},
+      {40, std::string(100, 'T')},
+  };
+  auto config = config_for(navigamer::RangeCandidateMode::QGramOnly);
+  navigamer::ExactRangeJoinIndex index(config, true);
+  index.build(items);
+
+  navigamer::RangeJoinQueryWorkspace workspace;
+  const auto vacuous = index.query(items[0].sequence, 20, &workspace);
+  assert(vacuous.mode_used == navigamer::RangeCandidateMode::QGramOnly);
+  assert(!vacuous.used_full_scan);
+  assert(vacuous.candidate_item_ids ==
+         (std::vector<size_t>{10, 20, 30, 40}));
+  assert(vacuous.required_shared_nonpositive == items.size());
+  assert(workspace.qgram.shared.empty());
+  assert(workspace.qgram.shared16.empty());
+  assert(workspace.qgram.seen_epoch.empty());
+  assert(workspace.qgram.seen_epoch16.empty());
+
+  const auto selective = index.query(items[0].sequence, 0, &workspace);
+  assert(selective.candidate_item_ids == (std::vector<size_t>{10}));
+  assert(!workspace.qgram.shared16.empty());
+  assert(!workspace.qgram.seen_epoch16.empty());
+
+  const auto unsafe = index.query(std::string(100, 'N'), 0);
+  assert(unsafe.used_full_scan);
+  assert(unsafe.candidate_item_ids ==
+         (std::vector<size_t>{10, 20, 30, 40}));
+}
+
 void test_shifted_window_postings_match_standard_index() {
   const std::string reference =
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -260,6 +294,7 @@ int main() {
 
   test_parallel_range_join_queries_are_deterministic();
   test_seed_and_qgram_queries_share_workspace_safely();
+  test_vacuous_qgram_bound_skips_deferred_postings();
   test_shifted_window_postings_match_standard_index();
   test_positional_postings_are_recall_safe();
 

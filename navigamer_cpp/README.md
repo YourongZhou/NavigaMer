@@ -288,6 +288,10 @@ Dense q-gram postings preserve the existing 16-bit item/count fast path through
 one lossless 32-bit `24-bit item index + 8-bit count` word per posting rather
 than the previous 8-byte pair. Inputs exceeding either bound automatically use
 the wide representation.
+Before materializing a deferred q-gram index, the range join tests the maximum
+possible q-gram total over the length-compatible range. If its exact L1
+threshold is non-positive, every compatible item must survive, so it returns
+that same superset without building postings.
 Use `--query-fastq-out <path>` to export the deterministic generated queries
 with `source_pos=` read-header annotations for matched external baseline
 candidate-recovery checks.

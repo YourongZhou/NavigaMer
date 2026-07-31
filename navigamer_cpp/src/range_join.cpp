@@ -227,18 +227,93 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
       }
     }
   }
+  min_item_sequence_length_ = items_.empty()
+                                  ? 0
+                                  : std::numeric_limits<size_t>::max();
+  max_item_sequence_length_ = 0;
+  item_ids_strictly_increasing_ = true;
   qgram_ready_ = false;
   std::vector<QGramCountIndex::ItemView> qgram_items;
   if (!defer_qgram_build_) qgram_items.reserve(items_.size());
-  for (const auto& item : items_) {
+  for (size_t item_idx = 0; item_idx < items_.size(); ++item_idx) {
+    const auto& item = items_[item_idx];
+    const auto sequence = item_sequence(item);
+    min_item_sequence_length_ =
+        std::min(min_item_sequence_length_, sequence.size());
+    max_item_sequence_length_ =
+        std::max(max_item_sequence_length_, sequence.size());
+    if (item_idx != 0 && item.item_id <= items_[item_idx - 1].item_id) {
+      item_ids_strictly_increasing_ = false;
+    }
     if (!defer_qgram_build_) {
-      qgram_items.push_back({item.item_id, item_sequence(item)});
+      qgram_items.push_back({item.item_id, sequence});
     }
   }
   if (!defer_qgram_build_) {
     qgram_index_.build_views(qgram_items);
     qgram_ready_ = true;
   }
+}
+
+bool ExactRangeJoinIndex::qgram_bound_is_vacuous(
+    std::string_view query_sequence, int tau,
+    bool* full_scan_fallback, size_t* query_total) const {
+  *full_scan_fallback = false;
+  *query_total = 0;
+
+  const int q = config_.qgram_q;
+  if (q > 32) {
+    *full_scan_fallback = true;
+    return true;
+  }
+  for (char base : query_sequence) {
+    if (base != 'A' && base != 'C' && base != 'G' && base != 'T') {
+      *full_scan_fallback = true;
+      return true;
+    }
+  }
+
+  const size_t q_size = static_cast<size_t>(q);
+  *query_total = query_sequence.size() < q_size
+                     ? 0
+                     : query_sequence.size() - q_size + 1;
+  if (*query_total == 0) {
+    *full_scan_fallback = true;
+    return true;
+  }
+  if (items_.empty()) return true;
+
+  const size_t threshold = static_cast<size_t>(tau);
+  const size_t min_compatible_length =
+      query_sequence.size() > threshold
+          ? query_sequence.size() - threshold
+          : 0;
+  const size_t max_compatible_length =
+      query_sequence.size() >
+              std::numeric_limits<size_t>::max() - threshold
+          ? std::numeric_limits<size_t>::max()
+          : query_sequence.size() + threshold;
+  if (max_item_sequence_length_ < min_compatible_length ||
+      min_item_sequence_length_ > max_compatible_length) {
+    return true;
+  }
+
+  // q-gram L1 pruning requires
+  //   query_total + item_total - 2*q*tau > 0.
+  // item_total grows monotonically with sequence length, so using the largest
+  // possibly compatible length gives a safe O(1) upper bound. If even that
+  // numerator is non-positive, no item can be removed by the posting index.
+  const size_t largest_possible_length =
+      std::min(max_item_sequence_length_, max_compatible_length);
+  const size_t largest_item_total =
+      largest_possible_length < q_size
+          ? 0
+          : largest_possible_length - q_size + 1;
+  const uint64_t max_l1 =
+      uint64_t{2} * static_cast<uint64_t>(q) *
+      static_cast<uint64_t>(threshold);
+  if (*query_total > max_l1) return false;
+  return largest_item_total <= max_l1 - *query_total;
 }
 
 const QGramCountIndex& ExactRangeJoinIndex::ensure_qgram_index() const {
@@ -975,11 +1050,48 @@ RangeJoinQueryResult ExactRangeJoinIndex::qgram_query(
   result.mode_used = RangeCandidateMode::QGramOnly;
   {
     ScopedTimer timer(&result.range_qgram_query_ms);
-    const QGramCountIndex& qgram_index =
-        defer_qgram_build_ ? ensure_qgram_index() : qgram_index_;
-    result.candidate_item_ids =
-        qgram_index.query(query_sequence, tau, &stats,
-                          workspace ? &workspace->qgram : nullptr);
+    bool full_scan_fallback = false;
+    size_t query_total = 0;
+    if (qgram_bound_is_vacuous(
+            query_sequence, tau, &full_scan_fallback, &query_total)) {
+      stats.total_items = items_.size();
+      stats.full_scan_fallbacks = full_scan_fallback ? 1 : 0;
+      const size_t q_size = static_cast<size_t>(config_.qgram_q);
+      const bool posting_index_capacity =
+          items_.size() <= static_cast<size_t>(
+                               std::numeric_limits<uint32_t>::max());
+      for (const auto& item : items_) {
+        const size_t item_length = item_sequence(item).size();
+        if (std::llabs(
+                static_cast<long long>(query_sequence.size()) -
+                static_cast<long long>(item_length)) > tau) {
+          stats.length_filtered_items++;
+          continue;
+        }
+        result.candidate_item_ids.push_back(item.item_id);
+        const size_t item_total =
+            item_length < q_size ? 0 : item_length - q_size + 1;
+        if (!full_scan_fallback && posting_index_capacity &&
+            query_total != 0 && item_total != 0) {
+          stats.required_shared_nonpositive++;
+        }
+      }
+      if (!item_ids_strictly_increasing_) {
+        std::sort(result.candidate_item_ids.begin(),
+                  result.candidate_item_ids.end());
+        result.candidate_item_ids.erase(
+            std::unique(result.candidate_item_ids.begin(),
+                        result.candidate_item_ids.end()),
+            result.candidate_item_ids.end());
+      }
+      stats.qgram_candidates = result.candidate_item_ids.size();
+    } else {
+      const QGramCountIndex& qgram_index =
+          defer_qgram_build_ ? ensure_qgram_index() : qgram_index_;
+      result.candidate_item_ids =
+          qgram_index.query(query_sequence, tau, &stats,
+                            workspace ? &workspace->qgram : nullptr);
+    }
   }
   result.used_full_scan = stats.full_scan_fallbacks > 0;
   result.length_filtered_items = stats.length_filtered_items;

@@ -243,6 +243,10 @@ For q-gram candidate generation, shards above 65,536 items no longer promote
 every short-sequence posting from 4 to 8 bytes: up to 24 bits encode the item
 index and 8 bits encode the exact q-gram count in one 32-bit word. Wider or
 longer inputs retain the lossless fallback representation.
+Deferred q-gram indexes are not materialized when the exact L1 threshold is
+non-positive even for the longest length-compatible item. In that case q-gram
+filtering is mathematically unable to remove a candidate, so construction emits
+the identical length-compatible superset directly without allocating postings.
 Query loading validates signatures, counts, file bounds, layer ranges, shard
 coordinates, and the bundle checksum without rescanning every mapped node or
 edge; completed or resumed builds perform the full per-part validation.

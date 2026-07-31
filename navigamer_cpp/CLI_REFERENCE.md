@@ -317,6 +317,9 @@ Dense q-gram postings remain 4-byte `16-bit item + 16-bit count` words through
 65,536 items. Larger short-sequence indexes use a lossless 4-byte
 `24-bit item + 8-bit count` word for up to 16,777,216 items; larger item IDs or
 q-gram counts fall back to the wide representation.
+When `query_total + maximum_compatible_item_total <= 2*q*tau`, the q-gram L1
+condition cannot prune any item. Deferred construction then returns the exact
+length-compatible candidate superset without allocating a q-gram posting index.
 
 **Required:** `--ref`, `--index`, `--shard-windows`
 
