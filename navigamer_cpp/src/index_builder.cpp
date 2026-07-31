@@ -136,45 +136,52 @@ class Phase1DistanceCache {
 };
 
 struct Phase1BaseCountSignature {
-  std::array<uint32_t, 4> counts = {};
-  bool safe = true;
+  uint32_t packed_counts = 0;
+
+  bool safe() const {
+    return packed_counts != std::numeric_limits<uint32_t>::max();
+  }
 };
+static_assert(sizeof(Phase1BaseCountSignature) == 4,
+              "compact base-count signature must remain 4 bytes");
 
 Phase1BaseCountSignature phase1_base_count_signature(
     std::string_view sequence) {
-  Phase1BaseCountSignature signature;
+  uint32_t packed = 0;
   for (char base : sequence) {
-    size_t index = 0;
+    uint32_t shift = 0;
     switch (base) {
-      case 'A': index = 0; break;
-      case 'C': index = 1; break;
-      case 'G': index = 2; break;
-      case 'T': index = 3; break;
+      case 'A': break;
+      case 'C': shift = 8; break;
+      case 'G': shift = 16; break;
+      case 'T': shift = 24; break;
       default:
-        signature.safe = false;
-        return signature;
+        return {std::numeric_limits<uint32_t>::max()};
     }
-    if (signature.counts[index] == std::numeric_limits<uint32_t>::max()) {
-      signature.safe = false;
-      return signature;
+    if (((packed >> shift) & 0xff) ==
+        std::numeric_limits<uint8_t>::max()) {
+      return {std::numeric_limits<uint32_t>::max()};
     }
-    signature.counts[index]++;
+    packed += uint32_t{1} << shift;
   }
-  return signature;
+  // Four counts of 255 collide with the reserved unsafe code. Such a
+  // sequence is longer than the compact reference-window path, so disabling
+  // this lower bound remains lossless.
+  return {packed};
 }
 
 int phase1_base_count_lower_bound(
     const Phase1BaseCountSignature& lhs,
     const Phase1BaseCountSignature& rhs) {
-  if (!lhs.safe || !rhs.safe) return 0;
-  uint64_t l1 = 0;
-  for (size_t base = 0; base < lhs.counts.size(); ++base) {
-    const uint32_t left = lhs.counts[base];
-    const uint32_t right = rhs.counts[base];
+  if (!lhs.safe() || !rhs.safe()) return 0;
+  uint32_t l1 = 0;
+  for (size_t base = 0; base < 4; ++base) {
+    const uint32_t shift = static_cast<uint32_t>(base * 8);
+    const uint32_t left = (lhs.packed_counts >> shift) & 0xff;
+    const uint32_t right = (rhs.packed_counts >> shift) & 0xff;
     l1 += left > right ? left - right : right - left;
   }
-  return static_cast<int>(
-      std::min<uint64_t>((l1 + 1) / 2, static_cast<uint64_t>(INT_MAX)));
+  return static_cast<int>((l1 + 1) / 2);
 }
 
 struct Phase4QGramSignature {
