@@ -1,5 +1,6 @@
 #include "phase2_distance_verifier.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
@@ -27,7 +28,8 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
           "phase2 distance batch exceeds compact result capacity");
     }
     Phase2DistanceBatchResult result;
-    result.accepted_pair_indices.reserve(pairs.size());
+    result.accepted_pair_indices.reserve(
+        std::min<size_t>(pairs.size(), 1024));
 
     bool prepare_parent = false;
     if (distance_mode_ == DistanceMode::Edlib && !pairs.empty()) {
