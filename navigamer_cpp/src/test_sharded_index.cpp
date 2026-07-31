@@ -95,7 +95,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
       navigamer::build_sharded_reference_index(
           bundle.string(), "literal-reference", "reference",
           reference, contigs, window, stride, shard_windows,
-          hierarchy, range_config);
+          hierarchy, range_config, 4);
 
   assert(navigamer::is_sharded_index(bundle.string()));
   const auto reloaded_manifest =
@@ -123,7 +123,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
       navigamer::build_sharded_reference_index(
           bundle.string(), "literal-reference", "reference",
           reference, contigs, window, stride, shard_windows,
-          hierarchy, range_config);
+          hierarchy, range_config, 4);
   assert(resumed.shards.size() == reloaded_manifest.shards.size());
   for (size_t shard_idx = 0;
        shard_idx < resumed.shards.size(); ++shard_idx) {
@@ -145,7 +145,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
       navigamer::build_sharded_reference_index(
           bundle.string(), "literal-reference", "reference",
           reference, contigs, window, stride, shard_windows,
-          hierarchy, range_config);
+          hierarchy, range_config, 4);
   assert(repaired.shards.size() == resumed.shards.size());
 
   {
@@ -168,7 +168,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
   (void)navigamer::build_sharded_reference_index(
       bundle.string(), "literal-reference", "reference",
       reference, contigs, window, stride, shard_windows,
-      hierarchy, range_config);
+      hierarchy, range_config, 4);
 
   const auto loaded = navigamer::load_sharded_index(
       bundle.string(),

@@ -46,7 +46,7 @@ void usage(const char* prog) {
             << "  " << prog << " demo [--size N] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build-scale --ref <path|seq> --window 250 --stride 1 --prefix-lengths csv --out <csv> [--index <file>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
-            << "  " << prog << " build-sharded --ref <path|seq> --window 250 --stride 1 --shard-windows N --index <manifest> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " build-sharded --ref <path|seq> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --index <manifest> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--index <file>] [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query-index --index <file> --query <seq> [--tolerance 2] [--mode adaptive]\n"
             << "  " << prog << " query-index-batch --index <file> --reads <fastq> [--tolerance 2] [--out <tsv>] [--path-trace-out <tsv>] [--mode adaptive]\n"
@@ -808,6 +808,7 @@ void run_build_sharded(
     int window_size,
     int stride,
     size_t max_shard_windows,
+    size_t shard_build_jobs,
     const std::string& index_path,
     const navigamer::HierarchyConfig& hierarchy,
     const navigamer::BuildRangeConfig& range_config) {
@@ -830,13 +831,17 @@ void run_build_sharded(
   std::cerr << "Building sharded index: reference_bases="
             << reference.sequence.size()
             << " max_shard_windows=" << max_shard_windows
+            << " shard_build_jobs="
+            << (shard_build_jobs == 0
+                    ? std::string("auto")
+                    : std::to_string(shard_build_jobs))
             << " window=" << window_size
             << " stride=" << stride << "\n";
   const auto manifest = build_sharded_reference_index(
       index_path, ref_input, reference.id, reference.sequence,
       reference.contigs, static_cast<size_t>(window_size),
       static_cast<size_t>(stride), max_shard_windows,
-      hierarchy, range_config);
+      hierarchy, range_config, shard_build_jobs);
   std::cerr << "Sharded index saved: " << index_path
             << " shards=" << manifest.shards.size()
             << " windows=" << manifest.total_window_count
@@ -2344,6 +2349,7 @@ int main(int argc, char** argv) {
   size_t phase1_qgram_min_fanout = 12;
   size_t phase1_qgram_max_touched = 250000;
   size_t max_shard_windows = 0;
+  size_t shard_build_jobs = 0;
   int progress_interval_seconds = 600;
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
@@ -2505,6 +2511,11 @@ int main(int argc, char** argv) {
     if (a == "--shard-windows" && i + 1 < argc) {
       max_shard_windows =
           parse_positive_size(argv[++i], "--shard-windows");
+      continue;
+    }
+    if (a == "--shard-build-jobs" && i + 1 < argc) {
+      shard_build_jobs =
+          parse_positive_size(argv[++i], "--shard-build-jobs");
       continue;
     }
     if (a == "--primary-radii" && i + 1 < argc) { primary_radii_csv = argv[++i]; continue; }
@@ -2849,7 +2860,7 @@ int main(int argc, char** argv) {
       }
       run_build_sharded(
           ref_input, window_size, stride, max_shard_windows,
-          index_path, hierarchy, range_config);
+          shard_build_jobs, index_path, hierarchy, range_config);
       return 0;
     }
     if (cmd == "query") {

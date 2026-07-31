@@ -20,7 +20,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer demo   [--size N] [--primary-radii 30,15,5 | --r-sw 5 --r-mw 15 --r-lw 30]
 ./navigamer build  --ref <fasta|sequence> --reads <fastq|sequence> [--index index.navidx] [same primary-layer flags]
 ./navigamer build-scale --ref <fasta|sequence> --window 250 --stride 1 --prefix-lengths 50000 --out build_scale.csv [--index index.navidx] [same primary-layer flags]
-./navigamer build-sharded --ref <fasta|sequence> --window 250 --stride 1 --shard-windows N --index index.navshard [same primary-layer flags]
+./navigamer build-sharded --ref <fasta|sequence> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --index index.navshard [same primary-layer flags]
 ./navigamer query  --reads <fastq|sequence> --query <sequence> [--index index.navidx] [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer query-index --index <index.navidx|index.navshard> --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer query-index-batch --index <index.navidx|index.navshard> --reads <fastq> [--tolerance 2] [--out out.tsv] [--path-trace-out trace.tsv]
@@ -164,7 +164,11 @@ v19 parts, each capped by `--shard-windows`. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
 contig. Valid completed parts are reused on restart, damaged parts are rebuilt,
-and new parts are installed atomically.
+and new parts are installed atomically. The automatic policy builds at most
+four parts concurrently and divides the OpenMP thread budget among their
+internal parallel phases. Use `--shard-build-jobs N` to cap concurrent
+builders and their aggregate memory; nested teams remain inside the original
+OpenMP thread budget.
 
 Indexed leaf attachment directly verifies range candidates by default. Use
 `--leaf-qgram-postfilter on` to apply a safe q-gram L1 necessary condition

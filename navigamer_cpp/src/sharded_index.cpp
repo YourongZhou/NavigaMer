@@ -1,10 +1,14 @@
 #include "sharded_index.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <omp.h>
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
@@ -130,6 +134,16 @@ std::filesystem::path shard_output_path(
        << shard_ordinal << ".navidx";
   return bundle_path.parent_path() / name.str();
 }
+
+struct ShardBuildSpec {
+  std::filesystem::path part_path;
+  std::string ref_id;
+  size_t slice_begin = 0;
+  size_t slice_end = 0;
+  uint32_t source_begin = 0;
+  uint32_t source_end = 0;
+  size_t window_count = 0;
+};
 
 bool load_reusable_shard(
     const std::filesystem::path& part_path,
@@ -391,7 +405,8 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t stride,
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
-    const BuildRangeConfig& range_config) {
+    const BuildRangeConfig& range_config,
+    size_t build_jobs) {
   if (bundle_path.empty()) {
     throw std::invalid_argument(
         "sharded index output path must not be empty");
@@ -420,10 +435,7 @@ ShardedIndexManifest build_sharded_reference_index(
           static_cast<int>(window_length),
           static_cast<int>(stride), hierarchy, range_config);
 
-  ShardedIndexManifest manifest;
-  manifest.window_length = window_length;
-  manifest.stride = stride;
-  manifest.part_signature = part_manifest.signature;
+  std::vector<ShardBuildSpec> specs;
   size_t shard_ordinal = 0;
   uint32_t expected_contig_begin = 0;
   for (const auto& contig : reference_contigs) {
@@ -461,18 +473,59 @@ ShardedIndexManifest build_sharded_reference_index(
             "reference shard coordinate exceeds 32-bit storage");
       }
 
-      std::string slice =
-          reference_sequence.substr(
-              slice_begin, slice_end - slice_begin);
-      ReferenceContig slice_contig{
-          contig.id, 0, static_cast<uint32_t>(slice.size()),
-          static_cast<uint32_t>(source_begin)};
+      specs.push_back({
+          shard_output_path(bundle, shard_ordinal), contig.id,
+          slice_begin, slice_end,
+          static_cast<uint32_t>(source_begin),
+          static_cast<uint32_t>(source_end), shard_window_count});
+      ++shard_ordinal;
+    }
+  }
+  if (expected_contig_begin != reference_sequence.size()) {
+    throw std::invalid_argument(
+        "reference contigs do not cover the reference");
+  }
+  if (specs.empty()) {
+    throw std::invalid_argument(
+        "sharded index reference contains no complete windows");
+  }
 
-      const std::filesystem::path part_path =
-          shard_output_path(bundle, shard_ordinal);
+  const size_t available_threads = static_cast<size_t>(
+      std::max(1, omp_get_max_threads()));
+  // A few concurrently built parts expose the mostly serial sketch phase
+  // without taking one full build peak per hardware thread. Leave each part a
+  // share of the thread budget for its parallel rebinding/attachment phases.
+  const size_t automatic_jobs = std::max<size_t>(
+      1, std::min<size_t>(
+             4, static_cast<size_t>(
+                    std::sqrt(static_cast<double>(available_threads)))));
+  const size_t requested_jobs =
+      build_jobs == 0 ? automatic_jobs : build_jobs;
+  const size_t job_count_size = std::min(
+      {requested_jobs, specs.size(), available_threads});
+  if (job_count_size >
+      static_cast<size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument(
+        "sharded index build job count is too large");
+  }
+  const int job_count = static_cast<int>(job_count_size);
+  const int threads_per_job = static_cast<int>(
+      std::max<size_t>(1, available_threads / job_count_size));
+
+  std::vector<IndexShardDescriptor> descriptors(specs.size());
+  std::vector<std::exception_ptr> errors(specs.size());
+  const auto build_one = [&](size_t spec_idx) {
+    try {
+      const auto& spec = specs[spec_idx];
+      std::string slice = reference_sequence.substr(
+          spec.slice_begin, spec.slice_end - spec.slice_begin);
+      ReferenceContig slice_contig{
+          spec.ref_id, 0, static_cast<uint32_t>(slice.size()),
+          spec.source_begin};
+
       LoadedIndex reusable;
       const bool reused = load_reusable_shard(
-          part_path, part_manifest, reference_id, slice,
+          spec.part_path, part_manifest, reference_id, slice,
           slice_contig, window_length, &reusable);
 
       size_t sequence_count = 0;
@@ -481,37 +534,64 @@ ShardedIndexManifest build_sharded_reference_index(
         sequence_count = reusable.builder.num_sequences();
         world_node_count = reusable.builder.num_world_nodes();
       } else {
-        BioGeometryIndexBuilder builder(hierarchy, range_config);
+        BuildRangeConfig shard_range_config = range_config;
+        if (job_count > 1) {
+          shard_range_config.progress_interval_seconds = 0;
+        }
+        BioGeometryIndexBuilder builder(hierarchy, shard_range_config);
         builder.build_reference_windows(
             reference_id, std::move(slice), window_length, stride,
             {slice_contig});
         install_shard_atomically(
-            part_path, builder, part_manifest);
+            spec.part_path, builder, part_manifest);
         sequence_count = builder.num_sequences();
         world_node_count = builder.num_world_nodes();
       }
 
-      IndexShardDescriptor descriptor;
-      descriptor.path = part_path.filename().string();
-      descriptor.ref_id = contig.id;
-      descriptor.source_begin =
-          static_cast<uint32_t>(source_begin);
-      descriptor.source_end =
-          static_cast<uint32_t>(source_end);
-      descriptor.window_count = shard_window_count;
-      descriptor.sequence_count = sequence_count;
-      descriptor.world_node_count = world_node_count;
-      manifest.total_window_count += descriptor.window_count;
-      manifest.total_sequence_count += descriptor.sequence_count;
-      manifest.total_world_node_count +=
-          descriptor.world_node_count;
-      manifest.shards.push_back(std::move(descriptor));
-      ++shard_ordinal;
+      descriptors[spec_idx] = {
+          spec.part_path.filename().string(), spec.ref_id,
+          spec.source_begin, spec.source_end, spec.window_count,
+          sequence_count, world_node_count};
+    } catch (...) {
+      errors[spec_idx] = std::current_exception();
     }
+  };
+
+  if (job_count == 1) {
+    for (size_t spec_idx = 0; spec_idx < specs.size(); ++spec_idx) {
+      build_one(spec_idx);
+    }
+  } else {
+    const int previous_active_levels = omp_get_max_active_levels();
+    omp_set_max_active_levels(std::max(2, previous_active_levels));
+#pragma omp parallel num_threads(job_count)
+    {
+      // Bound the product of concurrent shards and each builder's nested team
+      // by the original OpenMP thread budget.
+      const int previous_nested_threads = omp_get_max_threads();
+      omp_set_num_threads(threads_per_job);
+#pragma omp for schedule(dynamic, 1)
+      for (size_t spec_idx = 0; spec_idx < specs.size(); ++spec_idx) {
+        build_one(spec_idx);
+      }
+      omp_set_num_threads(previous_nested_threads);
+    }
+    omp_set_max_active_levels(previous_active_levels);
   }
-  if (expected_contig_begin != reference_sequence.size()) {
-    throw std::invalid_argument(
-        "reference contigs do not cover the reference");
+  for (const auto& error : errors) {
+    if (error) std::rethrow_exception(error);
+  }
+
+  ShardedIndexManifest manifest;
+  manifest.window_length = window_length;
+  manifest.stride = stride;
+  manifest.part_signature = part_manifest.signature;
+  manifest.shards.reserve(descriptors.size());
+  for (auto& descriptor : descriptors) {
+    manifest.total_window_count += descriptor.window_count;
+    manifest.total_sequence_count += descriptor.sequence_count;
+    manifest.total_world_node_count += descriptor.world_node_count;
+    manifest.shards.push_back(std::move(descriptor));
   }
   save_sharded_index_manifest(bundle_path, manifest);
   return manifest;

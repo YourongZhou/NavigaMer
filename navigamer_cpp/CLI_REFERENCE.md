@@ -301,6 +301,7 @@ manifest is written only after all parts are valid.
 | `--window` | `200` | Reference-window length |
 | `--stride` | `1` | Step between window starts |
 | `--shard-windows` | *(required)* | Maximum number of window starts assigned to one shard |
+| `--shard-build-jobs` | auto | Maximum concurrently built parts; auto uses at most four, and the OpenMP thread budget is divided among their internal teams |
 | `--index` | *(required)* | Output `.navshard` manifest; part files are created beside it |
 | `--progress-interval-seconds` | `600` | Periodic progress interval inside each shard build |
 

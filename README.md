@@ -108,7 +108,7 @@ cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
 ./navigamer build --ref ref --reads ACGTACGTACGTACGT --index /tmp/navigamer.navidx
 ./navigamer query-index --index /tmp/navigamer.navidx --query ACGTACGTACGTACGT --tolerance 2
-./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000000 --index /tmp/human.navshard
+./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000000 --shard-build-jobs 16 --index /tmp/human.navshard
 ./navigamer query-index-batch --index /tmp/human.navshard --reads reads.fastq --tolerance 2 --out /tmp/hits.tsv
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
@@ -207,6 +207,12 @@ For references that exceed one index's 32-bit array limits,
 `build-sharded` assigns each valid window start to exactly one shard. Adjacent
 shards retain only the reference overlap required to materialize their last
 windows, so neither windows nor original contig coordinates are lost.
+Independent parts build concurrently by default. The automatic policy uses at
+most four concurrent parts and divides the OpenMP thread budget among their
+internal parallel phases; `--shard-build-jobs N` sets an explicit concurrency
+limit. The product of part jobs and their internal worker teams never exceeds
+the OpenMP thread limit, while peak build memory is bounded by the number of
+concurrent parts.
 Completed shard files are content- and parameter-validated and reused after an
 interrupted build; new shards are installed atomically. The final
 `.navshard` manifest contains relative paths to ordinary v19 `.navidx` parts.
