@@ -3190,6 +3190,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
 #pragma omp parallel if(thread_capacity > 1) num_threads(thread_capacity)
     {
       const int tid = omp_get_thread_num();
+      std::vector<uint8_t> child_seen(build_nodes_.size(), uint8_t{0});
 
 #pragma omp single
       actual_threads = omp_get_num_threads();
@@ -3222,12 +3223,13 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
           ScopedTimer timer(&collapse_ms[static_cast<size_t>(tid)]);
           for (NodeId aux_id : auxiliary_nodes) {
             for (NodeId child : build_nodes_[aux_id].child_or_leaf_ids) {
-              if (std::find(direct_children.begin(), direct_children.end(),
-                            child) == direct_children.end()) {
+              if (!child_seen[child]) {
+                child_seen[child] = 1;
                 direct_children.push_back(child);
               }
             }
           }
+          for (NodeId child : direct_children) child_seen[child] = 0;
           node.child_or_leaf_ids = std::move(direct_children);
         }
 
