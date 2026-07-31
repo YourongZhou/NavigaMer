@@ -269,10 +269,12 @@ benchmarks and can compare original, random, minimizer, q-gram signature, router
 signature, and source-sorted oracle query ordering; the source oracle schedule is
 diagnostic only.
 
-The router builder retains only per-shard sorted 32-bit minimizer lists, then
-k-way merges them while streaming the key column and packed shard IDs. This
-halves the dominant router-construction array from 8 to 4 bytes per entry and
-removes the former second global sort; query-time layout is unchanged.
+The router builder writes each completed shard's sorted 32-bit minimizer list
+to a page-aligned temporary spool, then memory-maps and k-way merges the lists
+while streaming the key column and packed shard IDs. Consumed pages are released
+as the merge advances, bounding the working set by one shard list plus roughly
+one spool page per shard instead of all router entries. Query-time layout is
+unchanged.
 Use `--query-fastq-out <path>` to export the deterministic generated queries
 with `source_pos=` read-header annotations for matched external baseline
 candidate-recovery checks.

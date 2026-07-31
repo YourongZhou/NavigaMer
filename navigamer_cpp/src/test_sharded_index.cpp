@@ -355,6 +355,8 @@ void test_seed_router_no_false_negatives() {
          manifest.router_checksum);
   assert(!std::filesystem::exists(
       bundle.string() + ".route.packed.tmp"));
+  assert(!std::filesystem::exists(
+      bundle.string() + ".route.codes.tmp"));
   const auto router = navigamer::load_sharded_seed_router(
       bundle.string(), rebuilt_manifest);
   assert(router.enabled());

@@ -229,9 +229,11 @@ hit, not a heuristic. Short or ambiguous unsupported queries, and missing or
 invalid router sidecars, conservatively search every shard. `query-index` and
 `query-index-batch` search the selected parts in parallel and merge identical
 sequences and all of their occurrences before reporting results.
-Router construction retains only each shard's sorted 32-bit minimizer list and
-k-way merges those lists directly into the sidecar. It does not allocate the
-older 8-byte global pair array or perform a second global sort.
+Router construction writes each completed shard's sorted 32-bit minimizer list
+to a page-aligned temporary spool, then memory-maps and k-way merges the lists
+directly into the sidecar. Consumed pages are released as the merge advances,
+so the working set is bounded by one shard list plus roughly one spool page per
+shard instead of all router entries. The final query-time layout is unchanged.
 Query loading validates signatures, counts, file bounds, layer ranges, shard
 coordinates, and the bundle checksum without rescanning every mapped node or
 edge; completed or resumed builds perform the full per-part validation.

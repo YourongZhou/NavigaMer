@@ -218,27 +218,6 @@ uint64_t begin_router_checksum(
   return hash;
 }
 
-uint32_t unpack_shard_id(
-    const FinalArray<uint8_t>& packed_shard_ids,
-    size_t entry_index, uint32_t shard_id_bits) {
-  const size_t bit_offset = entry_index * shard_id_bits;
-  const size_t byte_offset = bit_offset / 8;
-  const uint32_t shift = static_cast<uint32_t>(bit_offset % 8);
-  uint64_t word = 0;
-  const size_t bytes_needed =
-      (shift + shard_id_bits + 7) / 8;
-  for (size_t byte = 0; byte < bytes_needed; ++byte) {
-    word |= static_cast<uint64_t>(
-                packed_shard_ids[byte_offset + byte])
-            << (8 * byte);
-  }
-  const uint64_t mask =
-      shard_id_bits == 32
-          ? UINT32_MAX
-          : ((uint64_t{1} << shard_id_bits) - 1);
-  return static_cast<uint32_t>((word >> shift) & mask);
-}
-
 int dna_code(char base) {
   switch (base) {
     case 'A': case 'a': return 0;
@@ -247,30 +226,6 @@ int dna_code(char base) {
     case 'T': case 't': return 3;
     default: return -1;
   }
-}
-
-bool exact_minimizer_code(
-    std::string_view sequence, uint32_t k, uint32_t window,
-    uint32_t* minimizer) {
-  if (!minimizer || k == 0 || k > 16 || window < k ||
-      sequence.size() != window) {
-    return false;
-  }
-  const uint64_t mask =
-      k == 16 ? UINT32_MAX : ((uint64_t{1} << (2 * k)) - 1);
-  uint64_t code = 0;
-  size_t valid = 0;
-  uint32_t best = UINT32_MAX;
-  for (char base : sequence) {
-    const int value = dna_code(base);
-    if (value < 0) return false;
-    code = ((code << 2) | static_cast<uint64_t>(value)) & mask;
-    if (++valid >= k) {
-      best = std::min(best, static_cast<uint32_t>(code));
-    }
-  }
-  *minimizer = best;
-  return true;
 }
 
 std::vector<uint32_t> reference_minimizers(
@@ -322,7 +277,6 @@ std::vector<uint32_t> reference_minimizers(
   minimizers.erase(
       std::unique(minimizers.begin(), minimizers.end()),
       minimizers.end());
-  minimizers.shrink_to_fit();
   return minimizers;
 }
 
@@ -347,7 +301,31 @@ struct ShardBuildSpec {
 };
 
 struct RouterBuildData {
-  std::vector<std::vector<uint32_t>> shard_minimizers;
+  explicit RouterBuildData(std::filesystem::path path)
+      : spool_path(std::move(path)) {}
+  RouterBuildData(const RouterBuildData&) = delete;
+  RouterBuildData& operator=(const RouterBuildData&) = delete;
+  RouterBuildData(RouterBuildData&& other) noexcept
+      : spool_path(std::move(other.spool_path)),
+        shard_offsets(std::move(other.shard_offsets)),
+        shard_counts(std::move(other.shard_counts)),
+        spool_size(other.spool_size),
+        page_size(other.page_size),
+        entry_count(other.entry_count) {
+    other.spool_path.clear();
+  }
+  ~RouterBuildData() {
+    if (!spool_path.empty()) {
+      std::error_code ignored;
+      std::filesystem::remove(spool_path, ignored);
+    }
+  }
+
+  std::filesystem::path spool_path;
+  std::vector<size_t> shard_offsets;
+  std::vector<size_t> shard_counts;
+  size_t spool_size = 0;
+  size_t page_size = 4096;
   size_t entry_count = 0;
 };
 
@@ -410,8 +388,10 @@ uint64_t save_router_sidecar(
     const std::filesystem::path& path,
     uint32_t k, uint32_t window, uint32_t shard_count,
     const RouterBuildData& data) {
-  if (data.shard_minimizers.size() != shard_count ||
-      data.entry_count == 0) {
+  if (data.shard_offsets.size() != shard_count ||
+      data.shard_counts.size() != shard_count ||
+      data.entry_count == 0 || data.spool_size == 0 ||
+      data.page_size == 0) {
     throw std::runtime_error("invalid shard router build data");
   }
   const std::filesystem::path temporary = path.string() + ".tmp";
@@ -424,6 +404,68 @@ uint64_t save_router_sidecar(
   uint64_t checksum = begin_router_checksum(
       k, window, shard_count, shard_id_bits, data.entry_count);
   try {
+#if defined(__unix__) || defined(__APPLE__)
+    const int spool_fd = open(data.spool_path.c_str(), O_RDONLY);
+    if (spool_fd < 0) {
+      throw std::runtime_error("unable to open shard router code spool");
+    }
+    struct stat spool_status {};
+    if (fstat(spool_fd, &spool_status) != 0 ||
+        spool_status.st_size < 0 ||
+        static_cast<uint64_t>(spool_status.st_size) !=
+            data.spool_size) {
+      close(spool_fd);
+      throw std::runtime_error("invalid shard router code spool size");
+    }
+    void* spool_address = mmap(
+        nullptr, data.spool_size, PROT_READ, MAP_PRIVATE,
+        spool_fd, 0);
+    close(spool_fd);
+    if (spool_address == MAP_FAILED) {
+      throw std::runtime_error("unable to map shard router code spool");
+    }
+#if defined(MADV_RANDOM)
+    (void)madvise(spool_address, data.spool_size, MADV_RANDOM);
+#endif
+    auto spool_mapping = std::make_shared<MappedRouterFile>(
+        spool_address, data.spool_size);
+    const uint8_t* spool_bytes = spool_mapping->data();
+#else
+    std::ifstream spool_in(data.spool_path, std::ios::binary);
+    if (!spool_in) {
+      throw std::runtime_error("unable to open shard router code spool");
+    }
+    std::vector<uint8_t> owned_spool(data.spool_size);
+    spool_in.read(
+        reinterpret_cast<char*>(owned_spool.data()),
+        static_cast<std::streamsize>(owned_spool.size()));
+    if (!spool_in ||
+        spool_in.peek() != std::char_traits<char>::eof()) {
+      throw std::runtime_error("invalid shard router code spool");
+    }
+    const uint8_t* spool_bytes = owned_spool.data();
+#endif
+    for (uint32_t shard_id = 0; shard_id < shard_count; ++shard_id) {
+      const size_t offset = data.shard_offsets[shard_id];
+      const size_t count = data.shard_counts[shard_id];
+      if (offset % data.page_size != 0 ||
+          count >
+              (std::numeric_limits<size_t>::max() - offset) /
+                  sizeof(uint32_t) ||
+          offset + count * sizeof(uint32_t) > data.spool_size) {
+        throw std::runtime_error("invalid shard router code range");
+      }
+    }
+    const auto code_at = [&](uint32_t shard_id, size_t offset) {
+      uint32_t code = 0;
+      std::memcpy(
+          &code,
+          spool_bytes + data.shard_offsets[shard_id] +
+              offset * sizeof(uint32_t),
+          sizeof(code));
+      return code;
+    };
+
     std::ofstream out(temporary, std::ios::binary);
     std::ofstream packed_out(packed_temporary, std::ios::binary);
     if (!out || !packed_out) {
@@ -454,9 +496,8 @@ uint64_t save_router_sidecar(
     std::priority_queue<
         Cursor, std::vector<Cursor>, CursorGreater> queue;
     for (uint32_t shard_id = 0; shard_id < shard_count; ++shard_id) {
-      const auto& minimizers = data.shard_minimizers[shard_id];
-      if (!minimizers.empty()) {
-        queue.push({minimizers.front(), shard_id, 0});
+      if (data.shard_counts[shard_id] != 0) {
+        queue.push({code_at(shard_id, 0), shard_id, 0});
       }
     }
 
@@ -508,13 +549,29 @@ uint64_t save_router_sidecar(
       }
       ++emitted;
 
-      const auto& minimizers =
-          data.shard_minimizers[cursor.shard_id];
       const size_t next_offset = cursor.offset + 1;
-      if (next_offset < minimizers.size()) {
+      if (next_offset < data.shard_counts[cursor.shard_id]) {
         queue.push({
-            minimizers[next_offset], cursor.shard_id, next_offset});
+            code_at(cursor.shard_id, next_offset),
+            cursor.shard_id, next_offset});
       }
+#if defined(__unix__) || defined(__APPLE__)
+#if defined(MADV_DONTNEED)
+      const size_t consumed_bytes =
+          next_offset * sizeof(uint32_t);
+      if (consumed_bytes % data.page_size == 0 ||
+          next_offset == data.shard_counts[cursor.shard_id]) {
+        const size_t consumed_page =
+            consumed_bytes == 0
+                ? 0
+                : (consumed_bytes - 1) / data.page_size;
+        void* page_address = const_cast<uint8_t*>(
+            spool_bytes + data.shard_offsets[cursor.shard_id] +
+            consumed_page * data.page_size);
+        (void)madvise(page_address, data.page_size, MADV_DONTNEED);
+      }
+#endif
+#endif
     }
     flush_codes();
     if (pending_bit_count != 0) {
@@ -582,27 +639,74 @@ uint64_t save_router_sidecar(
   return checksum;
 }
 
+size_t router_spool_page_size() {
+#if defined(__unix__) || defined(__APPLE__)
+  const long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size > 0) return static_cast<size_t>(page_size);
+#endif
+  return 4096;
+}
+
 RouterBuildData build_router_data(
     const std::string& reference_sequence,
     const std::vector<ShardBuildSpec>& specs,
-    uint32_t k, uint32_t window) {
+    uint32_t k, uint32_t window,
+    const std::filesystem::path& spool_path) {
   if (specs.size() > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("too many shards for seed router");
   }
-  RouterBuildData data;
-  data.shard_minimizers.reserve(specs.size());
+  RouterBuildData data(spool_path);
+  data.page_size = router_spool_page_size();
+  data.shard_offsets.reserve(specs.size());
+  data.shard_counts.reserve(specs.size());
+  std::ofstream spool(data.spool_path, std::ios::binary);
+  if (!spool) {
+    throw std::runtime_error("unable to create shard router code spool");
+  }
+  std::vector<uint8_t> zero_page(data.page_size, 0);
+  size_t spool_position = 0;
+  const auto align_spool = [&]() {
+    const size_t remainder = spool_position % data.page_size;
+    if (remainder == 0) return;
+    const size_t padding = data.page_size - remainder;
+    spool.write(
+        reinterpret_cast<const char*>(zero_page.data()),
+        static_cast<std::streamsize>(padding));
+    spool_position += padding;
+  };
   for (const auto& spec : specs) {
+    align_spool();
+    data.shard_offsets.push_back(spool_position);
     const std::string_view slice(
         reference_sequence.data() + spec.slice_begin,
         spec.slice_end - spec.slice_begin);
-    auto minimizers = reference_minimizers(slice, k, window);
+    const auto minimizers = reference_minimizers(slice, k, window);
     if (minimizers.size() >
         std::numeric_limits<size_t>::max() - data.entry_count) {
       throw std::runtime_error("shard router entry count overflow");
     }
+    if (minimizers.size() >
+        (std::numeric_limits<size_t>::max() - spool_position) /
+            sizeof(uint32_t)) {
+      throw std::runtime_error("shard router spool size overflow");
+    }
+    data.shard_counts.push_back(minimizers.size());
+    if (!minimizers.empty()) {
+      const size_t byte_count =
+          minimizers.size() * sizeof(uint32_t);
+      spool.write(
+          reinterpret_cast<const char*>(minimizers.data()),
+          static_cast<std::streamsize>(byte_count));
+      spool_position += byte_count;
+    }
     data.entry_count += minimizers.size();
-    data.shard_minimizers.push_back(std::move(minimizers));
   }
+  align_spool();
+  spool.close();
+  if (!spool) {
+    throw std::runtime_error("failed to finalize shard router code spool");
+  }
+  data.spool_size = spool_position;
   return data;
 }
 
@@ -691,65 +795,6 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
 }
 
 }  // namespace
-
-ShardRouteSelection ShardedSeedRouter::select(
-    std::string_view query, int tolerance) const {
-  ShardRouteSelection selection;
-  if (!enabled() || tolerance < 0 || query.empty()) {
-    return selection;
-  }
-  const size_t partition_count =
-      static_cast<size_t>(tolerance) + 1;
-  if (partition_count == 0 || partition_count > query.size() ||
-      query.size() / partition_count < window) {
-    return selection;
-  }
-
-  std::vector<uint32_t> minimizers;
-  minimizers.reserve(partition_count);
-  for (size_t partition = 0; partition < partition_count;
-       ++partition) {
-    const size_t begin = partition * query.size() / partition_count;
-    const size_t end =
-        (partition + 1) * query.size() / partition_count;
-    const size_t seed_begin = begin + (end - begin - window) / 2;
-    uint32_t minimizer = 0;
-    if (!exact_minimizer_code(
-            query.substr(seed_begin, window), k, window,
-            &minimizer)) {
-      return ShardRouteSelection{};
-    }
-    minimizers.push_back(minimizer);
-  }
-  std::sort(minimizers.begin(), minimizers.end());
-  minimizers.erase(
-      std::unique(minimizers.begin(), minimizers.end()),
-      minimizers.end());
-
-  for (uint32_t minimizer : minimizers) {
-    const auto first =
-        std::lower_bound(
-            minimizer_codes.begin(), minimizer_codes.end(), minimizer);
-    const auto last =
-        std::upper_bound(first, minimizer_codes.end(), minimizer);
-    for (auto code = first; code != last; ++code) {
-      const size_t entry_index = static_cast<size_t>(
-          code - minimizer_codes.begin());
-      const uint32_t shard_id = unpack_shard_id(
-          packed_shard_ids, entry_index, shard_id_bits);
-      if (shard_id >= shard_count) {
-        return ShardRouteSelection{};
-      }
-      selection.shard_ids.push_back(shard_id);
-    }
-  }
-  std::sort(selection.shard_ids.begin(), selection.shard_ids.end());
-  selection.shard_ids.erase(
-      std::unique(selection.shard_ids.begin(), selection.shard_ids.end()),
-      selection.shard_ids.end());
-  selection.enabled = true;
-  return selection;
-}
 
 bool is_sharded_index(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
@@ -1238,14 +1283,16 @@ ShardedIndexManifest build_sharded_reference_index(
     manifest.shards.push_back(std::move(descriptor));
   }
   if (specs.size() > 1 && window_length >= kRouterWindow) {
+    const auto router_path = router_output_path(bundle);
     auto router_data = build_router_data(
-        reference_sequence, specs, kRouterK, kRouterWindow);
+        reference_sequence, specs, kRouterK, kRouterWindow,
+        router_path.string() + ".codes.tmp");
     if (router_data.entry_count != 0) {
       manifest.router_k = kRouterK;
       manifest.router_window = kRouterWindow;
       manifest.router_entry_count = router_data.entry_count;
       manifest.router_checksum = save_router_sidecar(
-          router_output_path(bundle), manifest.router_k,
+          router_path, manifest.router_k,
           manifest.router_window,
           static_cast<uint32_t>(manifest.shards.size()),
           router_data);

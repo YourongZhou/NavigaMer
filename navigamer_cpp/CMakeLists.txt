@@ -37,6 +37,7 @@ add_executable(navigamer
   src/query_benchmark.cpp
   src/index_persistence.cpp
   src/sharded_index.cpp
+  src/shard_router.cpp
   src/candidate_verifier.cpp
 )
 
@@ -349,6 +350,7 @@ add_executable(test_sharded_index
   src/query_benchmark.cpp
   src/index_persistence.cpp
   src/sharded_index.cpp
+  src/shard_router.cpp
   src/phase1_seed_index.cpp
   src/phase2_distance_verifier.cpp
   src/build_progress.cpp

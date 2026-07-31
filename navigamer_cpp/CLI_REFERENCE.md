@@ -301,9 +301,11 @@ containing at least one seed minimizer are searched. This is a pigeonhole
 necessary condition for an exact edit-distance hit. Unsupported
 short/ambiguous queries or an unavailable
 sidecar conservatively search all parts.
-Router construction stores only per-shard 32-bit minimizer lists and k-way
-merges them directly into the sidecar, avoiding an 8-byte global pair array and
-a second global sort. This changes build peak memory, not query-time layout.
+Router construction writes each completed shard's sorted 32-bit minimizer list
+to a page-aligned temporary spool, then memory-maps and k-way merges the lists
+directly into the sidecar. Consumed pages are released as the merge advances,
+bounding the working set by one shard list plus roughly one spool page per shard.
+This changes build peak memory, not query-time layout.
 
 **Required:** `--ref`, `--index`, `--shard-windows`
 
