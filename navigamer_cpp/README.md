@@ -164,11 +164,12 @@ v19 parts, each capped by `--shard-windows`. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
 contig. Valid completed parts are reused on restart, damaged parts are rebuilt,
-and new parts are installed atomically. The automatic policy builds at most
-four parts concurrently and divides the OpenMP thread budget among their
-internal parallel phases. Use `--shard-build-jobs N` to cap concurrent
-builders and their aggregate memory; nested teams remain inside the original
-OpenMP thread budget.
+and new parts are installed atomically. The automatic policy keeps one part
+below 16 OpenMP threads; on high-core systems it builds at most four parts
+concurrently and divides the thread budget among their internal parallel
+phases. Use `--shard-build-jobs N` to cap concurrent builders and their
+aggregate memory; nested teams remain inside the original OpenMP thread
+budget.
 
 Indexed leaf attachment directly verifies range candidates by default. Use
 `--leaf-qgram-postfilter on` to apply a safe q-gram L1 necessary condition

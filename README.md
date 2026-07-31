@@ -207,12 +207,12 @@ For references that exceed one index's 32-bit array limits,
 `build-sharded` assigns each valid window start to exactly one shard. Adjacent
 shards retain only the reference overlap required to materialize their last
 windows, so neither windows nor original contig coordinates are lost.
-Independent parts build concurrently by default. The automatic policy uses at
-most four concurrent parts and divides the OpenMP thread budget among their
-internal parallel phases; `--shard-build-jobs N` sets an explicit concurrency
-limit. The product of part jobs and their internal worker teams never exceeds
-the OpenMP thread limit, while peak build memory is bounded by the number of
-concurrent parts.
+Independent parts build concurrently on high-core systems. The automatic
+policy retains one part below 16 OpenMP threads, otherwise uses at most four
+concurrent parts and divides the thread budget among their internal parallel
+phases; `--shard-build-jobs N` sets an explicit concurrency limit. The product
+of part jobs and their internal worker teams never exceeds the OpenMP thread
+limit, while peak build memory is bounded by the number of concurrent parts.
 Completed shard files are content- and parameter-validated and reused after an
 interrupted build; new shards are installed atomically. The final
 `.navshard` manifest contains relative paths to ordinary v19 `.navidx` parts.

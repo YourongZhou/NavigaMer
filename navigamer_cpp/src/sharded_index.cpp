@@ -495,10 +495,13 @@ ShardedIndexManifest build_sharded_reference_index(
   // A few concurrently built parts expose the mostly serial sketch phase
   // without taking one full build peak per hardware thread. Leave each part a
   // share of the thread budget for its parallel rebinding/attachment phases.
-  const size_t automatic_jobs = std::max<size_t>(
-      1, std::min<size_t>(
-             4, static_cast<size_t>(
-                    std::sqrt(static_cast<double>(available_threads)))));
+  const size_t automatic_jobs =
+      available_threads < 16
+          ? 1
+          : std::max<size_t>(
+                2, std::min<size_t>(
+                       4, static_cast<size_t>(std::sqrt(
+                              static_cast<double>(available_threads)))));
   const size_t requested_jobs =
       build_jobs == 0 ? automatic_jobs : build_jobs;
   const size_t job_count_size = std::min(
