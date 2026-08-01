@@ -679,6 +679,9 @@ struct SearchGraphView {
   FinalArray<LeafId> leaf_ids;
 
   FinalArray<uint8_t> child_beacon_dists;
+  // Exact bit width used by each primary layer's child MBB values. The finest
+  // layer has no child MBB but retains an entry so layer IDs index directly.
+  std::vector<uint32_t> child_mbb_bits_by_layer;
   // Explicit beacons only exist above the finest layer. Those NodeIds form a
   // dense prefix, so this side array needs no per-entry node identifier.
   FinalArray<uint32_t> beacon_begins;
@@ -749,6 +752,70 @@ struct SearchGraphView {
   }
   size_t edge_count() const {
     return child_id_deltas16.size() + child_ids.size();
+  }
+
+  size_t primary_layer_index(NodeId node_id) const {
+    const auto it = std::upper_bound(
+        layer_end.begin(), layer_end.end(), node_id);
+    if (it == layer_end.end()) {
+      throw std::out_of_range("node id has no primary layer");
+    }
+    return static_cast<size_t>(it - layer_end.begin());
+  }
+  uint32_t child_mbb_bits(NodeId node_id) const {
+    const size_t layer = primary_layer_index(node_id);
+    if (layer >= child_mbb_bits_by_layer.size()) {
+      throw std::runtime_error("child MBB layer width is missing");
+    }
+    const uint32_t bits = child_mbb_bits_by_layer[layer];
+    if (bits == 0 || bits > 8) {
+      throw std::runtime_error("child MBB layer width is invalid");
+    }
+    return bits;
+  }
+  size_t child_mbb_byte_count(NodeId node_id) const {
+    const uint64_t cells =
+        static_cast<uint64_t>(child_count(node_id)) *
+        beacon_count(node_id);
+    return static_cast<size_t>(
+        (cells * child_mbb_bits(node_id) + 7) / 8);
+  }
+  bool child_mbb_range_valid(NodeId node_id) const {
+    const auto& node = node_records[node_id];
+    return node.mbb_begin <= child_beacon_dists.size() &&
+           child_mbb_byte_count(node_id) <=
+               child_beacon_dists.size() - node.mbb_begin;
+  }
+  uint8_t child_beacon_distance(
+      NodeId node_id, size_t cell_offset) const {
+    const uint64_t cells =
+        static_cast<uint64_t>(child_count(node_id)) *
+        beacon_count(node_id);
+    if (cell_offset >= cells || !child_mbb_range_valid(node_id)) {
+      throw std::out_of_range("child MBB cell is outside packed storage");
+    }
+    const uint32_t bits = child_mbb_bits(node_id);
+    return child_beacon_distance_unchecked(
+        node_id, cell_offset, bits);
+  }
+  uint8_t child_beacon_distance_unchecked(
+      NodeId node_id, size_t cell_offset, uint32_t bits) const {
+    const auto& node = node_records[node_id];
+    if (bits == 8) {
+      return child_beacon_dists[node.mbb_begin + cell_offset];
+    }
+    const size_t bit_offset = cell_offset * bits;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    uint16_t word = child_beacon_dists[node.mbb_begin + byte_offset];
+    if (shift + bits > 8) {
+      word |= static_cast<uint16_t>(
+                  child_beacon_dists[
+                      node.mbb_begin + byte_offset + 1])
+              << 8;
+    }
+    return static_cast<uint8_t>(
+        (word >> shift) & ((uint32_t{1} << bits) - 1));
   }
 
   LeafId leaf_id(NodeId node_id, uint32_t leaf_offset) const {

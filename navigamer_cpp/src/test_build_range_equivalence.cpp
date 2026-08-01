@@ -236,12 +236,12 @@ Phase3BuildResult build_and_collect_phase3(
       if (!is_finest) {
         for (uint32_t child = 0; child < view.child_count(parent_id); ++child) {
           for (uint32_t dim = 0; dim < view.beacon_count(parent_id); ++dim) {
-            const size_t flat = parent.mbb_begin +
-                                static_cast<size_t>(dim) *
-                                    view.child_count(parent_id) +
-                                child;
+            const size_t cell =
+                static_cast<size_t>(dim) *
+                    view.child_count(parent_id) +
+                child;
             row << static_cast<int>(
-                       view.child_beacon_dists[flat])
+                       view.child_beacon_distance(parent_id, cell))
                 << ';';
           }
           row << '/';

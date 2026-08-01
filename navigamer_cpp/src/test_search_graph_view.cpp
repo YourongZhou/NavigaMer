@@ -42,6 +42,8 @@ void assert_view_equivalent_to_original() {
          static_cast<size_t>(builder.num_primary_layers()));
   assert(view.layer_end.size() ==
          static_cast<size_t>(builder.num_primary_layers()));
+  assert(view.child_mbb_bits_by_layer.size() ==
+         view.layer_begin.size());
   assert(view.beacon_begins.size() == view.layer_begin.back());
   for (size_t sequence_id = 0; sequence_id < view.sequences.size();
        ++sequence_id) {
@@ -65,9 +67,7 @@ void assert_view_equivalent_to_original() {
                     ? view.child_id_deltas16.size()
                     : view.child_ids.size()));
         assert(beacon_count <= link_count);
-        assert(record.mbb_begin +
-                   static_cast<size_t>(link_count) * beacon_count <=
-               view.child_beacon_dists.size());
+        assert(view.child_mbb_range_valid(node_id));
       }
     }
   }
@@ -152,11 +152,19 @@ void assert_max_byte_distance_is_recall_safe() {
       navigamer::HierarchyConfig({255, 254}));
   builder.build(std::move(sequences));
   const auto& view = builder.search_graph_view();
-  assert(std::find(
-             view.child_beacon_dists.begin(),
-             view.child_beacon_dists.end(),
-             static_cast<uint8_t>(255)) !=
-         view.child_beacon_dists.end());
+  bool found_max_distance = false;
+  for (uint32_t node_id = view.layer_begin.front();
+       node_id < view.layer_begin.back(); ++node_id) {
+    const size_t cells =
+        static_cast<size_t>(view.child_count(node_id)) *
+        view.beacon_count(node_id);
+    for (size_t cell = 0; cell < cells; ++cell) {
+      found_max_distance =
+          found_max_distance ||
+          view.child_beacon_distance(node_id, cell) == 255;
+    }
+  }
+  assert(found_max_distance);
 
   for (navigamer::SimdMode simd_mode :
        {navigamer::SimdMode::Scalar,

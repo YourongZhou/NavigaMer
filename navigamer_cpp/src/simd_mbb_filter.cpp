@@ -71,6 +71,52 @@ std::vector<uint32_t> filter_scalar(const uint8_t* center_dist_by_dim,
   return survivors;
 }
 
+uint8_t packed_distance(const uint8_t* data, size_t cell,
+                        uint32_t bits) {
+  const size_t bit_offset = cell * bits;
+  const size_t byte_offset = bit_offset >> 3;
+  const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+  uint16_t word = data[byte_offset];
+  if (shift + bits > 8) {
+    word |= static_cast<uint16_t>(data[byte_offset + 1]) << 8;
+  }
+  return static_cast<uint8_t>(
+      (word >> shift) & ((uint32_t{1} << bits) - 1));
+}
+
+std::vector<uint32_t> filter_packed_scalar(
+    const uint8_t* center_dist_by_dim,
+    size_t child_count,
+    size_t dim,
+    const int* query_beacon_dists,
+    int32_t tolerance,
+    uint32_t bits,
+    MBBFilterSimdStats* stats) {
+  if (stats) stats->scalar_checks += child_count;
+  std::vector<uint32_t> survivors;
+  survivors.reserve(child_count);
+  for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
+    bool ok = true;
+    for (size_t dim_idx = 0; dim_idx < dim; ++dim_idx) {
+      const size_t cell = dim_idx * child_count + child_idx;
+      const int64_t query_lo =
+          static_cast<int64_t>(query_beacon_dists[dim_idx]) -
+          tolerance;
+      const int64_t query_hi =
+          static_cast<int64_t>(query_beacon_dists[dim_idx]) +
+          tolerance;
+      const uint8_t center_dist =
+          packed_distance(center_dist_by_dim, cell, bits);
+      if (center_dist < query_lo || center_dist > query_hi) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) survivors.push_back(static_cast<uint32_t>(child_idx));
+  }
+  return survivors;
+}
+
 std::vector<uint32_t> filter_leaf_scalar(const uint8_t* dist_by_dim,
                                          size_t leaf_count,
                                          size_t dim,
@@ -504,9 +550,13 @@ std::vector<uint32_t> filter_mbb_survivors(
     int32_t child_radius,
     int32_t tolerance,
     SimdMode mode,
-    MBBFilterSimdStats* stats) {
+    MBBFilterSimdStats* stats,
+    uint32_t packed_bits) {
   validate_inputs(center_dist_by_dim, child_count, dim,
                   query_beacon_dists);
+  if (packed_bits == 0 || packed_bits > 8) {
+    throw std::invalid_argument("MBB packed width must be in [1, 8]");
+  }
   if (child_radius < 0) {
     throw std::invalid_argument("MBB child radius must be nonnegative");
   }
@@ -514,6 +564,12 @@ std::vector<uint32_t> filter_mbb_survivors(
       std::min<int64_t>(
           std::numeric_limits<int32_t>::max(),
           static_cast<int64_t>(child_radius) + tolerance));
+  if (packed_bits != 8) {
+    if (stats && mode != SimdMode::Scalar) ++stats->simd_fallbacks;
+    return filter_packed_scalar(
+        center_dist_by_dim, child_count, dim, query_beacon_dists,
+        effective_tolerance, packed_bits, stats);
+  }
   if (mode == SimdMode::Scalar || child_count == 0) {
     return filter_scalar(center_dist_by_dim, child_count, dim,
                          query_beacon_dists, effective_tolerance, stats);
