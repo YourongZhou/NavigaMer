@@ -509,7 +509,12 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
       }
       generate_positional(
           unindexable_items, true,
-          [&](uint64_t code, size_t, size_t) { postings.count(code); });
+          [&](uint64_t code, size_t item_idx, size_t position) {
+            postings.count(
+                code,
+                (static_cast<uint32_t>(item_idx) << position_bits) |
+                    static_cast<uint32_t>(position));
+          });
       const uint32_t maximum_item =
           item_count() == 0
               ? 0
@@ -525,6 +530,7 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
                 (static_cast<uint32_t>(item_idx) << position_bits) |
                     static_cast<uint32_t>(position));
           });
+      postings.finish_filling();
       positional_postings_by_seed_len_.emplace(
           seed_len, std::move(postings));
       positional_position_bits_by_seed_len_.emplace(
@@ -748,8 +754,8 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
       std::vector<uint64_t>().swap(sample_prefix_codes);
     }
 
-    generate(item_count(), true, [&](uint64_t code, CompactIndex) {
-      postings.count(code);
+    generate(item_count(), true, [&](uint64_t code, CompactIndex item_idx) {
+      postings.count(code, item_idx);
     });
     postings.finish_counting(
         item_count() == 0
@@ -759,6 +765,7 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
              [&](uint64_t code, CompactIndex compact_idx) {
       postings.append(code, compact_idx);
     });
+    postings.finish_filling();
   };
 
   if (seed_index_uses_16bit_) {

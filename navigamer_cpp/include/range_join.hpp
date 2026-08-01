@@ -110,19 +110,50 @@ class ExactRangeJoinIndex {
       RangeJoinQueryWorkspace* workspace) const;
 
  private:
-  // Build-time seed postings use contiguous open-addressed slots and store
-  // each item index at the exact bit width required by this index.
+  // Build-time seed postings use contiguous open-addressed slots, exact-width
+  // values, and adaptive intervals for consecutive reference-window IDs.
   template <typename Posting>
   class CompactPostingLists {
    public:
     class Iterator {
      public:
       Iterator() = default;
-      Iterator(const uint8_t* data, uint64_t index, uint8_t bit_width)
-          : data_(data), index_(index), bit_width_(bit_width) {}
+      Iterator(const uint8_t* data, uint64_t begin, uint64_t end,
+               uint8_t bit_width, bool interval)
+          : data_(data), index_(begin), end_(end),
+            bit_width_(bit_width), interval_(interval),
+            at_end_(begin == end) {
+        if (interval_ && !at_end_) {
+          current_ = decode(index_++);
+          run_end_ = decode(index_++);
+        }
+      }
 
       Posting operator*() const {
-        const uint64_t bit_offset = index_ * bit_width_;
+        return interval_ ? current_ : decode(index_);
+      }
+      Iterator& operator++() {
+        if (interval_) {
+          if (current_ < run_end_) {
+            ++current_;
+          } else if (index_ < end_) {
+            current_ = decode(index_++);
+            run_end_ = decode(index_++);
+          } else {
+            at_end_ = true;
+          }
+        } else if (++index_ == end_) {
+          at_end_ = true;
+        }
+        return *this;
+      }
+      bool operator!=(const Iterator& other) const {
+        return at_end_ != other.at_end_;
+      }
+
+     private:
+      Posting decode(uint64_t index) const {
+        const uint64_t bit_offset = index * bit_width_;
         const size_t byte_offset =
             static_cast<size_t>(bit_offset >> 3);
         const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
@@ -138,18 +169,15 @@ class ExactRangeJoinIndex {
                 : (uint64_t{1} << bit_width_) - 1;
         return static_cast<Posting>((word >> shift) & mask);
       }
-      Iterator& operator++() {
-        ++index_;
-        return *this;
-      }
-      bool operator!=(const Iterator& other) const {
-        return index_ != other.index_;
-      }
 
-     private:
       const uint8_t* data_ = nullptr;
       uint64_t index_ = 0;
+      uint64_t end_ = 0;
       uint8_t bit_width_ = 0;
+      bool interval_ = false;
+      bool at_end_ = true;
+      Posting current_ = 0;
+      Posting run_end_ = 0;
     };
 
     struct Range {
@@ -179,9 +207,9 @@ class ExactRangeJoinIndex {
       rehash(slots32_, capacity);
     }
 
-    void count(uint64_t code) {
+    void count(uint64_t code, Posting posting) {
       if (!slots64_.empty()) {
-        count_in(slots64_, code);
+        count_in(slots64_, code, posting);
         ++posting_count_;
         return;
       }
@@ -189,8 +217,14 @@ class ExactRangeJoinIndex {
       if (slot->count == std::numeric_limits<uint32_t>::max() ||
           posting_count_ == std::numeric_limits<uint32_t>::max()) {
         promote_to_64bit();
-        count_in(slots64_, code);
+        count_in(slots64_, code, posting);
       } else {
+        if (slot->count == 0 ||
+            slot->begin == std::numeric_limits<uint32_t>::max() ||
+            posting != static_cast<Posting>(slot->begin + 1)) {
+          ++slot->encoded_count;
+        }
+        slot->begin = posting;
         ++slot->count;
       }
       ++posting_count_;
@@ -204,13 +238,13 @@ class ExactRangeJoinIndex {
       }
       posting_bit_width_ = 1;
       while ((maximum_posting >>= 1) != 0) ++posting_bit_width_;
-      if (posting_count_ >
+      if (encoded_posting_count_ >
           (std::numeric_limits<size_t>::max() - 7) /
               posting_bit_width_) {
         throw std::length_error("range-join posting storage is too large");
       }
       const size_t byte_count = static_cast<size_t>(
-          (posting_count_ * posting_bit_width_ + 7) / 8);
+          (encoded_posting_count_ * posting_bit_width_ + 7) / 8);
       packed_postings_.assign(
           byte_count + sizeof(uint64_t) - 1, uint8_t{0});
     }
@@ -218,10 +252,18 @@ class ExactRangeJoinIndex {
     void append(uint64_t code, Posting posting) {
       if (!slots64_.empty()) {
         auto* slot = find_existing(slots64_, code);
-        store_posting(--slot->begin, posting);
+        append_to_slot(*slot, posting);
       } else {
         auto* slot = find_existing(slots32_, code);
-        store_posting(--slot->begin, posting);
+        append_to_slot(*slot, posting);
+      }
+    }
+
+    void finish_filling() {
+      if (!slots64_.empty()) {
+        finish_filling_slots(slots64_);
+      } else {
+        finish_filling_slots(slots32_);
       }
     }
 
@@ -235,16 +277,20 @@ class ExactRangeJoinIndex {
       uint64_t code = 0;
       uint32_t begin = 0;
       uint32_t count = 0;
+      uint32_t encoded_count = 0;
+      bool interval = false;
     };
     struct Slot64 {
       uint64_t code = 0;
       uint64_t begin = 0;
       uint64_t count = 0;
+      uint64_t encoded_count = 0;
+      bool interval = false;
     };
-    static_assert(sizeof(Slot32) == 16,
-                  "compact posting slot must remain 16 bytes");
-    static_assert(sizeof(Slot64) == 24,
-                  "wide posting slot must remain 24 bytes");
+    static_assert(sizeof(Slot32) == 24,
+                  "run-aware posting slot must remain 24 bytes");
+    static_assert(sizeof(Slot64) == 40,
+                  "wide run-aware posting slot must remain 40 bytes");
 
     static uint64_t hash_code(uint64_t value) {
       value += 0x9e3779b97f4a7c15ULL;
@@ -307,11 +353,19 @@ class ExactRangeJoinIndex {
     }
 
     template <typename Slot>
-    void count_in(std::vector<Slot>& slots, uint64_t code) {
+    void count_in(std::vector<Slot>& slots, uint64_t code,
+                  Posting posting) {
       auto* slot = find_or_insert(slots, code);
       if (slot->count == std::numeric_limits<decltype(slot->count)>::max()) {
         throw std::length_error("range-join posting list is too large");
       }
+      if (slot->count == 0 ||
+          slot->begin ==
+              std::numeric_limits<decltype(slot->begin)>::max() ||
+          posting != static_cast<Posting>(slot->begin + 1)) {
+        ++slot->encoded_count;
+      }
+      slot->begin = posting;
       ++slot->count;
     }
 
@@ -321,7 +375,9 @@ class ExactRangeJoinIndex {
         if (slot.count == 0) continue;
         auto* destination = find_existing(slots64_, slot.code);
         destination->code = slot.code;
+        destination->begin = slot.begin;
         destination->count = slot.count;
+        destination->encoded_count = slot.encoded_count;
       }
       std::vector<Slot32>().swap(slots32_);
     }
@@ -331,12 +387,42 @@ class ExactRangeJoinIndex {
       uint64_t posting_end = 0;
       for (auto& slot : slots) {
         if (slot.count == 0) continue;
-        posting_end += slot.count;
+        slot.interval =
+            slot.encoded_count < slot.count - slot.encoded_count;
+        const uint64_t record_count =
+            slot.interval ? slot.encoded_count * 2 : slot.count;
         slot.begin = static_cast<decltype(slot.begin)>(posting_end);
+        slot.encoded_count = 0;
+        posting_end += record_count;
       }
-      if (posting_end != posting_count_ ||
-          posting_end > std::numeric_limits<size_t>::max()) {
+      if (posting_end > std::numeric_limits<size_t>::max()) {
         throw std::length_error("range-join posting storage is too large");
+      }
+      encoded_posting_count_ = posting_end;
+    }
+
+    template <typename Slot>
+    void append_to_slot(Slot& slot, Posting posting) {
+      if (slot.interval && slot.encoded_count != 0) {
+        const Posting previous = load_posting(slot.begin - 1);
+        if (previous != std::numeric_limits<Posting>::max() &&
+            posting == static_cast<Posting>(previous + 1)) {
+          store_posting(slot.begin - 1, posting);
+          return;
+        }
+      }
+      store_posting(slot.begin++, posting);
+      ++slot.encoded_count;
+      if (slot.interval) {
+        store_posting(slot.begin++, posting);
+        ++slot.encoded_count;
+      }
+    }
+
+    template <typename Slot>
+    static void finish_filling_slots(std::vector<Slot>& slots) {
+      for (auto& slot : slots) {
+        if (slot.count != 0) slot.begin -= slot.encoded_count;
       }
     }
 
@@ -346,10 +432,11 @@ class ExactRangeJoinIndex {
       const auto* slot = find_existing(slots, code);
       if (!slot) return {};
       const uint64_t begin = slot->begin;
-      const uint64_t end = begin + slot->count;
+      const uint64_t end = begin + slot->encoded_count;
       return {
-          Iterator(packed_postings_.data(), begin, posting_bit_width_),
-          Iterator(packed_postings_.data(), end, posting_bit_width_),
+          Iterator(packed_postings_.data(), begin, end,
+                   posting_bit_width_, slot->interval),
+          Iterator(),
           true};
     }
 
@@ -358,19 +445,39 @@ class ExactRangeJoinIndex {
       const size_t byte_offset =
           static_cast<size_t>(bit_offset >> 3);
       const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
-      uint64_t value = static_cast<uint64_t>(posting) << shift;
-      const uint32_t byte_count =
-          (shift + posting_bit_width_ + 7) / 8;
-      for (uint32_t byte_idx = 0; byte_idx < byte_count; ++byte_idx) {
-        packed_postings_[byte_offset + byte_idx] |=
-            static_cast<uint8_t>(value >> (byte_idx * 8));
-      }
+      uint64_t word = 0;
+      std::memcpy(&word, packed_postings_.data() + byte_offset,
+                  sizeof(word));
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
+    __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      word = __builtin_bswap64(word);
+#endif
+      const uint64_t value_mask =
+          posting_bit_width_ == 32
+              ? std::numeric_limits<uint32_t>::max()
+              : (uint64_t{1} << posting_bit_width_) - 1;
+      const uint64_t shifted_mask = value_mask << shift;
+      word = (word & ~shifted_mask) |
+             ((static_cast<uint64_t>(posting) & value_mask) << shift);
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
+    __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+      word = __builtin_bswap64(word);
+#endif
+      std::memcpy(packed_postings_.data() + byte_offset, &word,
+                  sizeof(word));
+    }
+
+    Posting load_posting(uint64_t index) const {
+      return *Iterator(
+          packed_postings_.data(), index, index + 1,
+          posting_bit_width_, false);
     }
 
     std::vector<Slot32> slots32_;
     std::vector<Slot64> slots64_;
     std::vector<uint8_t> packed_postings_;
     uint64_t posting_count_ = 0;
+    uint64_t encoded_posting_count_ = 0;
     size_t unique_code_count_ = 0;
     uint8_t posting_bit_width_ = 1;
   };

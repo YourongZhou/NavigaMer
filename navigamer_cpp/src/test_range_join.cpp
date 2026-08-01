@@ -340,6 +340,28 @@ void test_compact_postings_support_extreme_codes_and_copy() {
   }
 }
 
+void test_run_encoded_postings_expand_exactly() {
+  std::vector<navigamer::RangeJoinItem> items;
+  std::vector<navigamer::RangeJoinItemId> expected;
+  for (uint32_t item_id = 0; item_id < 64; ++item_id) {
+    items.push_back({item_id, std::string(32, 'A')});
+    expected.push_back(item_id);
+  }
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 4;
+
+  for (bool positional : {false, true}) {
+    navigamer::ExactRangeJoinIndex index(
+        config, true, false, positional);
+    index.build(items);
+    const auto result = index.query(std::string(32, 'A'), 0);
+    assert(result.candidate_item_ids == expected);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -356,6 +378,7 @@ int main() {
   test_shifted_window_postings_match_standard_index();
   test_positional_postings_are_recall_safe();
   test_compact_postings_support_extreme_codes_and_copy();
+  test_run_encoded_postings_expand_exactly();
 
   std::mt19937 gen(42);
   std::vector<RangeJoinItem> items;
