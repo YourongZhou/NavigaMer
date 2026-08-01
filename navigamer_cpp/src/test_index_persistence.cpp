@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -81,11 +82,15 @@ void assert_loaded_search_matches_built() {
       loaded.builder.search_graph_view().beacon_begins.begin()));
 #if defined(__unix__) || defined(__APPLE__)
   const auto assert_mapped = [](const auto& array) {
-    if (!array.empty()) assert(array.is_mapped());
+    if (!array.empty()) {
+      assert(array.is_mapped());
+      assert((reinterpret_cast<uintptr_t>(array.data()) & 63) == 0);
+    }
   };
   const auto& loaded_view = loaded.builder.search_graph_view();
   assert_mapped(loaded_view.node_records);
   assert_mapped(loaded_view.node_count_overflows);
+  assert_mapped(loaded_view.child_id_base_deltas8);
   assert_mapped(loaded_view.child_id_deltas16);
   assert_mapped(loaded_view.child_ids);
   assert_mapped(loaded_view.leaf_id_deltas8);
@@ -453,6 +458,9 @@ void assert_mapped_reference_encoding_is_exact() {
   const auto& loaded_store = loaded.builder.sequence_store();
   assert(loaded_store.reference_sequence.empty());
   assert(loaded_store.mapped_reference_sequence.is_mapped());
+  assert((reinterpret_cast<uintptr_t>(
+              loaded_store.mapped_reference_sequence.data()) &
+          63) == 0);
   assert(loaded_store.mapped_reference_sequence.size() == reference.size());
   assert(loaded_store.reference_view() == reference);
   assert(loaded_store.reference_view().data() ==

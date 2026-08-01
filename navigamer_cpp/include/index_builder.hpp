@@ -575,8 +575,8 @@ struct WorldNodeRecord {
 
   LeafId center_sequence_id = INVALID_LEAF_ID;
 
-  // Non-finest nodes address child_id_deltas16 or child_ids; finest nodes
-  // address leaf_id_deltas8, leaf_id_deltas16, or leaf_ids.
+  // Non-finest nodes address byte base-deltas, 16-bit forward deltas, or
+  // absolute child IDs; finest nodes address 8/16-bit leaf deltas or leaf IDs.
   // Primary layers are explicit, so child and leaf ranges share one
   // offset/count pair; the packed link encoding selects the exact array.
   uint32_t link_begin = 0;
@@ -669,9 +669,11 @@ struct SearchGraphView {
   std::vector<uint32_t> layer_begin;
   std::vector<uint32_t> layer_end;
 
-  // A parent uses 16-bit forward deltas when every child is within 65536
-  // subsequent node IDs, and otherwise falls back to absolute 32-bit IDs.
-  // The representation bit is packed into WorldNodeRecord::packed_counts.
+  // Parents whose child IDs span at most 255 values may store one 32-bit base
+  // followed by byte offsets. Other parents use 16-bit forward deltas when
+  // possible and otherwise fall back to absolute 32-bit IDs. The
+  // representation is packed into WorldNodeRecord::packed_counts.
+  FinalArray<uint8_t> child_id_base_deltas8;
   FinalArray<uint16_t> child_id_deltas16;
   FinalArray<NodeId> child_ids;
   FinalArray<int8_t> leaf_id_deltas8;
@@ -734,24 +736,89 @@ struct SearchGraphView {
     node.set_count_overflow(overflow_index, storage);
   }
 
+  struct ChildIdAccessor {
+    NodeId base = 0;
+    const uint16_t* deltas16 = nullptr;
+    const uint8_t* base_deltas8 = nullptr;
+    const NodeId* ids32 = nullptr;
+
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((always_inline))
+#endif
+    inline NodeId at(uint32_t offset) const {
+      if (base_deltas8) return base + base_deltas8[offset];
+      if (deltas16) return base + deltas16[offset];
+      return ids32[offset];
+    }
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((always_inline))
+#endif
+    inline const void* address(uint32_t offset) const {
+      if (base_deltas8) {
+        return static_cast<const void*>(base_deltas8 + offset);
+      }
+      if (deltas16) {
+        return static_cast<const void*>(deltas16 + offset);
+      }
+      return static_cast<const void*>(ids32 + offset);
+    }
+  };
+
+  bool child_ids_are_base_delta8(NodeId node_id) const {
+    return node_records[node_id].link_storage() ==
+           WorldNodeRecord::LinkStorage::Delta8;
+  }
   bool child_ids_are_delta16(NodeId node_id) const {
     return node_records[node_id].link_storage() ==
            WorldNodeRecord::LinkStorage::Delta16;
+  }
+  void set_child_ids_base_delta8(NodeId node_id) {
+    node_records[node_id].set_link_storage(
+        WorldNodeRecord::LinkStorage::Delta8);
   }
   void set_child_ids_delta16(NodeId node_id) {
     node_records[node_id].set_link_storage(
         WorldNodeRecord::LinkStorage::Delta16);
   }
-  NodeId child_id(NodeId node_id, uint32_t child_offset) const {
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((always_inline))
+#endif
+  inline ChildIdAccessor child_ids_for(NodeId node_id) const {
     const auto& node = node_records[node_id];
-    if (child_ids_are_delta16(node_id)) {
-      return node_id + 1 +
-             child_id_deltas16[node.child_begin() + child_offset];
+    switch (node.link_storage()) {
+      case WorldNodeRecord::LinkStorage::Delta8: {
+        const uint8_t* segment =
+            child_id_base_deltas8.data() + node.child_begin();
+        NodeId base = 0;
+        std::memcpy(&base, segment, sizeof(base));
+        return {base, nullptr, segment + sizeof(base), nullptr};
+      }
+      case WorldNodeRecord::LinkStorage::Delta16:
+        return {static_cast<NodeId>(node_id + 1),
+                child_id_deltas16.data() + node.child_begin(),
+                nullptr, nullptr};
+      case WorldNodeRecord::LinkStorage::Absolute32:
+        return {0, nullptr, nullptr,
+                child_ids.data() + node.child_begin()};
     }
-    return child_ids[node.child_begin() + child_offset];
+    throw std::runtime_error("invalid child ID storage");
+  }
+  NodeId child_id(NodeId node_id, uint32_t child_offset) const {
+    return child_ids_for(node_id).at(child_offset);
+  }
+  size_t base_delta8_child_edge_count() const {
+    size_t count = 0;
+    for (NodeId node_id = 0;
+         node_id < child_mbb_bits_by_node.size(); ++node_id) {
+      if (child_ids_are_base_delta8(node_id)) {
+        count += child_count(node_id);
+      }
+    }
+    return count;
   }
   size_t edge_count() const {
-    return child_id_deltas16.size() + child_ids.size();
+    return base_delta8_child_edge_count() +
+           child_id_deltas16.size() + child_ids.size();
   }
 
   uint32_t child_mbb_bits(NodeId node_id) const {

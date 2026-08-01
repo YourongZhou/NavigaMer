@@ -828,21 +828,9 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
         } else {
           items.reserve(view.child_count(node_id));
         }
-        const auto& node = view.node_records[node_id];
-        const bool child_delta16 =
-            view.child_ids_are_delta16(node_id);
-        const uint16_t* child_deltas =
-            child_delta16
-                ? view.child_id_deltas16.data() + node.child_begin()
-                : nullptr;
-        const NodeId* child_ids32 =
-            child_delta16
-                ? nullptr
-                : view.child_ids.data() + node.child_begin();
+        const auto children = view.child_ids_for(node_id);
         const auto child_at = [&](size_t offset) {
-          return child_delta16
-                     ? node_id + 1 + child_deltas[offset]
-                     : child_ids32[offset];
+          return children.at(static_cast<uint32_t>(offset));
         };
         bool usable = true;
         for (size_t child_idx = 0;
@@ -926,21 +914,9 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
     } else {
       items.reserve(view.child_count(node_id));
     }
-    const auto& node = view.node_records[node_id];
-    const bool child_delta16 =
-        view.child_ids_are_delta16(node_id);
-    const uint16_t* child_deltas =
-        child_delta16
-            ? view.child_id_deltas16.data() + node.child_begin()
-            : nullptr;
-    const NodeId* child_ids32 =
-        child_delta16
-            ? nullptr
-            : view.child_ids.data() + node.child_begin();
+    const auto children = view.child_ids_for(node_id);
     const auto child_at = [&](size_t offset) {
-      return child_delta16
-                 ? node_id + 1 + child_deltas[offset]
-                 : child_ids32[offset];
+      return children.at(static_cast<uint32_t>(offset));
     };
     bool usable = true;
     for (size_t child_idx = 0;
@@ -1483,23 +1459,10 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
   if (node_id >= view.node_records.size()) {
     throw std::out_of_range("array node id is outside index");
   }
-  const auto& node = view.node_records[node_id];
   const size_t child_count = view.child_count(node_id);
-  const uint32_t child_begin = node.child_begin();
-  const bool child_delta16 =
-      view.child_ids_are_delta16(node_id);
-  const uint16_t* child_deltas =
-      child_delta16
-          ? view.child_id_deltas16.data() + child_begin
-          : nullptr;
-  const NodeId* child_ids32 =
-      child_delta16
-          ? nullptr
-          : view.child_ids.data() + child_begin;
+  const auto children = view.child_ids_for(node_id);
   const auto child_at = [&](uint32_t offset) {
-    return child_delta16
-               ? node_id + 1 + child_deltas[offset]
-               : child_ids32[offset];
+    return children.at(offset);
   };
   const size_t beacon_count = view.beacon_count(node_id);
   if (child_count < config_.safe_child_router_min_fanout) {
@@ -3314,26 +3277,12 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
   }
 
   const size_t child_count = view.child_count(node_id);
-  const uint32_t child_begin = node.child_begin();
-  const bool child_delta16 =
-      view.child_ids_are_delta16(node_id);
-  const uint16_t* child_deltas =
-      child_delta16
-          ? view.child_id_deltas16.data() + child_begin
-          : nullptr;
-  const NodeId* child_ids32 =
-      child_delta16
-          ? nullptr
-          : view.child_ids.data() + child_begin;
+  const auto children = view.child_ids_for(node_id);
   const auto child_at = [&](uint32_t offset) {
-    return child_delta16
-               ? node_id + 1 + child_deltas[offset]
-               : child_ids32[offset];
+    return children.at(offset);
   };
   const auto child_address = [&](uint32_t offset) -> const void* {
-    return child_delta16
-               ? static_cast<const void*>(child_deltas + offset)
-               : static_cast<const void*>(child_ids32 + offset);
+    return children.address(offset);
   };
   stats.child_edge_considered_count += child_count;
   const size_t dim = view.beacon_count(node_id);
@@ -3419,23 +3368,10 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
   if (node_id >= view.node_records.size()) {
     throw std::out_of_range("view node id is outside search graph view");
   }
-  const auto& node = view.node_records[node_id];
   const size_t child_count = view.child_count(node_id);
-  const uint32_t child_begin = node.child_begin();
-  const bool child_delta16 =
-      view.child_ids_are_delta16(node_id);
-  const uint16_t* child_deltas =
-      child_delta16
-          ? view.child_id_deltas16.data() + child_begin
-          : nullptr;
-  const NodeId* child_ids32 =
-      child_delta16
-          ? nullptr
-          : view.child_ids.data() + child_begin;
+  const auto children = view.child_ids_for(node_id);
   const auto child_at = [&](size_t offset) {
-    return child_delta16
-               ? node_id + 1 + child_deltas[offset]
-               : child_ids32[offset];
+    return children.at(static_cast<uint32_t>(offset));
   };
   stats.child_edge_considered_count += child_offsets.size();
 

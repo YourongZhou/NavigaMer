@@ -24,8 +24,9 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '6'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '7'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
+constexpr size_t kMappedArrayAlignment = 64;
 
 #if defined(__unix__) || defined(__APPLE__)
 class MappedIndexFile {
@@ -448,7 +449,7 @@ void align_write_position(std::ostream& out, size_t alignment) {
       static_cast<uint64_t>(static_cast<std::streamoff>(position));
   const size_t padding =
       static_cast<size_t>((alignment - offset % alignment) % alignment);
-  static constexpr std::array<char, 8> zeros{};
+  static constexpr std::array<char, kMappedArrayAlignment> zeros{};
   out.write(zeros.data(), static_cast<std::streamsize>(padding));
   if (!out) throw std::runtime_error("failed to align index output");
 }
@@ -462,7 +463,7 @@ void align_read_position(std::istream& in, size_t alignment) {
       static_cast<uint64_t>(static_cast<std::streamoff>(position));
   const size_t padding =
       static_cast<size_t>((alignment - offset % alignment) % alignment);
-  std::array<char, 8> bytes{};
+  std::array<char, kMappedArrayAlignment> bytes{};
   in.read(bytes.data(), static_cast<std::streamsize>(padding));
   if (!in) throw std::runtime_error("failed to read index alignment");
   for (size_t idx = 0; idx < padding; ++idx) {
@@ -489,7 +490,8 @@ void write_final_array(std::ostream& out,
     throw std::runtime_error(std::string(field) +
                              " exceeds stream size range");
   }
-  align_write_position(out, alignof(T));
+  align_write_position(
+      out, std::max(alignof(T), kMappedArrayAlignment));
   const size_t byte_count = values.size() * sizeof(T);
   out.write(reinterpret_cast<const char*>(values.data()),
             static_cast<std::streamsize>(byte_count));
@@ -518,7 +520,8 @@ FinalArray<T> read_final_array(
     throw std::runtime_error(std::string(field) +
                              " exceeds stream offset range");
   }
-  align_read_position(in, alignof(T));
+  align_read_position(
+      in, std::max(alignof(T), kMappedArrayAlignment));
   const size_t byte_count = count * sizeof(T);
 #if defined(__unix__) || defined(__APPLE__)
   if (mapping) {
@@ -570,6 +573,7 @@ void write_mapped_reference(std::ostream& out,
     throw std::runtime_error(
         "reference sequence exceeds stream size range");
   }
+  align_write_position(out, kMappedArrayAlignment);
   out.write(reference.data(),
             static_cast<std::streamsize>(reference.size()));
   if (!out) {
@@ -871,6 +875,8 @@ void write_search_graph_view(std::ostream& out,
   write_u32_vector(out, view.layer_begin);
   write_u32_vector(out, view.layer_end);
   write_final_array(
+      out, view.child_id_base_deltas8, "child_id_base_deltas8");
+  write_final_array(
       out, view.child_id_deltas16, "child_id_deltas16");
   write_final_array(out, view.child_ids, "child_ids");
   write_final_array(
@@ -904,6 +910,9 @@ SearchGraphView read_search_graph_view(
           in, mapping, "node_count_overflows");
   view.layer_begin = read_u32_vector(in, "layer_begin");
   view.layer_end = read_u32_vector(in, "layer_end");
+  view.child_id_base_deltas8 =
+      read_final_array<uint8_t>(
+          in, mapping, "child_id_base_deltas8");
   view.child_id_deltas16 =
       read_final_array<uint16_t>(
           in, mapping, "child_id_deltas16");

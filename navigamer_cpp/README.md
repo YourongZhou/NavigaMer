@@ -349,7 +349,7 @@ records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 26
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 27
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
@@ -372,19 +372,22 @@ full 32-bit ID only when necessary. A finest-layer node's sole beacon is its
 center and consumes no side-array entry. Only the dense non-finest NodeId
 prefix stores explicit beacon offsets in a separate array, eliminating the
 otherwise constant zero field from every finest-layer node.
-Each parent uses 16-bit forward deltas for child node IDs when its complete
-child range fits. A flag packed into each node record selects that compact array;
-parents with any larger delta use the exact 32-bit child-ID array instead, so
-there is no truncation or additional graph-size limit.
+When it is the smallest representation, a parent stores one exact 32-bit child
+base followed by 8-bit offsets. Other parents use 16-bit forward deltas when
+their complete child range fits, with exact 32-bit child IDs as the fallback.
+A flag packed into each node record selects the array, and every encoding has
+constant-time random access without truncation or an additional graph-size
+limit.
 Leaf IDs use signed 8-bit or 16-bit deltas from the node center when the whole
 leaf list fits, with exact 32-bit IDs as the fallback.
 Repeated reference positions use one pair for a singleton duplicate, while
 larger duplicate groups share one group offset and a flat 32-bit position
 array.
 Finalized node, edge, beacon, MBB, leaf, reference-record, and repeated
-occurrence arrays are aligned in the index and loaded through read-only memory
-mappings, so index load does not duplicate the arrays into heap memory. Query
-access still uses cached raw pointers and sizes.
+occurrence arrays start on 64-byte boundaries in the index and load through
+read-only memory mappings, so SIMD scans do not inherit accidental cache-line
+misalignment and index loading does not duplicate the arrays into heap memory.
+Query access still uses cached raw pointers and sizes.
 Because finest nodes use leaf links and all other nodes use child links, those
 two mutually exclusive ranges share one offset/count pair. Together with the
 packed count word, a finalized world node is therefore 16 bytes instead of 32,
