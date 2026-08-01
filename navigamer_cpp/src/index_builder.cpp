@@ -607,7 +607,7 @@ bool phase1_better_cover(size_t idx, int dist,
 }
 
 Phase1CoverScanResult find_best_phase1_cover(
-    const std::vector<NodeId>& candidates,
+    BuildArrayView<NodeId> candidates,
     const std::vector<BuildWorldNodeRecord>& nodes,
     const SequenceStore& sequences,
     const std::vector<Phase1BaseCountSignature>& sequence_signatures,
@@ -724,7 +724,7 @@ Phase1CoverScanResult find_best_phase1_cover(
 }
 
 Phase1CoverScanResult find_best_phase1_cover_by_indices(
-    const std::vector<NodeId>& candidates,
+    BuildArrayView<NodeId> candidates,
     const std::vector<BuildWorldNodeRecord>& nodes,
     const SequenceStore& sequences,
     const std::vector<Phase1BaseCountSignature>& sequence_signatures,
@@ -886,7 +886,7 @@ class Phase1CoverGroupIndex {
   }
 
   Phase1CandidateQueryResult query(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       const std::vector<BuildWorldNodeRecord>& nodes,
       const SequenceStore& sequences,
       std::string_view sequence,
@@ -961,7 +961,7 @@ class Phase1CoverGroupIndex {
   }
 
   std::string_view center_sequence(
-      const std::vector<NodeId>& candidates, size_t idx) const {
+      BuildArrayView<NodeId> candidates, size_t idx) const {
     static constexpr std::string_view empty;
     if (!nodes_ || !sequences_ || idx >= candidates.size() ||
         candidates[idx] >= nodes_->size()) {
@@ -981,7 +981,7 @@ class Phase1CoverGroupIndex {
   }
 
   void sync_items(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       const BuildRangeConfig& config) {
     while (items_.size() < candidates.size()) {
       const size_t idx = items_.size();
@@ -1003,7 +1003,7 @@ class Phase1CoverGroupIndex {
   }
 
   void ensure_metric(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       BuildDistanceMode distance_mode) {
     if (metric_built_) return;
     metric_nodes_.clear();
@@ -1016,7 +1016,7 @@ class Phase1CoverGroupIndex {
   }
 
   void insert_metric_item(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       size_t item_idx,
       BuildDistanceMode distance_mode) {
     if (!nodes_ || !sequences_ || item_idx >= candidates.size() ||
@@ -1051,7 +1051,7 @@ class Phase1CoverGroupIndex {
   }
 
   Phase1CandidateQueryResult query_metric(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       std::string_view sequence,
       int radius,
       const BuildRangeConfig& config) {
@@ -1091,7 +1091,7 @@ class Phase1CoverGroupIndex {
   }
 
   void ensure_qgram(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       int q) {
     if (qgram_built_ && qgram_q_ == q) return;
     qgram_postings_.clear();
@@ -1107,7 +1107,7 @@ class Phase1CoverGroupIndex {
   }
 
   Phase1CandidateQueryResult query_pigeonhole(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       std::string_view sequence,
       int radius, int maximum_radius,
       const BuildRangeConfig& config) {
@@ -1154,7 +1154,7 @@ class Phase1CoverGroupIndex {
   }
 
   void add_qgram_item(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       size_t idx,
       int q) {
     if (idx >= items_.size()) return;
@@ -1214,7 +1214,7 @@ class Phase1CoverGroupIndex {
   }
 
   Phase1CandidateQueryResult query_qgram(
-      const std::vector<NodeId>& candidates,
+      BuildArrayView<NodeId> candidates,
       std::string_view sequence,
       int radius,
       const BuildRangeConfig& config) {
@@ -2730,28 +2730,28 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
     NodeId parent = INVALID_NODE_ID;
     for (int layer_idx = 0; layer_idx < hierarchy_.num_expanded_layers(); ++layer_idx) {
       const int radius = expanded_radii_[static_cast<size_t>(layer_idx)];
-      const std::vector<NodeId>* candidates = nullptr;
+      BuildArrayView<NodeId> candidates;
       NodeId candidate_group = INVALID_NODE_ID;
       if (layer_idx == 0) {
-        candidates = &extended_layers_[0];
+        candidates = extended_layers_[0];
       } else if (parent != INVALID_NODE_ID) {
-        candidates = &build_nodes_[parent].child_or_leaf_ids;
+        candidates = build_nodes_[parent].child_or_leaf_ids;
         candidate_group = parent;
       }
 
       Phase1CoverScanResult scan;
       Phase1CoverScanResult initial;
       size_t known_rejected_idx = std::numeric_limits<size_t>::max();
-      if (candidates && !candidates->empty()) {
-        stats_.phase1_total_possible_pairs += candidates->size();
+      if (!candidates.empty()) {
+        stats_.phase1_total_possible_pairs += candidates.size();
         int candidate_radius = radius;
         if (range_config_.phase1_candidate_mode != Phase1CandidateMode::Scan) {
           const CoverHint& hint = hints[static_cast<size_t>(layer_idx)];
           if (hint.candidate_group == candidate_group &&
               hint.node != INVALID_NODE_ID &&
               hint.node < build_nodes_.size() &&
-              hint.candidate_idx < candidates->size() &&
-              (*candidates)[hint.candidate_idx] == hint.node &&
+              hint.candidate_idx < candidates.size() &&
+              candidates[hint.candidate_idx] == hint.node &&
               build_nodes_[hint.node].center_sequence_id <
                   search_graph_view_.sequences.size() &&
               phase1_length_compatible(sequence.size(),
@@ -2789,7 +2789,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
         auto use_scan = [&]() {
           stats_.phase1_scan_queries++;
           scan = find_best_phase1_cover(
-              *candidates, build_nodes_, search_graph_view_.sequences,
+              candidates, build_nodes_, search_graph_view_.sequences,
               sequence_signatures, query_signature, &distance_cache,
               prepared_query_ptr,
               sequence, radius,
@@ -2798,14 +2798,14 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
         };
 
         if (range_config_.phase1_candidate_mode == Phase1CandidateMode::Scan ||
-            candidates->size() <
+            candidates.size() <
                 range_config_.phase1_metric_min_fanout) {
           use_scan();
         } else {
           auto& group_index =
               cover_group_indexes[candidate_group];
           auto candidate_query = group_index.query(
-              *candidates, build_nodes_, search_graph_view_.sequences,
+              candidates, build_nodes_, search_graph_view_.sequences,
               sequence, candidate_radius, radius, range_config_);
           stats_.phase1_metric_build_distance_calls +=
               candidate_query.metric_build_distance_calls;
@@ -2824,7 +2824,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
             case Phase1CoverSource::FallbackScan:
               stats_.phase1_fallback_scan_queries++;
               scan = find_best_phase1_cover(
-                  *candidates, build_nodes_, search_graph_view_.sequences,
+                  candidates, build_nodes_, search_graph_view_.sequences,
                   sequence_signatures, query_signature, &distance_cache,
                   prepared_query_ptr,
                   sequence, radius,
@@ -2836,7 +2836,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               stats_.phase1_metric_distance_calls +=
                   candidate_query.metric_distance_calls;
               scan = find_best_phase1_cover_by_indices(
-                  *candidates, build_nodes_, search_graph_view_.sequences,
+                  candidates, build_nodes_, search_graph_view_.sequences,
                   sequence_signatures, query_signature, &distance_cache,
                   prepared_query_ptr,
                   candidate_query.candidate_indices, sequence, radius,
@@ -2845,7 +2845,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               break;
             case Phase1CoverSource::Pigeonhole:
               scan = find_best_phase1_cover_by_indices(
-                  *candidates, build_nodes_, search_graph_view_.sequences,
+                  candidates, build_nodes_, search_graph_view_.sequences,
                   sequence_signatures, query_signature, &distance_cache,
                   prepared_query_ptr,
                   candidate_query.candidate_indices, sequence, radius,
@@ -2859,7 +2859,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               stats_.phase1_qgram_pruned_candidates +=
                   candidate_query.qgram_pruned_candidates;
               scan = find_best_phase1_cover_by_indices(
-                  *candidates, build_nodes_, search_graph_view_.sequences,
+                  candidates, build_nodes_, search_graph_view_.sequences,
                   sequence_signatures, query_signature, &distance_cache,
                   prepared_query_ptr,
                   candidate_query.candidate_indices, sequence, radius,
@@ -2871,7 +2871,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
       }
 
       if (scan.best == INVALID_NODE_ID) {
-        const size_t new_candidate_idx = candidates ? candidates->size() : 0;
+        const size_t new_candidate_idx = candidates.size();
         if (build_nodes_.size() >
             static_cast<size_t>(INVALID_NODE_ID - 1)) {
           throw std::runtime_error("too many build nodes for 32-bit NodeId");
@@ -3528,7 +3528,9 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
       for (size_t node_idx = 0; node_idx < current_layer.size(); ++node_idx) {
         auto& node = build_nodes_[current_layer[node_idx]];
         auto& geometry = build_node_geometry_[node.geometry_index];
-        std::vector<NodeId> auxiliary_nodes = node.child_or_leaf_ids;
+        std::vector<NodeId> auxiliary_nodes(
+            node.child_or_leaf_ids.begin(),
+            node.child_or_leaf_ids.end());
         {
           ScopedTimer timer(&collect_ms[static_cast<size_t>(tid)]);
           const size_t beacon_count = std::min(
@@ -3547,7 +3549,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
           }
         }
 
-        std::vector<NodeId> direct_children;
+        CompactBuildVector<NodeId> direct_children;
         {
           ScopedTimer timer(&collapse_ms[static_cast<size_t>(tid)]);
           for (NodeId aux_id : auxiliary_nodes) {
@@ -3623,8 +3625,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
       stats_.phase3_child_mbb_distance_ms += distance_ms[idx];
     }
     for (NodeId auxiliary_id : auxiliary_layer) {
-      std::vector<NodeId>().swap(
-          build_nodes_[auxiliary_id].child_or_leaf_ids);
+      build_nodes_[auxiliary_id].child_or_leaf_ids.release();
     }
     std::vector<NodeId>().swap(
         extended_layers_[static_cast<size_t>(primary_idx * 2)]);
@@ -4095,7 +4096,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     return static_cast<uint32_t>(value);
   };
   auto beacon_storage_for =
-      [](LeafId center, const std::vector<LeafId>& beacon_ids) {
+      [](LeafId center, BuildArrayView<LeafId> beacon_ids) {
         bool fits_delta8 = true;
         bool fits_delta16 = true;
         for (LeafId beacon_id : beacon_ids) {
@@ -4425,7 +4426,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
 
   const auto append_packed_values =
       [&](FinalArray<uint8_t>& output,
-          const std::vector<uint8_t>& values, uint32_t bits,
+          BuildArrayView<uint8_t> values, uint32_t bits,
           uint32_t bin_width) {
         if (bits == 0 || bits > 8) {
           throw std::runtime_error("invalid packed distance bit width");

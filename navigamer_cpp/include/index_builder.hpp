@@ -6,13 +6,16 @@
 #include "range_join.hpp"
 #include "phase2_distance_verifier.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -714,6 +717,133 @@ struct WorldNodeRecord {
 static_assert(sizeof(WorldNodeRecord) == 16,
               "finalized world node must remain a compact 16 bytes");
 
+template <typename T>
+class BuildArrayView {
+ public:
+  BuildArrayView() = default;
+  BuildArrayView(const T* data, size_t size) : data_(data), size_(size) {}
+  BuildArrayView(const std::vector<T>& values)
+      : data_(values.data()), size_(values.size()) {}
+
+  const T* data() const { return data_; }
+  size_t size() const { return size_; }
+  bool empty() const { return size_ == 0; }
+  const T& operator[](size_t index) const { return data_[index]; }
+  const T* begin() const { return data_; }
+  const T* end() const { return data_ ? data_ + size_ : data_; }
+
+ private:
+  const T* data_ = nullptr;
+  size_t size_ = 0;
+};
+
+// Build-only vectors contain trivial integer values. A 32-bit size/capacity
+// pair keeps each mutable handle at 16 bytes, and realloc can grow it in place
+// without std::vector's allocate-copy-free peak.
+template <typename T>
+class CompactBuildVector {
+ public:
+  static_assert(std::is_trivially_copyable_v<T> &&
+                    std::is_trivially_destructible_v<T>,
+                "compact build vectors require trivial values");
+
+  CompactBuildVector() = default;
+  CompactBuildVector(const CompactBuildVector& other) { copy_from(other); }
+  CompactBuildVector& operator=(const CompactBuildVector& other) {
+    if (this != &other) copy_from(other);
+    return *this;
+  }
+  CompactBuildVector(CompactBuildVector&& other) noexcept {
+    move_from(std::move(other));
+  }
+  CompactBuildVector& operator=(CompactBuildVector&& other) noexcept {
+    if (this != &other) {
+      release();
+      move_from(std::move(other));
+    }
+    return *this;
+  }
+  ~CompactBuildVector() { std::free(data_); }
+
+  size_t size() const { return size_; }
+  size_t capacity() const { return capacity_; }
+  bool empty() const { return size_ == 0; }
+  T* data() { return data_; }
+  const T* data() const { return data_; }
+  T& operator[](size_t index) { return data_[index]; }
+  const T& operator[](size_t index) const { return data_[index]; }
+  T* begin() { return data_; }
+  const T* begin() const { return data_; }
+  T* end() { return data_ ? data_ + size_ : data_; }
+  const T* end() const { return data_ ? data_ + size_ : data_; }
+  operator BuildArrayView<T>() const {
+    return BuildArrayView<T>(data_, size_);
+  }
+
+  void clear() { size_ = 0; }
+  void release() {
+    std::free(data_);
+    data_ = nullptr;
+    size_ = 0;
+    capacity_ = 0;
+  }
+  void reserve(size_t requested_capacity) {
+    if (requested_capacity <= capacity_) return;
+    if (requested_capacity > std::numeric_limits<uint32_t>::max() ||
+        requested_capacity >
+            std::numeric_limits<size_t>::max() / sizeof(T)) {
+      throw std::length_error("compact build-vector capacity overflow");
+    }
+    void* allocation =
+        std::realloc(data_, requested_capacity * sizeof(T));
+    if (!allocation) throw std::bad_alloc();
+    data_ = static_cast<T*>(allocation);
+    capacity_ = static_cast<uint32_t>(requested_capacity);
+  }
+  void push_back(T value) {
+    if (size_ == capacity_) {
+      size_t grown = capacity_ == 0
+                         ? 4
+                         : static_cast<size_t>(capacity_) +
+                               capacity_ / 2 + 1;
+      if (grown > std::numeric_limits<uint32_t>::max()) {
+        grown = static_cast<size_t>(size_) + 1;
+      }
+      if (grown <= size_) grown = static_cast<size_t>(size_) + 1;
+      reserve(grown);
+    }
+    data_[size_++] = value;
+  }
+  void assign(size_t count, T value) {
+    reserve(count);
+    if (count != 0) std::fill_n(data_, count, value);
+    size_ = static_cast<uint32_t>(count);
+  }
+
+ private:
+  void copy_from(const CompactBuildVector& other) {
+    reserve(other.size_);
+    if (other.size_ != 0) {
+      std::memcpy(data_, other.data_, other.size_ * sizeof(T));
+    }
+    size_ = other.size_;
+  }
+  void move_from(CompactBuildVector&& other) {
+    data_ = other.data_;
+    size_ = other.size_;
+    capacity_ = other.capacity_;
+    other.data_ = nullptr;
+    other.size_ = 0;
+    other.capacity_ = 0;
+  }
+
+  T* data_ = nullptr;
+  uint32_t size_ = 0;
+  uint32_t capacity_ = 0;
+};
+static_assert(sizeof(CompactBuildVector<uint32_t>) == 16,
+              "compact build-vector handle must remain 16 bytes");
+
 // Mutable construction record. It intentionally contains only integer
 // references: no WorldNode objects are allocated while building the hierarchy.
 // The per-node vectors are flattened into SearchGraphView after all build
@@ -724,21 +854,21 @@ struct BuildWorldNodeRecord {
 
   // Phase 1-3 child NodeIds. Finest-layer nodes reuse the same uint32_t
   // storage for LeafIds after their child list is cleared.
-  std::vector<NodeId> child_or_leaf_ids;
+  CompactBuildVector<NodeId> child_or_leaf_ids;
 };
-static_assert(sizeof(BuildWorldNodeRecord) <= 32,
-              "mutable build node must remain compact");
+static_assert(sizeof(BuildWorldNodeRecord) == 24,
+              "mutable build node must remain 24 bytes");
 
 // Geometry exists only for primary nodes. Keeping these vectors out of every
 // expanded-layer node avoids two empty vector headers on auxiliary nodes.
 struct BuildNodeGeometry {
-  std::vector<LeafId> beacon_ids;
+  CompactBuildVector<LeafId> beacon_ids;
   // Non-finest nodes store dimension-major child MBB distances here;
   // finest nodes reuse the same vector for one distance per leaf.
-  std::vector<uint8_t> link_beacon_dists;
+  CompactBuildVector<uint8_t> link_beacon_dists;
 };
-static_assert(sizeof(BuildNodeGeometry) <= 48,
-              "primary-node build geometry must remain compact");
+static_assert(sizeof(BuildNodeGeometry) == 32,
+              "primary-node build geometry must remain 32 bytes");
 
 struct SearchGraphView {
   static constexpr uint32_t COARSE_CHILD_MBB_BIN_WIDTH = 12;
