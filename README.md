@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 34 stores the shared
+edit distance fits in one byte. Persisted format version 35 stores the shared
 reference as raw bases in the memory-mapped index, so loading does not allocate
 or eagerly fault a full decoded reference into heap memory, and
 keeps long literal inputs in the manifest only as content fingerprints. It
@@ -69,7 +69,10 @@ child-layer radius and the layer-specific quantization error. Leaf distances
 remain exact because they participate in the final leaf sieve, but each finest
 node packs them at the minimum 1..8-bit width required by its largest value.
 The width shares the node's 32-bit MBB field with the 29-bit byte offset, and
-each node begins on a byte boundary for constant-time decoding. Each
+each node begins on a byte boundary for constant-time decoding. Finest-layer
+leaf IDs use exact ZigZag deltas from the world center and the
+smallest profitable per-node 1..16-bit width; the width shares the leaf offset
+field and requires no side array. Each
 parent's child IDs use the smallest exact constant-time representation: a
 32-bit minimum ID plus fixed-width 1..16-bit offsets, a base plus byte offsets,
 16-bit forward deltas, or full 32-bit IDs. The packed width shares the child

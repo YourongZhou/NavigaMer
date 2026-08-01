@@ -548,6 +548,72 @@ void assert_leaf_id_encodings_are_exact() {
       navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
   assert(view.leaf_id(2, 0) == 17);
   assert(view.leaf_id(2, 1) == UINT32_MAX - 1);
+
+  constexpr uint32_t packed_count = 19;
+  for (uint32_t bits = 1; bits <= 16; ++bits) {
+    navigamer::SearchGraphView packed_view;
+    packed_view.node_records.resize(1);
+    auto& packed = packed_view.node_records[0];
+    packed.center_sequence_id = 100000;
+    packed.set_link_storage(
+        navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    packed.set_packed_leaf_layout(0, bits);
+    packed_view.set_node_counts(
+        0, packed_count, 1,
+        navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+    const uint32_t mask = (uint32_t{1} << bits) - 1;
+    packed_view.leaf_id_deltas8.assign(
+        (packed_count * bits + 7) / 8, 0);
+    for (uint32_t offset = 0; offset < packed_count; ++offset) {
+      const uint32_t zigzag = (offset * 7919 + 17) & mask;
+      const size_t bit_offset = static_cast<size_t>(offset) * bits;
+      const size_t byte_offset = bit_offset >> 3;
+      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+      const auto or_byte = [&](size_t index, uint8_t value) {
+        packed_view.leaf_id_deltas8[index] = static_cast<int8_t>(
+            static_cast<uint8_t>(packed_view.leaf_id_deltas8[index]) |
+            value);
+      };
+      or_byte(byte_offset, static_cast<uint8_t>(zigzag << shift));
+      if (shift + bits > 8) {
+        or_byte(byte_offset + 1,
+                static_cast<uint8_t>(zigzag >> (8 - shift)));
+      }
+      if (shift + bits > 16) {
+        or_byte(byte_offset + 2,
+                static_cast<uint8_t>(zigzag >> (16 - shift)));
+      }
+      const int64_t delta =
+          (zigzag & 1) != 0
+              ? -static_cast<int64_t>((zigzag >> 1) + 1)
+              : static_cast<int64_t>(zigzag >> 1);
+      assert(packed_view.leaf_id(0, offset) ==
+             static_cast<navigamer::LeafId>(100000 + delta));
+    }
+    assert(packed.leaf_begin() == 0);
+    assert(packed.packed_leaf_bits() == bits);
+    assert(packed_view.packed_leaf_byte_count(0) ==
+           packed_view.leaf_id_deltas8.size());
+  }
+
+  navigamer::WorldNodeRecord packed_layout;
+  bool saw_offset_overflow = false;
+  try {
+    packed_layout.set_packed_leaf_layout(
+        navigamer::WorldNodeRecord::PACKED_CHILD_BEGIN_MASK + 1, 8);
+  } catch (const std::length_error&) {
+    saw_offset_overflow = true;
+  }
+  assert(saw_offset_overflow);
+  for (uint32_t invalid_bits : {0U, 17U}) {
+    bool saw_invalid_width = false;
+    try {
+      packed_layout.set_packed_leaf_layout(0, invalid_bits);
+    } catch (const std::invalid_argument&) {
+      saw_invalid_width = true;
+    }
+    assert(saw_invalid_width);
+  }
 }
 
 }  // namespace

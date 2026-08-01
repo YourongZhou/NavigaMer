@@ -224,7 +224,7 @@ quality-audit time only.
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v34 binary persistence and manifest signatures |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v35 binary persistence and manifest signatures |
 | `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, exact-minimizer shard routing, bundle manifests, and validated loading |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
@@ -355,7 +355,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 34
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 35
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
@@ -379,7 +379,10 @@ the minimum 1..8-bit width required by its largest value. The width shares the
 same node field as its 29-bit byte offset, and nodes start on byte boundaries
 for constant-time decoding. This avoids both per-distance padding and a
 separate heap allocation for every child or leaf row. Finest-layer
-construction also reuses the cleared child-ID buffer for leaf IDs. Finalized
+construction also reuses the cleared child-ID buffer for leaf IDs. Leaf IDs
+use exact ZigZag deltas from the world center and the smallest profitable
+per-node 1..16-bit width; its width shares the leaf offset field, so the
+encoding needs no side array. Finalized
 nodes are 16 bytes and are addressed directly by array index;
 layer offsets imply the layer ID and both radii. A packed 32-bit word stores
 the common 24-bit child-or-leaf count, 4-bit beacon count, 2-bit beacon

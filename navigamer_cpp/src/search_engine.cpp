@@ -2695,8 +2695,14 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
       case WorldNodeRecord::LinkStorage::Absolute32:
         prefetch_read(view.leaf_ids.data() + leaf_begin + leaf_offset);
         break;
-      case WorldNodeRecord::LinkStorage::PackedDelta:
+      case WorldNodeRecord::LinkStorage::PackedDelta: {
+        const size_t byte_offset =
+            static_cast<size_t>(leaf_offset) *
+            node.packed_leaf_bits() >> 3;
+        prefetch_read(
+            view.leaf_id_deltas8.data() + leaf_begin + byte_offset);
         break;
+      }
     }
   };
 
@@ -2832,6 +2838,11 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
           [&](uint32_t offset) { return leaf_ids[offset]; });
       break;
     }
+    case WorldNodeRecord::LinkStorage::PackedDelta:
+      verify_survivors([&](uint32_t offset) {
+        return view.packed_leaf_id(node_id, offset);
+      });
+      break;
     default:
       throw std::runtime_error("view leaf ID encoding is invalid");
   }

@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '4'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '5'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 constexpr size_t kMappedArrayAlignment = 64;
 
@@ -318,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 28) {
+  if (manifest.format_version != 29) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -1030,7 +1030,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 28) {
+  if (manifest.format_version != 29) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1074,11 +1074,11 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 28;
+  stored.format_version = 29;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
-  stored.leaf_link_count = view.leaf_ids.size();
+  stored.leaf_link_count = view.leaf_link_count();
   refresh_signature(stored);
 
   std::ofstream out(path, std::ios::binary);
@@ -1098,7 +1098,7 @@ LoadedIndex load_index(
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 28) {
+  if (manifest.format_version != 29) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1118,7 +1118,7 @@ LoadedIndex load_index(
   if (view.sequences.size() != manifest.sequence_count ||
       view.node_records.size() != manifest.world_node_count ||
       view.edge_count() != manifest.edge_count ||
-      view.leaf_ids.size() != manifest.leaf_link_count) {
+      view.leaf_link_count() != manifest.leaf_link_count) {
     throw std::runtime_error(
         "array index manifest counts do not match stored arrays");
   }

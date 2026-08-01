@@ -233,7 +233,7 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 ### `build`
 
 Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
-provided, writes an array-format v34 binary index with a manifest signature,
+provided, writes an array-format v35 binary index with a manifest signature,
 build parameters, input fingerprints, sequence records, layer ranges,
 child/leaf/beacon ID arrays, MBB rows, and leaf-beacon distance rows. Older
 pointer-graph index formats are rejected and must be rebuilt.

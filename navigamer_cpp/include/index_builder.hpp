@@ -598,7 +598,11 @@ struct WorldNodeRecord {
                ? link_begin & PACKED_CHILD_BEGIN_MASK
                : link_begin;
   }
-  uint32_t leaf_begin() const { return link_begin; }
+  uint32_t leaf_begin() const {
+    return link_storage() == LinkStorage::PackedDelta
+               ? link_begin & PACKED_CHILD_BEGIN_MASK
+               : link_begin;
+  }
   uint32_t packed_child_bits() const {
     return (link_begin >> PACKED_CHILD_BEGIN_BITS) + 1;
   }
@@ -610,6 +614,21 @@ struct WorldNodeRecord {
     if (bits == 0 || bits > 16) {
       throw std::invalid_argument(
           "packed child-ID bit width must be 1..16");
+    }
+    link_begin =
+        begin | ((bits - 1) << PACKED_CHILD_BEGIN_BITS);
+  }
+  uint32_t packed_leaf_bits() const {
+    return (link_begin >> PACKED_CHILD_BEGIN_BITS) + 1;
+  }
+  void set_packed_leaf_layout(uint32_t begin, uint32_t bits) {
+    if (begin > PACKED_CHILD_BEGIN_MASK) {
+      throw std::length_error(
+          "packed leaf-ID storage exceeds 28-bit offset range");
+    }
+    if (bits == 0 || bits > 16) {
+      throw std::invalid_argument(
+          "packed leaf-ID bit width must be 1..16");
     }
     link_begin =
         begin | ((bits - 1) << PACKED_CHILD_BEGIN_BITS);
@@ -745,6 +764,8 @@ struct SearchGraphView {
   FinalArray<uint8_t> child_id_base_deltas8;
   FinalArray<uint16_t> child_id_deltas16;
   FinalArray<NodeId> child_ids;
+  // Signed byte deltas and exact per-node ZigZag-packed deltas share this
+  // byte array; LinkStorage distinguishes their interpretation.
   FinalArray<int8_t> leaf_id_deltas8;
   FinalArray<int16_t> leaf_id_deltas16;
   FinalArray<LeafId> leaf_ids;
@@ -954,6 +975,16 @@ struct SearchGraphView {
            packed_delta_child_edge_count() +
            child_id_deltas16.size() + child_ids.size();
   }
+  size_t leaf_link_count() const {
+    size_t count = 0;
+    const NodeId finest_begin =
+        layer_begin.empty() ? 0 : layer_begin.back();
+    for (NodeId node_id = finest_begin;
+         node_id < node_records.size(); ++node_id) {
+      count += leaf_count(node_id);
+    }
+    return count;
+  }
 
   uint32_t child_mbb_bits(NodeId node_id) const {
     if (layer_begin.empty() || node_id >= layer_begin.back()) {
@@ -1085,6 +1116,44 @@ struct SearchGraphView {
         (word >> shift) & ((uint32_t{1} << bits) - 1));
   }
 
+  size_t packed_leaf_byte_count(NodeId node_id) const {
+    const auto& node = node_records[node_id];
+    const uint64_t bit_count =
+        static_cast<uint64_t>(leaf_count(node_id)) *
+        node.packed_leaf_bits();
+    return static_cast<size_t>((bit_count + 7) / 8);
+  }
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((always_inline))
+#endif
+  inline LeafId packed_leaf_id(
+      NodeId node_id, uint32_t leaf_offset) const {
+    const auto& node = node_records[node_id];
+    const uint32_t bits = node.packed_leaf_bits();
+    const uint8_t* data =
+        reinterpret_cast<const uint8_t*>(leaf_id_deltas8.data()) +
+        node.leaf_begin();
+    const size_t bit_offset =
+        static_cast<size_t>(leaf_offset) * bits;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    uint32_t word = data[byte_offset];
+    if (shift + bits > 8) {
+      word |= static_cast<uint32_t>(data[byte_offset + 1]) << 8;
+    }
+    if (shift + bits > 16) {
+      word |= static_cast<uint32_t>(data[byte_offset + 2]) << 16;
+    }
+    const uint32_t zigzag =
+        (word >> shift) & ((uint32_t{1} << bits) - 1);
+    const int64_t delta =
+        (zigzag & 1) != 0
+            ? -static_cast<int64_t>((zigzag >> 1) + 1)
+            : static_cast<int64_t>(zigzag >> 1);
+    return static_cast<LeafId>(
+        static_cast<int64_t>(node.center_sequence_id) + delta);
+  }
+
   LeafId leaf_id(NodeId node_id, uint32_t leaf_offset) const {
     const auto& node = node_records[node_id];
     switch (node.link_storage()) {
@@ -1097,7 +1166,7 @@ struct SearchGraphView {
       case WorldNodeRecord::LinkStorage::Absolute32:
         return leaf_ids[node.leaf_begin() + leaf_offset];
       case WorldNodeRecord::LinkStorage::PackedDelta:
-        break;
+        return packed_leaf_id(node_id, leaf_offset);
     }
     return INVALID_LEAF_ID;
   }
