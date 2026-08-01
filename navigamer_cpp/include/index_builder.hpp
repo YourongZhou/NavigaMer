@@ -558,6 +558,7 @@ struct WorldNodeRecord {
     Absolute32 = 0,
     Delta16 = 1,
     Delta8 = 2,
+    PackedDelta = 3,
   };
   static constexpr uint32_t LINK_COUNT_BITS = 24;
   static constexpr uint32_t BEACON_COUNT_BITS = 4;
@@ -575,11 +576,15 @@ struct WorldNodeRecord {
   static constexpr uint32_t CHILD_MBB_BEGIN_BITS = 29;
   static constexpr uint32_t CHILD_MBB_BEGIN_MASK =
       (uint32_t{1} << CHILD_MBB_BEGIN_BITS) - 1;
+  static constexpr uint32_t PACKED_CHILD_BEGIN_BITS = 28;
+  static constexpr uint32_t PACKED_CHILD_BEGIN_MASK =
+      (uint32_t{1} << PACKED_CHILD_BEGIN_BITS) - 1;
 
   LeafId center_sequence_id = INVALID_LEAF_ID;
 
-  // Non-finest nodes address byte base-deltas, 16-bit forward deltas, or
-  // absolute child IDs; finest nodes address 8/16-bit leaf deltas or leaf IDs.
+  // Non-finest nodes address byte base-deltas, per-parent bit-packed deltas,
+  // 16-bit forward deltas, or absolute child IDs; finest nodes address
+  // 8/16-bit leaf deltas or leaf IDs.
   // Primary layers are explicit, so child and leaf ranges share one
   // offset/count pair; the packed link encoding selects the exact array.
   uint32_t link_begin = 0;
@@ -588,8 +593,27 @@ struct WorldNodeRecord {
   // store a 29-bit child-MBB byte offset plus the exact 1..8-bit cell width.
   uint32_t mbb_begin = 0;
 
-  uint32_t child_begin() const { return link_begin; }
+  uint32_t child_begin() const {
+    return link_storage() == LinkStorage::PackedDelta
+               ? link_begin & PACKED_CHILD_BEGIN_MASK
+               : link_begin;
+  }
   uint32_t leaf_begin() const { return link_begin; }
+  uint32_t packed_child_bits() const {
+    return (link_begin >> PACKED_CHILD_BEGIN_BITS) + 1;
+  }
+  void set_packed_child_layout(uint32_t begin, uint32_t bits) {
+    if (begin > PACKED_CHILD_BEGIN_MASK) {
+      throw std::length_error(
+          "packed child-ID storage exceeds 28-bit offset range");
+    }
+    if (bits == 0 || bits > 16) {
+      throw std::invalid_argument(
+          "packed child-ID bit width must be 1..16");
+    }
+    link_begin =
+        begin | ((bits - 1) << PACKED_CHILD_BEGIN_BITS);
+  }
   uint32_t child_mbb_begin() const {
     return mbb_begin & CHILD_MBB_BEGIN_MASK;
   }
@@ -771,7 +795,9 @@ struct SearchGraphView {
     NodeId base = 0;
     const uint16_t* deltas16 = nullptr;
     const uint8_t* base_deltas8 = nullptr;
+    const uint8_t* packed_deltas = nullptr;
     const NodeId* ids32 = nullptr;
+    uint32_t packed_bits = 0;
 
 #if defined(__GNUC__) || defined(__clang__)
     __attribute__((always_inline))
@@ -779,6 +805,26 @@ struct SearchGraphView {
     inline NodeId at(uint32_t offset) const {
       if (base_deltas8) return base + base_deltas8[offset];
       if (deltas16) return base + deltas16[offset];
+      if (packed_deltas) {
+        const size_t bit_offset =
+            static_cast<size_t>(offset) * packed_bits;
+        const size_t byte_offset = bit_offset >> 3;
+        const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+        uint32_t word = packed_deltas[byte_offset];
+        if (shift + packed_bits > 8) {
+          word |= static_cast<uint32_t>(
+                      packed_deltas[byte_offset + 1])
+                  << 8;
+        }
+        if (shift + packed_bits > 16) {
+          word |= static_cast<uint32_t>(
+                      packed_deltas[byte_offset + 2])
+                  << 16;
+        }
+        return base +
+               ((word >> shift) &
+                ((uint32_t{1} << packed_bits) - 1));
+      }
       return ids32[offset];
     }
 #if defined(__GNUC__) || defined(__clang__)
@@ -791,6 +837,11 @@ struct SearchGraphView {
       if (deltas16) {
         return static_cast<const void*>(deltas16 + offset);
       }
+      if (packed_deltas) {
+        return static_cast<const void*>(
+            packed_deltas +
+            (static_cast<size_t>(offset) * packed_bits >> 3));
+      }
       return static_cast<const void*>(ids32 + offset);
     }
   };
@@ -802,6 +853,18 @@ struct SearchGraphView {
   bool child_ids_are_delta16(NodeId node_id) const {
     return node_records[node_id].link_storage() ==
            WorldNodeRecord::LinkStorage::Delta16;
+  }
+  bool child_ids_are_packed_delta(NodeId node_id) const {
+    return node_records[node_id].link_storage() ==
+           WorldNodeRecord::LinkStorage::PackedDelta;
+  }
+  size_t packed_child_byte_count(NodeId node_id) const {
+    const auto& node = node_records[node_id];
+    const uint64_t bit_count =
+        static_cast<uint64_t>(child_count(node_id)) *
+        node.packed_child_bits();
+    return sizeof(NodeId) +
+           static_cast<size_t>((bit_count + 7) / 8);
   }
   void set_child_ids_base_delta8(NodeId node_id) {
     node_records[node_id].set_link_storage(
@@ -822,15 +885,24 @@ struct SearchGraphView {
             child_id_base_deltas8.data() + node.child_begin();
         NodeId base = 0;
         std::memcpy(&base, segment, sizeof(base));
-        return {base, nullptr, segment + sizeof(base), nullptr};
+        return {base, nullptr, segment + sizeof(base), nullptr,
+                nullptr, 0};
       }
       case WorldNodeRecord::LinkStorage::Delta16:
         return {static_cast<NodeId>(node_id + 1),
                 child_id_deltas16.data() + node.child_begin(),
-                nullptr, nullptr};
+                nullptr, nullptr, nullptr, 0};
+      case WorldNodeRecord::LinkStorage::PackedDelta: {
+        const uint8_t* segment =
+            child_id_base_deltas8.data() + node.child_begin();
+        NodeId base = 0;
+        std::memcpy(&base, segment, sizeof(base));
+        return {base, nullptr, nullptr, segment + sizeof(base),
+                nullptr, node.packed_child_bits()};
+      }
       case WorldNodeRecord::LinkStorage::Absolute32:
-        return {0, nullptr, nullptr,
-                child_ids.data() + node.child_begin()};
+        return {0, nullptr, nullptr, nullptr,
+                child_ids.data() + node.child_begin(), 0};
     }
     throw std::runtime_error("invalid child ID storage");
   }
@@ -849,8 +921,21 @@ struct SearchGraphView {
     }
     return count;
   }
+  size_t packed_delta_child_edge_count() const {
+    size_t count = 0;
+    const NodeId non_finest_node_count =
+        layer_begin.empty() ? 0 : layer_begin.back();
+    for (NodeId node_id = 0;
+         node_id < non_finest_node_count; ++node_id) {
+      if (child_ids_are_packed_delta(node_id)) {
+        count += child_count(node_id);
+      }
+    }
+    return count;
+  }
   size_t edge_count() const {
     return base_delta8_child_edge_count() +
+           packed_delta_child_edge_count() +
            child_id_deltas16.size() + child_ids.size();
   }
 
@@ -940,6 +1025,8 @@ struct SearchGraphView {
                leaf_id_deltas16[node.leaf_begin() + leaf_offset];
       case WorldNodeRecord::LinkStorage::Absolute32:
         return leaf_ids[node.leaf_begin() + leaf_offset];
+      case WorldNodeRecord::LinkStorage::PackedDelta:
+        break;
     }
     return INVALID_LEAF_ID;
   }

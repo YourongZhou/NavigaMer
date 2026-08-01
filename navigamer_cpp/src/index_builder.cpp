@@ -1915,7 +1915,9 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
           node.link_storage() !=
               WorldNodeRecord::LinkStorage::Delta16 &&
           node.link_storage() !=
-              WorldNodeRecord::LinkStorage::Delta8) {
+              WorldNodeRecord::LinkStorage::Delta8 &&
+          node.link_storage() !=
+              WorldNodeRecord::LinkStorage::PackedDelta) {
         return false;
       }
       bool child_range_valid = false;
@@ -1926,6 +1928,15 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
                   view.child_id_base_deltas8.size() &&
               link_count <= view.child_id_base_deltas8.size() -
                                 node.child_begin() - sizeof(NodeId);
+          break;
+        case WorldNodeRecord::LinkStorage::PackedDelta:
+          child_range_valid =
+              node.packed_child_bits() <= 16 &&
+              node.child_begin() <=
+                  view.child_id_base_deltas8.size() &&
+              view.packed_child_byte_count(node_id) <=
+                  view.child_id_base_deltas8.size() -
+                      node.child_begin();
           break;
         case WorldNodeRecord::LinkStorage::Delta16:
           child_range_valid =
@@ -2014,6 +2025,8 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
           case WorldNodeRecord::LinkStorage::Absolute32:
             leaf_array_size = view.leaf_ids.size();
             break;
+          case WorldNodeRecord::LinkStorage::PackedDelta:
+            return false;
           default:
             return false;
         }
@@ -2033,7 +2046,9 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
              node.link_storage() !=
                  WorldNodeRecord::LinkStorage::Delta16 &&
              node.link_storage() !=
-                 WorldNodeRecord::LinkStorage::Delta8) ||
+                 WorldNodeRecord::LinkStorage::Delta8 &&
+             node.link_storage() !=
+                 WorldNodeRecord::LinkStorage::PackedDelta) ||
             beacon_count > link_count ||
             !view.child_mbb_range_valid(node_id) ||
             node.beacon_storage() ==
@@ -2047,6 +2062,12 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
                   view.child_id_base_deltas8.size() ||
               link_count > view.child_id_base_deltas8.size() -
                                child_begin - sizeof(NodeId))) ||
+            (node.link_storage() ==
+                 WorldNodeRecord::LinkStorage::PackedDelta &&
+             (node.packed_child_bits() > 16 ||
+              child_begin > view.child_id_base_deltas8.size() ||
+              view.packed_child_byte_count(node_id) >
+                  view.child_id_base_deltas8.size() - child_begin)) ||
             (node.link_storage() ==
                  WorldNodeRecord::LinkStorage::Delta16 &&
              child_begin + link_count >
@@ -2133,7 +2154,9 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
            node.link_storage() !=
                WorldNodeRecord::LinkStorage::Delta16 &&
            node.link_storage() !=
-               WorldNodeRecord::LinkStorage::Delta8) ||
+               WorldNodeRecord::LinkStorage::Delta8 &&
+           node.link_storage() !=
+               WorldNodeRecord::LinkStorage::PackedDelta) ||
           node.child_mbb_begin() != expected_mbb_begin ||
           !view.child_mbb_range_valid(node_id)) {
         return false;
@@ -2141,6 +2164,9 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       size_t* expected_child_begin = nullptr;
       switch (node.link_storage()) {
         case WorldNodeRecord::LinkStorage::Delta8:
+          expected_child_begin = &expected_child_base_delta8_begin;
+          break;
+        case WorldNodeRecord::LinkStorage::PackedDelta:
           expected_child_begin = &expected_child_base_delta8_begin;
           break;
         case WorldNodeRecord::LinkStorage::Delta16:
@@ -2154,11 +2180,17 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
           node.child_begin() != *expected_child_begin) {
         return false;
       }
-      *expected_child_begin +=
-          link_count +
-          (node.link_storage() == WorldNodeRecord::LinkStorage::Delta8
-               ? sizeof(NodeId)
-               : 0);
+      if (node.link_storage() ==
+          WorldNodeRecord::LinkStorage::PackedDelta) {
+        *expected_child_begin +=
+            view.packed_child_byte_count(node_id);
+      } else {
+        *expected_child_begin +=
+            link_count +
+            (node.link_storage() == WorldNodeRecord::LinkStorage::Delta8
+                 ? sizeof(NodeId)
+                 : 0);
+      }
       expected_mbb_begin += view.child_mbb_byte_count(node_id);
     }
     const uint32_t beacon_begin =
@@ -3856,12 +3888,17 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         }
         return WorldNodeRecord::BeaconStorage::Absolute32;
       };
+  struct ChildStorageChoice {
+    WorldNodeRecord::LinkStorage storage =
+        WorldNodeRecord::LinkStorage::Absolute32;
+    NodeId base = 0;
+    uint8_t packed_bits = 0;
+  };
   const auto child_storage_for =
       [&](NodeId build_node_id) {
         const auto& node = build_nodes_[build_node_id];
         if (node.child_or_leaf_ids.empty()) {
-          return std::pair{WorldNodeRecord::LinkStorage::Absolute32,
-                           NodeId{0}};
+          return ChildStorageChoice{};
         }
         const NodeId parent_id = final_node_ids_[build_node_id];
         NodeId minimum_child_id = std::numeric_limits<NodeId>::max();
@@ -3869,8 +3906,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         bool fits_delta16 = true;
         for (NodeId child_build_id : node.child_or_leaf_ids) {
           if (child_build_id >= final_node_ids_.size()) {
-            return std::pair{WorldNodeRecord::LinkStorage::Absolute32,
-                             NodeId{0}};
+            return ChildStorageChoice{};
           }
           const NodeId child_id = final_node_ids_[child_build_id];
           minimum_child_id = std::min(minimum_child_id, child_id);
@@ -3890,17 +3926,33 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             fits_delta16 ? count * sizeof(uint16_t)
                          : std::numeric_limits<size_t>::max();
         const size_t absolute32_bytes = count * sizeof(NodeId);
-        if (fits_base_delta8 && delta8_bytes < delta16_bytes &&
-            delta8_bytes < absolute32_bytes) {
-          return std::pair{WorldNodeRecord::LinkStorage::Delta8,
-                           minimum_child_id};
+        WorldNodeRecord::LinkStorage storage =
+            WorldNodeRecord::LinkStorage::Absolute32;
+        size_t selected_bytes = absolute32_bytes;
+        NodeId base = 0;
+        if (fits_base_delta8 && delta8_bytes < selected_bytes &&
+            delta8_bytes < delta16_bytes) {
+          storage = WorldNodeRecord::LinkStorage::Delta8;
+          selected_bytes = delta8_bytes;
+          base = minimum_child_id;
+        } else if (fits_delta16 && delta16_bytes < selected_bytes) {
+          storage = WorldNodeRecord::LinkStorage::Delta16;
+          selected_bytes = delta16_bytes;
         }
-        if (fits_delta16) {
-          return std::pair{WorldNodeRecord::LinkStorage::Delta16,
-                           NodeId{0}};
+
+        uint32_t span = maximum_child_id - minimum_child_id;
+        uint8_t packed_bits = 1;
+        while ((span >>= 1) != 0) ++packed_bits;
+        const size_t packed_bytes =
+            sizeof(NodeId) +
+            static_cast<size_t>(
+                (static_cast<uint64_t>(count) * packed_bits + 7) / 8);
+        if (packed_bits <= 16 && packed_bytes < selected_bytes) {
+          return ChildStorageChoice{
+              WorldNodeRecord::LinkStorage::PackedDelta,
+              minimum_child_id, packed_bits};
         }
-        return std::pair{WorldNodeRecord::LinkStorage::Absolute32,
-                         NodeId{0}};
+        return ChildStorageChoice{storage, base, 0};
       };
   const auto leaf_storage_for =
       [&](NodeId build_node_id) {
@@ -3951,6 +4003,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   std::vector<WorldNodeRecord::LinkStorage> build_child_storage(
       build_nodes_.size(), WorldNodeRecord::LinkStorage::Absolute32);
   std::vector<NodeId> build_child_base(build_nodes_.size(), 0);
+  std::vector<uint8_t> build_child_packed_bits(build_nodes_.size(), 0);
   for (size_t layer_idx = 0;
        layer_idx < primary_layers_.size(); ++layer_idx) {
     const bool is_finest =
@@ -3977,13 +4030,24 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
                 : SearchGraphView::COARSE_CHILD_MBB_QUANTIZATION_SHIFT;
         build_mbb_quantization_shifts[build_node_id] =
             static_cast<uint8_t>(quantization_shift);
-        const auto [storage, base] =
-            child_storage_for(build_node_id);
+        const auto choice = child_storage_for(build_node_id);
+        const auto storage = choice.storage;
         build_child_storage[build_node_id] = storage;
-        build_child_base[build_node_id] = base;
+        build_child_base[build_node_id] = choice.base;
+        build_child_packed_bits[build_node_id] = choice.packed_bits;
         if (storage == WorldNodeRecord::LinkStorage::Delta8) {
           total_child_base_deltas8_bytes +=
               sizeof(NodeId) + node.child_or_leaf_ids.size();
+        } else if (
+            storage == WorldNodeRecord::LinkStorage::PackedDelta) {
+          total_child_base_deltas8_bytes +=
+              sizeof(NodeId) +
+              static_cast<size_t>(
+                  (static_cast<uint64_t>(
+                       node.child_or_leaf_ids.size()) *
+                       choice.packed_bits +
+                   7) /
+                  8);
         } else if (storage == WorldNodeRecord::LinkStorage::Delta16) {
           total_child_deltas16 += node.child_or_leaf_ids.size();
         } else {
@@ -4096,15 +4160,34 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       if (!is_finest) {
         const auto link_storage = build_child_storage[build_node_id];
         record.set_link_storage(link_storage);
-        if (link_storage == WorldNodeRecord::LinkStorage::Delta8) {
-          record.link_begin = to_u32(
+        if (link_storage == WorldNodeRecord::LinkStorage::Delta8 ||
+            link_storage == WorldNodeRecord::LinkStorage::PackedDelta) {
+          const uint32_t byte_begin = to_u32(
               view.child_id_base_deltas8.size(),
               "child_id_base_deltas8");
+          if (link_storage == WorldNodeRecord::LinkStorage::PackedDelta) {
+            record.set_packed_child_layout(
+                byte_begin, build_child_packed_bits[build_node_id]);
+          } else {
+            record.link_begin = byte_begin;
+          }
           const NodeId base = build_child_base[build_node_id];
           std::array<uint8_t, sizeof(NodeId)> base_bytes{};
           std::memcpy(base_bytes.data(), &base, sizeof(base));
           view.child_id_base_deltas8.append(
               base_bytes.begin(), base_bytes.end());
+          if (link_storage ==
+              WorldNodeRecord::LinkStorage::PackedDelta) {
+            const size_t packed_byte_count = static_cast<size_t>(
+                (static_cast<uint64_t>(
+                     node.child_or_leaf_ids.size()) *
+                     build_child_packed_bits[build_node_id] +
+                 7) /
+                8);
+            view.child_id_base_deltas8.resize(
+                view.child_id_base_deltas8.size() +
+                packed_byte_count);
+          }
         } else if (
             link_storage == WorldNodeRecord::LinkStorage::Delta16) {
           record.link_begin = to_u32(
@@ -4114,7 +4197,10 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           record.link_begin =
               to_u32(view.child_ids.size(), "child_ids");
         }
-        for (NodeId child_id : node.child_or_leaf_ids) {
+        for (size_t child_offset = 0;
+             child_offset < node.child_or_leaf_ids.size(); ++child_offset) {
+          const NodeId child_id =
+              node.child_or_leaf_ids[child_offset];
           if (child_id >= final_node_ids_.size() ||
               final_node_ids_[child_id] >= world_node_count_) {
             throw std::runtime_error(
@@ -4132,6 +4218,36 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             view.child_id_base_deltas8.push_back(
                 static_cast<uint8_t>(final_child_id - base));
           } else if (
+              link_storage ==
+              WorldNodeRecord::LinkStorage::PackedDelta) {
+            const NodeId base = build_child_base[build_node_id];
+            const uint32_t bits =
+                build_child_packed_bits[build_node_id];
+            const uint32_t delta = final_child_id - base;
+            if (final_child_id < base ||
+                delta >= (uint32_t{1} << bits)) {
+              throw std::runtime_error(
+                  "child ID exceeds packed-delta storage");
+            }
+            const size_t bit_offset = child_offset * bits;
+            const size_t byte_offset = bit_offset >> 3;
+            const uint32_t shift =
+                static_cast<uint32_t>(bit_offset & 7);
+            const size_t payload_begin =
+                record.child_begin() + sizeof(NodeId);
+            view.child_id_base_deltas8[payload_begin + byte_offset] |=
+                static_cast<uint8_t>(delta << shift);
+            if (shift + bits > 8) {
+              view.child_id_base_deltas8[
+                  payload_begin + byte_offset + 1] |=
+                  static_cast<uint8_t>(delta >> (8 - shift));
+            }
+            if (shift + bits > 16) {
+              view.child_id_base_deltas8[
+                  payload_begin + byte_offset + 2] |=
+                  static_cast<uint8_t>(delta >> (16 - shift));
+            }
+          } else if (
               link_storage == WorldNodeRecord::LinkStorage::Delta16) {
             view.child_id_deltas16.push_back(
                 static_cast<uint16_t>(
@@ -4140,20 +4256,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             view.child_ids.push_back(final_child_id);
           }
         }
-        if (link_storage == WorldNodeRecord::LinkStorage::Delta8) {
-          link_count = to_u32(
-              view.child_id_base_deltas8.size() - sizeof(NodeId),
-              "child_id_base_deltas8") - record.link_begin;
-        } else if (
-            link_storage == WorldNodeRecord::LinkStorage::Delta16) {
-          link_count = to_u32(
-                           view.child_id_deltas16.size(),
-                           "child_id_deltas16") -
-                       record.link_begin;
-        } else {
-          link_count = to_u32(view.child_ids.size(), "child_ids") -
-                       record.link_begin;
-        }
+        link_count = to_u32(
+            node.child_or_leaf_ids.size(), "child_count");
       } else {
         const auto link_storage = leaf_storage_for(build_node_id);
         record.set_link_storage(link_storage);

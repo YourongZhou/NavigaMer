@@ -355,7 +355,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 30
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 31
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
@@ -387,12 +387,11 @@ full 32-bit ID only when necessary. A finest-layer node's sole beacon is its
 center and consumes no side-array entry. Only the dense non-finest NodeId
 prefix stores explicit beacon offsets in a separate array, eliminating the
 otherwise constant zero field from every finest-layer node.
-When it is the smallest representation, a parent stores one exact 32-bit child
-base followed by 8-bit offsets. Other parents use 16-bit forward deltas when
-their complete child range fits, with exact 32-bit child IDs as the fallback.
-A flag packed into each node record selects the array, and every encoding has
-constant-time random access without truncation or an additional graph-size
-limit.
+Each parent selects the smallest exact constant-time child-ID representation:
+one 32-bit minimum ID followed by fixed-width 1..16-bit offsets, a base plus
+8-bit offsets, 16-bit forward deltas, or full 32-bit IDs. The packed width
+shares the node's child-offset field instead of requiring a side array. Every
+encoding preserves every edge without truncation.
 Leaf IDs use signed 8-bit or 16-bit deltas from the node center when the whole
 leaf list fits, with exact 32-bit IDs as the fallback.
 Repeated reference positions use one pair for a singleton duplicate, while

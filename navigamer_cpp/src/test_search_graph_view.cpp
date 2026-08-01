@@ -77,6 +77,12 @@ void assert_view_equivalent_to_original() {
           assert(record.child_begin() + sizeof(navigamer::NodeId) +
                      link_count <=
                  view.child_id_base_deltas8.size());
+        } else if (view.child_ids_are_packed_delta(node_id)) {
+          assert(record.child_begin() <=
+                 view.child_id_base_deltas8.size());
+          assert(view.packed_child_byte_count(node_id) <=
+                 view.child_id_base_deltas8.size() -
+                     record.child_begin());
         } else if (view.child_ids_are_delta16(node_id)) {
           assert(record.child_begin() + link_count <=
                  view.child_id_deltas16.size());
@@ -305,9 +311,10 @@ void assert_child_mbb_layout_is_exact() {
 
 void assert_child_id_encodings_are_exact() {
   navigamer::SearchGraphView view;
-  view.node_records.resize(3);
-  view.layer_begin = {3};
-  view.child_id_base_deltas8.resize(sizeof(navigamer::NodeId) + 2);
+  view.node_records.resize(4);
+  view.layer_begin = {4};
+  view.child_id_base_deltas8.resize(
+      2 * sizeof(navigamer::NodeId) + 5);
   const navigamer::NodeId child_base = 1000;
   std::array<uint8_t, sizeof(navigamer::NodeId)> child_base_bytes{};
   std::memcpy(
@@ -317,6 +324,36 @@ void assert_child_id_encodings_are_exact() {
   }
   view.child_id_base_deltas8[sizeof(navigamer::NodeId)] = 0;
   view.child_id_base_deltas8[sizeof(navigamer::NodeId) + 1] = 255;
+  const size_t packed_begin = sizeof(navigamer::NodeId) + 2;
+  const navigamer::NodeId packed_base = 5000;
+  std::array<uint8_t, sizeof(navigamer::NodeId)> packed_base_bytes{};
+  std::memcpy(
+      packed_base_bytes.data(), &packed_base, sizeof(packed_base));
+  for (size_t idx = 0; idx < packed_base_bytes.size(); ++idx) {
+    view.child_id_base_deltas8[packed_begin + idx] =
+        packed_base_bytes[idx];
+  }
+  const size_t packed_payload_begin =
+      packed_begin + sizeof(navigamer::NodeId);
+  const std::array<uint32_t, 2> packed_values = {0, 2047};
+  for (size_t offset = 0; offset < packed_values.size(); ++offset) {
+    const size_t bit_offset = offset * 11;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    const uint32_t value = packed_values[offset];
+    view.child_id_base_deltas8[packed_payload_begin + byte_offset] |=
+        static_cast<uint8_t>(value << shift);
+    if (shift + 11 > 8) {
+      view.child_id_base_deltas8[
+          packed_payload_begin + byte_offset + 1] |=
+          static_cast<uint8_t>(value >> (8 - shift));
+    }
+    if (shift + 11 > 16) {
+      view.child_id_base_deltas8[
+          packed_payload_begin + byte_offset + 2] |=
+          static_cast<uint8_t>(value >> (16 - shift));
+    }
+  }
   view.child_id_deltas16 = {0, UINT16_MAX};
   view.child_ids = {70000, UINT32_MAX - 1};
 
@@ -336,15 +373,76 @@ void assert_child_id_encodings_are_exact() {
   assert(view.child_id(1, 0) == 2);
   assert(view.child_id(1, 1) == 65537);
 
-  view.node_records[2].link_begin = 0;
+  view.node_records[2].set_link_storage(
+      navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+  view.node_records[2].set_packed_child_layout(packed_begin, 11);
   view.set_node_counts(
       2, 2, 0,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
-  assert(!view.child_ids_are_base_delta8(2));
-  assert(!view.child_ids_are_delta16(2));
-  assert(view.child_id(2, 0) == 70000);
-  assert(view.child_id(2, 1) == UINT32_MAX - 1);
-  assert(view.edge_count() == 6);
+  assert(view.child_ids_are_packed_delta(2));
+  assert(view.child_id(2, 0) == 5000);
+  assert(view.child_id(2, 1) == 7047);
+
+  view.node_records[3].link_begin = 0;
+  view.set_node_counts(
+      3, 2, 0,
+      navigamer::WorldNodeRecord::BeaconStorage::Delta8);
+  assert(!view.child_ids_are_base_delta8(3));
+  assert(!view.child_ids_are_delta16(3));
+  assert(!view.child_ids_are_packed_delta(3));
+  assert(view.child_id(3, 0) == 70000);
+  assert(view.child_id(3, 1) == UINT32_MAX - 1);
+  assert(view.edge_count() == 8);
+}
+
+void assert_all_packed_child_widths_are_exact() {
+  constexpr uint32_t kCount = 19;
+  constexpr navigamer::NodeId kBase = 100000;
+  navigamer::SearchGraphView view;
+  view.node_records.resize(1);
+  view.layer_begin = {1};
+  view.node_records[0].set_link_storage(
+      navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+  view.set_node_counts(
+      0, kCount, 0,
+      navigamer::WorldNodeRecord::BeaconStorage::Delta8);
+
+  std::array<uint8_t, sizeof(navigamer::NodeId)> base_bytes{};
+  std::memcpy(base_bytes.data(), &kBase, sizeof(kBase));
+  for (uint32_t bits = 1; bits <= 16; ++bits) {
+    const uint32_t mask = (uint32_t{1} << bits) - 1;
+    const size_t payload_bytes =
+        (static_cast<size_t>(kCount) * bits + 7) / 8;
+    view.child_id_base_deltas8.assign(
+        sizeof(navigamer::NodeId) + payload_bytes, 0);
+    for (size_t idx = 0; idx < base_bytes.size(); ++idx) {
+      view.child_id_base_deltas8[idx] = base_bytes[idx];
+    }
+    view.node_records[0].set_packed_child_layout(0, bits);
+
+    for (uint32_t offset = 0; offset < kCount; ++offset) {
+      const uint32_t value =
+          offset == 0 ? 0
+                      : offset + 1 == kCount
+                            ? mask
+                            : (offset * 2654435761u) & mask;
+      const size_t bit_offset = static_cast<size_t>(offset) * bits;
+      const size_t byte_offset = bit_offset >> 3;
+      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+      const size_t payload_begin = sizeof(navigamer::NodeId);
+      view.child_id_base_deltas8[payload_begin + byte_offset] |=
+          static_cast<uint8_t>(value << shift);
+      if (shift + bits > 8) {
+        view.child_id_base_deltas8[payload_begin + byte_offset + 1] |=
+            static_cast<uint8_t>(value >> (8 - shift));
+      }
+      if (shift + bits > 16) {
+        view.child_id_base_deltas8[payload_begin + byte_offset + 2] |=
+            static_cast<uint8_t>(value >> (16 - shift));
+      }
+      assert(view.child_id(0, offset) == kBase + value);
+    }
+  }
 }
 
 void assert_leaf_id_encodings_are_exact() {
@@ -396,6 +494,7 @@ int main() {
   assert_node_count_overflow_is_exact();
   assert_child_mbb_layout_is_exact();
   assert_child_id_encodings_are_exact();
+  assert_all_packed_child_widths_are_exact();
   assert_leaf_id_encodings_are_exact();
   std::cout << "search graph view tests passed\n";
   return 0;

@@ -2692,6 +2692,8 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
       case WorldNodeRecord::LinkStorage::Absolute32:
         prefetch_read(view.leaf_ids.data() + leaf_begin + leaf_offset);
         break;
+      case WorldNodeRecord::LinkStorage::PackedDelta:
+        break;
     }
   };
 

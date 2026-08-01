@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 30 stores the shared
+edit distance fits in one byte. Persisted format version 31 stores the shared
 reference as raw bases in the memory-mapped index, so loading does not allocate
 or eagerly fault a full decoded reference into heap memory, and
 keeps long literal inputs in the manifest only as content fingerprints. It
@@ -66,10 +66,12 @@ the node's 32-bit MBB field with its 29-bit byte offset, eliminating a separate
 width array and its query-time memory load. A shard may contain up to 512 MiB
 of packed child-MBB data. Search reconstructs a conservative interval from the
 child-layer radius and the layer-specific quantization error. Leaf distances
-are exact flat bytes because they participate in the final leaf sieve. Child IDs use a
-32-bit base plus byte offsets when that is smaller than
-the exact 16-bit or 32-bit alternatives; all encodings retain constant-time
-lookup. Finest-layer nodes reuse their cleared child buffer for leaf IDs.
+are exact flat bytes because they participate in the final leaf sieve. Each
+parent's child IDs use the smallest exact constant-time representation: a
+32-bit minimum ID plus fixed-width 1..16-bit offsets, a base plus byte offsets,
+16-bit forward deltas, or full 32-bit IDs. The packed width shares the child
+offset field in the node record, so it needs no side array. Finest-layer nodes
+reuse their cleared child buffer for leaf IDs.
 Finalized nodes are cache-friendly 16-byte records containing the center ID,
 the two hot shared-array offsets, and one packed count/encoding word. The
 common case stores a 24-bit child-or-leaf count, a 4-bit beacon count, the
@@ -83,11 +85,8 @@ node's sole beacon is its center and occupies no side-array element. Explicit
 beacon offsets live in a dense side array indexed only by the non-finest NodeId
 prefix, instead of wasting a zero offset in every finest node. No
 per-edge distance vector is allocated before finalization.
-Parent-child links use exact 16-bit forward node-ID deltas when every child of
-that parent is representable; a flag packed into the node record selects the
-compact array, and any parent outside the range falls back to full 32-bit child IDs.
-This changes neither node IDs nor graph connectivity and never truncates an
-edge.
+Parent-child link encodings are selected independently per parent and change
+neither node IDs nor graph connectivity; no edge is truncated.
 Leaf IDs likewise use signed 8-bit or 16-bit deltas from the node center when
 the complete leaf list fits, with an exact 32-bit fallback.
 Repeated reference positions use one pair for a singleton duplicate, while
