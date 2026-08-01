@@ -1098,13 +1098,33 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
       }
       break;
     }
-    case WorldNodeRecord::BeaconStorage::Delta16: {
-      const int16_t* deltas =
-          view.beacon_deltas16.data() + beacon_begin;
-      for (uint32_t offset = 0; offset < beacon_count; ++offset) {
-        measure_beacon(static_cast<LeafId>(
-            static_cast<int64_t>(center_id) +
-            deltas[offset]));
+    case WorldNodeRecord::BeaconStorage::PackedDelta: {
+      const uint32_t bits = view.beacon_delta_bits;
+      const uint64_t total_bits =
+          static_cast<uint64_t>(beacon_count) * bits;
+      if (total_bits <= 64) {
+        uint64_t packed = 0;
+        const size_t byte_count = static_cast<size_t>((total_bits + 7) / 8);
+        std::memcpy(
+            &packed, view.beacon_deltas8.data() + beacon_begin, byte_count);
+        const uint64_t mask =
+            bits == 32 ? std::numeric_limits<uint32_t>::max()
+                       : (uint64_t{1} << bits) - 1;
+        uint32_t packed_shift = 0;
+        for (uint32_t offset = 0; offset < beacon_count;
+             ++offset, packed_shift += bits) {
+          const uint32_t zigzag = static_cast<uint32_t>(
+              (packed >> packed_shift) & mask);
+          const int32_t delta = static_cast<int32_t>(zigzag >> 1) ^
+                                -static_cast<int32_t>(zigzag & 1);
+          measure_beacon(static_cast<LeafId>(
+              static_cast<int64_t>(center_id) + delta));
+        }
+      } else {
+        for (uint32_t offset = 0; offset < beacon_count; ++offset) {
+          measure_beacon(view.beacon_sequence_id(
+              node_id, node, center_id, offset));
+        }
       }
       break;
     }

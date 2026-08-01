@@ -233,7 +233,7 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 ### `build`
 
 Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
-provided, writes an array-format v36 binary index with a manifest signature,
+provided, writes an array-format v37 binary index with a manifest signature,
 build parameters, input fingerprints, sequence records, layer ranges,
 child/leaf/beacon ID arrays, MBB rows, and leaf-beacon distance rows. Older
 pointer-graph index formats are rejected and must be rebuilt.
@@ -253,6 +253,9 @@ the previous conservative quantized bins, so this changes storage rather than
 pruning semantics.
 Beacon offsets are also packed to the minimum shard-local bit width and retain
 exact constant-time random access.
+Beacon IDs use exact shard-wide 1..32-bit ZigZag deltas when that is smaller
+than direct signed bytes or absolute IDs. The selected width minimizes stored
+bytes without approximating any ID.
 
 **Required:** `--ref`, `--reads`
 
@@ -307,12 +310,12 @@ relative to the original contig.
 
 Each logical part is an independently mmap-decodable graph payload. Up to
 1,024 payloads are stored in one `.navpack` container with a checked
-offset/length directory. The common v36 construction manifest is stored once
+offset/length directory. The common v37 construction manifest is stored once
 at bundle scope instead of once per logical part. A completed pack is reused
 only after every selected payload's construction signature, reference slice,
 contig, and source coordinates validate. Damaged
 or incompatible packs are rebuilt one atomic group at a time; only that group's
-temporary part files exist during construction. The final v8 `.navshard`
+temporary part files exist during construction. The final v9 `.navshard`
 manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric

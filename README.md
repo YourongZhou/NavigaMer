@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 36 stores the shared
+edit distance fits in one byte. Persisted format version 37 stores the shared
 reference as raw bases in the memory-mapped index, so loading does not allocate
 or eagerly fault a full decoded reference into heap memory, and
 keeps long literal inputs in the manifest only as content fingerprints. It
@@ -58,7 +58,10 @@ layer. Center lookup remains constant-time and reconstructs the original
 stores one child-center-to-beacon distance per MBB cell instead of separate
 lower and upper bounds. Non-finest parents use at most 10 deterministic
 beacons; reducing the sampling cap only relaxes pruning, so it cannot introduce
-false negatives. Child-center distances use twelve-base integer bins in coarse
+false negatives. Beacon sequence IDs use exact ZigZag deltas at the
+file-size-minimizing shard-wide width selected from 1..32 bits; the 16-bit
+candidate reproduces the former delta representation, so this selection can
+never enlarge the beacon payload. Child-center distances use twelve-base integer bins in coarse
 layers and six-base bins in the last transition into the finest world layer,
 where pruning precision matters most. Search decodes each bin midpoint and
 widens the metric bound by the matching maximum reconstruction error (six or
@@ -255,7 +258,7 @@ limit, while peak build memory is bounded by the number of concurrent parts.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
-Only one group of temporary shard files exists at a time. The final v8
+Only one group of temporary shard files exists at a time. The final v9
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph

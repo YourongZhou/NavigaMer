@@ -554,7 +554,7 @@ static_assert(sizeof(NodeCountOverflowRecord) == 8,
 struct WorldNodeRecord {
   enum class BeaconStorage : uint32_t {
     Delta8 = 0,
-    Delta16 = 1,
+    PackedDelta = 1,
     Absolute32 = 2,
     ImplicitCenter = 3,
   };
@@ -1267,8 +1267,8 @@ struct SearchGraphView {
   // a 32-bit offset for every non-finest node.
   FinalArray<uint8_t> beacon_begins;
   uint8_t beacon_begin_bits = 0;
+  uint8_t beacon_delta_bits = 16;
   FinalArray<int8_t> beacon_deltas8;
-  FinalArray<int16_t> beacon_deltas16;
   FinalArray<LeafId> beacon_ids32;
 
   FinalArray<uint8_t> leaf_beacon_dists;
@@ -2099,10 +2099,30 @@ struct SearchGraphView {
         return static_cast<LeafId>(
             static_cast<int64_t>(center) +
             beacon_deltas8[beacon_begin + beacon_offset]);
-      case WorldNodeRecord::BeaconStorage::Delta16:
-        return static_cast<LeafId>(
-            static_cast<int64_t>(center) +
-            beacon_deltas16[beacon_begin + beacon_offset]);
+      case WorldNodeRecord::BeaconStorage::PackedDelta: {
+        const uint32_t bits = beacon_delta_bits;
+        const size_t bit_offset =
+            static_cast<size_t>(beacon_offset) * bits;
+        const size_t byte_offset = beacon_begin + (bit_offset >> 3);
+        const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+        const size_t byte_count = (shift + bits + 7) / 8;
+        uint64_t word = 0;
+        for (size_t byte = 0; byte < byte_count; ++byte) {
+          word |= static_cast<uint64_t>(static_cast<uint8_t>(
+                      beacon_deltas8[byte_offset + byte]))
+                  << (byte * 8);
+        }
+        const uint64_t mask =
+            bits == 32 ? std::numeric_limits<uint32_t>::max()
+                       : (uint64_t{1} << bits) - 1;
+        const uint32_t zigzag =
+            static_cast<uint32_t>((word >> shift) & mask);
+        const int64_t delta =
+            (zigzag & 1) != 0
+                ? -static_cast<int64_t>((zigzag >> 1) + 1)
+                : static_cast<int64_t>(zigzag >> 1);
+        return static_cast<LeafId>(static_cast<int64_t>(center) + delta);
+      }
       case WorldNodeRecord::BeaconStorage::Absolute32:
         return beacon_ids32[beacon_begin + beacon_offset];
       case WorldNodeRecord::BeaconStorage::ImplicitCenter:

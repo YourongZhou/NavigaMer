@@ -222,12 +222,13 @@ void assert_all_beacon_id_encodings_are_exact() {
   view.layer_begin = {0, 1, 2, 3};
   view.layer_end = {1, 2, 3, 4};
   view.initialize_center_sequence_ids({0, 0, 0, 0});
-  view.beacon_deltas8 = {-120};
-  view.beacon_deltas16 = {30000};
+  view.beacon_delta_bits = 16;
+  view.beacon_deltas8 = {
+      -120, static_cast<int8_t>(0x60), static_cast<int8_t>(0xea)};
   view.beacon_ids32 = {4000000000U};
   view.initialize_beacon_begins(3, 0);
   view.set_beacon_begin(0, 0);
-  view.set_beacon_begin(1, 0);
+  view.set_beacon_begin(1, 1);
   view.set_beacon_begin(2, 0);
 
   view.set_center_sequence_id(0, 0, 200);
@@ -239,7 +240,7 @@ void assert_all_beacon_id_encodings_are_exact() {
   view.set_center_sequence_id(1, 1, 1000);
   view.set_node_counts(
       1, 0, 1,
-      navigamer::WorldNodeRecord::BeaconStorage::Delta16);
+      navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
   assert(view.beacon_sequence_id(1, 0) == 31000);
 
   view.set_center_sequence_id(2, 2, 0);
@@ -253,6 +254,34 @@ void assert_all_beacon_id_encodings_are_exact() {
       3, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
   assert(view.beacon_sequence_id(3, 0) == 123456789U);
+
+  for (uint32_t bits = 1; bits <= 32; ++bits) {
+    navigamer::SearchGraphView packed_view;
+    packed_view.node_records.resize(1);
+    packed_view.layer_begin = {0};
+    packed_view.layer_end = {1};
+    packed_view.initialize_center_sequence_ids({0});
+    constexpr navigamer::LeafId kCenter = uint32_t{1} << 31;
+    packed_view.set_center_sequence_id(0, 0, kCenter);
+    packed_view.beacon_delta_bits = static_cast<uint8_t>(bits);
+    const uint32_t zigzag =
+        bits == 32 ? UINT32_MAX : (uint32_t{1} << bits) - 1;
+    packed_view.beacon_deltas8.resize((bits + 7) / 8);
+    for (size_t byte = 0; byte < packed_view.beacon_deltas8.size(); ++byte) {
+      packed_view.beacon_deltas8[byte] =
+          static_cast<int8_t>(zigzag >> (byte * 8));
+    }
+    packed_view.initialize_beacon_begins(1, 0);
+    packed_view.set_beacon_begin(0, 0);
+    packed_view.set_node_counts(
+        0, 0, 1,
+        navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
+    const int64_t delta =
+        -static_cast<int64_t>((zigzag >> 1) + 1);
+    assert(packed_view.beacon_sequence_id(0, 0) ==
+           static_cast<navigamer::LeafId>(
+               static_cast<int64_t>(kCenter) + delta));
+  }
 }
 
 void assert_all_center_id_widths_are_exact() {
@@ -715,7 +744,7 @@ void assert_compact_node_layout_is_exact() {
     auto node = records[1];
     node.set_count_overflow(
         1501,
-        navigamer::WorldNodeRecord::BeaconStorage::Delta16);
+        navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
     assert(node.counts_overflow());
     assert(node.inline_link_count_or_overflow_index() == 1501);
   }
