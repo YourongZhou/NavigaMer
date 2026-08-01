@@ -1,4 +1,5 @@
 #include "sharded_index.hpp"
+#include "io_utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <numeric>
@@ -648,11 +650,12 @@ size_t router_spool_page_size() {
   return 4096;
 }
 
+template <typename SliceLoader>
 RouterBuildData build_router_data(
-    const std::string& reference_sequence,
     const std::vector<ShardBuildSpec>& specs,
     uint32_t k, uint32_t window,
-    const std::filesystem::path& spool_path) {
+    const std::filesystem::path& spool_path,
+    SliceLoader&& load_slice) {
   if (specs.size() > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("too many shards for seed router");
   }
@@ -678,9 +681,7 @@ RouterBuildData build_router_data(
   for (const auto& spec : specs) {
     align_spool();
     data.shard_offsets.push_back(spool_position);
-    const std::string_view slice(
-        reference_sequence.data() + spec.slice_begin,
-        spec.slice_end - spec.slice_begin);
+    const auto slice = load_slice(spec);
     const auto minimizers = reference_minimizers(slice, k, window);
     if (minimizers.size() >
         std::numeric_limits<size_t>::max() - data.entry_count) {
@@ -1082,12 +1083,14 @@ ShardedSeedRouter load_sharded_seed_router(
   return router;
 }
 
-ShardedIndexManifest build_sharded_reference_index(
+static ShardedIndexManifest build_sharded_reference_index_impl(
     const std::string& bundle_path,
     const std::string& ref_input,
     const std::string& reference_id,
-    const std::string& reference_sequence,
+    size_t reference_size,
     const std::vector<ReferenceContig>& reference_contigs,
+    const std::function<std::string(size_t, size_t)>& load_slice,
+    const std::string* contiguous_reference,
     size_t window_length,
     size_t stride,
     size_t max_shard_windows,
@@ -1110,7 +1113,7 @@ ShardedIndexManifest build_sharded_reference_index(
     throw std::invalid_argument(
         "sharded index window or stride exceeds manifest storage");
   }
-  if (reference_sequence.empty() || reference_contigs.empty()) {
+  if (reference_size == 0 || reference_contigs.empty()) {
     throw std::invalid_argument(
         "sharded index reference must not be empty");
   }
@@ -1118,7 +1121,7 @@ ShardedIndexManifest build_sharded_reference_index(
   const std::filesystem::path bundle(bundle_path);
   const IndexBuildManifest part_manifest =
       make_reference_window_index_manifest(
-          ref_input, reference_sequence.size(),
+          ref_input, reference_size,
           static_cast<int>(window_length),
           static_cast<int>(stride), hierarchy, range_config);
 
@@ -1128,7 +1131,7 @@ ShardedIndexManifest build_sharded_reference_index(
   for (const auto& contig : reference_contigs) {
     if (contig.id.empty() || contig.begin != expected_contig_begin ||
         contig.end < contig.begin ||
-        contig.end > reference_sequence.size()) {
+        contig.end > reference_size) {
       throw std::invalid_argument(
           "reference contigs must be contiguous and in bounds");
     }
@@ -1168,7 +1171,7 @@ ShardedIndexManifest build_sharded_reference_index(
       ++shard_ordinal;
     }
   }
-  if (expected_contig_begin != reference_sequence.size()) {
+  if (expected_contig_begin != reference_size) {
     throw std::invalid_argument(
         "reference contigs do not cover the reference");
   }
@@ -1207,8 +1210,12 @@ ShardedIndexManifest build_sharded_reference_index(
   const auto build_one = [&](size_t spec_idx) {
     try {
       const auto& spec = specs[spec_idx];
-      std::string slice = reference_sequence.substr(
-          spec.slice_begin, spec.slice_end - spec.slice_begin);
+      std::string slice =
+          load_slice(spec.slice_begin, spec.slice_end);
+      if (slice.size() != spec.slice_end - spec.slice_begin) {
+        throw std::runtime_error(
+            "reference slice loader returned the wrong number of bases");
+      }
       ReferenceContig slice_contig{
           spec.ref_id, 0, static_cast<uint32_t>(slice.size()),
           spec.source_begin};
@@ -1285,9 +1292,21 @@ ShardedIndexManifest build_sharded_reference_index(
   }
   if (specs.size() > 1 && window_length >= kRouterWindow) {
     const auto router_path = router_output_path(bundle);
-    auto router_data = build_router_data(
-        reference_sequence, specs, kRouterK, kRouterWindow,
-        router_path.string() + ".codes.tmp");
+    auto router_data = contiguous_reference
+        ? build_router_data(
+              specs, kRouterK, kRouterWindow,
+              router_path.string() + ".codes.tmp",
+              [&](const ShardBuildSpec& spec) {
+                return std::string_view(
+                    contiguous_reference->data() + spec.slice_begin,
+                    spec.slice_end - spec.slice_begin);
+              })
+        : build_router_data(
+              specs, kRouterK, kRouterWindow,
+              router_path.string() + ".codes.tmp",
+              [&](const ShardBuildSpec& spec) {
+                return load_slice(spec.slice_begin, spec.slice_end);
+              });
     if (router_data.entry_count != 0) {
       manifest.router_k = kRouterK;
       manifest.router_window = kRouterWindow;
@@ -1301,6 +1320,48 @@ ShardedIndexManifest build_sharded_reference_index(
   }
   save_sharded_index_manifest(bundle_path, manifest);
   return manifest;
+}
+
+ShardedIndexManifest build_sharded_reference_index(
+    const std::string& bundle_path,
+    const std::string& ref_input,
+    const std::string& reference_id,
+    const std::string& reference_sequence,
+    const std::vector<ReferenceContig>& reference_contigs,
+    size_t window_length,
+    size_t stride,
+    size_t max_shard_windows,
+    const HierarchyConfig& hierarchy,
+    const BuildRangeConfig& range_config,
+    size_t build_jobs) {
+  return build_sharded_reference_index_impl(
+      bundle_path, ref_input, reference_id,
+      reference_sequence.size(), reference_contigs,
+      [&](size_t begin, size_t end) {
+        return reference_sequence.substr(begin, end - begin);
+      },
+      &reference_sequence, window_length, stride,
+      max_shard_windows, hierarchy, range_config, build_jobs);
+}
+
+ShardedIndexManifest build_sharded_reference_index(
+    const std::string& bundle_path,
+    const std::string& ref_input,
+    const IndexedReferenceFile& reference,
+    size_t window_length,
+    size_t stride,
+    size_t max_shard_windows,
+    const HierarchyConfig& hierarchy,
+    const BuildRangeConfig& range_config,
+    size_t build_jobs) {
+  return build_sharded_reference_index_impl(
+      bundle_path, ref_input, reference.id,
+      reference.sequence_size, reference.contigs,
+      [&](size_t begin, size_t end) {
+        return reference.slice(begin, end);
+      },
+      nullptr, window_length, stride, max_shard_windows,
+      hierarchy, range_config, build_jobs);
 }
 
 LoadedIndex load_sharded_index_part(

@@ -2,6 +2,8 @@
 #define NAVIGAMER_IO_UTILS_HPP
 
 #include "structure.hpp"
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 #include <utility>
@@ -9,14 +11,41 @@
 
 namespace navigamer {
 
+class ReferenceFileMapping;
+
 struct LoadedReference {
   std::string id;
   std::string sequence;
   std::vector<ReferenceContig> contigs;
 };
 
+struct ReferenceFileCheckpoint {
+  size_t sequence_pos = 0;
+  uint64_t file_pos = 0;
+};
+
+// Sparse random-access index over an existing FASTA/plain-sequence file.
+// It preserves load_reference_genome() normalization without retaining the
+// complete normalized reference in memory.
+struct IndexedReferenceFile {
+  std::string path;
+  std::string id;
+  size_t sequence_size = 0;
+  std::vector<ReferenceContig> contigs;
+  std::vector<ReferenceFileCheckpoint> checkpoints;
+
+  std::string slice(size_t begin, size_t end) const;
+
+ private:
+  std::shared_ptr<const ReferenceFileMapping> mapping;
+
+  friend IndexedReferenceFile index_reference_genome_file(
+      const std::string& path);
+};
+
 // Load a reference: existing paths are parsed as FASTA, otherwise literal DNA.
 LoadedReference load_reference_genome(const std::string& path_or_string);
+IndexedReferenceFile index_reference_genome_file(const std::string& path);
 std::pair<std::string, std::string> load_reference(const std::string& path_or_string);
 
 // Load reads: existing paths are parsed as FASTQ, otherwise one literal read.

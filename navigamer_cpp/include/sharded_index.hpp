@@ -11,6 +11,8 @@
 
 namespace navigamer {
 
+struct IndexedReferenceFile;
+
 struct IndexShardDescriptor {
   std::string path;
   std::string ref_id;
@@ -84,6 +86,17 @@ ShardedIndexManifest build_sharded_reference_index(
     const std::string& reference_id,
     const std::string& reference_sequence,
     const std::vector<ReferenceContig>& reference_contigs,
+    size_t window_length,
+    size_t stride,
+    size_t max_shard_windows,
+    const HierarchyConfig& hierarchy,
+    const BuildRangeConfig& range_config,
+    size_t build_jobs = 0);
+
+ShardedIndexManifest build_sharded_reference_index(
+    const std::string& bundle_path,
+    const std::string& ref_input,
+    const IndexedReferenceFile& reference,
     size_t window_length,
     size_t stride,
     size_t max_shard_windows,

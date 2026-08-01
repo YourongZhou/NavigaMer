@@ -824,24 +824,46 @@ void run_build_sharded(
   if (index_path.empty()) {
     throw std::runtime_error("build-sharded requires --index");
   }
-  auto reference = load_reference_genome(ref_input);
-  if (reference.sequence.empty()) {
-    throw std::runtime_error("build-sharded reference is empty");
+  const bool reference_is_regular_file =
+      std::filesystem::is_regular_file(ref_input);
+  size_t reference_bases = 0;
+  ShardedIndexManifest manifest;
+  const auto print_start = [&](size_t base_count) {
+    std::cerr << "Building sharded index: reference_bases="
+              << base_count
+              << " max_shard_windows=" << max_shard_windows
+              << " shard_build_jobs="
+              << (shard_build_jobs == 0
+                      ? std::string("auto")
+                      : std::to_string(shard_build_jobs))
+              << " window=" << window_size
+              << " stride=" << stride << "\n";
+  };
+  if (reference_is_regular_file) {
+    const auto reference = index_reference_genome_file(ref_input);
+    reference_bases = reference.sequence_size;
+    if (reference_bases == 0) {
+      throw std::runtime_error("build-sharded reference is empty");
+    }
+    print_start(reference_bases);
+    manifest = build_sharded_reference_index(
+        index_path, ref_input, reference,
+        static_cast<size_t>(window_size),
+        static_cast<size_t>(stride), max_shard_windows,
+        hierarchy, range_config, shard_build_jobs);
+  } else {
+    auto reference = load_reference_genome(ref_input);
+    reference_bases = reference.sequence.size();
+    if (reference_bases == 0) {
+      throw std::runtime_error("build-sharded reference is empty");
+    }
+    print_start(reference_bases);
+    manifest = build_sharded_reference_index(
+        index_path, ref_input, reference.id, reference.sequence,
+        reference.contigs, static_cast<size_t>(window_size),
+        static_cast<size_t>(stride), max_shard_windows,
+        hierarchy, range_config, shard_build_jobs);
   }
-  std::cerr << "Building sharded index: reference_bases="
-            << reference.sequence.size()
-            << " max_shard_windows=" << max_shard_windows
-            << " shard_build_jobs="
-            << (shard_build_jobs == 0
-                    ? std::string("auto")
-                    : std::to_string(shard_build_jobs))
-            << " window=" << window_size
-            << " stride=" << stride << "\n";
-  const auto manifest = build_sharded_reference_index(
-      index_path, ref_input, reference.id, reference.sequence,
-      reference.contigs, static_cast<size_t>(window_size),
-      static_cast<size_t>(stride), max_shard_windows,
-      hierarchy, range_config, shard_build_jobs);
   std::cerr << "Sharded index saved: " << index_path
             << " shards=" << manifest.shards.size()
             << " windows=" << manifest.total_window_count

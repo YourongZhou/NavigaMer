@@ -1,11 +1,14 @@
 #include "sharded_index.hpp"
+#include "io_utils.hpp"
 #include "search_engine.hpp"
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -97,6 +100,84 @@ std::string deterministic_dna(size_t size) {
     sequence.push_back(bases[state & 3U]);
   }
   return sequence;
+}
+
+bool files_equal(const std::filesystem::path& left,
+                 const std::filesystem::path& right) {
+  if (std::filesystem::file_size(left) !=
+      std::filesystem::file_size(right)) {
+    return false;
+  }
+  std::ifstream left_in(left, std::ios::binary);
+  std::ifstream right_in(right, std::ios::binary);
+  return std::equal(
+      std::istreambuf_iterator<char>(left_in),
+      std::istreambuf_iterator<char>(),
+      std::istreambuf_iterator<char>(right_in));
+}
+
+void test_indexed_reference_file_slices() {
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("navigamer-reference-file-test-" +
+       std::to_string(static_cast<unsigned long long>(
+           ::getpid())));
+  std::filesystem::create_directories(directory);
+  const auto fasta = directory / "reference.fa";
+  const std::string first =
+      deterministic_dna((size_t{1} << 20) + 257);
+  {
+    std::ofstream out(fasta, std::ios::binary);
+    out << ">chrA description\r\n";
+    for (size_t begin = 0; begin < first.size(); begin += 61) {
+      const size_t count = std::min<size_t>(61, first.size() - begin);
+      std::string line = first.substr(begin, count);
+      std::transform(
+          line.begin(), line.end(), line.begin(),
+          [](unsigned char base) {
+            return static_cast<char>(std::tolower(base));
+          });
+      out << line << "\r\n";
+    }
+    out << "\r\n>chrB\tmetadata\r\n"
+        << "nN nN\r\n"
+        << "a c g t\r\n";
+  }
+
+  const auto loaded =
+      navigamer::load_reference_genome(fasta.string());
+  const auto indexed =
+      navigamer::index_reference_genome_file(fasta.string());
+  assert(indexed.id == loaded.id);
+  assert(indexed.sequence_size == loaded.sequence.size());
+  assert(indexed.contigs.size() == loaded.contigs.size());
+  for (size_t idx = 0; idx < indexed.contigs.size(); ++idx) {
+    assert(indexed.contigs[idx].id == loaded.contigs[idx].id);
+    assert(indexed.contigs[idx].begin == loaded.contigs[idx].begin);
+    assert(indexed.contigs[idx].end == loaded.contigs[idx].end);
+    assert(indexed.contigs[idx].source_begin ==
+           loaded.contigs[idx].source_begin);
+  }
+  const std::vector<std::pair<size_t, size_t>> slices = {
+      {0, 1},
+      {0, 4097},
+      {(size_t{1} << 20) - 127, (size_t{1} << 20) + 127},
+      {first.size() - 257, first.size()},
+      {first.size(), first.size() + 8}};
+  for (const auto& slice : slices) {
+    assert(indexed.slice(slice.first, slice.second) ==
+           loaded.sequence.substr(
+               slice.first, slice.second - slice.first));
+  }
+  bool crossing_rejected = false;
+  try {
+    (void)indexed.slice(first.size() - 1, first.size() + 1);
+  } catch (const std::out_of_range&) {
+    crossing_rejected = true;
+  }
+  assert(crossing_rejected);
+
+  std::filesystem::remove_all(directory);
 }
 
 uint32_t shard_id_bits(uint32_t shard_count) {
@@ -326,7 +407,7 @@ void test_seed_router_no_false_negatives() {
   std::filesystem::create_directories(directory);
   const auto bundle = directory / "reference.navshard";
   (void)navigamer::build_sharded_reference_index(
-      bundle.string(), "literal-router-reference", "reference",
+      bundle.string(), "literal-router-reference", "chrR",
       reference, contigs, window, stride, shard_windows,
       hierarchy, range_config, 2);
 
@@ -346,7 +427,7 @@ void test_seed_router_no_false_negatives() {
          40 + manifest.router_entry_count * sizeof(uint64_t));
   const auto rebuilt_manifest =
       navigamer::build_sharded_reference_index(
-          bundle.string(), "literal-router-reference", "reference",
+          bundle.string(), "literal-router-reference", "chrR",
           reference, contigs, window, stride, shard_windows,
           hierarchy, range_config, 2);
   assert(rebuilt_manifest.router_entry_count ==
@@ -357,6 +438,46 @@ void test_seed_router_no_false_negatives() {
       bundle.string() + ".route.packed.tmp"));
   assert(!std::filesystem::exists(
       bundle.string() + ".route.codes.tmp"));
+
+  const auto fasta = directory / "reference.fa";
+  {
+    std::ofstream out(fasta);
+    out << ">chrR source\n";
+    for (size_t begin = 0; begin < reference.size(); begin += 53) {
+      std::string line = reference.substr(
+          begin, std::min<size_t>(53, reference.size() - begin));
+      std::transform(
+          line.begin(), line.end(), line.begin(),
+          [](unsigned char base) {
+            return static_cast<char>(std::tolower(base));
+          });
+      out << line << '\n';
+    }
+  }
+  const auto indexed_reference =
+      navigamer::index_reference_genome_file(fasta.string());
+  const auto file_bundle = directory / "reference-file.navshard";
+  const auto file_manifest =
+      navigamer::build_sharded_reference_index(
+          file_bundle.string(), "literal-router-reference",
+          indexed_reference, window, stride, shard_windows,
+          hierarchy, range_config, 2);
+  assert(file_manifest.router_checksum ==
+         rebuilt_manifest.router_checksum);
+  assert(file_manifest.shards.size() ==
+         rebuilt_manifest.shards.size());
+  for (size_t shard_idx = 0;
+       shard_idx < file_manifest.shards.size(); ++shard_idx) {
+    assert(files_equal(
+        navigamer::resolve_index_shard_path(
+            bundle.string(), rebuilt_manifest.shards[shard_idx].path),
+        navigamer::resolve_index_shard_path(
+            file_bundle.string(), file_manifest.shards[shard_idx].path)));
+  }
+  assert(files_equal(
+      bundle.string() + ".route",
+      file_bundle.string() + ".route"));
+
   const auto router = navigamer::load_sharded_seed_router(
       bundle.string(), rebuilt_manifest);
   assert(router.enabled());
@@ -421,6 +542,7 @@ void test_seed_router_no_false_negatives() {
 }  // namespace
 
 int main() {
+  test_indexed_reference_file_slices();
   test_bit_packed_shard_id_boundaries();
   test_sharded_round_trip_and_no_false_negatives();
   test_seed_router_no_false_negatives();

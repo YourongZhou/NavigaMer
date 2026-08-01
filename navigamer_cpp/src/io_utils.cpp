@@ -1,16 +1,330 @@
 #include "io_utils.hpp"
+#include <array>
 #include <fstream>
+#include <iterator>
+#include <limits>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <stdexcept>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace navigamer {
+
+namespace {
+
+struct ReferenceByteTable {
+  std::array<bool, 256> whitespace{};
+  std::array<char, 256> uppercase{};
+
+  ReferenceByteTable() {
+    for (size_t byte = 0; byte < whitespace.size(); ++byte) {
+      const auto value = static_cast<unsigned char>(byte);
+      whitespace[byte] = std::isspace(value) != 0;
+      uppercase[byte] = static_cast<char>(std::toupper(value));
+    }
+  }
+};
+
+const ReferenceByteTable& reference_byte_table() {
+  static const ReferenceByteTable table;
+  return table;
+}
+
+}  // namespace
+
+class ReferenceFileMapping {
+ public:
+  ReferenceFileMapping(void* address, size_t size)
+      : address_(address), size_(size) {}
+  ~ReferenceFileMapping() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (address_ && size_ != 0) munmap(address_, size_);
+#endif
+  }
+
+  const char* data() const {
+    return static_cast<const char*>(address_);
+  }
+  size_t size() const { return size_; }
+  void discard(size_t begin, size_t end) const {
+#if defined(__unix__) || defined(__APPLE__)
+#if defined(MADV_DONTNEED)
+    if (!address_ || begin >= end || begin >= size_) return;
+    end = std::min(end, size_);
+    static const size_t page_size = [] {
+      const long raw_page_size = sysconf(_SC_PAGESIZE);
+      return raw_page_size > 0
+          ? static_cast<size_t>(raw_page_size)
+          : size_t{4096};
+    }();
+    const size_t begin_remainder = begin % page_size;
+    const size_t begin_advance = begin_remainder == 0
+        ? 0
+        : page_size - begin_remainder;
+    const size_t aligned_begin = begin_advance > size_ - begin
+        ? size_
+        : begin + begin_advance;
+    const size_t aligned_end = end == size_
+        ? end
+        : end - end % page_size;
+    if (aligned_begin < aligned_end) {
+      (void)madvise(
+          static_cast<char*>(address_) + aligned_begin,
+          aligned_end - aligned_begin, MADV_DONTNEED);
+    }
+#endif
+#else
+    (void)begin;
+    (void)end;
+#endif
+  }
+
+ private:
+  void* address_ = nullptr;
+  size_t size_ = 0;
+};
 
 static bool is_file(const std::string& path) {
   std::ifstream f(path);
   return f.good();
+}
+
+IndexedReferenceFile index_reference_genome_file(
+    const std::string& path) {
+  if (!is_file(path)) {
+    throw std::runtime_error("reference file does not exist: " + path);
+  }
+  constexpr size_t kCheckpointStride = size_t{1} << 20;
+  IndexedReferenceFile reference;
+  reference.path = path;
+  std::string current_id;
+  size_t current_begin = 0;
+  size_t next_checkpoint = 0;
+  const auto& byte_table = reference_byte_table();
+
+  const auto finish_contig = [&]() {
+    if (current_id.empty()) return;
+    if (reference.sequence_size >= static_cast<size_t>(UINT32_MAX)) {
+      throw std::runtime_error(
+          "reference length exceeds 32-bit coordinate storage");
+    }
+    reference.contigs.push_back(
+        {current_id, static_cast<uint32_t>(current_begin),
+         static_cast<uint32_t>(reference.sequence_size)});
+  };
+  const auto begin_implicit_contig = [&]() {
+    current_id = "ref";
+    if (reference.id.empty()) reference.id = current_id;
+    current_begin = reference.sequence_size;
+    next_checkpoint = current_begin;
+  };
+
+  const auto process_line = [&](std::string_view line,
+                                uint64_t line_offset) {
+    size_t logical_end = line.size();
+    while (logical_end != 0 &&
+           (line[logical_end - 1] == '\r' ||
+            line[logical_end - 1] == '\n')) {
+      --logical_end;
+    }
+    if (logical_end == 0) return;
+    if (line[0] == '>') {
+      finish_contig();
+      current_id = std::string(line.substr(1, logical_end - 1));
+      const size_t separator = current_id.find_first_of(" \t");
+      if (separator != std::string::npos) {
+        current_id.resize(separator);
+      }
+      if (current_id.empty()) current_id = "ref";
+      if (reference.id.empty()) reference.id = current_id;
+      current_begin = reference.sequence_size;
+      next_checkpoint = current_begin;
+      return;
+    }
+    if (current_id.empty()) begin_implicit_contig();
+
+    for (size_t char_idx = 0; char_idx < logical_end; ++char_idx) {
+      const unsigned char base =
+          static_cast<unsigned char>(line[char_idx]);
+      if (byte_table.whitespace[base]) continue;
+      if (reference.sequence_size >= next_checkpoint) {
+        reference.checkpoints.push_back(
+            {reference.sequence_size, line_offset + char_idx});
+        if (reference.sequence_size >
+            std::numeric_limits<size_t>::max() - kCheckpointStride) {
+          throw std::runtime_error("reference checkpoint overflow");
+        }
+        next_checkpoint = reference.sequence_size + kCheckpointStride;
+      }
+      ++reference.sequence_size;
+    }
+  };
+
+#if defined(__unix__) || defined(__APPLE__)
+  const int descriptor = open(path.c_str(), O_RDONLY);
+  if (descriptor >= 0) {
+    struct stat metadata {};
+    if (fstat(descriptor, &metadata) == 0 && metadata.st_size > 0 &&
+        static_cast<uint64_t>(metadata.st_size) <=
+            std::numeric_limits<size_t>::max()) {
+      const size_t mapped_size = static_cast<size_t>(metadata.st_size);
+      void* address = mmap(
+          nullptr, mapped_size, PROT_READ, MAP_PRIVATE, descriptor, 0);
+      if (address != MAP_FAILED) {
+        reference.mapping = std::make_shared<ReferenceFileMapping>(
+            address, mapped_size);
+      }
+    }
+    close(descriptor);
+  }
+#endif
+
+  if (reference.mapping) {
+    constexpr size_t kDiscardStride = size_t{16} << 20;
+    const char* data = reference.mapping->data();
+    const size_t file_size = reference.mapping->size();
+    size_t line_begin = 0;
+    size_t discard_begin = 0;
+    while (line_begin < file_size) {
+      const void* newline = std::memchr(
+          data + line_begin, '\n', file_size - line_begin);
+      const size_t line_end = newline
+          ? static_cast<size_t>(
+                static_cast<const char*>(newline) - data)
+          : file_size;
+      process_line(
+          std::string_view(data + line_begin, line_end - line_begin),
+          line_begin);
+      line_begin = line_end == file_size ? file_size : line_end + 1;
+      if (line_begin - discard_begin >= kDiscardStride) {
+        reference.mapping->discard(discard_begin, line_begin);
+        discard_begin = line_begin;
+      }
+    }
+    reference.mapping->discard(discard_begin, file_size);
+  } else {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+      throw std::runtime_error("unable to open reference file: " + path);
+    }
+    std::string line;
+    uint64_t raw_offset = 0;
+    while (std::getline(f, line)) {
+      const uint64_t line_offset = raw_offset;
+      const bool terminated = !f.eof();
+      const uint64_t remaining =
+          std::numeric_limits<uint64_t>::max() - raw_offset;
+      if (line.size() > remaining ||
+          (terminated && line.size() == remaining)) {
+        throw std::runtime_error("reference file offset overflow");
+      }
+      raw_offset += line.size() + (terminated ? 1 : 0);
+      process_line(line, line_offset);
+    }
+    if (!f.eof()) {
+      throw std::runtime_error(
+          "failed while reading reference file: " + path);
+    }
+  }
+  finish_contig();
+  if (reference.id.empty()) reference.id = "ref";
+  return reference;
+}
+
+std::string IndexedReferenceFile::slice(size_t begin, size_t end) const {
+  if (begin > end || end > sequence_size) {
+    throw std::out_of_range("reference file slice is out of bounds");
+  }
+  if (begin == end) return {};
+  const auto contig_it = std::upper_bound(
+      contigs.begin(), contigs.end(), begin,
+      [](size_t position, const ReferenceContig& contig) {
+        return position < contig.begin;
+      });
+  if (contig_it == contigs.begin()) {
+    throw std::out_of_range("reference file slice has no contig");
+  }
+  const auto& contig = *std::prev(contig_it);
+  if (begin < contig.begin || begin >= contig.end || end > contig.end) {
+    throw std::out_of_range(
+        "reference file slice crosses a contig boundary");
+  }
+
+  const auto checkpoint_it = std::upper_bound(
+      checkpoints.begin(), checkpoints.end(), begin,
+      [](size_t position, const ReferenceFileCheckpoint& checkpoint) {
+        return position < checkpoint.sequence_pos;
+      });
+  if (checkpoint_it == checkpoints.begin()) {
+    throw std::runtime_error("reference file slice has no checkpoint");
+  }
+  const auto& checkpoint = *std::prev(checkpoint_it);
+  if (checkpoint.sequence_pos < contig.begin ||
+      checkpoint.sequence_pos > begin) {
+    throw std::runtime_error("reference file slice checkpoint is invalid");
+  }
+
+  std::string result(end - begin, '\0');
+  size_t sequence_pos = checkpoint.sequence_pos;
+  bool at_line_start = false;
+  const auto& byte_table = reference_byte_table();
+  const auto consume_byte = [&](unsigned char byte) {
+    if (byte == '\n') {
+      at_line_start = true;
+      return;
+    }
+    if (at_line_start && byte == '>') {
+      throw std::runtime_error(
+          "reference file slice ended before its contig boundary");
+    }
+    at_line_start = false;
+    if (byte_table.whitespace[byte]) return;
+    if (sequence_pos >= begin) {
+      result[sequence_pos - begin] = byte_table.uppercase[byte];
+    }
+    ++sequence_pos;
+  };
+
+  if (mapping) {
+    size_t raw_pos = static_cast<size_t>(checkpoint.file_pos);
+    while (sequence_pos < end && raw_pos < mapping->size()) {
+      consume_byte(
+          static_cast<unsigned char>(mapping->data()[raw_pos++]));
+    }
+    mapping->discard(
+        static_cast<size_t>(checkpoint.file_pos), raw_pos);
+  } else {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+      throw std::runtime_error("unable to reopen reference file: " + path);
+    }
+    in.seekg(static_cast<std::streamoff>(checkpoint.file_pos));
+    if (!in) {
+      throw std::runtime_error("unable to seek reference file: " + path);
+    }
+    std::array<char, 64 * 1024> buffer{};
+    while (sequence_pos < end && in) {
+      in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+      const size_t bytes_read = static_cast<size_t>(in.gcount());
+      for (size_t idx = 0;
+           idx < bytes_read && sequence_pos < end; ++idx) {
+        consume_byte(static_cast<unsigned char>(buffer[idx]));
+      }
+    }
+  }
+  if (sequence_pos != end) {
+    throw std::runtime_error("truncated reference file slice: " + path);
+  }
+  return result;
 }
 
 static bool parse_source_pos(const std::string& header, size_t* source_pos) {
@@ -40,9 +354,9 @@ LoadedReference load_reference_genome(const std::string& path_or_string) {
       throw std::runtime_error(
           "reference length exceeds 32-bit coordinate storage");
     }
+    const auto& byte_table = reference_byte_table();
     for (char& c : s) {
-      c = static_cast<char>(
-          std::toupper(static_cast<unsigned char>(c)));
+      c = byte_table.uppercase[static_cast<unsigned char>(c)];
     }
     return {"ref", s,
             {{"ref", 0, static_cast<uint32_t>(s.size())}}};
@@ -52,6 +366,7 @@ LoadedReference load_reference_genome(const std::string& path_or_string) {
   std::string line;
   std::string current_id;
   size_t current_begin = 0;
+  const auto& byte_table = reference_byte_table();
   auto finish_contig = [&]() {
     if (current_id.empty()) return;
     if (reference.sequence.size() >= static_cast<size_t>(UINT32_MAX)) {
@@ -80,9 +395,9 @@ LoadedReference load_reference_genome(const std::string& path_or_string) {
         current_begin = reference.sequence.size();
       }
       for (char c : line) {
-        if (std::isspace(static_cast<unsigned char>(c))) continue;
-        reference.sequence.push_back(static_cast<char>(
-            std::toupper(static_cast<unsigned char>(c))));
+        const auto byte = static_cast<unsigned char>(c);
+        if (byte_table.whitespace[byte]) continue;
+        reference.sequence.push_back(byte_table.uppercase[byte]);
       }
     }
   }
