@@ -3918,7 +3918,7 @@ void BioGeometryIndexBuilder::attach_leaves(
         }
       }
       ExactRangeJoinIndex sequence_index(
-          leaf_range_join_config, true, true, false);
+          leaf_range_join_config, true, true, true);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         if (sequences.fixed_sequence_length != 0) {
