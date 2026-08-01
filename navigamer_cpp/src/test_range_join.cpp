@@ -314,6 +314,51 @@ void test_positional_postings_are_recall_safe() {
           std::vector<navigamer::RangeJoinItemId>{7}));
 }
 
+void test_shared_reference_positional_postings_match_per_item_index() {
+  std::mt19937 gen(1907);
+  std::string reference = random_dna(900, gen);
+  reference[470] = 'N';
+  constexpr size_t sequence_length = 80;
+  std::vector<uint32_t> starts = {
+      320, 0,   145, 64,  430, 208, 16,  512,
+      96,  384, 256, 32,  560, 176, 448, 128};
+
+  std::vector<navigamer::RangeJoinItemView> item_views;
+  std::vector<const char*> sequence_data;
+  item_views.reserve(starts.size());
+  sequence_data.reserve(starts.size());
+  for (size_t item_idx = 0; item_idx < starts.size(); ++item_idx) {
+    const char* data = reference.data() + starts[item_idx];
+    item_views.push_back(
+        {item_idx, std::string_view(data, sequence_length)});
+    sequence_data.push_back(data);
+  }
+
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 20;
+  navigamer::ExactRangeJoinIndex per_item(config, true, false, true);
+  navigamer::ExactRangeJoinIndex shared_reference(
+      config, true, false, true);
+  per_item.build_views(std::move(item_views));
+  shared_reference.build_uniform_identity_views(
+      std::move(sequence_data), sequence_length);
+
+  for (int tau : {0, 1, 2, 5, 9}) {
+    for (size_t query_idx : {size_t{1}, size_t{5}, size_t{8}}) {
+      const std::string query = mutate_with_indels(
+          std::string(reference.data() + starts[query_idx],
+                      sequence_length),
+          tau, gen);
+      const auto expected = per_item.query(query, tau);
+      const auto actual = shared_reference.query(query, tau);
+      assert(actual.candidate_item_ids == expected.candidate_item_ids);
+    }
+  }
+}
+
 void test_compact_postings_support_extreme_codes_and_copy() {
   std::vector<navigamer::RangeJoinItem> items = {
       {0, std::string(32, 'A')},
@@ -415,6 +460,7 @@ int main() {
   test_external_views_preserve_sparse_item_ids();
   test_shifted_window_postings_match_standard_index();
   test_positional_postings_are_recall_safe();
+  test_shared_reference_positional_postings_match_per_item_index();
   test_compact_postings_support_extreme_codes_and_copy();
   test_run_encoded_postings_expand_exactly();
   test_compact_slot_supports_16bit_boundary_and_overflow();

@@ -697,6 +697,12 @@ class ExactRangeJoinIndex {
   bool seed_index_capacity_ = true;
   bool seed_index_uses_16bit_ = true;
   bool positional_postings_use_32bit_ = true;
+  // Uniform reference views share every overlapping seed occurrence. The
+  // optional permutation is allocated only when item starts are not already
+  // ordered by reference offset.
+  bool positional_postings_use_reference_offsets_ = false;
+  uint64_t positional_reference_span_ = 0;
+  std::vector<uint32_t> positional_sorted_item_indices_;
   // Uniform mode uses this word for the shared reference base; other modes
   // use it for the minimum item length. This keeps the compact offset mode
   // from increasing the range-index object size.

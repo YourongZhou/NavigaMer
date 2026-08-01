@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -310,6 +311,35 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
       enable_positional_postings_ && seed_index_capacity_ &&
       position_bits < 32 &&
       item_bits <= static_cast<uint8_t>(32 - position_bits);
+  positional_postings_use_reference_offsets_ = false;
+  positional_reference_span_ = 0;
+  positional_sorted_item_indices_.clear();
+  if (enable_positional_postings_ && item_storage_.index() == 0 &&
+      count != 0 && uniform_sequence_length != 0) {
+    const auto& offsets = std::get<0>(item_storage_);
+    const uint64_t maximum_offset =
+        *std::max_element(offsets.begin(), offsets.end());
+    positional_reference_span_ =
+        maximum_offset + uniform_sequence_length;
+    positional_postings_use_reference_offsets_ =
+        positional_reference_span_ <=
+        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1;
+    if (positional_postings_use_reference_offsets_) {
+      positional_postings_use_32bit_ = true;
+      if (!std::is_sorted(offsets.begin(), offsets.end())) {
+        positional_sorted_item_indices_.resize(count);
+        std::iota(positional_sorted_item_indices_.begin(),
+                  positional_sorted_item_indices_.end(), uint32_t{0});
+        std::sort(
+            positional_sorted_item_indices_.begin(),
+            positional_sorted_item_indices_.end(),
+            [&](uint32_t left, uint32_t right) {
+              return std::tie(offsets[left], left) <
+                     std::tie(offsets[right], right);
+            });
+      }
+    }
+  }
   size_t min_item_sequence_length =
       count == 0 ? 0 : std::numeric_limits<size_t>::max();
   max_item_sequence_length_ =
@@ -454,6 +484,77 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
   }
 
   if (enable_positional_postings_) {
+    if (positional_postings_use_reference_offsets_) {
+      PositionalPostingLists postings;
+      const size_t seed_size = static_cast<size_t>(seed_len);
+      const bool indexable_seed = seed_len > 0 && seed_len <= 32;
+      const size_t posting_count =
+          indexable_seed && positional_reference_span_ >= seed_size
+              ? static_cast<size_t>(
+                    positional_reference_span_ - seed_size + 1)
+              : 0;
+      uint64_t code_capacity = posting_count;
+      if (seed_len > 0 && seed_len < 32) {
+        code_capacity = std::min<uint64_t>(
+            code_capacity, uint64_t{1} << (2 * seed_len));
+      }
+      postings.reserve_unique_codes(static_cast<size_t>(code_capacity));
+
+      const auto populate_reference_postings =
+          [&](auto& unindexable_items) {
+            for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
+              if (!is_acgt_sequence(item_sequence(item_idx))) {
+                unindexable_items.push_back(
+                    static_cast<typename std::decay_t<
+                        decltype(unindexable_items)>::value_type>(item_idx));
+              }
+            }
+            const auto generate = [&](auto&& emit) {
+              if (seed_len <= 0 || seed_len > 32 || posting_count == 0) {
+                return;
+              }
+              const auto* reference =
+                  reinterpret_cast<const char*>(item_storage_aux_);
+              const std::string_view reference_view(
+                  reference, static_cast<size_t>(positional_reference_span_));
+              for (size_t position = 0;
+                   position < posting_count; ++position) {
+                uint64_t code = 0;
+                if (encode_dna_seed(
+                        reference_view, position, seed_len, &code)) {
+                  emit(code, static_cast<uint32_t>(position));
+                }
+              }
+            };
+            generate([&](uint64_t code, uint32_t position) {
+              postings.count(code, position);
+            });
+            postings.finish_counting(
+                posting_count == 0
+                    ? 0
+                    : static_cast<uint32_t>(posting_count - 1));
+            generate([&](uint64_t code, uint32_t position) {
+              postings.append(code, position);
+            });
+            postings.finish_filling();
+          };
+
+      if (seed_index_uses_16bit_) {
+        std::vector<uint16_t> unindexable_items;
+        populate_reference_postings(unindexable_items);
+        unindexable_items16_by_seed_len_.emplace(
+            seed_len, std::move(unindexable_items));
+      } else {
+        std::vector<uint32_t> unindexable_items;
+        populate_reference_postings(unindexable_items);
+        unindexable_items_by_seed_len_.emplace(
+            seed_len, std::move(unindexable_items));
+      }
+      positional_postings_by_seed_len_.emplace(
+          seed_len, std::move(postings));
+      return;
+    }
+
     const auto generate_positional = [&](auto& unindexable_items,
                                          bool collect_unindexable,
                                          auto&& emit) {
@@ -1129,6 +1230,75 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
         }
         return true;
       };
+  const auto consume_reference_positions =
+      [&](const PositionalPostingLists::Range& positions,
+          size_t block_start) {
+        const auto& offsets = std::get<0>(item_storage_);
+        const auto sorted_item = [&](size_t sorted_idx) {
+          return positional_sorted_item_indices_.empty()
+                     ? static_cast<uint32_t>(sorted_idx)
+                     : positional_sorted_item_indices_[sorted_idx];
+        };
+        const auto offset_at = [&](size_t sorted_idx) {
+          return offsets[sorted_item(sorted_idx)];
+        };
+        const auto lower_bound_offset = [&](uint32_t value) {
+          size_t first = 0;
+          size_t count = offsets.size();
+          while (count != 0) {
+            const size_t step = count / 2;
+            const size_t middle = first + step;
+            if (offset_at(middle) < value) {
+              first = middle + 1;
+              count -= step + 1;
+            } else {
+              count = step;
+            }
+          }
+          return first;
+        };
+        if (static_cast<size_t>(seed_len) >
+            max_item_sequence_length_) {
+          return true;
+        }
+        const size_t last_seed_position =
+            max_item_sequence_length_ - static_cast<size_t>(seed_len);
+        const size_t minimum_position =
+            block_start > static_cast<size_t>(tau)
+                ? block_start - static_cast<size_t>(tau)
+                : 0;
+        const size_t maximum_position = std::min(
+            last_seed_position,
+            block_start + static_cast<size_t>(tau));
+        if (minimum_position > maximum_position) return true;
+        for (uint32_t absolute_position : positions) {
+          if (absolute_position < minimum_position) continue;
+          const uint32_t first_offset =
+              absolute_position > maximum_position
+                  ? static_cast<uint32_t>(
+                        absolute_position - maximum_position)
+                  : 0;
+          const uint32_t last_offset = static_cast<uint32_t>(
+              absolute_position - minimum_position);
+          size_t item_offset = lower_bound_offset(first_offset);
+          const size_t item_end =
+              last_offset == std::numeric_limits<uint32_t>::max()
+                  ? offsets.size()
+                  : lower_bound_offset(last_offset + 1);
+          for (; item_offset < item_end; ++item_offset) {
+            add_candidate(sorted_item(item_offset));
+            if (touched_size() > early_abort_candidate_limit) {
+              result.seed_candidate_pairs_before_length_filter =
+                  touched_size();
+              result.pigeonhole_candidate_count = touched_size();
+              result.pigeonhole_early_abort_count = 1;
+              result.final_candidate_pairs = 0;
+              return false;
+            }
+          }
+        }
+        return true;
+      };
 
   const int block_count = tau + 1;
   for (int block_idx = 0; block_idx < block_count; ++block_idx) {
@@ -1151,10 +1321,14 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
       }
       if (posting) {
         ScopedTimer timer(&result.range_seed_union_ms);
-        const uint8_t position_bits =
-            positional_position_bits_by_seed_len_.at(result.seed_len);
-        if (!consume_positional_indices(
-                posting, block_start, position_bits)) {
+        const bool consumed =
+            positional_postings_use_reference_offsets_
+                ? consume_reference_positions(posting, block_start)
+                : consume_positional_indices(
+                      posting, block_start,
+                      positional_position_bits_by_seed_len_.at(
+                          result.seed_len));
+        if (!consumed) {
           return result;
         }
       }
