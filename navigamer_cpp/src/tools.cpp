@@ -9,6 +9,14 @@
 #include <stdexcept>
 #include <utility>
 
+#if (defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#define NAVIGAMER_HAS_MYERS_BATCH4_AVX2 1
+#else
+#define NAVIGAMER_HAS_MYERS_BATCH4_AVX2 0
+#endif
+
 namespace navigamer {
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -407,6 +415,202 @@ int compute_distance_bounded_myers_prepared(
     return compute_distance_bounded_myers_single_word(pattern, text, tau);
   }
   return compute_distance_bounded_myers_multiword(pattern, text, tau);
+}
+
+#if NAVIGAMER_HAS_MYERS_BATCH4_AVX2
+__attribute__((target("avx2")))
+bool compute_distance_bounded_myers_prepared_batch4_avx2(
+    const PreparedMyersPattern& pattern,
+    const std::array<std::string_view, 4>& texts,
+    int tau,
+    std::array<int, 4>& distances) {
+  const size_t pattern_length = pattern.pattern.size();
+  const size_t block_count = pattern.block_count;
+  const size_t text_length = texts[0].size();
+  const __m256i zero = _mm256_setzero_si256();
+  const __m256i one = _mm256_set1_epi64x(1);
+  const __m256i sign = _mm256_set1_epi64x(
+      static_cast<long long>(uint64_t{1} << 63));
+  const __m256i all_ones = _mm256_set1_epi64x(-1);
+  __m256i pv[4] = {};
+  __m256i mv[4] = {};
+  __m256i xv[4] = {};
+  __m256i ph[4] = {};
+  __m256i mh[4] = {};
+  __m256i masks[4] = {};
+  for (size_t block = 0; block < block_count; ++block) {
+    masks[block] = _mm256_set1_epi64x(
+        static_cast<long long>(pattern.masks[block]));
+    pv[block] = masks[block];
+    mv[block] = zero;
+  }
+
+  std::array<int, 4> scores = {
+      static_cast<int>(pattern_length),
+      static_cast<int>(pattern_length),
+      static_cast<int>(pattern_length),
+      static_cast<int>(pattern_length)};
+  const size_t last_block = block_count - 1;
+  const __m256i top_bit = _mm256_set1_epi64x(
+      static_cast<long long>(
+          uint64_t{1} << ((pattern_length - 1) % 64)));
+
+  for (size_t text_idx = 0; text_idx < text_length; ++text_idx) {
+    const auto code = [&](size_t lane) -> size_t {
+      const unsigned char base =
+          static_cast<unsigned char>(texts[lane][text_idx]);
+      return static_cast<size_t>(((base >> 1) ^ (base >> 2)) & 3);
+    };
+    const size_t code0 = code(0);
+    const size_t code1 = code(1);
+    const size_t code2 = code(2);
+    const size_t code3 = code(3);
+
+    __m256i carry = zero;
+    for (size_t block = 0; block < block_count; ++block) {
+      const __m256i eq = _mm256_set_epi64x(
+          static_cast<long long>(pattern.peq[block][code3]),
+          static_cast<long long>(pattern.peq[block][code2]),
+          static_cast<long long>(pattern.peq[block][code1]),
+          static_cast<long long>(pattern.peq[block][code0]));
+      xv[block] = _mm256_or_si256(eq, mv[block]);
+      const __m256i addend = _mm256_and_si256(xv[block], pv[block]);
+      const __m256i sum1 = _mm256_add_epi64(addend, pv[block]);
+      const __m256i carry1 = _mm256_cmpgt_epi64(
+          _mm256_xor_si256(addend, sign),
+          _mm256_xor_si256(sum1, sign));
+      const __m256i sum2 = _mm256_add_epi64(sum1, carry);
+      const __m256i carry2 = _mm256_cmpgt_epi64(
+          _mm256_xor_si256(sum1, sign),
+          _mm256_xor_si256(sum2, sign));
+      carry = _mm256_and_si256(
+          _mm256_or_si256(carry1, carry2), one);
+
+      const __m256i xh = _mm256_and_si256(
+          _mm256_or_si256(
+              _mm256_xor_si256(sum2, pv[block]), xv[block]),
+          masks[block]);
+      ph[block] = _mm256_and_si256(
+          _mm256_or_si256(
+              mv[block],
+              _mm256_andnot_si256(
+                  _mm256_or_si256(xh, pv[block]), all_ones)),
+          masks[block]);
+      mh[block] = _mm256_and_si256(
+          _mm256_and_si256(pv[block], xh), masks[block]);
+    }
+
+    const int ph_zero = _mm256_movemask_pd(_mm256_castsi256_pd(
+        _mm256_cmpeq_epi64(
+            _mm256_and_si256(ph[last_block], top_bit), zero)));
+    const int mh_zero = _mm256_movemask_pd(_mm256_castsi256_pd(
+        _mm256_cmpeq_epi64(
+            _mm256_and_si256(mh[last_block], top_bit), zero)));
+    const int ph_bits = (~ph_zero) & 0x0f;
+    const int mh_bits = (~mh_zero) & 0x0f;
+    for (size_t lane = 0; lane < 4; ++lane) {
+      scores[lane] += (ph_bits >> lane) & 1;
+      scores[lane] -= (mh_bits >> lane) & 1;
+    }
+
+    __m256i ph_carry = one;
+    __m256i mh_carry = zero;
+    for (size_t block = 0; block < block_count; ++block) {
+      const __m256i next_ph_carry =
+          _mm256_srli_epi64(ph[block], 63);
+      const __m256i next_mh_carry =
+          _mm256_srli_epi64(mh[block], 63);
+      ph[block] = _mm256_and_si256(
+          _mm256_or_si256(
+              _mm256_slli_epi64(ph[block], 1), ph_carry),
+          masks[block]);
+      mh[block] = _mm256_and_si256(
+          _mm256_or_si256(
+              _mm256_slli_epi64(mh[block], 1), mh_carry),
+          masks[block]);
+      ph_carry = next_ph_carry;
+      mh_carry = next_mh_carry;
+    }
+
+    for (size_t block = 0; block < block_count; ++block) {
+      mv[block] = _mm256_and_si256(
+          _mm256_and_si256(ph[block], xv[block]), masks[block]);
+      pv[block] = _mm256_and_si256(
+          _mm256_or_si256(
+              mh[block],
+              _mm256_andnot_si256(
+                  _mm256_or_si256(ph[block], xv[block]), all_ones)),
+          masks[block]);
+    }
+
+    // The current score is ED(pattern, text_prefix). Appending the remaining
+    // text characters can reduce that distance by at most one per character,
+    // so score - remaining is an exact lower bound on the final distance.
+    // Check only periodically to keep the accepted/near-candidate hot path
+    // cheap, and stop only when every SIMD lane is provably outside tau.
+    if ((text_idx & 15U) == 15U) {
+      const int remaining =
+          static_cast<int>(text_length - text_idx - 1);
+      bool all_rejected = true;
+      for (int score : scores) {
+        if (score - remaining <= tau) {
+          all_rejected = false;
+          break;
+        }
+      }
+      if (all_rejected) {
+        distances.fill(tau + 1);
+        return true;
+      }
+    }
+  }
+
+  for (size_t lane = 0; lane < 4; ++lane) {
+    distances[lane] = scores[lane] <= tau ? scores[lane] : tau + 1;
+  }
+  return true;
+}
+#endif
+
+bool myers_batch4_avx2_runtime_supported() {
+#if NAVIGAMER_HAS_MYERS_BATCH4_AVX2
+  static const bool supported = [] {
+    __builtin_cpu_init();
+    return static_cast<bool>(__builtin_cpu_supports("avx2"));
+  }();
+  return supported;
+#else
+  return false;
+#endif
+}
+
+bool compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+    const PreparedMyersPattern& pattern,
+    const std::array<std::string_view, 4>& texts,
+    int tau,
+    std::array<int, 4>& distances) {
+  if (tau < 0) {
+    throw std::invalid_argument(
+        "edit-distance threshold must be non-negative");
+  }
+  if (!myers_batch4_avx2_runtime_supported() ||
+      !pattern.supported || pattern.pattern.empty() ||
+      pattern.block_count == 0 || pattern.block_count > 4) {
+    return false;
+  }
+  const size_t text_length = texts[0].size();
+  if (text_length != pattern.pattern.size()) return false;
+  for (size_t lane = 1; lane < 4; ++lane) {
+    if (texts[lane].size() != text_length) return false;
+  }
+#if NAVIGAMER_HAS_MYERS_BATCH4_AVX2
+  return compute_distance_bounded_myers_prepared_batch4_avx2(
+      pattern, texts, tau, distances);
+#else
+  (void)texts;
+  (void)distances;
+  return false;
+#endif
 }
 
 bool compute_distance_bounded_myers_supported(std::string_view a,

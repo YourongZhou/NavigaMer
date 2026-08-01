@@ -42,6 +42,10 @@ without rescanning the reference. No per-window
 `BioSequence`, identifier, occurrence vector, or sequence string is allocated.
 Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
 range-join code read non-owning sequence views into the shared reference.
+Reference-backed Phase 2 construction batches four exact high-tolerance
+distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
+Its periodic lower-bound exit rejects a batch only when every lane is proven
+to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
 edit distance fits in one byte. Persisted format version 28 stores the shared
 reference as raw bases in the memory-mapped index, so loading does not allocate

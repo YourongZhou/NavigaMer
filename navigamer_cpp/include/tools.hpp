@@ -71,6 +71,16 @@ int compute_distance_bounded_myers_prepared(
     const PreparedMyersPattern& pattern,
     std::string_view text,
     int tau);
+bool myers_batch4_avx2_runtime_supported();
+// Computes four exact bounded distances. The caller guarantees that the
+// shared pattern and all texts contain only uppercase A/C/G/T. Returns false
+// when AVX2 or the equal-length <=256 bp shape is unavailable, in which case
+// callers must use the scalar verifier.
+bool compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+    const PreparedMyersPattern& pattern,
+    const std::array<std::string_view, 4>& texts,
+    int tau,
+    std::array<int, 4>& distances);
 
 int compute_distance_bounded_with_mode(std::string_view a,
                                        std::string_view b, int tau,

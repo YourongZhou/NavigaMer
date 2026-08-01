@@ -3128,16 +3128,61 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
 
         if (direct_edlib && !candidates.candidate_item_ids.empty()) {
           const auto verify_start = Clock::now();
-          const PreparedEdlibDnaPattern prepared_child =
-              prepare_edlib_dna_pattern(child_sequence);
-          for (RangeJoinItemId parent_idx :
-               candidates.candidate_item_ids) {
-            if (compute_distance_bounded_edlib_prepared(
-                    prepared_child, parent_sequences[parent_idx],
-                    link_tolerance) <= link_tolerance) {
-              local_edges.push_back(
-                  {parent_idx, static_cast<uint32_t>(child_idx)});
-              local.stats.phase2_edges_added++;
+          // Four-lane Myers wins only for the high-tolerance layer; bounded
+          // scalar Edlib exits sooner at lower tolerances.
+          const bool use_batch4 =
+              link_tolerance >= 40 &&
+              search_graph_view_.sequences.reference_backed &&
+              candidates.candidate_item_ids.size() >= 4 &&
+              myers_batch4_avx2_runtime_supported();
+          PreparedMyersPattern prepared_batch_pattern;
+          if (use_batch4) {
+            prepared_batch_pattern =
+                prepare_myers_pattern(child_sequence);
+          }
+          size_t candidate_idx = 0;
+          for (; use_batch4 &&
+                 candidate_idx + 4 <=
+                     candidates.candidate_item_ids.size();
+               candidate_idx += 4) {
+            const std::array<std::string_view, 4> parent_batch = {
+                parent_sequences[
+                    candidates.candidate_item_ids[candidate_idx]],
+                parent_sequences[
+                    candidates.candidate_item_ids[candidate_idx + 1]],
+                parent_sequences[
+                    candidates.candidate_item_ids[candidate_idx + 2]],
+                parent_sequences[
+                    candidates.candidate_item_ids[candidate_idx + 3]]};
+            std::array<int, 4> distances{};
+            const bool computed =
+                compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+                    prepared_batch_pattern, parent_batch,
+                    link_tolerance, distances);
+            if (!computed) break;
+            for (size_t lane = 0; lane < 4; ++lane) {
+              if (distances[lane] <= link_tolerance) {
+                local_edges.push_back({
+                    candidates.candidate_item_ids[candidate_idx + lane],
+                    static_cast<uint32_t>(child_idx)});
+                local.stats.phase2_edges_added++;
+              }
+            }
+          }
+          if (candidate_idx < candidates.candidate_item_ids.size()) {
+            const PreparedEdlibDnaPattern prepared_child =
+                prepare_edlib_dna_pattern(child_sequence);
+            for (; candidate_idx < candidates.candidate_item_ids.size();
+                 ++candidate_idx) {
+              const RangeJoinItemId parent_idx =
+                  candidates.candidate_item_ids[candidate_idx];
+              if (compute_distance_bounded_edlib_prepared(
+                      prepared_child, parent_sequences[parent_idx],
+                      link_tolerance) <= link_tolerance) {
+                local_edges.push_back(
+                    {parent_idx, static_cast<uint32_t>(child_idx)});
+                local.stats.phase2_edges_added++;
+              }
             }
           }
           local.exact_verify_worker_ms += elapsed_ms_since(verify_start);
