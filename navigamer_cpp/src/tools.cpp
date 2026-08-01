@@ -548,7 +548,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
     // so score - remaining is an exact lower bound on the final distance.
     // Check only periodically to keep the accepted/near-candidate hot path
     // cheap, and stop only when every SIMD lane is provably outside tau.
-    if ((text_idx & 15U) == 15U) {
+    if ((text_idx & 1U) == 1U) {
       const int remaining =
           static_cast<int>(text_length - text_idx - 1);
       bool all_rejected = true;
