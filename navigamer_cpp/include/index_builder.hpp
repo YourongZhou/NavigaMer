@@ -1371,7 +1371,6 @@ class BioGeometryIndexBuilder {
   std::vector<int> expanded_radii_;
   std::vector<BuildWorldNodeRecord> build_nodes_;
   std::vector<BuildNodeGeometry> build_node_geometry_;
-  std::vector<NodeId> final_node_ids_;
   std::vector<std::vector<NodeId>> extended_layers_;
   std::vector<std::vector<NodeId>> primary_layers_;
 
@@ -1401,7 +1400,7 @@ class BioGeometryIndexBuilder {
   void phase3_collapse_and_compute_mbb(BuildProgressReporter* progress);
 
   void attach_leaves(BuildProgressReporter* progress);
-  void assign_integer_ids();
+  void compact_primary_build_nodes();
   void build_search_graph_view();
   void release_build_arrays();
 

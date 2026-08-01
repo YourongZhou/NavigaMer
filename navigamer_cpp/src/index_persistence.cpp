@@ -430,7 +430,6 @@ class IndexPersistenceAccess {
     builder.world_node_count_ = view.node_records.size();
     builder.sequence_count_ = view.sequences.size();
     builder.build_nodes_.clear();
-    builder.final_node_ids_.clear();
     builder.primary_layers_.clear();
     builder.extended_layers_.clear();
     builder.search_graph_view_ = std::move(view);
