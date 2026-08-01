@@ -294,9 +294,12 @@ candidate sets, but its signature-building overhead is slower on the default
 prepared-DNA distance path. Either setting is no-false-negative: accepted links
 are still determined by bounded exact edit distance.
 
-Auto construction accepts pigeonhole candidates when their count is at most
-`4096`; if the seed union grows beyond that threshold, it early-aborts the
-pigeonhole collection and invokes the q-gram safe fallback. The legacy
+During Phase 2, auto construction accepts pigeonhole candidates when their
+count is at most `4096`; if the seed union grows beyond that threshold, it
+early-aborts the pigeonhole collection and invokes the q-gram safe fallback.
+Indexed leaf attachment keeps the recall-safe pigeonhole result instead of
+materializing a tier-wide q-gram index for an occasional oversized query;
+explicit `qgram` and `hybrid` modes remain available. The legacy
 `--auto-pigeonhole-max-ratio` flag is parsed for command compatibility but no
 longer drives auto selection, so normal pigeonhole queries do not full-scan all
 length-compatible targets just to compute a ratio.

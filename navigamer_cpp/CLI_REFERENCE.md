@@ -24,7 +24,7 @@ Used by all pipelines that build the index:
 | `--leaf-qgram-postfilter` | `off` | Optional safe q-gram L1 postfilter for indexed leaf attachment candidates before bounded exact verification |
 | `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
-| `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full` |
+| `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full`; auto uses count-selected pigeonhole/q-gram in Phase 2 and pigeonhole-only leaf attachment |
 | `--qgram-q` | `5` | Positive q-gram length used by q-gram and hybrid candidate generation |
 | `--auto-pigeonhole-max-candidates` | `4096` | Auto accepts pigeonhole when its candidate count is at most this value |
 | `--auto-pigeonhole-max-ratio` | `0.25` | Compatibility no-op; parsed and validated, but auto no longer computes or uses a candidate ratio |
@@ -81,10 +81,13 @@ pigeonhole and q-gram safe candidate supersets. Auto runs pigeonhole when its
 seed is long enough, accepting it when candidate count is at most the
 configured maximum. If the seed union grows beyond the maximum, auto stops
 collecting pigeonhole candidates immediately and invokes q-gram as a safe
-fallback. It does not full-scan all length-compatible targets to compute a
-candidate ratio; `--auto-pigeonhole-max-ratio` is retained only so older
-command lines still parse. Full candidate mode returns every
-length-compatible item.
+fallback during Phase 2. Auto leaf attachment instead consumes the complete
+pigeonhole candidate superset, preventing a single fallback from allocating a
+q-gram index over the full finest tier. It does not full-scan all
+length-compatible targets to compute a candidate ratio;
+`--auto-pigeonhole-max-ratio` is retained only so older command lines still
+parse. Explicit q-gram and hybrid modes retain their stated behavior. Full
+candidate mode returns every length-compatible item.
 
 Indexed leaf attachment directly verifies range candidates by default. With
 `--leaf-qgram-postfilter on`, it applies the same no-false-negative q-gram L1

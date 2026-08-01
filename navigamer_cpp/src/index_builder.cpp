@@ -3455,6 +3455,16 @@ void BioGeometryIndexBuilder::attach_leaves(
     }
     stats_.leaf_candidate_pairs = stats_.total_possible_leaf_pairs;
   } else {
+    RangeJoinConfig leaf_range_join_config = range_config_.range_join;
+    if (leaf_range_join_config.candidate_mode ==
+        RangeCandidateMode::Auto) {
+      // One auto fallback would materialize a q-gram index for the entire
+      // finest tier. At genome scale that allocation dominates the leaf
+      // phase, while the already-built pigeonhole index remains an exact,
+      // recall-safe candidate generator even for large result sets.
+      leaf_range_join_config.candidate_mode =
+          RangeCandidateMode::PigeonholeOnly;
+    }
     std::vector<Phase1BaseCountSignature> leaf_base_counts(
         sequences.size());
     for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
@@ -3514,7 +3524,7 @@ void BioGeometryIndexBuilder::attach_leaves(
       }
       const int max_radius =
           finest_layer.empty() ? 0 : finest_radius;
-      ExactRangeJoinIndex world_index(range_config_.range_join, true);
+      ExactRangeJoinIndex world_index(leaf_range_join_config, true);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         if (sequences.fixed_sequence_length != 0) {
@@ -3607,7 +3617,7 @@ void BioGeometryIndexBuilder::attach_leaves(
         }
       }
       ExactRangeJoinIndex sequence_index(
-          range_config_.range_join, true, true, false);
+          leaf_range_join_config, true, true, false);
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         if (sequences.fixed_sequence_length != 0) {
@@ -3628,13 +3638,13 @@ void BioGeometryIndexBuilder::attach_leaves(
               center.size() /
               static_cast<size_t>(finest_radius + 1));
           seed_lengths.push_back(std::min(
-              range_config_.range_join.max_seed_len, block_len));
+              leaf_range_join_config.max_seed_len, block_len));
         }
-        if (range_config_.range_join.candidate_mode ==
+        if (leaf_range_join_config.candidate_mode ==
                 RangeCandidateMode::Auto ||
-            range_config_.range_join.candidate_mode ==
+            leaf_range_join_config.candidate_mode ==
                 RangeCandidateMode::PigeonholeOnly ||
-            range_config_.range_join.candidate_mode ==
+            leaf_range_join_config.candidate_mode ==
                 RangeCandidateMode::Hybrid) {
           std::sort(seed_lengths.begin(), seed_lengths.end());
           seed_lengths.erase(

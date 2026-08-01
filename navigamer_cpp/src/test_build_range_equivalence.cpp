@@ -426,12 +426,13 @@ int main() {
   assert(auto_stats.phase2_auto_hybrid_invoked == 0);
   assert(auto_stats.phase2_auto_final_candidate_pairs ==
          auto_stats.phase2_candidate_pairs);
-  assert(auto_stats.leaf_auto_pigeonhole_rejected_large_candidates > 0);
-  assert(auto_stats.leaf_auto_qgram_invoked > 0);
-  assert(auto_stats.leaf_pigeonhole_early_abort_count > 0);
+  assert(auto_stats.leaf_pigeonhole_queries > 0);
+  assert(auto_stats.leaf_qgram_queries == 0);
+  assert(auto_stats.leaf_auto_pigeonhole_rejected_large_candidates == 0);
+  assert(auto_stats.leaf_auto_qgram_invoked == 0);
+  assert(auto_stats.leaf_pigeonhole_early_abort_count == 0);
   assert(auto_stats.leaf_auto_hybrid_invoked == 0);
-  assert(auto_stats.leaf_auto_final_candidate_pairs ==
-         auto_stats.leaf_candidate_pairs);
+  assert(auto_stats.leaf_auto_final_candidate_pairs == 0);
   assert(auto_stats.leaf_seed_candidate_pairs_before_length_filter > 0);
   assert(auto_stats.leaf_range_final_candidate_pairs ==
          auto_stats.leaf_candidate_pairs);

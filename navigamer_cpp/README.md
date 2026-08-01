@@ -314,9 +314,11 @@ executed during construction.
 **Note:** Phase-2 rebinding and leaf attachment default to exact indexed range
 joins. Use `--link-mode full` and/or `--leaf-attach-mode full` for the original
 full-pairwise construction. `--range-candidate-mode auto` uses adaptive
-pigeonhole seeds when they are at least 8 bp, accepts them by actual candidate
-count, and early-aborts to the q-gram safe fallback when the seed union exceeds
-the configured candidate threshold. The legacy ratio flag is ignored, so normal
+pigeonhole seeds when they are at least 8 bp. Phase-2 rebinding accepts them by
+actual candidate count and early-aborts to the q-gram safe fallback when the
+seed union exceeds the configured threshold. Leaf attachment keeps the exact
+pigeonhole candidate superset so a rare fallback cannot materialize a q-gram
+index over the entire finest tier. The legacy ratio flag is ignored, so normal
 pigeonhole queries do not full-scan all length-compatible targets just to
 compute a denominator. `--leaf-attach-direction auto` chooses world-to-sequence
 leaf attachment when there are fewer finest worlds than unique sequences;
