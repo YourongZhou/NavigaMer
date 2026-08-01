@@ -3358,14 +3358,59 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
       for (NodeId node_id : current_layer) {
         build_nodes_[node_id].child_or_leaf_ids.clear();
       }
+      std::vector<NodeId>().swap(
+          extended_layers_[static_cast<size_t>(primary_idx * 2)]);
       continue;
     }
+
+    const auto& next_primary_layer =
+        primary_layers_[static_cast<size_t>(primary_idx + 1)];
+    const auto& auxiliary_layer =
+        extended_layers_[static_cast<size_t>(primary_idx * 2 + 1)];
 
     const int thread_capacity = std::max(
         1, std::min(omp_get_max_threads(),
                     static_cast<int>(std::min<size_t>(
                         current_layer.size(),
                         static_cast<size_t>(std::numeric_limits<int>::max())))));
+    const uint64_t global_seen_bytes =
+        static_cast<uint64_t>(thread_capacity) * build_nodes_.size();
+    const uint64_t local_seen_bytes =
+        static_cast<uint64_t>(build_nodes_.size()) * sizeof(uint32_t) +
+        static_cast<uint64_t>(thread_capacity) * next_primary_layer.size();
+    // Use a shared global-to-layer map only when it makes all per-thread
+    // deduplication bitmaps smaller in aggregate.
+    const bool use_layer_local_child_seen =
+        local_seen_bytes < global_seen_bytes;
+    std::vector<uint32_t> child_local_indices;
+    if (use_layer_local_child_seen) {
+      child_local_indices.assign(
+          build_nodes_.size(), std::numeric_limits<uint32_t>::max());
+      for (size_t child_idx = 0;
+           child_idx < next_primary_layer.size(); ++child_idx) {
+        const NodeId child_id = next_primary_layer[child_idx];
+        if (child_id >= build_nodes_.size() ||
+            child_idx > std::numeric_limits<uint32_t>::max() ||
+            child_local_indices[child_id] !=
+                std::numeric_limits<uint32_t>::max()) {
+          throw std::runtime_error(
+              "next primary build layer has invalid NodeIds");
+        }
+        child_local_indices[child_id] =
+            static_cast<uint32_t>(child_idx);
+      }
+      for (NodeId auxiliary_id : auxiliary_layer) {
+        for (NodeId child_id :
+             build_nodes_[auxiliary_id].child_or_leaf_ids) {
+          if (child_id >= child_local_indices.size() ||
+              child_local_indices[child_id] ==
+                  std::numeric_limits<uint32_t>::max()) {
+            throw std::runtime_error(
+                "auxiliary edge does not target the next primary layer");
+          }
+        }
+      }
+    }
     std::vector<double> collect_ms(static_cast<size_t>(thread_capacity), 0.0);
     std::vector<double> collapse_ms(static_cast<size_t>(thread_capacity), 0.0);
     std::vector<double> distance_ms(static_cast<size_t>(thread_capacity), 0.0);
@@ -3374,7 +3419,11 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
 #pragma omp parallel if(thread_capacity > 1) num_threads(thread_capacity)
     {
       const int tid = omp_get_thread_num();
-      std::vector<uint8_t> child_seen(build_nodes_.size(), uint8_t{0});
+      std::vector<uint8_t> child_seen(
+          use_layer_local_child_seen
+              ? next_primary_layer.size()
+              : build_nodes_.size(),
+          uint8_t{0});
 
 #pragma omp single
       actual_threads = omp_get_num_threads();
@@ -3407,13 +3456,23 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
           ScopedTimer timer(&collapse_ms[static_cast<size_t>(tid)]);
           for (NodeId aux_id : auxiliary_nodes) {
             for (NodeId child : build_nodes_[aux_id].child_or_leaf_ids) {
-              if (!child_seen[child]) {
-                child_seen[child] = 1;
+              const size_t local_child =
+                  use_layer_local_child_seen
+                      ? child_local_indices[child]
+                      : child;
+              if (!child_seen[local_child]) {
+                child_seen[local_child] = 1;
                 direct_children.push_back(child);
               }
             }
           }
-          for (NodeId child : direct_children) child_seen[child] = 0;
+          for (NodeId child : direct_children) {
+            const size_t local_child =
+                use_layer_local_child_seen
+                    ? child_local_indices[child]
+                    : child;
+            child_seen[local_child] = 0;
+          }
           node.child_or_leaf_ids = std::move(direct_children);
         }
 
@@ -3467,6 +3526,14 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
       stats_.phase3_collapse_children_ms += collapse_ms[idx];
       stats_.phase3_child_mbb_distance_ms += distance_ms[idx];
     }
+    for (NodeId auxiliary_id : auxiliary_layer) {
+      std::vector<NodeId>().swap(
+          build_nodes_[auxiliary_id].child_or_leaf_ids);
+    }
+    std::vector<NodeId>().swap(
+        extended_layers_[static_cast<size_t>(primary_idx * 2)]);
+    std::vector<NodeId>().swap(
+        extended_layers_[static_cast<size_t>(primary_idx * 2 + 1)]);
   }
   if (progress) progress->finish_phase();
 }
