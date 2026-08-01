@@ -213,29 +213,23 @@ class ExactRangeJoinIndex {
         ++posting_count_;
         return;
       }
-      Slot32* slot = find_or_insert(slots32_, code);
-      if (slot->count == std::numeric_limits<uint32_t>::max() ||
-          posting_count_ == std::numeric_limits<uint32_t>::max()) {
+      if (posting_count_ == std::numeric_limits<uint32_t>::max()) {
         promote_to_64bit();
         count_in(slots64_, code, posting);
       } else {
-        if (slot->count == 0 ||
-            slot->begin == std::numeric_limits<uint32_t>::max() ||
-            posting != static_cast<Posting>(slot->begin + 1)) {
-          ++slot->encoded_count;
-        }
-        slot->begin = posting;
-        ++slot->count;
+        count_in(slots32_, code, posting);
       }
       ++posting_count_;
     }
 
     void finish_counting(uint32_t maximum_posting) {
+      if (slots64_.empty() && !compact_slots_fit()) promote_to_64bit();
       if (!slots64_.empty()) {
         finish_slots(slots64_);
       } else {
         finish_slots(slots32_);
       }
+      std::unordered_map<uint64_t, CountOverflow>().swap(count_overflows_);
       posting_bit_width_ = 1;
       while ((maximum_posting >>= 1) != 0) ++posting_bit_width_;
       if (encoded_posting_count_ >
@@ -273,12 +267,27 @@ class ExactRangeJoinIndex {
     }
 
    private:
-    struct Slot32 {
+    // Counting and finalized lookup need different metadata, so the two
+    // 32-bit words are reused between those stages. Common counts fit two
+    // 16-bit lanes; exceptional high-frequency codes spill into a sparse
+    // side table only while counting. Every lookup slot stays 16 bytes.
+    struct CompactSlot {
+      static constexpr uint32_t kIntervalMask = UINT32_C(0x80000000);
+      static constexpr uint32_t kOccupiedMask = UINT32_C(0x40000000);
+      static constexpr uint32_t kCountMask = UINT32_C(0x3fffffff);
+
       uint64_t code = 0;
-      uint32_t begin = 0;
+      // Counting: last 32-bit posting, or run count for 16-bit postings.
+      // Finalized: packed-posting begin.
+      uint32_t primary = 0;
+      // Counting: [count16 | run count16], or [count16 | last posting16]
+      // for 16-bit postings. Finalized: [flags2 | encoded count30].
+      uint32_t secondary = 0;
+    };
+    struct CountOverflow {
+      uint32_t last = 0;
       uint32_t count = 0;
-      uint32_t encoded_count = 0;
-      bool interval = false;
+      uint32_t run_count = 0;
     };
     struct Slot64 {
       uint64_t code = 0;
@@ -287,8 +296,10 @@ class ExactRangeJoinIndex {
       uint64_t encoded_count = 0;
       bool interval = false;
     };
-    static_assert(sizeof(Slot32) == 24,
-                  "run-aware posting slot must remain 24 bytes");
+    using NarrowSlot = CompactSlot;
+
+    static_assert(sizeof(CompactSlot) == 16,
+                  "compact posting slot must remain 16 bytes");
     static_assert(sizeof(Slot64) == 40,
                   "wide run-aware posting slot must remain 40 bytes");
 
@@ -306,10 +317,19 @@ class ExactRangeJoinIndex {
     }
 
     template <typename Slot>
+    static bool slot_occupied(const Slot& slot) {
+      if constexpr (std::is_same_v<Slot, CompactSlot>) {
+        return slot.primary != 0 || slot.secondary != 0;
+      } else {
+        return slot.count != 0;
+      }
+    }
+
+    template <typename Slot>
     static Slot* find_existing(std::vector<Slot>& slots,
                                uint64_t code) {
       size_t idx = slot_index(slots, code);
-      while (slots[idx].count != 0 && slots[idx].code != code) {
+      while (slot_occupied(slots[idx]) && slots[idx].code != code) {
         idx = (idx + 1) & (slots.size() - 1);
       }
       return &slots[idx];
@@ -320,17 +340,17 @@ class ExactRangeJoinIndex {
                                      uint64_t code) {
       if (slots.empty()) return nullptr;
       size_t idx = slot_index(slots, code);
-      while (slots[idx].count != 0 && slots[idx].code != code) {
+      while (slot_occupied(slots[idx]) && slots[idx].code != code) {
         idx = (idx + 1) & (slots.size() - 1);
       }
-      return slots[idx].count == 0 ? nullptr : &slots[idx];
+      return slot_occupied(slots[idx]) ? &slots[idx] : nullptr;
     }
 
     template <typename Slot>
     void rehash(std::vector<Slot>& slots, size_t capacity) {
       std::vector<Slot> replacement(capacity);
       for (const auto& slot : slots) {
-        if (slot.count == 0) continue;
+        if (!slot_occupied(slot)) continue;
         auto* destination = find_existing(replacement, slot.code);
         *destination = slot;
       }
@@ -341,7 +361,7 @@ class ExactRangeJoinIndex {
     Slot* find_or_insert(std::vector<Slot>& slots, uint64_t code) {
       if (slots.empty()) rehash(slots, 16);
       Slot* slot = find_existing(slots, code);
-      if (slot->count != 0) return slot;
+      if (slot_occupied(*slot)) return slot;
       if (unique_code_count_ + 1 >
           slots.size() - slots.size() / 8) {
         rehash(slots, slots.size() * 2);
@@ -352,47 +372,163 @@ class ExactRangeJoinIndex {
       return slot;
     }
 
+    void counting_values(const CompactSlot& slot,
+                         uint32_t* last,
+                         uint32_t* count,
+                         uint32_t* run_count) const {
+      if constexpr (sizeof(Posting) == sizeof(uint16_t)) {
+        *last = static_cast<uint16_t>(slot.secondary);
+        const uint16_t stored_count =
+            static_cast<uint16_t>(slot.secondary >> 16);
+        *count = stored_count == 0 ? 65536 : stored_count;
+        *run_count = slot.primary;
+      } else {
+        const auto overflow = count_overflows_.find(slot.code);
+        if (overflow != count_overflows_.end()) {
+          *last = overflow->second.last;
+          *count = overflow->second.count;
+          *run_count = overflow->second.run_count;
+          return;
+        }
+        *last = slot.primary;
+        *count = static_cast<uint16_t>(slot.secondary >> 16);
+        *run_count = static_cast<uint16_t>(slot.secondary);
+      }
+    }
+
+    bool compact_slots_fit() const {
+      for (const auto& slot : slots32_) {
+        if (!slot_occupied(slot)) continue;
+        uint32_t last = 0;
+        uint32_t count = 0;
+        uint32_t run_count = 0;
+        counting_values(slot, &last, &count, &run_count);
+        const bool interval = run_count < count - run_count;
+        const uint64_t record_count =
+            interval ? uint64_t{2} * run_count : count;
+        if (record_count > CompactSlot::kCountMask) return false;
+      }
+      return true;
+    }
+
     template <typename Slot>
     void count_in(std::vector<Slot>& slots, uint64_t code,
                   Posting posting) {
       auto* slot = find_or_insert(slots, code);
-      if (slot->count == std::numeric_limits<decltype(slot->count)>::max()) {
-        throw std::length_error("range-join posting list is too large");
+      if constexpr (std::is_same_v<Slot, CompactSlot>) {
+        if constexpr (sizeof(Posting) == sizeof(uint16_t)) {
+          const uint16_t last = static_cast<uint16_t>(slot->secondary);
+          if (slot->primary == 0 ||
+              last == std::numeric_limits<uint16_t>::max() ||
+              posting != static_cast<Posting>(last + 1)) {
+            ++slot->primary;
+          }
+          const uint16_t count = static_cast<uint16_t>(
+              (slot->secondary >> 16) + 1);
+          slot->secondary =
+              (static_cast<uint32_t>(count) << 16) |
+              static_cast<uint16_t>(posting);
+        } else {
+          if (slot->secondary == std::numeric_limits<uint32_t>::max()) {
+            auto overflow = count_overflows_.find(code);
+            if (overflow != count_overflows_.end()) {
+              auto& value = overflow->second;
+              if (value.last == std::numeric_limits<uint32_t>::max() ||
+                  posting != static_cast<Posting>(value.last + 1)) {
+                ++value.run_count;
+              }
+              value.last = posting;
+              ++value.count;
+              slot->primary = posting;
+              return;
+            }
+          }
+
+          const uint16_t stored_count =
+              static_cast<uint16_t>(slot->secondary >> 16);
+          const uint16_t stored_runs =
+              static_cast<uint16_t>(slot->secondary);
+          const bool new_run =
+              stored_count == 0 ||
+              slot->primary == std::numeric_limits<uint32_t>::max() ||
+              posting != static_cast<Posting>(slot->primary + 1);
+          if (stored_count == std::numeric_limits<uint16_t>::max() ||
+              (new_run &&
+               stored_runs == std::numeric_limits<uint16_t>::max())) {
+            count_overflows_.emplace(
+                code,
+                CountOverflow{
+                    posting,
+                    static_cast<uint32_t>(stored_count) + 1,
+                    static_cast<uint32_t>(stored_runs) +
+                        static_cast<uint32_t>(new_run)});
+            slot->primary = posting;
+            slot->secondary = std::numeric_limits<uint32_t>::max();
+            return;
+          }
+          slot->primary = posting;
+          slot->secondary =
+              (static_cast<uint32_t>(stored_count + 1) << 16) |
+              static_cast<uint16_t>(stored_runs + new_run);
+        }
+      } else {
+        if (slot->count ==
+            std::numeric_limits<decltype(slot->count)>::max()) {
+          throw std::length_error("range-join posting list is too large");
+        }
+        if (slot->count == 0 ||
+            slot->begin ==
+                std::numeric_limits<decltype(slot->begin)>::max() ||
+            posting != static_cast<Posting>(slot->begin + 1)) {
+          ++slot->encoded_count;
+        }
+        slot->begin = posting;
+        ++slot->count;
       }
-      if (slot->count == 0 ||
-          slot->begin ==
-              std::numeric_limits<decltype(slot->begin)>::max() ||
-          posting != static_cast<Posting>(slot->begin + 1)) {
-        ++slot->encoded_count;
-      }
-      slot->begin = posting;
-      ++slot->count;
     }
 
     void promote_to_64bit() {
       slots64_.resize(slots32_.size());
       for (const auto& slot : slots32_) {
-        if (slot.count == 0) continue;
+        if (!slot_occupied(slot)) continue;
         auto* destination = find_existing(slots64_, slot.code);
         destination->code = slot.code;
-        destination->begin = slot.begin;
-        destination->count = slot.count;
-        destination->encoded_count = slot.encoded_count;
+        uint32_t last = 0;
+        uint32_t count = 0;
+        uint32_t run_count = 0;
+        counting_values(slot, &last, &count, &run_count);
+        destination->begin = last;
+        destination->count = count;
+        destination->encoded_count = run_count;
       }
-      std::vector<Slot32>().swap(slots32_);
+      std::vector<NarrowSlot>().swap(slots32_);
+      std::unordered_map<uint64_t, CountOverflow>().swap(count_overflows_);
     }
 
     template <typename Slot>
     void finish_slots(std::vector<Slot>& slots) {
       uint64_t posting_end = 0;
       for (auto& slot : slots) {
-        if (slot.count == 0) continue;
-        slot.interval =
-            slot.encoded_count < slot.count - slot.encoded_count;
-        const uint64_t record_count =
-            slot.interval ? slot.encoded_count * 2 : slot.count;
-        slot.begin = static_cast<decltype(slot.begin)>(posting_end);
-        slot.encoded_count = 0;
+        if (!slot_occupied(slot)) continue;
+        uint64_t record_count = 0;
+        if constexpr (std::is_same_v<Slot, CompactSlot>) {
+          uint32_t last = 0;
+          uint32_t count = 0;
+          uint32_t run_count = 0;
+          counting_values(slot, &last, &count, &run_count);
+          const bool interval = run_count < count - run_count;
+          record_count = interval ? uint64_t{2} * run_count : count;
+          slot.primary = static_cast<uint32_t>(posting_end);
+          slot.secondary = CompactSlot::kOccupiedMask |
+                           (interval ? CompactSlot::kIntervalMask : 0);
+        } else {
+          slot.interval =
+              slot.encoded_count < slot.count - slot.encoded_count;
+          record_count =
+              slot.interval ? slot.encoded_count * 2 : slot.count;
+          slot.begin = static_cast<decltype(slot.begin)>(posting_end);
+          slot.encoded_count = 0;
+        }
         posting_end += record_count;
       }
       if (posting_end > std::numeric_limits<size_t>::max()) {
@@ -403,26 +539,57 @@ class ExactRangeJoinIndex {
 
     template <typename Slot>
     void append_to_slot(Slot& slot, Posting posting) {
-      if (slot.interval && slot.encoded_count != 0) {
-        const Posting previous = load_posting(slot.begin - 1);
-        if (previous != std::numeric_limits<Posting>::max() &&
-            posting == static_cast<Posting>(previous + 1)) {
-          store_posting(slot.begin - 1, posting);
-          return;
+      if constexpr (std::is_same_v<Slot, CompactSlot>) {
+        const bool interval =
+            (slot.secondary & CompactSlot::kIntervalMask) != 0;
+        uint32_t encoded_count =
+            slot.secondary & CompactSlot::kCountMask;
+        if (interval && encoded_count != 0) {
+          const Posting previous = load_posting(slot.primary - 1);
+          if (previous != std::numeric_limits<Posting>::max() &&
+              posting == static_cast<Posting>(previous + 1)) {
+            store_posting(slot.primary - 1, posting);
+            return;
+          }
         }
-      }
-      store_posting(slot.begin++, posting);
-      ++slot.encoded_count;
-      if (slot.interval) {
+        store_posting(slot.primary++, posting);
+        ++encoded_count;
+        if (interval) {
+          store_posting(slot.primary++, posting);
+          ++encoded_count;
+        }
+        slot.secondary =
+            CompactSlot::kOccupiedMask |
+            (interval ? CompactSlot::kIntervalMask : 0) |
+            encoded_count;
+      } else {
+        if (slot.interval && slot.encoded_count != 0) {
+          const Posting previous = load_posting(slot.begin - 1);
+          if (previous != std::numeric_limits<Posting>::max() &&
+              posting == static_cast<Posting>(previous + 1)) {
+            store_posting(slot.begin - 1, posting);
+            return;
+          }
+        }
         store_posting(slot.begin++, posting);
         ++slot.encoded_count;
+        if (slot.interval) {
+          store_posting(slot.begin++, posting);
+          ++slot.encoded_count;
+        }
       }
     }
 
     template <typename Slot>
     static void finish_filling_slots(std::vector<Slot>& slots) {
       for (auto& slot : slots) {
-        if (slot.count != 0) slot.begin -= slot.encoded_count;
+        if (!slot_occupied(slot)) continue;
+        if constexpr (std::is_same_v<Slot, CompactSlot>) {
+          slot.primary -=
+              slot.secondary & CompactSlot::kCountMask;
+        } else {
+          slot.begin -= slot.encoded_count;
+        }
       }
     }
 
@@ -431,11 +598,23 @@ class ExactRangeJoinIndex {
                      uint64_t code) const {
       const auto* slot = find_existing(slots, code);
       if (!slot) return {};
-      const uint64_t begin = slot->begin;
-      const uint64_t end = begin + slot->encoded_count;
+      uint64_t begin = 0;
+      uint64_t end = 0;
+      bool interval = false;
+      if constexpr (std::is_same_v<Slot, CompactSlot>) {
+        begin = slot->primary;
+        end = begin +
+              (slot->secondary & CompactSlot::kCountMask);
+        interval =
+            (slot->secondary & CompactSlot::kIntervalMask) != 0;
+      } else {
+        begin = slot->begin;
+        end = begin + slot->encoded_count;
+        interval = slot->interval;
+      }
       return {
           Iterator(packed_postings_.data(), begin, end,
-                   posting_bit_width_, slot->interval),
+                   posting_bit_width_, interval),
           Iterator(),
           true};
     }
@@ -473,8 +652,9 @@ class ExactRangeJoinIndex {
           posting_bit_width_, false);
     }
 
-    std::vector<Slot32> slots32_;
+    std::vector<NarrowSlot> slots32_;
     std::vector<Slot64> slots64_;
+    std::unordered_map<uint64_t, CountOverflow> count_overflows_;
     std::vector<uint8_t> packed_postings_;
     uint64_t posting_count_ = 0;
     uint64_t encoded_posting_count_ = 0;

@@ -362,6 +362,28 @@ void test_run_encoded_postings_expand_exactly() {
   }
 }
 
+void test_compact_slot_supports_16bit_boundary_and_overflow() {
+  const std::string sequence(4, 'A');
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 4;
+  const size_t boundary =
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
+  for (size_t item_count : {boundary, boundary + 1}) {
+    std::vector<const char*> sequence_data(item_count, sequence.data());
+    navigamer::ExactRangeJoinIndex index(config, true);
+    index.build_uniform_identity_views(
+        std::move(sequence_data), sequence.size());
+
+    const auto result = index.query(sequence, 0);
+    assert(result.candidate_item_ids.size() == item_count);
+    assert(result.candidate_item_ids.front() == 0);
+    assert(result.candidate_item_ids.back() == item_count - 1);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -379,6 +401,7 @@ int main() {
   test_positional_postings_are_recall_safe();
   test_compact_postings_support_extreme_codes_and_copy();
   test_run_encoded_postings_expand_exactly();
+  test_compact_slot_supports_16bit_boundary_and_overflow();
 
   std::mt19937 gen(42);
   std::vector<RangeJoinItem> items;
