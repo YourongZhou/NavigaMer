@@ -231,7 +231,7 @@ quality-audit time only.
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v35 binary persistence and manifest signatures |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v36 binary persistence and manifest signatures |
 | `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, exact-minimizer shard routing, bundle manifests, and validated loading |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
@@ -246,13 +246,17 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v35 bit-packs each node to the minimum whole-byte width supported by
+Format v36 bit-packs each node to the minimum whole-byte width supported by
 that shard's actual offset and count ranges (9 bytes per node in the 100k-window
 reference benchmark, with wider automatic fallbacks). Base-relative child
 payloads store a minimum whole-byte forward base delta from `node_id + 1`
 immediately before their local child offsets, preserving cache locality while
 avoiding a fixed 32-bit base. Finalized arrays load directly. Older files must
 be rebuilt.
+Center sequence IDs use aligned 16-node blocks within each layer. Each block
+stores one exact 32-bit base and fixed-width exact deltas using the minimum
+width required by that layer; lookup is constant-time and reconstructs the
+same `LeafId` without approximation.
 Paired child-MBB coordinates store one exact beacon-pair distance and rank
 each child's quantized pair only among states allowed by the triangle
 inequality. Decoding reproduces the same conservative bins exactly, so pruning
@@ -260,7 +264,7 @@ and recall semantics are unchanged while infeasible states consume no code
 space.
 Non-finest beacon offsets use the minimum shard-local bit width with exact
 constant-time decoding rather than one 32-bit value per node.
-A v7 `.navshard` bundle stores the common v35 construction manifest once and
+A v8 `.navshard` bundle stores the common v36 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
@@ -381,7 +385,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 35
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 36
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed

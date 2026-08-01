@@ -1031,6 +1031,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances(
 NAVIGAMER_QUERY_HOT_ALIGN
 std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     NodeId node_id,
+    size_t layer,
     const BioSequence& query_seq,
     SearchStats& stats) const {
   const auto& view = index_.search_graph_view();
@@ -1085,7 +1086,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
               WorldNodeRecord::BeaconStorage::ImplicitCenter
           ? 0
           : view.beacon_begin(node_id);
-  const LeafId center_id = view.center_sequence_id(node_id);
+  const LeafId center_id = view.center_sequence_id(node_id, layer);
   switch (node.beacon_storage()) {
     case WorldNodeRecord::BeaconStorage::Delta8: {
       const int8_t* deltas =
@@ -1852,10 +1853,6 @@ std::vector<std::string> BioGeometrySearchEngine::debug_safe_child_router_candid
 
   SearchStats stats(static_cast<size_t>(index_.num_primary_layers()));
   std::vector<int> V_Q;
-  if (view.beacon_count(parent_id) > 0) {
-    V_Q = compute_query_beacon_distances_view(parent_id, query_seq, stats);
-  }
-  bool routed = false;
   const auto layer_it = std::upper_bound(
       view.layer_end.begin(), view.layer_end.end(), parent_id);
   if (layer_it == view.layer_end.end()) {
@@ -1865,6 +1862,11 @@ std::vector<std::string> BioGeometrySearchEngine::debug_safe_child_router_candid
   const size_t parent_layer =
       static_cast<size_t>(
           std::distance(view.layer_end.begin(), layer_it));
+  if (view.beacon_count(parent_id) > 0) {
+    V_Q = compute_query_beacon_distances_view(
+        parent_id, parent_layer, query_seq, stats);
+  }
+  bool routed = false;
   const auto& primary_radii =
       index_.hierarchy_config().primary_radii;
   const int child_radius =
@@ -2727,7 +2729,8 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
       view.leaf_mbb_range_valid(
           node_id, node, leaf_count, beacon_count);
   if (has_leaf_sieve) {
-    V_Q = compute_query_beacon_distances_view(node_id, query_seq, stats);
+    V_Q = compute_query_beacon_distances_view(
+        node_id, view.layer_begin.size() - 1, query_seq, stats);
   }
 
   std::vector<uint32_t> survivor_offsets;
@@ -2835,7 +2838,8 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     case WorldNodeRecord::LinkStorage::Delta8: {
       const int8_t* deltas =
           view.leaf_id_deltas8.data() + leaf_begin;
-      const LeafId center_id = view.center_sequence_id(node_id);
+      const LeafId center_id = view.center_sequence_id(
+          node_id, view.layer_begin.size() - 1);
       verify_survivors([&](uint32_t offset) {
         return center_id + deltas[offset];
       });
@@ -2844,7 +2848,8 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     case WorldNodeRecord::LinkStorage::Delta16: {
       const int16_t* deltas =
           view.leaf_id_deltas16.data() + leaf_begin;
-      const LeafId center_id = view.center_sequence_id(node_id);
+      const LeafId center_id = view.center_sequence_id(
+          node_id, view.layer_begin.size() - 1);
       verify_survivors([&](uint32_t offset) {
         return center_id + deltas[offset];
       });
@@ -2856,11 +2861,14 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
           [&](uint32_t offset) { return leaf_ids[offset]; });
       break;
     }
-    case WorldNodeRecord::LinkStorage::PackedDelta:
+    case WorldNodeRecord::LinkStorage::PackedDelta: {
+      const LeafId center_id = view.center_sequence_id(
+          node_id, view.layer_begin.size() - 1);
       verify_survivors([&](uint32_t offset) {
-        return view.packed_leaf_id(node_id, offset);
+        return view.packed_leaf_id(node, center_id, offset);
       });
       break;
+    }
     default:
       throw std::runtime_error("view leaf ID encoding is invalid");
   }
@@ -3536,7 +3544,8 @@ void BioGeometrySearchEngine::process_node_adaptive_view(
           static_cast<size_t>(child_layer));
   std::vector<int> V_Q;
   if (view.beacon_count(node_id) > 0) {
-    V_Q = compute_query_beacon_distances_view(node_id, query_seq, stats);
+    V_Q = compute_query_beacon_distances_view(
+        node_id, static_cast<size_t>(current_layer), query_seq, stats);
   }
   bool used_safe_child_router = false;
   auto child_offsets = safe_child_router_candidate_indices_view(
@@ -3603,7 +3612,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
         }
         const std::string key = node_key(node_id);
         if (key != cached_it->second) continue;
-        const LeafId center_id = view.center_sequence_id(node_id);
+        const LeafId center_id = view.center_sequence_id(
+            node_id, static_cast<size_t>(layer_id));
         if (center_id >= view.sequences.size()) {
           throw std::runtime_error("array node center id is invalid");
         }
@@ -3665,7 +3675,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
         prefetch_read(view.node_records.record_data(next_id));
       }
     }
-    const LeafId center_id = view.center_sequence_id(node_id);
+    const LeafId center_id = view.center_sequence_id(
+        node_id, static_cast<size_t>(layer_id));
     if (center_id >= view.sequences.size()) {
       throw std::runtime_error("array node center id is invalid");
     }
@@ -4072,7 +4083,8 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
       if (node_id >= view.node_records.size()) {
         throw std::out_of_range("greedy node id is outside array index");
       }
-      const LeafId center_id = view.center_sequence_id(node_id);
+      const LeafId center_id = view.center_sequence_id(
+          node_id, static_cast<size_t>(layer_id));
       if (center_id >= view.sequences.size()) {
         throw std::runtime_error("greedy node center id is invalid");
       }
@@ -4103,7 +4115,8 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
     }
 
     std::vector<int> V_Q =
-        compute_query_beacon_distances_view(best_node, query_seq, stats);
+        compute_query_beacon_distances_view(
+            best_node, static_cast<size_t>(layer_id), query_seq, stats);
     current =
         get_mbb_surviving_child_ids_view(
             best_node, V_Q,
@@ -4157,7 +4170,8 @@ void BioGeometrySearchEngine::traverse_exhaustive_view(
   }
   if (visited_nodes[node_id]) return;
   visited_nodes[node_id] = 1;
-  const LeafId center_id = view.center_sequence_id(node_id);
+  const LeafId center_id = view.center_sequence_id(
+      node_id, static_cast<size_t>(current_layer));
   if (center_id >= view.sequences.size()) {
     throw std::runtime_error("exhaustive node center id is invalid");
   }

@@ -1227,11 +1227,15 @@ struct SearchGraphView {
   // Canonical array representation. NodeId and LeafId are positions in
   // node_records and sequences respectively.
   PackedWorldNodeArray node_records;
-  // Fixed-width packed LeafIds use max(1, ceil(log2(sequence_count))) bits.
-  // Keeping centers separate shrinks every hot node record from 16 to 12
-  // bytes without changing center lookup complexity.
-  FinalArray<uint8_t> center_sequence_ids;
-  uint8_t center_sequence_id_bits = 0;
+  // Center IDs increase within each layer. Every aligned 16-node block stores
+  // one absolute base plus fixed-width exact deltas; layer-local widths keep
+  // random access O(1) without paying the shard-wide LeafId width per node.
+  static constexpr size_t CENTER_ID_BLOCK_SIZE = 16;
+  FinalArray<LeafId> center_id_block_bases;
+  FinalArray<uint8_t> center_id_block_deltas;
+  std::vector<uint32_t> center_id_block_begins;
+  std::vector<uint32_t> center_id_delta_begins;
+  std::vector<uint8_t> center_id_delta_bits;
   FinalArray<NodeCountOverflowRecord> node_count_overflows;
   SequenceStore sequences;
   std::vector<uint32_t> layer_begin;
@@ -1343,30 +1347,110 @@ struct SearchGraphView {
     return static_cast<uint32_t>((word >> shift) & mask);
   }
 
-  void initialize_center_sequence_ids(size_t sequence_count) {
-    center_sequence_id_bits = 0;
-    if (sequence_count != 0) {
-      center_sequence_id_bits = 1;
-      for (size_t maximum = sequence_count - 1; maximum >>= 1;) {
-        ++center_sequence_id_bits;
+  void initialize_center_sequence_ids(
+      const std::vector<uint8_t>& bits_by_layer) {
+    const size_t layer_count = layer_begin.size();
+    if (layer_end.size() != layer_count ||
+        bits_by_layer.size() != layer_count) {
+      throw std::invalid_argument(
+          "center ID layer metadata is inconsistent");
+    }
+    center_id_block_begins.assign(layer_count, 0);
+    center_id_delta_begins.assign(layer_count, 0);
+    center_id_delta_bits = bits_by_layer;
+    size_t total_blocks = 0;
+    size_t total_delta_bytes = 0;
+    for (size_t layer = 0; layer < layer_count; ++layer) {
+      if (layer_end[layer] < layer_begin[layer] ||
+          bits_by_layer[layer] > 32) {
+        throw std::invalid_argument("invalid center ID layer layout");
+      }
+      center_id_block_begins[layer] = static_cast<uint32_t>(total_blocks);
+      center_id_delta_begins[layer] =
+          static_cast<uint32_t>(total_delta_bytes);
+      const size_t count = layer_end[layer] - layer_begin[layer];
+      const size_t blocks =
+          (count + CENTER_ID_BLOCK_SIZE - 1) / CENTER_ID_BLOCK_SIZE;
+      total_blocks += blocks;
+      const uint64_t slots =
+          static_cast<uint64_t>(blocks) * (CENTER_ID_BLOCK_SIZE - 1);
+      total_delta_bytes += static_cast<size_t>(
+          (slots * bits_by_layer[layer] + 7) / 8);
+      if (total_blocks > std::numeric_limits<uint32_t>::max() ||
+          total_delta_bytes > std::numeric_limits<uint32_t>::max()) {
+        throw std::length_error("center ID block storage exceeds 32 bits");
       }
     }
-    const uint64_t bit_count =
-        static_cast<uint64_t>(node_records.size()) *
-        center_sequence_id_bits;
-    center_sequence_ids.assign(
-        static_cast<size_t>((bit_count + 7) / 8), uint8_t{0});
+    center_id_block_bases.assign(total_blocks, LeafId{0});
+    center_id_block_deltas.assign(total_delta_bytes, uint8_t{0});
   }
 
-  void set_center_sequence_id(NodeId node_id, LeafId center_id) {
-    const uint32_t bits = center_sequence_id_bits;
-    const size_t bit_offset = static_cast<size_t>(node_id) * bits;
-    const size_t byte_offset = bit_offset >> 3;
+  bool center_sequence_ids_valid() const {
+    const size_t layer_count = layer_begin.size();
+    if (layer_end.size() != layer_count ||
+        center_id_block_begins.size() != layer_count ||
+        center_id_delta_begins.size() != layer_count ||
+        center_id_delta_bits.size() != layer_count) {
+      return false;
+    }
+    size_t expected_blocks = 0;
+    size_t expected_delta_bytes = 0;
+    for (size_t layer = 0; layer < layer_count; ++layer) {
+      if (layer_end[layer] < layer_begin[layer] ||
+          center_id_delta_bits[layer] > 32 ||
+          center_id_block_begins[layer] != expected_blocks ||
+          center_id_delta_begins[layer] != expected_delta_bytes) {
+        return false;
+      }
+      const size_t count = layer_end[layer] - layer_begin[layer];
+      const size_t blocks =
+          (count + CENTER_ID_BLOCK_SIZE - 1) / CENTER_ID_BLOCK_SIZE;
+      expected_blocks += blocks;
+      const uint64_t slots =
+          static_cast<uint64_t>(blocks) * (CENTER_ID_BLOCK_SIZE - 1);
+      expected_delta_bytes += static_cast<size_t>(
+          (slots * center_id_delta_bits[layer] + 7) / 8);
+    }
+    return center_id_block_bases.size() == expected_blocks &&
+           center_id_block_deltas.size() == expected_delta_bytes;
+  }
+
+  void set_center_sequence_id(
+      NodeId node_id, size_t layer, LeafId center_id) {
+    if (layer >= layer_begin.size() || node_id < layer_begin[layer] ||
+        node_id >= layer_end[layer]) {
+      throw std::out_of_range("center ID node is outside its layer");
+    }
+    const size_t local = node_id - layer_begin[layer];
+    const size_t block = local / CENTER_ID_BLOCK_SIZE;
+    const size_t in_block = local % CENTER_ID_BLOCK_SIZE;
+    const size_t base_idx = center_id_block_begins[layer] + block;
+    if (in_block == 0) {
+      center_id_block_bases[base_idx] = center_id;
+      return;
+    }
+    const LeafId base = center_id_block_bases[base_idx];
+    if (center_id < base) {
+      throw std::runtime_error(
+          "center IDs are not monotone within a layer block");
+    }
+    const uint32_t delta = center_id - base;
+    const uint32_t bits = center_id_delta_bits[layer];
+    const uint64_t mask =
+        bits == 32 ? std::numeric_limits<uint32_t>::max()
+                   : bits == 0 ? 0 : (uint64_t{1} << bits) - 1;
+    if (delta > mask) {
+      throw std::length_error("center ID delta exceeds layer width");
+    }
+    const size_t slot = block * (CENTER_ID_BLOCK_SIZE - 1) + in_block - 1;
+    const size_t bit_offset = slot * bits;
+    const size_t byte_offset =
+        center_id_delta_begins[layer] + (bit_offset >> 3);
     const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
     const size_t byte_count = (shift + bits + 7) / 8;
-    uint64_t word = static_cast<uint64_t>(center_id) << shift;
+    const uint64_t word = static_cast<uint64_t>(delta) << shift;
     for (size_t byte = 0; byte < byte_count; ++byte) {
-      center_sequence_ids[byte_offset + byte] |=
+      center_id_block_deltas[byte_offset + byte] |=
           static_cast<uint8_t>(word >> (byte * 8));
     }
   }
@@ -1383,30 +1467,49 @@ struct SearchGraphView {
     return link_count(node);
   }
 
-  LeafId center_sequence_id(NodeId node_id) const {
-    const uint32_t bits = center_sequence_id_bits;
-    const size_t bit_offset = static_cast<size_t>(node_id) * bits;
-    const size_t byte_offset = bit_offset >> 3;
+  LeafId center_sequence_id(NodeId node_id, size_t layer) const {
+    const size_t local = node_id - layer_begin[layer];
+    const size_t block = local / CENTER_ID_BLOCK_SIZE;
+    const size_t in_block = local % CENTER_ID_BLOCK_SIZE;
+    const LeafId base =
+        center_id_block_bases[center_id_block_begins[layer] + block];
+    if (in_block == 0) return base;
+    const uint32_t bits = center_id_delta_bits[layer];
+    if (bits == 0) return base;
+    const size_t slot = block * (CENTER_ID_BLOCK_SIZE - 1) + in_block - 1;
+    const size_t bit_offset = slot * bits;
+    const size_t byte_offset =
+        center_id_delta_begins[layer] + (bit_offset >> 3);
     const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
-    if (bits <= 25 && byte_offset + sizeof(uint32_t) <=
-                          center_sequence_ids.size()) {
-      uint32_t word = 0;
-      std::memcpy(&word, center_sequence_ids.data() + byte_offset,
-                  sizeof(word));
-      const uint32_t mask = (uint32_t{1} << bits) - 1;
-      return static_cast<LeafId>((word >> shift) & mask);
-    }
-    const size_t byte_count = (shift + bits + 7) / 8;
     uint64_t word = 0;
-    for (size_t byte = 0; byte < byte_count; ++byte) {
-      word |= static_cast<uint64_t>(
-                  center_sequence_ids[byte_offset + byte])
-              << (byte * 8);
+    if (bits <= 25 && byte_offset + sizeof(uint32_t) <=
+                          center_id_block_deltas.size()) {
+      uint32_t packed = 0;
+      std::memcpy(
+          &packed, center_id_block_deltas.data() + byte_offset,
+          sizeof(packed));
+      word = packed;
+    } else {
+      const size_t byte_count = (shift + bits + 7) / 8;
+      for (size_t byte = 0; byte < byte_count; ++byte) {
+        word |= static_cast<uint64_t>(
+                    center_id_block_deltas[byte_offset + byte])
+                << (byte * 8);
+      }
     }
     const uint64_t mask =
         bits == 32 ? std::numeric_limits<uint32_t>::max()
                    : (uint64_t{1} << bits) - 1;
-    return static_cast<LeafId>((word >> shift) & mask);
+    return static_cast<LeafId>(base + ((word >> shift) & mask));
+  }
+
+  LeafId center_sequence_id(NodeId node_id) const {
+    const auto it = std::upper_bound(layer_end.begin(), layer_end.end(), node_id);
+    if (it == layer_end.end()) {
+      throw std::out_of_range("center ID node is outside graph layers");
+    }
+    return center_sequence_id(
+        node_id, static_cast<size_t>(it - layer_end.begin()));
   }
   uint32_t child_count(NodeId node_id) const {
     return link_count(node_id);

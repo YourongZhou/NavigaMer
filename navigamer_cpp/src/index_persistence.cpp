@@ -25,7 +25,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '7'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '8'};
 constexpr std::array<char, 8> kPayloadMagic = {
     'N', 'G', 'P', 'A', 'Y', 'L', '0', '1'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 35) {
+  if (manifest.format_version != 36) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 35) {
+  if (manifest.format_version != 36) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -476,6 +476,36 @@ std::vector<uint32_t> read_u32_vector(std::istream& in, const char* field) {
   const size_t byte_count = count * sizeof(uint32_t);
   in.read(reinterpret_cast<char*>(values.data()),
           static_cast<std::streamsize>(byte_count));
+  if (!in) {
+    throw std::runtime_error(std::string("failed to read index field: ") +
+                             field);
+  }
+  return values;
+}
+
+void write_u8_vector(std::ostream& out, const std::vector<uint8_t>& values) {
+  write_size(out, values.size());
+  if (values.empty()) return;
+  if (values.size() > static_cast<size_t>(
+                          std::numeric_limits<std::streamsize>::max())) {
+    throw std::runtime_error("u8 vector exceeds stream size range");
+  }
+  out.write(reinterpret_cast<const char*>(values.data()),
+            static_cast<std::streamsize>(values.size()));
+  if (!out) throw std::runtime_error("failed to write u8 vector");
+}
+
+std::vector<uint8_t> read_u8_vector(std::istream& in, const char* field) {
+  const size_t count = read_size(in, field);
+  if (count > static_cast<size_t>(
+                  std::numeric_limits<std::streamsize>::max())) {
+    throw std::runtime_error(std::string(field) +
+                             " exceeds stream size range");
+  }
+  std::vector<uint8_t> values(count);
+  if (values.empty()) return values;
+  in.read(reinterpret_cast<char*>(values.data()),
+          static_cast<std::streamsize>(values.size()));
   if (!in) {
     throw std::runtime_error(std::string("failed to read index field: ") +
                              field);
@@ -941,10 +971,13 @@ SequenceStore read_sequence_store(
 void write_search_graph_view(std::ostream& out,
                              const SearchGraphView& view) {
   write_sequence_store(out, view.sequences);
-  write_pod<uint8_t>(
-      out, view.center_sequence_id_bits);
   write_final_array(
-      out, view.center_sequence_ids, "center_sequence_ids");
+      out, view.center_id_block_bases, "center_id_block_bases");
+  write_final_array(
+      out, view.center_id_block_deltas, "center_id_block_deltas");
+  write_u32_vector(out, view.center_id_block_begins);
+  write_u32_vector(out, view.center_id_delta_begins);
+  write_u8_vector(out, view.center_id_delta_bits);
   write_pod<PackedWorldNodeLayout>(out, view.node_records.layout());
   write_size(out, view.node_records.size());
   write_final_array(
@@ -983,11 +1016,18 @@ SearchGraphView read_search_graph_view(
   SearchGraphView view;
   view.sequences =
       read_sequence_store(in, mapping, validation);
-  view.center_sequence_id_bits =
-      read_pod<uint8_t>(in, "center_sequence_id_bits");
-  view.center_sequence_ids =
+  view.center_id_block_bases =
+      read_final_array<LeafId>(
+          in, mapping, "center_id_block_bases");
+  view.center_id_block_deltas =
       read_final_array<uint8_t>(
-          in, mapping, "center_sequence_ids");
+          in, mapping, "center_id_block_deltas");
+  view.center_id_block_begins =
+      read_u32_vector(in, "center_id_block_begins");
+  view.center_id_delta_begins =
+      read_u32_vector(in, "center_id_delta_begins");
+  view.center_id_delta_bits =
+      read_u8_vector(in, "center_id_delta_bits");
   const PackedWorldNodeLayout node_layout =
       read_pod<PackedWorldNodeLayout>(in, "node_record_layout");
   if (!node_layout.valid()) {
@@ -1045,20 +1085,7 @@ bool validate_structural_layout(
       view.layer_end.size() != layer_count) {
     return false;
   }
-  uint32_t expected_center_bits = 0;
-  if (!view.sequences.empty()) {
-    expected_center_bits = 1;
-    for (size_t maximum = view.sequences.size() - 1;
-         maximum >>= 1;) {
-      ++expected_center_bits;
-    }
-  }
-  const uint64_t center_bit_count =
-      static_cast<uint64_t>(view.node_records.size()) *
-      expected_center_bits;
-  if (view.center_sequence_id_bits != expected_center_bits ||
-      view.center_sequence_ids.size() !=
-          static_cast<size_t>((center_bit_count + 7) / 8)) {
+  if (!view.center_sequence_ids_valid()) {
     return false;
   }
   uint32_t expected_begin = 0;
@@ -1196,7 +1223,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 35;
+  stored.format_version = 36;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

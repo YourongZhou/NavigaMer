@@ -335,6 +335,7 @@ class BioGeometrySearchEngine {
       SearchStats& stats) const;
   std::vector<int> compute_query_beacon_distances_view(
       NodeId node_id,
+      size_t layer,
       const BioSequence& query_seq,
       SearchStats& stats) const;
   std::vector<std::shared_ptr<WorldNode>> scan_mbb_surviving_children(

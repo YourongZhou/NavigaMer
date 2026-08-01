@@ -47,10 +47,14 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 35 stores the shared
+edit distance fits in one byte. Persisted format version 36 stores the shared
 reference as raw bases in the memory-mapped index, so loading does not allocate
 or eagerly fault a full decoded reference into heap memory, and
 keeps long literal inputs in the manifest only as content fingerprints. It
+stores layer-monotone center IDs in aligned 16-node blocks: one exact 32-bit
+base plus fixed-width exact deltas, with an independently chosen width per
+layer. Center lookup remains constant-time and reconstructs the original
+`LeafId` exactly. It
 stores one child-center-to-beacon distance per MBB cell instead of separate
 lower and upper bounds. Non-finest parents use at most 10 deterministic
 beacons; reducing the sampling cap only relaxes pruning, so it cannot introduce
@@ -251,7 +255,7 @@ limit, while peak build memory is bounded by the number of concurrent parts.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
-Only one group of temporary shard files exists at a time. The final v7
+Only one group of temporary shard files exists at a time. The final v8
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph

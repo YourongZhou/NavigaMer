@@ -1907,18 +1907,7 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       view.sequences.size() != sequence_count_) {
     return false;
   }
-  uint32_t expected_center_bits = 0;
-  if (sequence_count_ != 0) {
-    expected_center_bits = 1;
-    for (size_t maximum = sequence_count_ - 1; maximum >>= 1;) {
-      ++expected_center_bits;
-    }
-  }
-  const uint64_t center_bit_count =
-      static_cast<uint64_t>(world_node_count_) * expected_center_bits;
-  if (view.center_sequence_id_bits != expected_center_bits ||
-      view.center_sequence_ids.size() !=
-          static_cast<size_t>((center_bit_count + 7) / 8)) {
+  if (!view.center_sequence_ids_valid()) {
     return false;
   }
   if (view.sequences.reference_backed) {
@@ -2181,18 +2170,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
           ? static_cast<NodeId>(view.node_records.size())
           : view.layer_begin.back();
   if (!view.child_base_ids_valid(finest_begin)) return false;
-  uint32_t expected_center_bits = 0;
-  if (sequence_count_ != 0) {
-    expected_center_bits = 1;
-    for (size_t maximum = sequence_count_ - 1; maximum >>= 1;) {
-      ++expected_center_bits;
-    }
-  }
-  const uint64_t center_bit_count =
-      static_cast<uint64_t>(world_node_count_) * expected_center_bits;
-  if (view.center_sequence_id_bits != expected_center_bits ||
-      view.center_sequence_ids.size() !=
-          static_cast<size_t>((center_bit_count + 7) / 8)) {
+  if (!view.center_sequence_ids_valid()) {
     return false;
   }
   uint32_t expected_layer_begin = 0;
@@ -4497,6 +4475,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   std::vector<uint64_t> node_finalization_plans(world_node_count_, 0);
   view.layer_begin.assign(static_cast<size_t>(num_primary_layers()), 0);
   view.layer_end.assign(static_cast<size_t>(num_primary_layers()), 0);
+  std::vector<uint8_t> center_id_delta_bits(primary_layers_.size(), 0);
   size_t total_child_base_deltas8_bytes = 0;
   size_t total_child_deltas16 = 0;
   size_t total_child_ids32 = 0;
@@ -4545,12 +4524,44 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   };
   for (size_t layer_idx = 0;
        layer_idx < primary_layers_.size(); ++layer_idx) {
+    const auto& layer = primary_layers_[layer_idx];
     const bool is_finest =
         layer_idx + 1 == primary_layers_.size();
-    for (NodeId build_node_id : primary_layers_[layer_idx]) {
+    const uint32_t previous_end =
+        layer_idx == 0 ? 0 : view.layer_end[layer_idx - 1];
+    view.layer_begin[layer_idx] =
+        layer.empty() ? previous_end : layer.front();
+    view.layer_end[layer_idx] =
+        layer.empty() ? view.layer_begin[layer_idx]
+                      : to_u32(static_cast<size_t>(layer.back()) + 1,
+                               "layer_end");
+    if (view.layer_begin[layer_idx] != previous_end) {
+      throw std::runtime_error(
+          "world node IDs are not contiguous across primary layers");
+    }
+    uint32_t maximum_block_delta = 0;
+    LeafId block_base = 0;
+    LeafId previous_center = 0;
+    bool have_previous = false;
+    size_t node_offset = 0;
+    for (NodeId build_node_id : layer) {
       const auto& node = build_nodes_[build_node_id];
       const auto& geometry =
           build_node_geometry_[node.geometry_index];
+      if (node_offset % SearchGraphView::CENTER_ID_BLOCK_SIZE == 0) {
+        block_base = node.center_sequence_id;
+      }
+      if (have_previous &&
+          node.center_sequence_id <= previous_center) {
+        throw std::runtime_error(
+            "center sequence IDs are not strictly increasing within layer");
+      }
+      maximum_block_delta = std::max(
+          maximum_block_delta,
+          node.center_sequence_id - block_base);
+      previous_center = node.center_sequence_id;
+      have_previous = true;
+      ++node_offset;
       maximum_link_count = std::max<uint64_t>(
           maximum_link_count, node.child_or_leaf_ids.size());
       if (node.child_or_leaf_ids.size() >
@@ -4664,6 +4675,10 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           static_cast<uint64_t>(child_base) |
           (static_cast<uint64_t>(plan) << 32);
     }
+    center_id_delta_bits[layer_idx] =
+        maximum_block_delta == 0
+            ? 0
+            : PackedWorldNodeLayout::bits_for_value(maximum_block_delta);
   }
   if (total_mbb_bytes >
       static_cast<size_t>(WorldNodeRecord::CHILD_MBB_BEGIN_MASK) + 1) {
@@ -4686,7 +4701,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       world_node_count_, PackedWorldNodeLayout::compact(
           maximum_link_begin, maximum_mbb_begin,
           maximum_count_field));
-  view.initialize_center_sequence_ids(sequence_count_);
+  view.initialize_center_sequence_ids(center_id_delta_bits);
   const size_t non_finest_node_count =
       primary_layers_.empty()
           ? 0
@@ -4711,9 +4726,6 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     const auto& layer = primary_layers_[layer_idx];
     const bool is_finest =
         layer_idx + 1 == primary_layers_.size();
-    view.layer_begin[layer_idx] =
-        layer.empty() ? to_u32(world_node_count_, "layer_begin")
-                      : layer.front();
     for (NodeId build_node_id : layer) {
       if (build_node_id >= build_nodes_.size() ||
           build_node_id >= world_node_count_) {
@@ -4733,7 +4745,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         throw std::runtime_error(
             "cannot build array index with invalid center sequence id");
       }
-      view.set_center_sequence_id(node_id, node.center_sequence_id);
+      view.set_center_sequence_id(
+          node_id, layer_idx, node.center_sequence_id);
 
       uint32_t link_count = 0;
       if (!is_finest) {
@@ -5043,13 +5056,6 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             geometry.link_beacon_dists.end());
       }
     }
-    view.layer_end[layer_idx] =
-        layer.empty() ? view.layer_begin[layer_idx]
-                      : to_u32(
-                            static_cast<size_t>(
-                                layer.back()) +
-                                1,
-                               "layer_end");
   }
 
   search_graph_view_ = std::move(view);

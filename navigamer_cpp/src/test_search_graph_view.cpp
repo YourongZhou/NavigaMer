@@ -219,7 +219,9 @@ void assert_max_byte_distance_is_recall_safe() {
 void assert_all_beacon_id_encodings_are_exact() {
   navigamer::SearchGraphView view;
   view.node_records.resize(4);
-  view.initialize_center_sequence_ids(4000000001ULL);
+  view.layer_begin = {0, 1, 2, 3};
+  view.layer_end = {1, 2, 3, 4};
+  view.initialize_center_sequence_ids({0, 0, 0, 0});
   view.beacon_deltas8 = {-120};
   view.beacon_deltas16 = {30000};
   view.beacon_ids32 = {4000000000U};
@@ -228,25 +230,25 @@ void assert_all_beacon_id_encodings_are_exact() {
   view.set_beacon_begin(1, 0);
   view.set_beacon_begin(2, 0);
 
-  view.set_center_sequence_id(0, 200);
+  view.set_center_sequence_id(0, 0, 200);
   view.set_node_counts(
       0, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
   assert(view.beacon_sequence_id(0, 0) == 80);
 
-  view.set_center_sequence_id(1, 1000);
+  view.set_center_sequence_id(1, 1, 1000);
   view.set_node_counts(
       1, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Delta16);
   assert(view.beacon_sequence_id(1, 0) == 31000);
 
-  view.set_center_sequence_id(2, 0);
+  view.set_center_sequence_id(2, 2, 0);
   view.set_node_counts(
       2, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
   assert(view.beacon_sequence_id(2, 0) == 4000000000U);
 
-  view.set_center_sequence_id(3, 123456789U);
+  view.set_center_sequence_id(3, 3, 123456789U);
   view.set_node_counts(
       3, 0, 1,
       navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
@@ -254,25 +256,27 @@ void assert_all_beacon_id_encodings_are_exact() {
 }
 
 void assert_all_center_id_widths_are_exact() {
-  constexpr navigamer::NodeId kNodeCount = 11;
-  for (uint32_t bits = 1; bits <= 32; ++bits) {
+  constexpr navigamer::NodeId kNodeCount = 16;
+  for (uint32_t bits = 0; bits <= 32; ++bits) {
     navigamer::SearchGraphView view;
-    view.node_records.resize(kNodeCount);
-    const uint64_t sequence_count = uint64_t{1} << bits;
-    view.initialize_center_sequence_ids(
-        static_cast<size_t>(sequence_count));
-    assert(view.center_sequence_id_bits == bits);
-    const uint32_t mask =
-        bits == 32 ? UINT32_MAX : (uint32_t{1} << bits) - 1;
-    for (navigamer::NodeId node_id = 0; node_id < kNodeCount;
+    const navigamer::NodeId node_count = bits == 0 ? 1 : kNodeCount;
+    view.node_records.resize(node_count);
+    view.layer_begin = {0};
+    view.layer_end = {node_count};
+    view.initialize_center_sequence_ids({static_cast<uint8_t>(bits)});
+    assert(view.center_id_delta_bits.front() == bits);
+    const uint64_t mask =
+        bits == 32 ? UINT32_MAX : bits == 0 ? 0 : (uint64_t{1} << bits) - 1;
+    const uint32_t divisor = node_count > 1 ? node_count - 1 : 1;
+    for (navigamer::NodeId node_id = 0; node_id < node_count;
          ++node_id) {
       const navigamer::LeafId center_id =
-          node_id + 1 == kNodeCount
-              ? mask
-              : (node_id * 2654435761U) & mask;
-      view.set_center_sequence_id(node_id, center_id);
+          static_cast<navigamer::LeafId>(
+              mask * node_id / divisor);
+      view.set_center_sequence_id(node_id, 0, center_id);
       assert(view.center_sequence_id(node_id) == center_id);
     }
+    assert(view.center_sequence_ids_valid());
   }
 }
 
@@ -564,13 +568,15 @@ void assert_all_packed_child_widths_are_exact() {
 void assert_leaf_id_encodings_are_exact() {
   navigamer::SearchGraphView view;
   view.node_records.resize(3);
-  view.initialize_center_sequence_ids(100001);
+  view.layer_begin = {0, 1, 2};
+  view.layer_end = {1, 2, 3};
+  view.initialize_center_sequence_ids({0, 0, 0});
   view.leaf_id_deltas8 = {-120, 127};
   view.leaf_id_deltas16 = {-30000, 30000};
   view.leaf_ids = {17, UINT32_MAX - 1};
 
   auto delta8 = view.node_records[0];
-  view.set_center_sequence_id(0, 200);
+  view.set_center_sequence_id(0, 0, 200);
   delta8.set_link_begin_value(0);
   delta8.set_link_storage(
       navigamer::WorldNodeRecord::LinkStorage::Delta8);
@@ -581,7 +587,7 @@ void assert_leaf_id_encodings_are_exact() {
   assert(view.leaf_id(0, 1) == 327);
 
   auto delta16 = view.node_records[1];
-  view.set_center_sequence_id(1, 40000);
+  view.set_center_sequence_id(1, 1, 40000);
   delta16.set_link_begin_value(0);
   delta16.set_link_storage(
       navigamer::WorldNodeRecord::LinkStorage::Delta16);
@@ -592,7 +598,7 @@ void assert_leaf_id_encodings_are_exact() {
   assert(view.leaf_id(1, 1) == 70000);
 
   auto absolute32 = view.node_records[2];
-  view.set_center_sequence_id(2, 0);
+  view.set_center_sequence_id(2, 2, 0);
   absolute32.set_link_begin_value(0);
   view.set_node_counts(
       2, 2, 1,
@@ -604,9 +610,11 @@ void assert_leaf_id_encodings_are_exact() {
   for (uint32_t bits = 1; bits <= 16; ++bits) {
     navigamer::SearchGraphView packed_view;
     packed_view.node_records.resize(1);
-    packed_view.initialize_center_sequence_ids(100001);
+    packed_view.layer_begin = {0};
+    packed_view.layer_end = {1};
+    packed_view.initialize_center_sequence_ids({0});
     auto packed = packed_view.node_records[0];
-    packed_view.set_center_sequence_id(0, 100000);
+    packed_view.set_center_sequence_id(0, 0, 100000);
     packed.set_link_storage(
         navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
     packed.set_packed_leaf_layout(0, bits);

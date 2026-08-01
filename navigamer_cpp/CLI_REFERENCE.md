@@ -233,7 +233,7 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 ### `build`
 
 Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
-provided, writes an array-format v35 binary index with a manifest signature,
+provided, writes an array-format v36 binary index with a manifest signature,
 build parameters, input fingerprints, sequence records, layer ranges,
 child/leaf/beacon ID arrays, MBB rows, and leaf-beacon distance rows. Older
 pointer-graph index formats are rejected and must be rebuilt.
@@ -241,6 +241,8 @@ The in-memory construction path also uses node arrays and integer IDs; it does
 not construct an intermediate `WorldNode` pointer graph. Node records use a
 per-index bit layout derived from the shard's actual maximum offsets and counts,
 rounded only to whole bytes and widened automatically when required.
+Center sequence IDs use exact, layer-aligned 16-node base/delta blocks with a
+layer-local minimum bit width and constant-time decoding.
 Base-relative child payloads store a minimum whole-byte forward base delta from
 `node_id + 1` immediately before their local child offsets, preserving cache
 locality while avoiding a fixed 32-bit base.
@@ -305,12 +307,12 @@ relative to the original contig.
 
 Each logical part is an independently mmap-decodable graph payload. Up to
 1,024 payloads are stored in one `.navpack` container with a checked
-offset/length directory. The common v35 construction manifest is stored once
+offset/length directory. The common v36 construction manifest is stored once
 at bundle scope instead of once per logical part. A completed pack is reused
 only after every selected payload's construction signature, reference slice,
 contig, and source coordinates validate. Damaged
 or incompatible packs are rebuilt one atomic group at a time; only that group's
-temporary part files exist during construction. The final v7 `.navshard`
+temporary part files exist during construction. The final v8 `.navshard`
 manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
