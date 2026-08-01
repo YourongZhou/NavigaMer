@@ -42,8 +42,8 @@ void assert_view_equivalent_to_original() {
          static_cast<size_t>(builder.num_primary_layers()));
   assert(view.layer_end.size() ==
          static_cast<size_t>(builder.num_primary_layers()));
-  assert(view.child_mbb_bits_by_layer.size() ==
-         view.layer_begin.size());
+  assert(view.child_mbb_bits_by_node.size() ==
+         view.layer_begin.back());
   assert(view.beacon_begins.size() == view.layer_begin.back());
   for (size_t sequence_id = 0; sequence_id < view.sequences.size();
        ++sequence_id) {

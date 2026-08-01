@@ -73,8 +73,8 @@ void assert_loaded_search_matches_built() {
   assert(loaded_mbb.size() == built_mbb.size());
   assert(std::equal(
       built_mbb.begin(), built_mbb.end(), loaded_mbb.begin()));
-  assert(built.search_graph_view().child_mbb_bits_by_layer ==
-         loaded.builder.search_graph_view().child_mbb_bits_by_layer);
+  assert(built.search_graph_view().child_mbb_bits_by_node ==
+         loaded.builder.search_graph_view().child_mbb_bits_by_node);
   assert(std::equal(
       built.search_graph_view().beacon_begins.begin(),
       built.search_graph_view().beacon_begins.end(),
@@ -95,6 +95,7 @@ void assert_loaded_search_matches_built() {
   assert_mapped(loaded_view.beacon_deltas16);
   assert_mapped(loaded_view.beacon_ids32);
   assert_mapped(loaded_view.beacon_begins);
+  assert_mapped(loaded_view.child_mbb_bits_by_node);
   assert_mapped(loaded_view.child_beacon_dists);
   assert_mapped(loaded_view.leaf_beacon_dists);
 #endif

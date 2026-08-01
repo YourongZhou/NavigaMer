@@ -349,11 +349,11 @@ records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 25
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 26
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
-at the exact minimum bit width required by each primary layer, with each node
+at the exact minimum bit width required by each parent, with each node
 starting on a byte boundary for constant-time lookup. No distance is truncated.
 The child-layer radius
 reconstructs the original lower and upper bounds during search. This is exactly

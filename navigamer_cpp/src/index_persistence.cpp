@@ -24,7 +24,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '5'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '2', '6'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -882,7 +882,8 @@ void write_search_graph_view(std::ostream& out,
   write_final_array(out, view.beacon_deltas16, "beacon_deltas16");
   write_final_array(out, view.beacon_ids32, "beacon_ids32");
   write_final_array(out, view.beacon_begins, "beacon_begins");
-  write_u32_vector(out, view.child_mbb_bits_by_layer);
+  write_final_array(
+      out, view.child_mbb_bits_by_node, "child_mbb_bits_by_node");
   write_final_array(
       out, view.child_beacon_dists, "child_beacon_dists");
   write_final_array(
@@ -922,8 +923,9 @@ SearchGraphView read_search_graph_view(
       read_final_array<LeafId>(in, mapping, "beacon_ids32");
   view.beacon_begins =
       read_final_array<uint32_t>(in, mapping, "beacon_begins");
-  view.child_mbb_bits_by_layer =
-      read_u32_vector(in, "child_mbb_bits_by_layer");
+  view.child_mbb_bits_by_node =
+      read_final_array<uint8_t>(
+          in, mapping, "child_mbb_bits_by_node");
   view.child_beacon_dists =
       read_final_array<uint8_t>(in, mapping, "child_beacon_dists");
   view.leaf_beacon_dists =
@@ -937,8 +939,7 @@ bool validate_structural_layout(
   const size_t layer_count =
       builder.hierarchy_config().primary_radii.size();
   if (view.layer_begin.size() != layer_count ||
-      view.layer_end.size() != layer_count ||
-      view.child_mbb_bits_by_layer.size() != layer_count) {
+      view.layer_end.size() != layer_count) {
     return false;
   }
   uint32_t expected_begin = 0;
@@ -952,6 +953,7 @@ bool validate_structural_layout(
   }
   return expected_begin == view.node_records.size() &&
          !view.layer_begin.empty() &&
+         view.child_mbb_bits_by_node.size() == view.layer_begin.back() &&
          view.beacon_begins.size() == view.layer_begin.back();
 }
 

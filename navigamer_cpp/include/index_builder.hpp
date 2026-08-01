@@ -679,9 +679,9 @@ struct SearchGraphView {
   FinalArray<LeafId> leaf_ids;
 
   FinalArray<uint8_t> child_beacon_dists;
-  // Exact bit width used by each primary layer's child MBB values. The finest
-  // layer has no child MBB but retains an entry so layer IDs index directly.
-  std::vector<uint32_t> child_mbb_bits_by_layer;
+  // Exact bit width used by each non-finest node's child MBB values. Those
+  // NodeIds form a dense prefix, so lookup needs no stored node identifier.
+  FinalArray<uint8_t> child_mbb_bits_by_node;
   // Explicit beacons only exist above the finest layer. Those NodeIds form a
   // dense prefix, so this side array needs no per-entry node identifier.
   FinalArray<uint32_t> beacon_begins;
@@ -754,22 +754,13 @@ struct SearchGraphView {
     return child_id_deltas16.size() + child_ids.size();
   }
 
-  size_t primary_layer_index(NodeId node_id) const {
-    const auto it = std::upper_bound(
-        layer_end.begin(), layer_end.end(), node_id);
-    if (it == layer_end.end()) {
-      throw std::out_of_range("node id has no primary layer");
-    }
-    return static_cast<size_t>(it - layer_end.begin());
-  }
   uint32_t child_mbb_bits(NodeId node_id) const {
-    const size_t layer = primary_layer_index(node_id);
-    if (layer >= child_mbb_bits_by_layer.size()) {
-      throw std::runtime_error("child MBB layer width is missing");
+    if (node_id >= child_mbb_bits_by_node.size()) {
+      throw std::runtime_error("child MBB node width is missing");
     }
-    const uint32_t bits = child_mbb_bits_by_layer[layer];
+    const uint32_t bits = child_mbb_bits_by_node[node_id];
     if (bits == 0 || bits > 8) {
-      throw std::runtime_error("child MBB layer width is invalid");
+      throw std::runtime_error("child MBB node width is invalid");
     }
     return bits;
   }
