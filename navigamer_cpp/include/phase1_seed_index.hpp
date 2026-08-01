@@ -4,14 +4,26 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace navigamer {
+
+namespace phase1_detail {
+
+#if defined(__linux__)
+void* resize_anonymous_mapping(void* address, size_t old_bytes,
+                               size_t new_bytes);
+void release_anonymous_mapping(void* address, size_t bytes) noexcept;
+#endif
+
+}  // namespace phase1_detail
 
 struct Phase1SeedIndexConfig {
   int min_seed_len = 8;
@@ -43,6 +55,155 @@ class IncrementalPigeonholeIndex {
   size_t posting_bytes() const;
 
  private:
+  // Linux can grow an anonymous mapping by remapping page tables instead of
+  // copying every posting during geometric vector growth. Entries remain
+  // contiguous, so the query hot path still performs one direct indexed load.
+  // Other platforms retain the same semantics through std::vector.
+  template <typename T>
+  class ContiguousPostingArray {
+   public:
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "remapped postings must be trivially copyable");
+    static_assert(std::is_trivially_destructible<T>::value,
+                  "remapped postings must be trivially destructible");
+
+    ContiguousPostingArray() = default;
+    ContiguousPostingArray(const ContiguousPostingArray&) = delete;
+    ContiguousPostingArray& operator=(const ContiguousPostingArray&) = delete;
+
+    ContiguousPostingArray(ContiguousPostingArray&& other) noexcept {
+      move_from(other);
+    }
+    ContiguousPostingArray& operator=(ContiguousPostingArray&& other) noexcept {
+      if (this != &other) {
+        clear_and_release();
+        move_from(other);
+      }
+      return *this;
+    }
+    ~ContiguousPostingArray() { clear_and_release(); }
+
+    size_t size() const {
+#if defined(__linux__)
+      return size_;
+#else
+      return values_.size();
+#endif
+    }
+
+    size_t capacity() const {
+#if defined(__linux__)
+      return capacity_;
+#else
+      return values_.capacity();
+#endif
+    }
+
+    T& operator[](size_t index) {
+#if defined(__linux__)
+      return data_[index];
+#else
+      return values_[index];
+#endif
+    }
+    const T& operator[](size_t index) const {
+#if defined(__linux__)
+      return data_[index];
+#else
+      return values_[index];
+#endif
+    }
+
+    void reserve(size_t requested_capacity) {
+#if defined(__linux__)
+      if (requested_capacity <= capacity_) return;
+      if (requested_capacity >
+          std::numeric_limits<size_t>::max() / sizeof(T)) {
+        throw std::length_error("phase1 posting array is too large");
+      }
+      const size_t requested_bytes = requested_capacity * sizeof(T);
+      void* resized = phase1_detail::resize_anonymous_mapping(
+          data_, mapped_bytes_, requested_bytes);
+      data_ = static_cast<T*>(resized);
+      mapped_bytes_ = requested_bytes;
+      capacity_ = requested_capacity;
+#else
+      values_.reserve(requested_capacity);
+#endif
+    }
+
+    void push_back(const T& value) {
+#if defined(__linux__)
+      if (size_ == capacity_) {
+        const size_t next_capacity = capacity_ == 0 ? 16 : capacity_ * 2;
+        if (next_capacity < capacity_) {
+          throw std::length_error("phase1 posting array is too large");
+        }
+        reserve(next_capacity);
+      }
+      ::new (static_cast<void*>(data_ + size_)) T(value);
+      ++size_;
+#else
+      values_.push_back(value);
+#endif
+    }
+
+    void clear() {
+#if defined(__linux__)
+      size_ = 0;
+#else
+      values_.clear();
+#endif
+    }
+
+    void shrink_to_fit() {
+#if defined(__linux__)
+      if (size_ == 0) clear_and_release();
+#else
+      values_.shrink_to_fit();
+#endif
+    }
+
+   private:
+    void clear_and_release() noexcept {
+#if defined(__linux__)
+      if (data_ != nullptr) {
+        phase1_detail::release_anonymous_mapping(data_, mapped_bytes_);
+      }
+      data_ = nullptr;
+      size_ = 0;
+      capacity_ = 0;
+      mapped_bytes_ = 0;
+#else
+      std::vector<T>().swap(values_);
+#endif
+    }
+
+    void move_from(ContiguousPostingArray& other) noexcept {
+#if defined(__linux__)
+      data_ = other.data_;
+      size_ = other.size_;
+      capacity_ = other.capacity_;
+      mapped_bytes_ = other.mapped_bytes_;
+      other.data_ = nullptr;
+      other.size_ = 0;
+      other.capacity_ = 0;
+      other.mapped_bytes_ = 0;
+#else
+      values_ = std::move(other.values_);
+#endif
+    }
+
+#if defined(__linux__)
+    T* data_ = nullptr;
+    size_t size_ = 0;
+    size_t capacity_ = 0;
+    size_t mapped_bytes_ = 0;
+#else
+    std::vector<T> values_;
+#endif
+  };
+
   template <typename Head>
   class PostingHeadMap {
    public:
@@ -334,7 +495,7 @@ class IncrementalPigeonholeIndex {
     PostingHeadMap<uint16_t> compact_heads;
     std::vector<uint32_t> compact_entries;
     Compact24PostingHeadMap compact24_heads;
-    std::vector<Compact24PostingEntry> compact24_entries;
+    ContiguousPostingArray<Compact24PostingEntry> compact24_entries;
     PostingHeadMap<uint32_t> packed_heads;
     std::vector<uint64_t> packed_entries;
     PostingHeadMap<uint32_t> wide_heads;

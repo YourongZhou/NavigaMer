@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "phase1_seed_index.hpp"
 
 #include <algorithm>
@@ -6,7 +10,60 @@
 #include <limits>
 #include <stdexcept>
 
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 namespace navigamer {
+
+namespace phase1_detail {
+
+#if defined(__linux__)
+namespace {
+
+size_t page_rounded_bytes(size_t bytes) {
+  const long page_size_value = ::sysconf(_SC_PAGESIZE);
+  if (page_size_value <= 0) {
+    throw std::runtime_error("could not determine system page size");
+  }
+  const size_t page_size = static_cast<size_t>(page_size_value);
+  if (bytes > std::numeric_limits<size_t>::max() - (page_size - 1)) {
+    throw std::length_error("phase1 posting mapping is too large");
+  }
+  return (bytes + page_size - 1) / page_size * page_size;
+}
+
+}  // namespace
+
+void* resize_anonymous_mapping(void* address, size_t old_bytes,
+                               size_t new_bytes) {
+  const size_t rounded_new_bytes = page_rounded_bytes(new_bytes);
+  if (address == nullptr) {
+    void* mapped = ::mmap(nullptr, rounded_new_bytes,
+                          PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapped == MAP_FAILED) throw std::bad_alloc();
+    return mapped;
+  }
+  const size_t rounded_old_bytes = page_rounded_bytes(old_bytes);
+  void* resized = ::mremap(address, rounded_old_bytes,
+                           rounded_new_bytes, MREMAP_MAYMOVE);
+  if (resized == MAP_FAILED) throw std::bad_alloc();
+  return resized;
+}
+
+void release_anonymous_mapping(void* address, size_t bytes) noexcept {
+  if (address == nullptr || bytes == 0) return;
+  const long page_size_value = ::sysconf(_SC_PAGESIZE);
+  if (page_size_value <= 0) return;
+  const size_t page_size = static_cast<size_t>(page_size_value);
+  const size_t rounded_bytes = (bytes + page_size - 1) / page_size * page_size;
+  (void)::munmap(address, rounded_bytes);
+}
+#endif
+
+}  // namespace phase1_detail
 
 namespace {
 
@@ -105,7 +162,7 @@ size_t IncrementalPigeonholeIndex::posting_bytes() const {
   for (const auto& state_entry : states_) {
     const auto& state = state_entry.second;
     bytes += state.compact_entries.capacity() * sizeof(uint32_t);
-    bytes += state.compact24_entries.capacity() *
+    bytes += state.compact24_entries.size() *
              sizeof(SeedState::Compact24PostingEntry);
     bytes += state.packed_entries.capacity() * sizeof(uint64_t);
     bytes += state.wide_entries.capacity() *
