@@ -318,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 32) {
+  if (manifest.format_version != 33) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -880,6 +880,8 @@ void write_search_graph_view(std::ostream& out,
       out, view.node_count_overflows, "node_count_overflows");
   write_u32_vector(out, view.layer_begin);
   write_u32_vector(out, view.layer_end);
+  write_pod<uint8_t>(
+      out, view.child_base_forward_delta_bytes);
   write_final_array(
       out, view.child_id_base_deltas8, "child_id_base_deltas8");
   write_final_array(
@@ -927,6 +929,8 @@ SearchGraphView read_search_graph_view(
           in, mapping, "node_count_overflows");
   view.layer_begin = read_u32_vector(in, "layer_begin");
   view.layer_end = read_u32_vector(in, "layer_end");
+  view.child_base_forward_delta_bytes =
+      read_pod<uint8_t>(in, "child_base_forward_delta_bytes");
   view.child_id_base_deltas8 =
       read_final_array<uint8_t>(
           in, mapping, "child_id_base_deltas8");
@@ -992,6 +996,7 @@ bool validate_structural_layout(
   }
   return expected_begin == view.node_records.size() &&
          !view.layer_begin.empty() &&
+         view.child_base_ids_valid(view.layer_begin.back()) &&
          view.beacon_begins.size() == view.layer_begin.back();
 }
 
@@ -1065,7 +1070,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 32) {
+  if (manifest.format_version != 33) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1111,7 +1116,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 32;
+  stored.format_version = 33;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
@@ -1135,7 +1140,7 @@ LoadedIndex load_index(
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 32) {
+  if (manifest.format_version != 33) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }

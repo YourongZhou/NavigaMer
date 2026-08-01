@@ -1235,10 +1235,11 @@ struct SearchGraphView {
   std::vector<uint32_t> layer_begin;
   std::vector<uint32_t> layer_end;
 
-  // Each parent selects the smallest exact representation: one 32-bit base
-  // followed by fixed-width 1..16-bit offsets, byte offsets, 16-bit forward
-  // deltas, or absolute 32-bit IDs. The representation code and packed width
-  // share existing WorldNodeRecord fields.
+  // Base-relative child payloads start with one minimum whole-byte forward
+  // base delta from node_id + 1, followed by fixed-width 1..16-bit offsets.
+  // Keeping the base adjacent to its payload preserves query locality while
+  // avoiding the former 32-bit base in almost every parent segment.
+  uint8_t child_base_forward_delta_bytes = 0;
   FinalArray<uint8_t> child_id_base_deltas8;
   FinalArray<uint16_t> child_id_deltas16;
   FinalArray<NodeId> child_ids;
@@ -1366,6 +1367,68 @@ struct SearchGraphView {
     node.set_count_overflow(overflow_index, storage);
   }
 
+  void initialize_child_base_ids(size_t non_finest_node_count,
+                                 uint64_t maximum_forward_delta) {
+    if (non_finest_node_count == 0) {
+      child_base_forward_delta_bytes = 0;
+      return;
+    }
+    const uint8_t bits =
+        PackedWorldNodeLayout::bits_for_value(maximum_forward_delta);
+    if (bits > 32) {
+      throw std::length_error("child base delta exceeds 32 bits");
+    }
+    child_base_forward_delta_bytes = (bits + 7) / 8;
+  }
+
+  bool child_base_ids_valid(size_t non_finest_node_count) const {
+    if (non_finest_node_count == 0) {
+      return child_base_forward_delta_bytes == 0;
+    }
+    return child_base_forward_delta_bytes != 0 &&
+           child_base_forward_delta_bytes <= sizeof(NodeId);
+  }
+
+  size_t child_base_byte_count() const {
+    return child_base_forward_delta_bytes;
+  }
+
+  void append_child_base_id(NodeId node_id, NodeId base) {
+    const uint32_t bits = child_base_forward_delta_bytes * 8;
+    if (bits == 0 || base <= node_id) {
+      throw std::out_of_range("child base does not follow its parent");
+    }
+    const uint32_t delta = base - node_id - 1;
+    const uint64_t mask =
+        bits == 32 ? std::numeric_limits<uint32_t>::max()
+                   : (uint64_t{1} << bits) - 1;
+    if (delta > mask) {
+      throw std::length_error("child base exceeds packed forward range");
+    }
+    const size_t byte_count = child_base_byte_count();
+    for (size_t byte = 0; byte < byte_count; ++byte) {
+      child_id_base_deltas8.push_back(
+          static_cast<uint8_t>(delta >> (byte * 8)));
+    }
+  }
+
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((always_inline))
+#endif
+  inline NodeId child_base_id(NodeId node_id, const uint8_t* segment,
+                              size_t byte_count) const {
+    if (byte_count == 2) {
+      uint16_t delta = 0;
+      std::memcpy(&delta, segment, sizeof(delta));
+      return static_cast<NodeId>(node_id + 1 + delta);
+    }
+    uint32_t delta = 0;
+    for (size_t byte = 0; byte < byte_count; ++byte) {
+      delta |= static_cast<uint32_t>(segment[byte]) << (byte * 8);
+    }
+    return static_cast<NodeId>(node_id + 1 + delta);
+  }
+
   struct ChildIdAccessor {
     NodeId base = 0;
     const uint16_t* deltas16 = nullptr;
@@ -1439,7 +1502,7 @@ struct SearchGraphView {
     const uint64_t bit_count =
         static_cast<uint64_t>(child_count_value) *
         node.packed_child_bits();
-    return sizeof(NodeId) +
+    return child_base_byte_count() +
            static_cast<size_t>((bit_count + 7) / 8);
   }
   size_t packed_child_byte_count(NodeId node_id) const {
@@ -1463,9 +1526,9 @@ struct SearchGraphView {
       case WorldNodeRecord::LinkStorage::Delta8: {
         const uint8_t* segment =
             child_id_base_deltas8.data() + node.child_begin();
-        NodeId base = 0;
-        std::memcpy(&base, segment, sizeof(base));
-        return {base, nullptr, segment + sizeof(base), nullptr,
+        const size_t base_bytes = child_base_byte_count();
+        return {child_base_id(node_id, segment, base_bytes), nullptr,
+                segment + base_bytes, nullptr,
                 nullptr, 0};
       }
       case WorldNodeRecord::LinkStorage::Delta16:
@@ -1475,9 +1538,9 @@ struct SearchGraphView {
       case WorldNodeRecord::LinkStorage::PackedDelta: {
         const uint8_t* segment =
             child_id_base_deltas8.data() + node.child_begin();
-        NodeId base = 0;
-        std::memcpy(&base, segment, sizeof(base));
-        return {base, nullptr, nullptr, segment + sizeof(base),
+        const size_t base_bytes = child_base_byte_count();
+        return {child_base_id(node_id, segment, base_bytes), nullptr, nullptr,
+                segment + base_bytes,
                 nullptr, node.packed_child_bits()};
       }
       case WorldNodeRecord::LinkStorage::Absolute32:

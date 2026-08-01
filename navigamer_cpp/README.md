@@ -160,7 +160,7 @@ periodic heartbeats but retains phase start/finish reports. `build-scale` can
 persist a reference-window index with `--index <file>` when exactly one prefix
 length is requested. Multiple prefixes with one output index are rejected.
 `build-sharded` instead partitions window starts into independently persisted
-v32 parts, each capped by `--shard-windows`. Reference slices overlap only
+v33 parts, each capped by `--shard-windows`. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
 contig. Valid completed parts are reused on restart, damaged parts are rebuilt,
@@ -224,7 +224,7 @@ quality-audit time only.
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v32 binary persistence and manifest signatures |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v33 binary persistence and manifest signatures |
 | `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, exact-minimizer shard routing, bundle manifests, and validated loading |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
@@ -239,11 +239,14 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v32 bit-packs each node to the minimum whole-byte width supported by
+Format v33 bit-packs each node to the minimum whole-byte width supported by
 that shard's actual offset and count ranges (9 bytes per node in the 100k-window
-reference benchmark, with wider automatic fallbacks) and loads the finalized
-arrays directly. Older files must be rebuilt.
-A `.navshard` bundle points to independently loadable v32 parts and, when it
+reference benchmark, with wider automatic fallbacks). Base-relative child
+payloads store a minimum whole-byte forward base delta from `node_id + 1`
+immediately before their local child offsets, preserving cache locality while
+avoiding a fixed 32-bit base. Finalized arrays load directly. Older files must
+be rebuilt.
+A `.navshard` bundle points to independently loadable v33 parts and, when it
 has multiple shards and windows of at least 32 bases, a memory-mapped
 `.route` sidecar. The router uses 16-mer minimizers from 32- to 64-base seeds
 in `d + 1` disjoint query blocks. Its keys are 32-bit arrays and the parallel

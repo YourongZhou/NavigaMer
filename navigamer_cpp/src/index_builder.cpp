@@ -2052,6 +2052,7 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       view.layer_begin.empty()
           ? static_cast<NodeId>(view.node_records.size())
           : view.layer_begin.back();
+  if (!view.child_base_ids_valid(finest_begin)) return false;
   for (NodeId node_id = 0; node_id < view.node_records.size(); ++node_id) {
     const auto node = view.node_records[node_id];
     const LeafId center_id = view.center_sequence_id(node_id);
@@ -2077,10 +2078,12 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       switch (node.link_storage()) {
         case WorldNodeRecord::LinkStorage::Delta8:
           child_range_valid =
-              static_cast<size_t>(node.child_begin()) + sizeof(NodeId) <=
+              static_cast<size_t>(node.child_begin()) +
+                      view.child_base_byte_count() <=
                   view.child_id_base_deltas8.size() &&
               link_count <= view.child_id_base_deltas8.size() -
-                                node.child_begin() - sizeof(NodeId);
+                                node.child_begin() -
+                                view.child_base_byte_count();
           break;
         case WorldNodeRecord::LinkStorage::PackedDelta:
           child_range_valid =
@@ -2156,6 +2159,11 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       view.layer_end.size() != static_cast<size_t>(num_primary_layers())) {
     return false;
   }
+  const NodeId finest_begin =
+      view.layer_begin.empty()
+          ? static_cast<NodeId>(view.node_records.size())
+          : view.layer_begin.back();
+  if (!view.child_base_ids_valid(finest_begin)) return false;
   uint32_t expected_center_bits = 0;
   if (sequence_count_ != 0) {
     expected_center_bits = 1;
@@ -2240,10 +2248,11 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
         const size_t child_begin = node.child_begin();
         if ((node.link_storage() ==
                  WorldNodeRecord::LinkStorage::Delta8 &&
-             (child_begin + sizeof(NodeId) >
+             (child_begin + view.child_base_byte_count() >
                   view.child_id_base_deltas8.size() ||
               link_count > view.child_id_base_deltas8.size() -
-                               child_begin - sizeof(NodeId))) ||
+                               child_begin -
+                               view.child_base_byte_count())) ||
             (node.link_storage() ==
                  WorldNodeRecord::LinkStorage::PackedDelta &&
              (node.packed_child_bits() > 16 ||
@@ -2380,8 +2389,9 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       } else {
         *expected_child_begin +=
             link_count +
-            (node.link_storage() == WorldNodeRecord::LinkStorage::Delta8
-                 ? sizeof(NodeId)
+            (node.link_storage() ==
+                     WorldNodeRecord::LinkStorage::Delta8
+                 ? view.child_base_byte_count()
                  : 0);
       }
       expected_mbb_begin += view.child_mbb_byte_count(
@@ -4314,6 +4324,31 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     NodeId base = 0;
     uint8_t packed_bits = 0;
   };
+  uint64_t maximum_child_base_forward_delta = 0;
+  if (!primary_layers_.empty()) {
+    for (size_t layer_idx = 0;
+         layer_idx + 1 < primary_layers_.size(); ++layer_idx) {
+      for (NodeId build_node_id : primary_layers_[layer_idx]) {
+        const auto& child_ids =
+            build_nodes_[build_node_id].child_or_leaf_ids;
+        if (child_ids.empty()) continue;
+        const NodeId base = *std::min_element(
+            child_ids.begin(), child_ids.end());
+        if (base <= build_node_id) {
+          throw std::runtime_error(
+              "child base does not follow its parent");
+        }
+        maximum_child_base_forward_delta = std::max<uint64_t>(
+            maximum_child_base_forward_delta,
+            static_cast<uint64_t>(base) - build_node_id - 1);
+      }
+    }
+  }
+  const uint8_t child_base_forward_delta_bits =
+      PackedWorldNodeLayout::bits_for_value(
+          maximum_child_base_forward_delta);
+  const size_t child_base_bytes =
+      (child_base_forward_delta_bits + 7) / 8;
   const auto child_storage_for =
       [&](NodeId build_node_id) {
         const auto& node = build_nodes_[build_node_id];
@@ -4340,7 +4375,12 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         const bool fits_base_delta8 =
             maximum_child_id - minimum_child_id <=
             std::numeric_limits<uint8_t>::max();
-        const size_t delta8_bytes = count + sizeof(NodeId);
+        // Keep the established query-oriented representation boundary. The
+        // compact base prefix reduces finalized bytes, but a one-byte packing
+        // win is not worth replacing direct 16-bit child loads with bit
+        // decoding on the search path.
+        const size_t selection_base_bytes = sizeof(NodeId);
+        const size_t delta8_bytes = selection_base_bytes + count;
         const size_t delta16_bytes =
             fits_delta16 ? count * sizeof(uint16_t)
                          : std::numeric_limits<size_t>::max();
@@ -4363,8 +4403,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         uint8_t packed_bits = 1;
         while ((span >>= 1) != 0) ++packed_bits;
         const size_t packed_bytes =
-            sizeof(NodeId) +
-            static_cast<size_t>(
+            selection_base_bytes + static_cast<size_t>(
                 (static_cast<uint64_t>(count) * packed_bits + 7) / 8);
         if (packed_bits <= 16 && packed_bytes < selected_bytes) {
           return ChildStorageChoice{
@@ -4545,14 +4584,13 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           maximum_link_begin = std::max<uint64_t>(
               maximum_link_begin, total_child_base_deltas8_bytes);
           total_child_base_deltas8_bytes +=
-              sizeof(NodeId) + node.child_or_leaf_ids.size();
+              child_base_bytes + node.child_or_leaf_ids.size();
         } else if (
             storage == WorldNodeRecord::LinkStorage::PackedDelta) {
           maximum_link_begin = std::max<uint64_t>(
               maximum_link_begin, total_child_base_deltas8_bytes);
           total_child_base_deltas8_bytes +=
-              sizeof(NodeId) +
-              static_cast<size_t>(
+              child_base_bytes + static_cast<size_t>(
                   (static_cast<uint64_t>(
                        node.child_or_leaf_ids.size()) *
                        choice.packed_bits +
@@ -4613,6 +4651,12 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           maximum_link_begin, maximum_mbb_begin,
           maximum_count_field));
   view.initialize_center_sequence_ids(sequence_count_);
+  const size_t non_finest_node_count =
+      primary_layers_.empty()
+          ? 0
+          : world_node_count_ - primary_layers_.back().size();
+  view.initialize_child_base_ids(
+      non_finest_node_count, maximum_child_base_forward_delta);
   view.child_id_base_deltas8.reserve(total_child_base_deltas8_bytes);
   view.child_id_deltas16.reserve(total_child_deltas16);
   view.child_ids.reserve(total_child_ids32);
@@ -4677,10 +4721,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             record.set_link_begin_value(byte_begin);
           }
           const NodeId base = planned_child_base;
-          std::array<uint8_t, sizeof(NodeId)> base_bytes{};
-          std::memcpy(base_bytes.data(), &base, sizeof(base));
-          view.child_id_base_deltas8.append(
-              base_bytes.begin(), base_bytes.end());
+          view.append_child_base_id(node_id, base);
           if (link_storage ==
               WorldNodeRecord::LinkStorage::PackedDelta) {
             const size_t packed_byte_count = static_cast<size_t>(
@@ -4737,7 +4778,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             const uint32_t shift =
                 static_cast<uint32_t>(bit_offset & 7);
             const size_t payload_begin =
-                record.child_begin() + sizeof(NodeId);
+                record.child_begin() + view.child_base_byte_count();
             view.child_id_base_deltas8[payload_begin + byte_offset] |=
                 static_cast<uint8_t>(delta << shift);
             if (shift + bits > 8) {

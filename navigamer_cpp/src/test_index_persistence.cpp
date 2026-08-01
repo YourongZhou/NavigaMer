@@ -81,6 +81,8 @@ void assert_loaded_search_matches_built() {
          built.search_graph_view().node_records.layout());
   assert(loaded.builder.search_graph_view().node_records.bytes() ==
          built.search_graph_view().node_records.bytes());
+  assert(loaded.builder.search_graph_view().child_base_forward_delta_bytes ==
+         built.search_graph_view().child_base_forward_delta_bytes);
   assert(loaded_mbb.size() == built_mbb.size());
   assert(std::equal(
       built_mbb.begin(), built_mbb.end(), loaded_mbb.begin()));
@@ -359,7 +361,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 32);
+  assert(loaded.manifest.format_version == 33);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

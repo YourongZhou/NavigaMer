@@ -49,6 +49,7 @@ void assert_view_equivalent_to_original() {
        ++sequence_id) {
     assert(view.sequences.records[sequence_id].sequence_id == sequence_id);
   }
+  assert(view.child_base_ids_valid(view.layer_begin.back()));
   for (size_t layer = 0; layer < view.layer_begin.size(); ++layer) {
     assert(view.layer_begin[layer] <= view.layer_end[layer]);
     for (uint32_t node_id = view.layer_begin[layer];
@@ -74,7 +75,7 @@ void assert_view_equivalent_to_original() {
         assert(view.child_mbb_bin_width(node_id) ==
                expected_bin_width);
         if (view.child_ids_are_base_delta8(node_id)) {
-          assert(record.child_begin() + sizeof(navigamer::NodeId) +
+          assert(record.child_begin() + view.child_base_byte_count() +
                      link_count <=
                  view.child_id_base_deltas8.size());
         } else if (view.child_ids_are_packed_delta(node_id)) {
@@ -399,28 +400,17 @@ void assert_child_id_encodings_are_exact() {
   navigamer::SearchGraphView view;
   view.node_records.resize(4);
   view.layer_begin = {4};
-  view.child_id_base_deltas8.resize(
-      2 * sizeof(navigamer::NodeId) + 5);
+  view.initialize_child_base_ids(4, 4997);
   const navigamer::NodeId child_base = 1000;
-  std::array<uint8_t, sizeof(navigamer::NodeId)> child_base_bytes{};
-  std::memcpy(
-      child_base_bytes.data(), &child_base, sizeof(child_base));
-  for (size_t idx = 0; idx < child_base_bytes.size(); ++idx) {
-    view.child_id_base_deltas8[idx] = child_base_bytes[idx];
-  }
-  view.child_id_base_deltas8[sizeof(navigamer::NodeId)] = 0;
-  view.child_id_base_deltas8[sizeof(navigamer::NodeId) + 1] = 255;
-  const size_t packed_begin = sizeof(navigamer::NodeId) + 2;
+  view.append_child_base_id(0, child_base);
+  view.child_id_base_deltas8.push_back(0);
+  view.child_id_base_deltas8.push_back(255);
+  const size_t packed_begin = view.child_id_base_deltas8.size();
   const navigamer::NodeId packed_base = 5000;
-  std::array<uint8_t, sizeof(navigamer::NodeId)> packed_base_bytes{};
-  std::memcpy(
-      packed_base_bytes.data(), &packed_base, sizeof(packed_base));
-  for (size_t idx = 0; idx < packed_base_bytes.size(); ++idx) {
-    view.child_id_base_deltas8[packed_begin + idx] =
-        packed_base_bytes[idx];
-  }
+  view.append_child_base_id(2, packed_base);
   const size_t packed_payload_begin =
-      packed_begin + sizeof(navigamer::NodeId);
+      packed_begin + view.child_base_byte_count();
+  view.child_id_base_deltas8.resize(packed_payload_begin + 3);
   const std::array<uint32_t, 2> packed_values = {0, 2047};
   for (size_t offset = 0; offset < packed_values.size(); ++offset) {
     const size_t bit_offset = offset * 11;
@@ -481,29 +471,65 @@ void assert_child_id_encodings_are_exact() {
   assert(view.edge_count() == 8);
 }
 
+void assert_all_child_base_widths_are_exact() {
+  constexpr navigamer::NodeId kCount = 19;
+  for (uint32_t bits = 1; bits <= 32; ++bits) {
+    const uint64_t mask =
+        bits == 32 ? std::numeric_limits<uint32_t>::max()
+                   : (uint64_t{1} << bits) - 1;
+    navigamer::SearchGraphView view;
+    view.initialize_child_base_ids(kCount, mask);
+    assert(view.child_base_forward_delta_bytes == (bits + 7) / 8);
+    assert(view.child_base_ids_valid(kCount));
+
+    std::array<navigamer::NodeId, kCount> expected{};
+    std::array<size_t, kCount> begins{};
+    for (navigamer::NodeId node_id = 0; node_id < kCount; ++node_id) {
+      const uint64_t maximum_valid_delta =
+          std::numeric_limits<navigamer::NodeId>::max() -
+          static_cast<uint64_t>(node_id) - 1;
+      uint64_t delta =
+          (static_cast<uint64_t>(node_id + 1) * 2654435761ULL) & mask;
+      if (node_id == 0) delta = std::min(mask, maximum_valid_delta);
+      delta = std::min(delta, maximum_valid_delta);
+      expected[node_id] = static_cast<navigamer::NodeId>(
+          static_cast<uint64_t>(node_id) + 1 + delta);
+      begins[node_id] = view.child_id_base_deltas8.size();
+      view.append_child_base_id(node_id, expected[node_id]);
+    }
+    assert(view.child_id_base_deltas8.size() ==
+           kCount * view.child_base_byte_count());
+    for (navigamer::NodeId node_id = 0; node_id < kCount; ++node_id) {
+      assert(view.child_base_id(
+                 node_id,
+                 view.child_id_base_deltas8.data() + begins[node_id],
+                 view.child_base_byte_count()) ==
+             expected[node_id]);
+    }
+  }
+}
+
 void assert_all_packed_child_widths_are_exact() {
   constexpr uint32_t kCount = 19;
   constexpr navigamer::NodeId kBase = 100000;
   navigamer::SearchGraphView view;
   view.node_records.resize(1);
   view.layer_begin = {1};
+  view.initialize_child_base_ids(1, kBase - 1);
   view.node_records[0].set_link_storage(
       navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
   view.set_node_counts(
       0, kCount, 0,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
 
-  std::array<uint8_t, sizeof(navigamer::NodeId)> base_bytes{};
-  std::memcpy(base_bytes.data(), &kBase, sizeof(kBase));
   for (uint32_t bits = 1; bits <= 16; ++bits) {
     const uint32_t mask = (uint32_t{1} << bits) - 1;
     const size_t payload_bytes =
         (static_cast<size_t>(kCount) * bits + 7) / 8;
-    view.child_id_base_deltas8.assign(
-        sizeof(navigamer::NodeId) + payload_bytes, 0);
-    for (size_t idx = 0; idx < base_bytes.size(); ++idx) {
-      view.child_id_base_deltas8[idx] = base_bytes[idx];
-    }
+    view.child_id_base_deltas8.clear();
+    view.append_child_base_id(0, kBase);
+    view.child_id_base_deltas8.resize(
+        view.child_base_byte_count() + payload_bytes);
     view.node_records[0].set_packed_child_layout(0, bits);
 
     for (uint32_t offset = 0; offset < kCount; ++offset) {
@@ -515,7 +541,7 @@ void assert_all_packed_child_widths_are_exact() {
       const size_t bit_offset = static_cast<size_t>(offset) * bits;
       const size_t byte_offset = bit_offset >> 3;
       const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
-      const size_t payload_begin = sizeof(navigamer::NodeId);
+      const size_t payload_begin = view.child_base_byte_count();
       view.child_id_base_deltas8[payload_begin + byte_offset] |=
           static_cast<uint8_t>(value << shift);
       if (shift + bits > 8) {
@@ -702,6 +728,7 @@ int main() {
   assert_child_mbb_layout_is_exact();
   assert_leaf_mbb_layout_and_values_are_exact();
   assert_child_id_encodings_are_exact();
+  assert_all_child_base_widths_are_exact();
   assert_all_packed_child_widths_are_exact();
   assert_leaf_id_encodings_are_exact();
   assert_compact_node_layout_is_exact();
