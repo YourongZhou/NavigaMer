@@ -2033,8 +2033,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
         if (static_cast<size_t>(node.leaf_begin()) +
                     link_count >
                 leaf_array_size ||
-            static_cast<size_t>(node.mbb_begin) + link_count >
-                view.leaf_beacon_dists.size() ||
+            !view.leaf_mbb_range_valid(node_id) ||
             beacon_count != 1 ||
             node.beacon_storage() !=
                 WorldNodeRecord::BeaconStorage::ImplicitCenter) {
@@ -2143,11 +2142,13 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       }
       if (!expected_leaf_begin ||
           node.leaf_begin() != *expected_leaf_begin ||
-          node.mbb_begin != expected_leaf_beacon_begin) {
+          node.leaf_mbb_begin() != expected_leaf_beacon_begin ||
+          !view.leaf_mbb_range_valid(node_id)) {
         return false;
       }
       *expected_leaf_begin += link_count;
-      expected_leaf_beacon_begin += link_count;
+      expected_leaf_beacon_begin +=
+          view.leaf_mbb_byte_count(node_id);
     } else {
       if ((node.link_storage() !=
                WorldNodeRecord::LinkStorage::Absolute32 &&
@@ -3991,12 +3992,13 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   size_t total_leaf_deltas8 = 0;
   size_t total_leaf_deltas16 = 0;
   size_t total_leaf_ids32 = 0;
-  size_t total_leaf_beacon_cells = 0;
+  size_t total_leaf_beacon_bytes = 0;
   size_t total_beacon_deltas8 = 0;
   size_t total_beacon_deltas16 = 0;
   size_t total_beacon_ids32 = 0;
   size_t total_mbb_bytes = 0;
   std::vector<uint8_t> build_mbb_bits(build_nodes_.size(), 8);
+  std::vector<uint8_t> build_leaf_mbb_bits(build_nodes_.size(), 8);
   std::vector<uint8_t> build_mbb_bin_widths(
       build_nodes_.size(),
       SearchGraphView::FINE_CHILD_MBB_BIN_WIDTH);
@@ -4021,8 +4023,19 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         } else {
           total_leaf_ids32 += node.child_or_leaf_ids.size();
         }
-        total_leaf_beacon_cells +=
-            geometry.link_beacon_dists.size();
+        uint32_t maximum = geometry.link_beacon_dists.empty()
+                               ? 0
+                               : *std::max_element(
+                                     geometry.link_beacon_dists.begin(),
+                                     geometry.link_beacon_dists.end());
+        uint8_t bits = 1;
+        while (maximum >>= 1) ++bits;
+        build_leaf_mbb_bits[build_node_id] = bits;
+        const uint64_t bit_count =
+            static_cast<uint64_t>(geometry.link_beacon_dists.size()) *
+            bits;
+        total_leaf_beacon_bytes +=
+            static_cast<size_t>((bit_count + 7) / 8);
       } else {
         const uint32_t bin_width =
             layer_idx + 2 == primary_layers_.size()
@@ -4086,6 +4099,11 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     throw std::length_error(
         "packed child MBB storage exceeds 29-bit shard range");
   }
+  if (total_leaf_beacon_bytes >
+      static_cast<size_t>(WorldNodeRecord::CHILD_MBB_BEGIN_MASK) + 1) {
+    throw std::length_error(
+        "packed leaf MBB storage exceeds 29-bit shard range");
+  }
   view.child_id_base_deltas8.reserve(total_child_base_deltas8_bytes);
   view.child_id_deltas16.reserve(total_child_deltas16);
   view.child_ids.reserve(total_child_ids32);
@@ -4100,18 +4118,19 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   view.beacon_deltas8.reserve(total_beacon_deltas8);
   view.beacon_deltas16.reserve(total_beacon_deltas16);
   view.beacon_ids32.reserve(total_beacon_ids32);
-  view.leaf_beacon_dists.reserve(total_leaf_beacon_cells);
+  view.leaf_beacon_dists.reserve(total_leaf_beacon_bytes);
 
-  const auto append_packed_mbb =
-      [&](const std::vector<uint8_t>& values, uint32_t bits,
+  const auto append_packed_values =
+      [&](FinalArray<uint8_t>& output,
+          const std::vector<uint8_t>& values, uint32_t bits,
           uint32_t bin_width) {
         if (bits == 0 || bits > 8) {
-          throw std::runtime_error("invalid child MBB bit width");
+          throw std::runtime_error("invalid packed distance bit width");
         }
         const size_t byte_count = static_cast<size_t>(
             (static_cast<uint64_t>(values.size()) * bits + 7) / 8);
-        const size_t byte_begin = view.child_beacon_dists.size();
-        view.child_beacon_dists.resize(byte_begin + byte_count);
+        const size_t byte_begin = output.size();
+        output.resize(byte_begin + byte_count);
         for (size_t value_idx = 0; value_idx < values.size(); ++value_idx) {
           const uint32_t value = values[value_idx] / bin_width;
           if (value >= (uint32_t{1} << bits)) {
@@ -4122,11 +4141,10 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           const size_t byte_offset = bit_offset >> 3;
           const uint32_t shift =
               static_cast<uint32_t>(bit_offset & 7);
-          view.child_beacon_dists[byte_begin + byte_offset] |=
+          output[byte_begin + byte_offset] |=
               static_cast<uint8_t>(value << shift);
           if (shift + bits > 8) {
-            view.child_beacon_dists[
-                byte_begin + byte_offset + 1] |=
+            output[byte_begin + byte_offset + 1] |=
                 static_cast<uint8_t>(value >> (8 - shift));
           }
         }
@@ -4349,17 +4367,20 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           node_id, link_count, beacon_count, storage);
 
       if (is_finest) {
-        record.mbb_begin =
+        const uint8_t leaf_mbb_bits =
+            build_leaf_mbb_bits[build_node_id];
+        record.set_leaf_mbb_layout(
             to_u32(view.leaf_beacon_dists.size(),
-                   "leaf_beacon_dists");
+                   "leaf_beacon_dists"),
+            leaf_mbb_bits);
         if (geometry.link_beacon_dists.size() !=
             node.child_or_leaf_ids.size()) {
           throw std::runtime_error(
               "flat leaf beacon array does not match leaf dimensions");
         }
-        view.leaf_beacon_dists.append(
-            geometry.link_beacon_dists.begin(),
-            geometry.link_beacon_dists.end());
+        append_packed_values(
+            view.leaf_beacon_dists,
+            geometry.link_beacon_dists, leaf_mbb_bits, 1);
       } else {
         const size_t mbb_cells =
             node.child_or_leaf_ids.size() * geometry.beacon_ids.size();
@@ -4372,7 +4393,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             to_u32(view.child_beacon_dists.size(),
                    "child_beacon_dists"),
             mbb_bits);
-        append_packed_mbb(
+        append_packed_values(
+            view.child_beacon_dists,
             geometry.link_beacon_dists, mbb_bits,
             build_mbb_bin_widths[build_node_id]);
       }

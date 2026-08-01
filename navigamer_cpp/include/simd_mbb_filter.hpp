@@ -50,7 +50,8 @@ std::vector<uint32_t> filter_leaf_beacon_survivors(
     const int* query_beacon_dists,
     int32_t tolerance,
     SimdMode mode,
-    LeafBeaconFilterSimdStats* stats = nullptr);
+    LeafBeaconFilterSimdStats* stats = nullptr,
+    uint32_t packed_bits = 8);
 
 }  // namespace navigamer
 

@@ -2703,9 +2703,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
   std::vector<int> V_Q;
   const bool has_leaf_sieve =
       beacon_count > 0 &&
-      node.mbb_begin +
-              beacon_count * leaf_count <=
-          view.leaf_beacon_dists.size();
+      view.leaf_mbb_range_valid(node_id);
   if (has_leaf_sieve) {
     V_Q = compute_query_beacon_distances_view(node_id, query_seq, stats);
   }
@@ -2717,7 +2715,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     ScopedSearchTimer leaf_filter_timer(stats.query_profile_enabled,
                                         &stats.leaf_mbb_filter_ms);
     LeafBeaconFilterSimdStats simd_stats;
-    const uint32_t offset = node.mbb_begin;
+    const uint32_t offset = node.leaf_mbb_begin();
     if (config_.search_prefetch) {
       prefetch_read(view.leaf_beacon_dists.data() + offset);
       if (leaf_count != 0) prefetch_leaf_code(0);
@@ -2729,7 +2727,8 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
         V_Q.data(),
         static_cast<int32_t>(tolerance),
         config_.simd_mode,
-        &simd_stats);
+        &simd_stats,
+        view.leaf_mbb_bits(node_id));
 
     stats.node_access_count += leaf_count;
     stats.leaf_beacon_check_count += leaf_count;

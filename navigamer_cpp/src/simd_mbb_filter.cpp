@@ -152,6 +152,39 @@ std::vector<uint32_t> filter_leaf_scalar(const uint8_t* dist_by_dim,
   return survivors;
 }
 
+std::vector<uint32_t> filter_leaf_packed_scalar(
+    const uint8_t* dist_by_dim,
+    size_t leaf_count,
+    size_t dim,
+    const int* query_beacon_dists,
+    int32_t tolerance,
+    uint32_t bits,
+    LeafBeaconFilterSimdStats* stats) {
+  if (stats) stats->scalar_checks += leaf_count;
+  std::vector<uint32_t> survivors;
+  survivors.reserve(leaf_count);
+  for (size_t leaf_idx = 0; leaf_idx < leaf_count; ++leaf_idx) {
+    bool ok = true;
+    for (size_t dim_idx = 0; dim_idx < dim; ++dim_idx) {
+      const size_t cell = dim_idx * leaf_count + leaf_idx;
+      const int64_t query_lower =
+          static_cast<int64_t>(query_beacon_dists[dim_idx]) -
+          tolerance;
+      const int64_t query_upper =
+          static_cast<int64_t>(query_beacon_dists[dim_idx]) +
+          tolerance;
+      const uint8_t distance =
+          packed_distance(dist_by_dim, cell, bits, 1);
+      if (distance < query_lower || distance > query_upper) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) survivors.push_back(static_cast<uint32_t>(leaf_idx));
+  }
+  return survivors;
+}
+
 #if NAVIGAMER_HAS_AVX2_TARGET
 __attribute__((target("avx2")))
 std::vector<uint32_t> filter_avx2(
@@ -610,8 +643,18 @@ std::vector<uint32_t> filter_leaf_beacon_survivors(
     const int* query_beacon_dists,
     int32_t tolerance,
     SimdMode mode,
-    LeafBeaconFilterSimdStats* stats) {
+    LeafBeaconFilterSimdStats* stats,
+    uint32_t packed_bits) {
   validate_leaf_inputs(dist_by_dim, leaf_count, dim, query_beacon_dists);
+  if (packed_bits == 0 || packed_bits > 8) {
+    throw std::invalid_argument("leaf MBB bit width must be 1..8");
+  }
+  if (packed_bits != 8) {
+    if (stats && mode != SimdMode::Scalar) ++stats->simd_fallbacks;
+    return filter_leaf_packed_scalar(
+        dist_by_dim, leaf_count, dim, query_beacon_dists,
+        tolerance, packed_bits, stats);
+  }
   if (mode == SimdMode::Scalar || leaf_count == 0) {
     return filter_leaf_scalar(dist_by_dim, leaf_count, dim, query_beacon_dists,
                               tolerance, stats);

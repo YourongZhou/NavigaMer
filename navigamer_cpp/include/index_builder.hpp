@@ -589,8 +589,8 @@ struct WorldNodeRecord {
   // offset/count pair; the packed link encoding selects the exact array.
   uint32_t link_begin = 0;
   uint32_t packed_counts = 0;
-  // Finest nodes store the raw leaf-distance byte offset. Non-finest nodes
-  // store a 29-bit child-MBB byte offset plus the exact 1..8-bit cell width.
+  // Finest nodes store a 29-bit leaf-distance byte offset plus the exact
+  // 1..8-bit cell width. Non-finest nodes use the same layout for child MBBs.
   uint32_t mbb_begin = 0;
 
   uint32_t child_begin() const {
@@ -627,6 +627,22 @@ struct WorldNodeRecord {
     }
     if (bits == 0 || bits > 8) {
       throw std::invalid_argument("child MBB bit width must be 1..8");
+    }
+    mbb_begin = begin | ((bits - 1) << CHILD_MBB_BEGIN_BITS);
+  }
+  uint32_t leaf_mbb_begin() const {
+    return mbb_begin & CHILD_MBB_BEGIN_MASK;
+  }
+  uint32_t leaf_mbb_bits() const {
+    return (mbb_begin >> CHILD_MBB_BEGIN_BITS) + 1;
+  }
+  void set_leaf_mbb_layout(uint32_t begin, uint32_t bits) {
+    if (begin > CHILD_MBB_BEGIN_MASK) {
+      throw std::length_error(
+          "packed leaf MBB storage exceeds 29-bit offset range");
+    }
+    if (bits == 0 || bits > 8) {
+      throw std::invalid_argument("leaf MBB bit width must be 1..8");
     }
     mbb_begin = begin | ((bits - 1) << CHILD_MBB_BEGIN_BITS);
   }
@@ -1012,6 +1028,61 @@ struct SearchGraphView {
         static_cast<uint32_t>(encoded) * bin_width +
         child_mbb_quantization_error(bin_width);
     return static_cast<uint8_t>(std::min<uint32_t>(midpoint, 255));
+  }
+
+  uint32_t leaf_mbb_bits(NodeId node_id) const {
+    if (layer_begin.empty() || node_id < layer_begin.back() ||
+        node_id >= node_records.size()) {
+      throw std::runtime_error("leaf MBB node width is missing");
+    }
+    const uint32_t bits = node_records[node_id].leaf_mbb_bits();
+    if (bits == 0 || bits > 8) {
+      throw std::runtime_error("leaf MBB node width is invalid");
+    }
+    return bits;
+  }
+  size_t leaf_mbb_byte_count(NodeId node_id) const {
+    const uint64_t cells =
+        static_cast<uint64_t>(leaf_count(node_id)) *
+        beacon_count(node_id);
+    return static_cast<size_t>(
+        (cells * leaf_mbb_bits(node_id) + 7) / 8);
+  }
+  bool leaf_mbb_range_valid(NodeId node_id) const {
+    const auto& node = node_records[node_id];
+    const uint32_t begin = node.leaf_mbb_begin();
+    return begin <= leaf_beacon_dists.size() &&
+           leaf_mbb_byte_count(node_id) <=
+               leaf_beacon_dists.size() - begin;
+  }
+  uint8_t leaf_beacon_distance(
+      NodeId node_id, size_t cell_offset) const {
+    const uint64_t cells =
+        static_cast<uint64_t>(leaf_count(node_id)) *
+        beacon_count(node_id);
+    if (cell_offset >= cells || !leaf_mbb_range_valid(node_id)) {
+      throw std::out_of_range("leaf MBB cell is outside packed storage");
+    }
+    return leaf_beacon_distance_unchecked(
+        node_id, cell_offset, leaf_mbb_bits(node_id));
+  }
+  uint8_t leaf_beacon_distance_unchecked(
+      NodeId node_id, size_t cell_offset, uint32_t bits) const {
+    const uint32_t begin = node_records[node_id].leaf_mbb_begin();
+    if (bits == 8) {
+      return leaf_beacon_dists[begin + cell_offset];
+    }
+    const size_t bit_offset = cell_offset * bits;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    uint16_t word = leaf_beacon_dists[begin + byte_offset];
+    if (shift + bits > 8) {
+      word |= static_cast<uint16_t>(
+                  leaf_beacon_dists[begin + byte_offset + 1])
+              << 8;
+    }
+    return static_cast<uint8_t>(
+        (word >> shift) & ((uint32_t{1} << bits) - 1));
   }
 
   LeafId leaf_id(NodeId node_id, uint32_t leaf_offset) const {
