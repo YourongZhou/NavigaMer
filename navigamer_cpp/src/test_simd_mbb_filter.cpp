@@ -138,50 +138,51 @@ void assert_packed_equivalence() {
 }
 
 void assert_quantized_filter_has_no_false_negatives() {
-  constexpr uint32_t shift = 2;
-  constexpr uint32_t bits = 6;
   std::mt19937 rng(20260803);
   std::uniform_int_distribution<int> pick_distance(0, 255);
-  for (size_t dim : {size_t{1}, size_t{4}, size_t{10}}) {
-    for (size_t child_count : {size_t{1}, size_t{31}, size_t{257}}) {
-      std::vector<uint8_t> exact(dim * child_count);
-      std::vector<uint8_t> encoded(dim * child_count);
-      for (size_t idx = 0; idx < exact.size(); ++idx) {
-        exact[idx] = static_cast<uint8_t>(pick_distance(rng));
-        encoded[idx] = static_cast<uint8_t>(exact[idx] >> shift);
+  for (uint32_t shift : {uint32_t{2}, uint32_t{3}}) {
+    const uint32_t bits = 8 - shift;
+    for (size_t dim : {size_t{1}, size_t{4}, size_t{10}}) {
+      for (size_t child_count : {size_t{1}, size_t{31}, size_t{257}}) {
+        std::vector<uint8_t> exact(dim * child_count);
+        std::vector<uint8_t> encoded(dim * child_count);
+        for (size_t idx = 0; idx < exact.size(); ++idx) {
+          exact[idx] = static_cast<uint8_t>(pick_distance(rng));
+          encoded[idx] = static_cast<uint8_t>(exact[idx] >> shift);
+        }
+        const auto packed = pack_distances(encoded, bits);
+        std::vector<int> query(dim);
+        for (auto& distance : query) distance = pick_distance(rng);
+        for (int32_t tolerance : {0, 1, 5, 20}) {
+          const auto expected = reference_survivors(
+              exact, child_count, dim, query, 7, tolerance);
+          const auto actual = navigamer::filter_mbb_survivors(
+              packed.data(), child_count, dim, query.data(), 7,
+              tolerance, navigamer::SimdMode::Auto, nullptr, bits, shift);
+          assert(std::includes(
+              actual.begin(), actual.end(), expected.begin(), expected.end()));
+        }
       }
-      const auto packed = pack_distances(encoded, bits);
-      std::vector<int> query(dim);
-      for (auto& distance : query) distance = pick_distance(rng);
-      for (int32_t tolerance : {0, 1, 5, 20}) {
+    }
+
+    std::vector<uint8_t> exact(256);
+    std::vector<uint8_t> encoded(256);
+    for (size_t distance = 0; distance < exact.size(); ++distance) {
+      exact[distance] = static_cast<uint8_t>(distance);
+      encoded[distance] = static_cast<uint8_t>(distance >> shift);
+    }
+    const auto packed = pack_distances(encoded, bits);
+    for (int query_distance = 0; query_distance <= 255; ++query_distance) {
+      const std::vector<int> query = {query_distance};
+      for (int32_t tolerance : {0, 1, 5, 20, 255}) {
         const auto expected = reference_survivors(
-            exact, child_count, dim, query, 7, tolerance);
+            exact, exact.size(), 1, query, 0, tolerance);
         const auto actual = navigamer::filter_mbb_survivors(
-            packed.data(), child_count, dim, query.data(), 7,
+            packed.data(), exact.size(), 1, query.data(), 0,
             tolerance, navigamer::SimdMode::Auto, nullptr, bits, shift);
         assert(std::includes(
             actual.begin(), actual.end(), expected.begin(), expected.end()));
       }
-    }
-  }
-
-  std::vector<uint8_t> exact(256);
-  std::vector<uint8_t> encoded(256);
-  for (size_t distance = 0; distance < exact.size(); ++distance) {
-    exact[distance] = static_cast<uint8_t>(distance);
-    encoded[distance] = static_cast<uint8_t>(distance >> shift);
-  }
-  const auto packed = pack_distances(encoded, bits);
-  for (int query_distance = 0; query_distance <= 255; ++query_distance) {
-    const std::vector<int> query = {query_distance};
-    for (int32_t tolerance : {0, 1, 5, 20, 255}) {
-      const auto expected = reference_survivors(
-          exact, exact.size(), 1, query, 0, tolerance);
-      const auto actual = navigamer::filter_mbb_survivors(
-          packed.data(), exact.size(), 1, query.data(), 0,
-          tolerance, navigamer::SimdMode::Auto, nullptr, bits, shift);
-      assert(std::includes(
-          actual.begin(), actual.end(), expected.begin(), expected.end()));
     }
   }
 }

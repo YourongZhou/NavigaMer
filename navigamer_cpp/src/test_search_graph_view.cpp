@@ -65,6 +65,14 @@ void assert_view_equivalent_to_original() {
         assert(beacon_count <= 10);
         assert(view.child_mbb_bits(node_id) >= 1);
         assert(view.child_mbb_bits(node_id) <= 8);
+        const uint32_t expected_quantization_shift =
+            layer + 2 == view.layer_begin.size()
+                ? navigamer::SearchGraphView::
+                      FINE_CHILD_MBB_QUANTIZATION_SHIFT
+                : navigamer::SearchGraphView::
+                      COARSE_CHILD_MBB_QUANTIZATION_SHIFT;
+        assert(view.child_mbb_quantization_shift(node_id) ==
+               expected_quantization_shift);
         if (view.child_ids_are_base_delta8(node_id)) {
           assert(record.child_begin() + sizeof(navigamer::NodeId) +
                      link_count <=
@@ -172,7 +180,8 @@ void assert_max_byte_distance_is_recall_safe() {
       found_max_distance =
           found_max_distance ||
           view.child_beacon_distance(node_id, cell) >=
-              255 - navigamer::SearchGraphView::CHILD_MBB_QUANTIZATION_ERROR;
+              255 - navigamer::SearchGraphView::child_mbb_quantization_error(
+                        view.child_mbb_quantization_shift(node_id));
     }
   }
   assert(found_max_distance);

@@ -355,23 +355,25 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 29
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 30
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
 for at most 10 deterministic beacons per non-finest parent. Reducing the
 beacon cap only removes safe metric constraints and therefore cannot create a
-false negative. Child-center distances are stored as `floor(distance / 4)`.
+false negative. Coarse layers store child-center distances as
+`floor(distance / 8)`; the last transition into the finest world layer uses
+`floor(distance / 4)` to preserve its more consequential pruning precision.
 Search decodes the bin midpoint and widens every corresponding metric bound by
-two, the maximum reconstruction error, so the representation may retain extra
-children but cannot prune a true result. Values use the exact minimum bit width
-required by each parent's largest quantized value, with each node starting on
-a byte boundary for constant-time lookup. The
+the matching maximum reconstruction error, four or two, so the representation
+may retain extra children but cannot prune a true result. Values use the exact
+minimum bit width required by each parent's largest quantized value, with each
+node starting on a byte boundary for constant-time lookup. The
 three-bit width code shares the node's 32-bit MBB field with its 29-bit byte
 offset, removing the former side array and one query-time load. A shard may
 contain up to 512 MiB of packed child-MBB data. The child-layer radius plus the
-two-unit quantization error reconstructs a conservative interval during search.
-Leaf distances remain exact flat bytes, avoiding
+layer-specific quantization error reconstructs a conservative interval during
+search. Leaf distances remain exact flat bytes, avoiding
 a separate heap allocation for every child or leaf row. Finest-layer
 construction also reuses the cleared child-ID buffer for leaf IDs. Finalized
 nodes are 16 bytes and are addressed directly by array index;

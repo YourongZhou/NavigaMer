@@ -682,9 +682,13 @@ static_assert(sizeof(BuildNodeGeometry) <= 48,
               "primary-node build geometry must remain compact");
 
 struct SearchGraphView {
-  static constexpr uint32_t CHILD_MBB_QUANTIZATION_SHIFT = 2;
-  static constexpr uint32_t CHILD_MBB_QUANTIZATION_ERROR =
-      uint32_t{1} << (CHILD_MBB_QUANTIZATION_SHIFT - 1);
+  static constexpr uint32_t COARSE_CHILD_MBB_QUANTIZATION_SHIFT = 3;
+  static constexpr uint32_t FINE_CHILD_MBB_QUANTIZATION_SHIFT = 2;
+
+  static constexpr uint32_t child_mbb_quantization_error(
+      uint32_t quantization_shift) {
+    return uint32_t{1} << (quantization_shift - 1);
+  }
 
   // Canonical array representation. NodeId and LeafId are positions in
   // node_records and sequences respectively.
@@ -705,10 +709,11 @@ struct SearchGraphView {
   FinalArray<int16_t> leaf_id_deltas16;
   FinalArray<LeafId> leaf_ids;
 
-  // Each child-center-to-beacon distance d is stored as floor(d / 4), packed
-  // at the narrowest per-parent width. Search decodes the bin midpoint and
-  // widens every pruning threshold by CHILD_MBB_QUANTIZATION_ERROR, so the
-  // lossy representation can only retain extra children, never remove one.
+  // Each child-center-to-beacon distance d is stored as floor(d / 8) above
+  // the last non-finest layer and floor(d / 4) in that final child-world
+  // transition. Search decodes the bin midpoint and widens every pruning
+  // threshold by the matching error bound, so the lossy representation can
+  // only retain extra children, never remove one.
   FinalArray<uint8_t> child_beacon_dists;
   // Explicit beacons only exist above the finest layer. Those NodeIds form a
   // dense prefix, so this side array needs no per-entry node identifier.
@@ -859,6 +864,16 @@ struct SearchGraphView {
     }
     return bits;
   }
+  uint32_t child_mbb_quantization_shift(NodeId node_id) const {
+    if (layer_begin.size() < 2 || node_id >= layer_begin.back()) {
+      throw std::runtime_error("child MBB node layer is missing");
+    }
+    const NodeId last_non_finest_begin =
+        layer_begin[layer_begin.size() - 2];
+    return node_id >= last_non_finest_begin
+               ? FINE_CHILD_MBB_QUANTIZATION_SHIFT
+               : COARSE_CHILD_MBB_QUANTIZATION_SHIFT;
+  }
   size_t child_mbb_byte_count(NodeId node_id) const {
     const uint64_t cells =
         static_cast<uint64_t>(child_count(node_id)) *
@@ -883,10 +898,12 @@ struct SearchGraphView {
     }
     const uint32_t bits = child_mbb_bits(node_id);
     return child_beacon_distance_unchecked(
-        node_id, cell_offset, bits);
+        node_id, cell_offset, bits,
+        child_mbb_quantization_shift(node_id));
   }
   uint8_t child_beacon_distance_unchecked(
-      NodeId node_id, size_t cell_offset, uint32_t bits) const {
+      NodeId node_id, size_t cell_offset, uint32_t bits,
+      uint32_t quantization_shift) const {
     const auto& node = node_records[node_id];
     const uint32_t begin = node.child_mbb_begin();
     uint8_t encoded = 0;
@@ -907,8 +924,8 @@ struct SearchGraphView {
           (word >> shift) & ((uint32_t{1} << bits) - 1));
     }
     const uint32_t midpoint =
-        (static_cast<uint32_t>(encoded) << CHILD_MBB_QUANTIZATION_SHIFT) +
-        CHILD_MBB_QUANTIZATION_ERROR;
+        (static_cast<uint32_t>(encoded) << quantization_shift) +
+        child_mbb_quantization_error(quantization_shift);
     return static_cast<uint8_t>(std::min<uint32_t>(midpoint, 255));
   }
 
