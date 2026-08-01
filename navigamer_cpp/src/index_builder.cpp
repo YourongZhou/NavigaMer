@@ -3268,10 +3268,10 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
 
         if (direct_edlib && !candidates.candidate_item_ids.empty()) {
           const auto verify_start = Clock::now();
-          // Four-lane Myers wins only for the high-tolerance layer; bounded
+          // Four-lane Myers wins only for high-tolerance layers; bounded
           // scalar Edlib exits sooner at lower tolerances.
           const bool use_batch4 =
-              link_tolerance >= 40 &&
+              link_tolerance >= 35 &&
               search_graph_view_.sequences.reference_backed &&
               candidates.candidate_item_ids.size() >= 4 &&
               myers_batch4_avx2_runtime_supported();
