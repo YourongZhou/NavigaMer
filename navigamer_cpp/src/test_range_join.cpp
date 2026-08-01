@@ -385,6 +385,19 @@ void test_compact_slot_supports_16bit_boundary_and_overflow() {
       assert(result.candidate_item_ids.back() == item_count - 1);
     }
   }
+
+  std::vector<navigamer::RangeJoinItemView> views(
+      boundary + 1, {0, sequence});
+  for (size_t item_idx = 0; item_idx < views.size(); ++item_idx) {
+    views[item_idx].item_id = item_idx;
+  }
+  const std::string ambiguous(4, 'N');
+  views.back().sequence = ambiguous;
+  navigamer::ExactRangeJoinIndex positional(config, true, false, true);
+  positional.build_views(std::move(views));
+  const auto ambiguous_result = positional.query(sequence, 0);
+  assert(ambiguous_result.candidate_item_ids.size() == boundary + 1);
+  assert(ambiguous_result.candidate_item_ids.back() == boundary);
 }
 
 }  // namespace

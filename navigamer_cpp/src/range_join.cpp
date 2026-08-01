@@ -496,7 +496,6 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
 
     if (positional_postings_use_32bit_) {
       PositionalPostingLists postings;
-      std::vector<uint16_t> unindexable_items;
       uint32_t maximum_position = 0;
       for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
         const size_t length = item_sequence(item_idx).size();
@@ -512,36 +511,47 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
            (value >>= 1) != 0;) {
         ++position_bits;
       }
-      generate_positional(
-          unindexable_items, true,
-          [&](uint64_t code, size_t item_idx, size_t position) {
-            postings.count(
-                code,
-                (static_cast<uint32_t>(item_idx) << position_bits) |
-                    static_cast<uint32_t>(position));
-          });
-      const uint32_t maximum_item =
-          item_count() == 0
-              ? 0
-              : static_cast<uint32_t>(item_count() - 1);
-      const uint32_t maximum_packed =
-          (maximum_item << position_bits) | maximum_position;
-      postings.finish_counting(maximum_packed);
-      generate_positional(
-          unindexable_items, false,
-          [&](uint64_t code, size_t item_idx, size_t position) {
-            postings.append(
-                code,
-                (static_cast<uint32_t>(item_idx) << position_bits) |
-                    static_cast<uint32_t>(position));
-          });
-      postings.finish_filling();
+      const auto populate_positional = [&](auto& unindexable_items) {
+        generate_positional(
+            unindexable_items, true,
+            [&](uint64_t code, size_t item_idx, size_t position) {
+              postings.count(
+                  code,
+                  (static_cast<uint32_t>(item_idx) << position_bits) |
+                      static_cast<uint32_t>(position));
+            });
+        const uint32_t maximum_item =
+            item_count() == 0
+                ? 0
+                : static_cast<uint32_t>(item_count() - 1);
+        const uint32_t maximum_packed =
+            (maximum_item << position_bits) | maximum_position;
+        postings.finish_counting(maximum_packed);
+        generate_positional(
+            unindexable_items, false,
+            [&](uint64_t code, size_t item_idx, size_t position) {
+              postings.append(
+                  code,
+                  (static_cast<uint32_t>(item_idx) << position_bits) |
+                      static_cast<uint32_t>(position));
+            });
+        postings.finish_filling();
+      };
+      if (seed_index_uses_16bit_) {
+        std::vector<uint16_t> unindexable_items;
+        populate_positional(unindexable_items);
+        unindexable_items16_by_seed_len_.emplace(
+            seed_len, std::move(unindexable_items));
+      } else {
+        std::vector<uint32_t> unindexable_items;
+        populate_positional(unindexable_items);
+        unindexable_items_by_seed_len_.emplace(
+            seed_len, std::move(unindexable_items));
+      }
       positional_postings_by_seed_len_.emplace(
           seed_len, std::move(postings));
       positional_position_bits_by_seed_len_.emplace(
           seed_len, position_bits);
-      unindexable_items16_by_seed_len_.emplace(
-          seed_len, std::move(unindexable_items));
     } else {
       WidePositionalPostingLists postings;
       postings.reserve(item_count());
@@ -1183,10 +1193,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
       }
     }
   }
-  const bool compact_unindexable =
-      enable_positional_postings_
-          ? positional_postings_use_32bit_
-          : seed_index_uses_16bit_;
+  const bool compact_unindexable = seed_index_uses_16bit_;
   if (compact_unindexable) {
     const auto unindexable_it =
         unindexable_items16_by_seed_len_.find(result.seed_len);
