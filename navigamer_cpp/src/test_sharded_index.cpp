@@ -284,24 +284,26 @@ void test_sharded_round_trip_and_no_false_negatives() {
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(reloaded_manifest.window_length == window);
-  assert(reloaded_manifest.format_version == 3);
+  assert(reloaded_manifest.format_version == 4);
   assert(reloaded_manifest.stride == stride);
   assert(reloaded_manifest.shards.size() ==
          manifest.shards.size());
   assert(reloaded_manifest.shards.size() > 2);
   for (const auto& shard : reloaded_manifest.shards) {
     assert(shard.window_count <= shard_windows);
-    assert(std::filesystem::exists(
-        navigamer::resolve_index_shard_path(
-            bundle.string(), shard.path)));
+    assert(shard.pack_id < reloaded_manifest.pack_paths.size());
+    assert(shard.file_offset % 64 == 0);
+    assert(shard.file_size > 0);
   }
 
-  std::vector<std::filesystem::file_time_type> shard_times;
-  shard_times.reserve(reloaded_manifest.shards.size());
-  for (const auto& shard : reloaded_manifest.shards) {
-    shard_times.push_back(std::filesystem::last_write_time(
-        navigamer::resolve_index_shard_path(
-            bundle.string(), shard.path)));
+  std::vector<std::filesystem::file_time_type> pack_times;
+  pack_times.reserve(reloaded_manifest.pack_paths.size());
+  for (const auto& pack_path : reloaded_manifest.pack_paths) {
+    const auto resolved = navigamer::resolve_index_shard_path(
+        bundle.string(), pack_path);
+    assert(std::filesystem::exists(resolved));
+    pack_times.push_back(std::filesystem::last_write_time(
+        resolved));
   }
   const auto resumed =
       navigamer::build_sharded_reference_index(
@@ -309,18 +311,18 @@ void test_sharded_round_trip_and_no_false_negatives() {
           reference, contigs, window, stride, shard_windows,
           hierarchy, range_config, 4);
   assert(resumed.shards.size() == reloaded_manifest.shards.size());
-  for (size_t shard_idx = 0;
-       shard_idx < resumed.shards.size(); ++shard_idx) {
+  assert(resumed.pack_paths.size() == pack_times.size());
+  for (size_t pack_idx = 0;
+       pack_idx < resumed.pack_paths.size(); ++pack_idx) {
     assert(std::filesystem::last_write_time(
-               navigamer::resolve_index_shard_path(
-                   bundle.string(),
-                   resumed.shards[shard_idx].path)) ==
-           shard_times[shard_idx]);
+        navigamer::resolve_index_shard_path(
+            bundle.string(), resumed.pack_paths[pack_idx])) ==
+           pack_times[pack_idx]);
   }
 
   const std::string damaged_path =
       navigamer::resolve_index_shard_path(
-          bundle.string(), resumed.shards.front().path);
+          bundle.string(), resumed.pack_paths.front());
   {
     std::ofstream damaged(damaged_path, std::ios::binary);
     damaged << "damaged";
@@ -466,13 +468,15 @@ void test_seed_router_no_false_negatives() {
          rebuilt_manifest.router_checksum);
   assert(file_manifest.shards.size() ==
          rebuilt_manifest.shards.size());
-  for (size_t shard_idx = 0;
-       shard_idx < file_manifest.shards.size(); ++shard_idx) {
+  assert(file_manifest.pack_paths.size() ==
+         rebuilt_manifest.pack_paths.size());
+  for (size_t pack_idx = 0;
+       pack_idx < file_manifest.pack_paths.size(); ++pack_idx) {
     assert(files_equal(
         navigamer::resolve_index_shard_path(
-            bundle.string(), rebuilt_manifest.shards[shard_idx].path),
+            bundle.string(), rebuilt_manifest.pack_paths[pack_idx]),
         navigamer::resolve_index_shard_path(
-            file_bundle.string(), file_manifest.shards[shard_idx].path)));
+            file_bundle.string(), file_manifest.pack_paths[pack_idx])));
   }
   assert(files_equal(
       bundle.string() + ".route",

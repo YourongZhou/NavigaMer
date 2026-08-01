@@ -84,6 +84,15 @@ LoadedIndex load_index(
     IndexLoadValidation validation =
         IndexLoadValidation::Full);
 
+// Load one complete .navidx image embedded at a 64-byte-aligned range in a
+// larger file. Only the requested byte range is mapped.
+LoadedIndex load_index_range(
+    const std::string& path,
+    uint64_t offset,
+    uint64_t length,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
+
 }  // namespace navigamer
 
 #endif  // NAVIGAMER_INDEX_PERSISTENCE_HPP

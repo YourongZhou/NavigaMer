@@ -32,17 +32,23 @@ namespace navigamer {
 namespace {
 
 constexpr std::array<char, 8> kShardMagic = {
-    'N', 'G', 'S', 'H', 'R', 'D', '0', '3'};
+    'N', 'G', 'S', 'H', 'R', 'D', '0', '4'};
+constexpr std::array<char, 8> kShardPackMagic = {
+    'N', 'G', 'P', 'A', 'C', 'K', '0', '1'};
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '2'};
-constexpr uint32_t kShardFormatVersion = 3;
+constexpr uint32_t kShardFormatVersion = 4;
+constexpr uint32_t kShardPackFormatVersion = 1;
 constexpr uint32_t kRouterFormatVersion = 2;
 constexpr size_t kRouterHeaderBytes = 48;
 constexpr std::streamoff kRouterChecksumOffset = 40;
 constexpr uint32_t kRouterK = 16;
 constexpr uint32_t kRouterWindow = 32;
-constexpr uint64_t kMaxShardCount = uint64_t{1} << 20;
+constexpr uint64_t kMaxShardCount =
+    std::numeric_limits<uint32_t>::max();
 constexpr uint64_t kMaxStringLength = uint64_t{1} << 30;
+constexpr size_t kShardsPerPack = 1024;
+constexpr uint64_t kShardPackAlignment = 64;
 constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
 constexpr uint64_t kFnvPrime = 1099511628211ULL;
 
@@ -155,10 +161,20 @@ uint64_t manifest_checksum(
   hash_pod<uint64_t>(&hash, manifest.router_entry_count);
   hash_pod<uint64_t>(&hash, manifest.router_checksum);
   hash_string(&hash, manifest.part_signature);
+  hash_pod<uint64_t>(&hash, manifest.pack_paths.size());
+  for (const auto& path : manifest.pack_paths) {
+    hash_string(&hash, path);
+  }
+  hash_pod<uint64_t>(&hash, manifest.contig_ids.size());
+  for (const auto& id : manifest.contig_ids) {
+    hash_string(&hash, id);
+  }
   hash_pod<uint64_t>(&hash, manifest.shards.size());
   for (const auto& shard : manifest.shards) {
-    hash_string(&hash, shard.path);
-    hash_string(&hash, shard.ref_id);
+    hash_pod<uint32_t>(&hash, shard.pack_id);
+    hash_pod<uint64_t>(&hash, shard.file_offset);
+    hash_pod<uint64_t>(&hash, shard.file_size);
+    hash_pod<uint32_t>(&hash, shard.contig_id);
     hash_pod<uint32_t>(&hash, shard.source_begin);
     hash_pod<uint32_t>(&hash, shard.source_end);
     hash_pod<uint64_t>(&hash, shard.window_count);
@@ -293,15 +309,24 @@ std::filesystem::path shard_output_path(
   return bundle_path.parent_path() / name.str();
 }
 
+std::filesystem::path shard_pack_output_path(
+    const std::filesystem::path& bundle_path,
+    size_t pack_ordinal) {
+  std::ostringstream name;
+  name << bundle_path.filename().string()
+       << ".pack" << std::setw(6) << std::setfill('0')
+       << pack_ordinal << ".navpack";
+  return bundle_path.parent_path() / name.str();
+}
+
 struct ShardBuildSpec {
-  std::filesystem::path part_path;
-  std::string ref_id;
-  size_t slice_begin = 0;
-  size_t slice_end = 0;
+  uint32_t contig_id = 0;
+  uint32_t slice_begin = 0;
   uint32_t source_begin = 0;
-  uint32_t source_end = 0;
-  size_t window_count = 0;
+  uint32_t window_count = 0;
 };
+static_assert(sizeof(ShardBuildSpec) == 16,
+              "millions of shard plans must remain compact");
 
 struct RouterBuildData {
   explicit RouterBuildData(std::filesystem::path path)
@@ -313,7 +338,6 @@ struct RouterBuildData {
         shard_offsets(std::move(other.shard_offsets)),
         shard_counts(std::move(other.shard_counts)),
         spool_size(other.spool_size),
-        page_size(other.page_size),
         entry_count(other.entry_count) {
     other.spool_path.clear();
   }
@@ -325,12 +349,36 @@ struct RouterBuildData {
   }
 
   std::filesystem::path spool_path;
-  std::vector<size_t> shard_offsets;
-  std::vector<size_t> shard_counts;
+  std::vector<uint64_t> shard_offsets;
+  std::vector<uint32_t> shard_counts;
   size_t spool_size = 0;
-  size_t page_size = 4096;
   size_t entry_count = 0;
 };
+
+bool reusable_shard_matches(
+    const LoadedIndex& candidate,
+    const std::string& expected_signature,
+    const std::string& reference_id,
+    const std::string& reference_slice,
+    const ReferenceContig& expected_contig,
+    size_t window_length) {
+  if (candidate.manifest.signature != expected_signature) {
+    return false;
+  }
+  const auto& store = candidate.builder.sequence_store();
+  if (!store.reference_backed ||
+      store.reference_id != reference_id ||
+      store.fixed_sequence_length != window_length ||
+      store.reference_view() != reference_slice ||
+      store.reference_contigs.size() != 1) {
+    return false;
+  }
+  const auto& contig = store.reference_contigs.front();
+  return contig.id == expected_contig.id &&
+         contig.begin == expected_contig.begin &&
+         contig.end == expected_contig.end &&
+         contig.source_begin == expected_contig.source_begin;
+}
 
 bool load_reusable_shard(
     const std::filesystem::path& part_path,
@@ -347,19 +395,9 @@ bool load_reusable_shard(
   }
   try {
     LoadedIndex candidate = load_index(part_path.string());
-    const auto& store = candidate.builder.sequence_store();
-    if (!store.reference_backed ||
-        store.reference_id != reference_id ||
-        store.fixed_sequence_length != window_length ||
-        store.reference_view() != reference_slice ||
-        store.reference_contigs.size() != 1) {
-      return false;
-    }
-    const auto& contig = store.reference_contigs.front();
-    if (contig.id != expected_contig.id ||
-        contig.begin != expected_contig.begin ||
-        contig.end != expected_contig.end ||
-        contig.source_begin != expected_contig.source_begin) {
+    if (!reusable_shard_matches(
+            candidate, expected_manifest.signature, reference_id,
+            reference_slice, expected_contig, window_length)) {
       return false;
     }
     *loaded = std::move(candidate);
@@ -387,14 +425,140 @@ void install_shard_atomically(
   }
 }
 
+struct ShardPackEntry {
+  uint64_t offset = 0;
+  uint64_t size = 0;
+};
+
+uint64_t align_shard_pack_offset(uint64_t offset) {
+  const uint64_t remainder = offset % kShardPackAlignment;
+  if (remainder == 0) return offset;
+  const uint64_t padding = kShardPackAlignment - remainder;
+  if (offset > std::numeric_limits<uint64_t>::max() - padding) {
+    throw std::runtime_error("shard pack offset overflow");
+  }
+  return offset + padding;
+}
+
+std::vector<ShardPackEntry> read_shard_pack_directory(
+    const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("unable to open shard pack");
+  std::array<char, 8> magic{};
+  in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+  if (!in || magic != kShardPackMagic) {
+    throw std::runtime_error("invalid shard pack magic");
+  }
+  const uint32_t version = read_pod<uint32_t>(in, "pack.version");
+  const uint32_t count = read_pod<uint32_t>(in, "pack.count");
+  if (version != kShardPackFormatVersion || count == 0 ||
+      count > kShardsPerPack) {
+    throw std::runtime_error("invalid shard pack directory");
+  }
+  std::vector<ShardPackEntry> entries(count);
+  for (auto& entry : entries) {
+    entry.offset = read_pod<uint64_t>(in, "pack.offset");
+    entry.size = read_pod<uint64_t>(in, "pack.size");
+  }
+  std::error_code error;
+  const uint64_t file_size = std::filesystem::file_size(path, error);
+  if (error) throw std::runtime_error("unable to stat shard pack");
+  uint64_t expected_offset = align_shard_pack_offset(
+      16 + static_cast<uint64_t>(entries.size()) * 16);
+  for (const auto& entry : entries) {
+    if (entry.offset != expected_offset || entry.size == 0 ||
+        entry.offset > file_size ||
+        entry.size > file_size - entry.offset) {
+      throw std::runtime_error("invalid shard pack range");
+    }
+    expected_offset = align_shard_pack_offset(entry.offset + entry.size);
+  }
+  if (entries.back().offset + entries.back().size != file_size) {
+    throw std::runtime_error("shard pack has truncated or trailing data");
+  }
+  return entries;
+}
+
+std::vector<ShardPackEntry> install_shard_pack_atomically(
+    const std::filesystem::path& pack_path,
+    const std::vector<std::filesystem::path>& part_paths) {
+  if (part_paths.empty() || part_paths.size() > kShardsPerPack) {
+    throw std::invalid_argument("invalid number of shards in pack");
+  }
+  std::vector<ShardPackEntry> entries(part_paths.size());
+  uint64_t offset = align_shard_pack_offset(
+      16 + static_cast<uint64_t>(part_paths.size()) * 16);
+  for (size_t idx = 0; idx < part_paths.size(); ++idx) {
+    std::error_code error;
+    const uint64_t size =
+        std::filesystem::file_size(part_paths[idx], error);
+    if (error || size == 0 ||
+        size > std::numeric_limits<uint64_t>::max() - offset) {
+      throw std::runtime_error("invalid temporary shard file");
+    }
+    entries[idx] = {offset, size};
+    offset = align_shard_pack_offset(offset + size);
+  }
+
+  const std::filesystem::path temporary = pack_path.string() + ".tmp";
+  std::error_code ignored;
+  std::filesystem::remove(temporary, ignored);
+  try {
+    std::ofstream out(temporary, std::ios::binary);
+    if (!out) throw std::runtime_error("unable to create shard pack");
+    out.write(kShardPackMagic.data(),
+              static_cast<std::streamsize>(kShardPackMagic.size()));
+    write_pod<uint32_t>(out, kShardPackFormatVersion);
+    write_pod<uint32_t>(
+        out, static_cast<uint32_t>(entries.size()));
+    for (const auto& entry : entries) {
+      write_pod<uint64_t>(out, entry.offset);
+      write_pod<uint64_t>(out, entry.size);
+    }
+    static constexpr std::array<char, kShardPackAlignment> zeros{};
+    std::array<char, 1 << 20> buffer{};
+    for (size_t idx = 0; idx < part_paths.size(); ++idx) {
+      const uint64_t position = static_cast<uint64_t>(out.tellp());
+      if (position > entries[idx].offset) {
+        throw std::runtime_error("shard pack directory overlap");
+      }
+      const size_t padding =
+          static_cast<size_t>(entries[idx].offset - position);
+      out.write(zeros.data(), static_cast<std::streamsize>(padding));
+      std::ifstream part(part_paths[idx], std::ios::binary);
+      if (!part) throw std::runtime_error("unable to read temporary shard");
+      while (part) {
+        part.read(buffer.data(),
+                  static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = part.gcount();
+        if (count > 0) out.write(buffer.data(), count);
+      }
+      if (!part.eof() || !out) {
+        throw std::runtime_error("failed to copy temporary shard");
+      }
+    }
+    out.close();
+    if (!out) throw std::runtime_error("failed to finalize shard pack");
+    std::error_code error;
+    std::filesystem::rename(temporary, pack_path, error);
+    if (error) {
+      throw std::runtime_error(
+          "unable to install shard pack: " + error.message());
+    }
+  } catch (...) {
+    std::filesystem::remove(temporary, ignored);
+    throw;
+  }
+  return entries;
+}
+
 uint64_t save_router_sidecar(
     const std::filesystem::path& path,
     uint32_t k, uint32_t window, uint32_t shard_count,
     const RouterBuildData& data) {
   if (data.shard_offsets.size() != shard_count ||
       data.shard_counts.size() != shard_count ||
-      data.entry_count == 0 || data.spool_size == 0 ||
-      data.page_size == 0) {
+      data.entry_count == 0 || data.spool_size == 0) {
     throw std::runtime_error("invalid shard router build data");
   }
   const std::filesystem::path temporary = path.string() + ".tmp";
@@ -451,8 +615,7 @@ uint64_t save_router_sidecar(
     for (uint32_t shard_id = 0; shard_id < shard_count; ++shard_id) {
       const size_t offset = data.shard_offsets[shard_id];
       const size_t count = data.shard_counts[shard_id];
-      if (offset % data.page_size != 0 ||
-          count >
+      if (count >
               (std::numeric_limits<size_t>::max() - offset) /
                   sizeof(uint32_t) ||
           offset + count * sizeof(uint32_t) > data.spool_size) {
@@ -558,23 +721,6 @@ uint64_t save_router_sidecar(
             code_at(cursor.shard_id, next_offset),
             cursor.shard_id, next_offset});
       }
-#if defined(__unix__) || defined(__APPLE__)
-#if defined(MADV_DONTNEED)
-      const size_t consumed_bytes =
-          next_offset * sizeof(uint32_t);
-      if (consumed_bytes % data.page_size == 0 ||
-          next_offset == data.shard_counts[cursor.shard_id]) {
-        const size_t consumed_page =
-            consumed_bytes == 0
-                ? 0
-                : (consumed_bytes - 1) / data.page_size;
-        void* page_address = const_cast<uint8_t*>(
-            spool_bytes + data.shard_offsets[cursor.shard_id] +
-            consumed_page * data.page_size);
-        (void)madvise(page_address, data.page_size, MADV_DONTNEED);
-      }
-#endif
-#endif
     }
     flush_codes();
     if (pending_bit_count != 0) {
@@ -642,14 +788,6 @@ uint64_t save_router_sidecar(
   return checksum;
 }
 
-size_t router_spool_page_size() {
-#if defined(__unix__) || defined(__APPLE__)
-  const long page_size = sysconf(_SC_PAGESIZE);
-  if (page_size > 0) return static_cast<size_t>(page_size);
-#endif
-  return 4096;
-}
-
 template <typename SliceLoader>
 RouterBuildData build_router_data(
     const std::vector<ShardBuildSpec>& specs,
@@ -660,29 +798,23 @@ RouterBuildData build_router_data(
     throw std::runtime_error("too many shards for seed router");
   }
   RouterBuildData data(spool_path);
-  data.page_size = router_spool_page_size();
   data.shard_offsets.reserve(specs.size());
   data.shard_counts.reserve(specs.size());
   std::ofstream spool(data.spool_path, std::ios::binary);
   if (!spool) {
     throw std::runtime_error("unable to create shard router code spool");
   }
-  std::vector<uint8_t> zero_page(data.page_size, 0);
   size_t spool_position = 0;
-  const auto align_spool = [&]() {
-    const size_t remainder = spool_position % data.page_size;
-    if (remainder == 0) return;
-    const size_t padding = data.page_size - remainder;
-    spool.write(
-        reinterpret_cast<const char*>(zero_page.data()),
-        static_cast<std::streamsize>(padding));
-    spool_position += padding;
-  };
   for (const auto& spec : specs) {
-    align_spool();
+    // Keep lists contiguous. Page-aligning millions of small shards would
+    // add one mostly empty 4 KiB page per shard and fault it during merge.
     data.shard_offsets.push_back(spool_position);
     const auto slice = load_slice(spec);
     const auto minimizers = reference_minimizers(slice, k, window);
+    if (minimizers.size() > std::numeric_limits<uint32_t>::max()) {
+      throw std::runtime_error(
+          "one shard has too many router minimizers");
+    }
     if (minimizers.size() >
         std::numeric_limits<size_t>::max() - data.entry_count) {
       throw std::runtime_error("shard router entry count overflow");
@@ -692,7 +824,8 @@ RouterBuildData build_router_data(
             sizeof(uint32_t)) {
       throw std::runtime_error("shard router spool size overflow");
     }
-    data.shard_counts.push_back(minimizers.size());
+    data.shard_counts.push_back(
+        static_cast<uint32_t>(minimizers.size()));
     if (!minimizers.empty()) {
       const size_t byte_count =
           minimizers.size() * sizeof(uint32_t);
@@ -703,7 +836,6 @@ RouterBuildData build_router_data(
     }
     data.entry_count += minimizers.size();
   }
-  align_spool();
   spool.close();
   if (!spool) {
     throw std::runtime_error("failed to finalize shard router code spool");
@@ -722,8 +854,22 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
         "sharded index has invalid window configuration");
   }
   if (manifest.part_signature.empty() ||
+      manifest.pack_paths.empty() || manifest.contig_ids.empty() ||
       manifest.shards.empty()) {
     throw std::runtime_error("sharded index contains no shards");
+  }
+  if (manifest.pack_paths.size() > manifest.shards.size()) {
+    throw std::runtime_error("sharded index has too many pack files");
+  }
+  for (const auto& path : manifest.pack_paths) {
+    if (path.empty()) {
+      throw std::runtime_error("sharded index has an empty pack path");
+    }
+  }
+  for (const auto& id : manifest.contig_ids) {
+    if (id.empty()) {
+      throw std::runtime_error("sharded index has an empty contig ID");
+    }
   }
   if (manifest.shards.size() > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("sharded index has too many router targets");
@@ -746,13 +892,26 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
   size_t total_sequences = 0;
   size_t total_nodes = 0;
   const IndexShardDescriptor* previous = nullptr;
+  std::vector<uint64_t> pack_ends(manifest.pack_paths.size(), 0);
+  std::vector<uint8_t> pack_referenced(manifest.pack_paths.size(), 0);
   for (const auto& shard : manifest.shards) {
-    if (shard.path.empty() || shard.ref_id.empty() ||
+    if (shard.pack_id >= manifest.pack_paths.size() ||
+        shard.contig_id >= manifest.contig_ids.size() ||
+        shard.file_offset % kShardPackAlignment != 0 ||
+        shard.file_size == 0 ||
         shard.source_end < shard.source_begin ||
         shard.window_count == 0) {
       throw std::runtime_error(
           "sharded index contains an invalid shard descriptor");
     }
+    if (shard.file_offset < pack_ends[shard.pack_id] ||
+        shard.file_size >
+            std::numeric_limits<uint64_t>::max() - shard.file_offset) {
+      throw std::runtime_error(
+          "sharded index contains overlapping pack ranges");
+    }
+    pack_ends[shard.pack_id] = shard.file_offset + shard.file_size;
+    pack_referenced[shard.pack_id] = 1;
     const uint64_t expected_source_end =
         static_cast<uint64_t>(shard.source_begin) +
         (static_cast<uint64_t>(shard.window_count) - 1) *
@@ -764,7 +923,7 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
       throw std::runtime_error(
           "sharded index has inconsistent shard coordinates");
     }
-    if (previous && previous->ref_id == shard.ref_id) {
+    if (previous && previous->contig_id == shard.contig_id) {
       const uint64_t expected_source_begin =
           static_cast<uint64_t>(previous->source_begin) +
           static_cast<uint64_t>(previous->window_count) *
@@ -787,6 +946,10 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
     total_sequences += shard.sequence_count;
     total_nodes += shard.world_node_count;
     previous = &shard;
+  }
+  if (std::find(pack_referenced.begin(), pack_referenced.end(), 0) !=
+      pack_referenced.end()) {
+    throw std::runtime_error("sharded index contains an unused pack file");
   }
   if (total_windows != manifest.total_window_count ||
       total_sequences != manifest.total_sequence_count ||
@@ -832,15 +995,25 @@ void save_sharded_index_manifest(
     write_pod<uint64_t>(out, manifest.router_entry_count);
     write_pod<uint64_t>(out, manifest.router_checksum);
     write_string(out, manifest.part_signature);
+    write_pod<uint64_t>(out, manifest.pack_paths.size());
+    for (const auto& pack_path : manifest.pack_paths) {
+      write_string(out, pack_path);
+    }
+    write_pod<uint64_t>(out, manifest.contig_ids.size());
+    for (const auto& contig_id : manifest.contig_ids) {
+      write_string(out, contig_id);
+    }
     write_pod<uint64_t>(out, manifest.shards.size());
     for (const auto& shard : manifest.shards) {
-      write_string(out, shard.path);
-      write_string(out, shard.ref_id);
+      write_pod<uint32_t>(out, shard.pack_id);
+      write_pod<uint64_t>(out, shard.file_offset);
+      write_pod<uint64_t>(out, shard.file_size);
+      write_pod<uint32_t>(out, shard.contig_id);
       write_pod<uint32_t>(out, shard.source_begin);
       write_pod<uint32_t>(out, shard.source_end);
-      write_pod<uint64_t>(out, shard.window_count);
-      write_pod<uint64_t>(out, shard.sequence_count);
-      write_pod<uint64_t>(out, shard.world_node_count);
+      write_pod<uint32_t>(out, shard.window_count);
+      write_pod<uint32_t>(out, shard.sequence_count);
+      write_pod<uint32_t>(out, shard.world_node_count);
     }
     write_pod<uint64_t>(out, manifest_checksum(manifest));
     out.close();
@@ -891,6 +1064,26 @@ ShardedIndexManifest read_sharded_index_manifest(
       read_pod<uint64_t>(in, "router_checksum");
   manifest.part_signature =
       read_string(in, "part_signature");
+  const uint64_t pack_count =
+      read_pod<uint64_t>(in, "pack_count");
+  if (pack_count == 0 || pack_count > kMaxShardCount) {
+    throw std::runtime_error("invalid sharded index pack count");
+  }
+  manifest.pack_paths.reserve(static_cast<size_t>(pack_count));
+  for (uint64_t pack_idx = 0; pack_idx < pack_count; ++pack_idx) {
+    manifest.pack_paths.push_back(
+        read_string(in, "pack.path"));
+  }
+  const uint64_t contig_count =
+      read_pod<uint64_t>(in, "contig_count");
+  if (contig_count == 0 || contig_count > kMaxShardCount) {
+    throw std::runtime_error("invalid sharded index contig count");
+  }
+  manifest.contig_ids.reserve(static_cast<size_t>(contig_count));
+  for (uint64_t contig_idx = 0; contig_idx < contig_count; ++contig_idx) {
+    manifest.contig_ids.push_back(
+        read_string(in, "contig.id"));
+  }
   const uint64_t shard_count =
       read_pod<uint64_t>(in, "shard_count");
   if (shard_count == 0 || shard_count > kMaxShardCount) {
@@ -900,17 +1093,19 @@ ShardedIndexManifest read_sharded_index_manifest(
   for (uint64_t shard_idx = 0; shard_idx < shard_count;
        ++shard_idx) {
     IndexShardDescriptor shard;
-    shard.path = read_string(in, "shard.path");
-    shard.ref_id = read_string(in, "shard.ref_id");
+    shard.pack_id = read_pod<uint32_t>(in, "shard.pack_id");
+    shard.file_offset = read_pod<uint64_t>(in, "shard.file_offset");
+    shard.file_size = read_pod<uint64_t>(in, "shard.file_size");
+    shard.contig_id = read_pod<uint32_t>(in, "shard.contig_id");
     shard.source_begin =
         read_pod<uint32_t>(in, "shard.source_begin");
     shard.source_end =
         read_pod<uint32_t>(in, "shard.source_end");
-    shard.window_count = read_size(in, "shard.window_count");
+    shard.window_count = read_pod<uint32_t>(in, "shard.window_count");
     shard.sequence_count =
-        read_size(in, "shard.sequence_count");
+        read_pod<uint32_t>(in, "shard.sequence_count");
     shard.world_node_count =
-        read_size(in, "shard.world_node_count");
+        read_pod<uint32_t>(in, "shard.world_node_count");
     manifest.shards.push_back(std::move(shard));
   }
   const uint64_t stored_checksum =
@@ -1126,15 +1321,19 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
           static_cast<int>(stride), hierarchy, range_config);
 
   std::vector<ShardBuildSpec> specs;
-  size_t shard_ordinal = 0;
+  std::vector<std::string> contig_ids;
+  contig_ids.reserve(reference_contigs.size());
   uint32_t expected_contig_begin = 0;
-  for (const auto& contig : reference_contigs) {
+  for (size_t contig_idx = 0; contig_idx < reference_contigs.size();
+       ++contig_idx) {
+    const auto& contig = reference_contigs[contig_idx];
     if (contig.id.empty() || contig.begin != expected_contig_begin ||
         contig.end < contig.begin ||
         contig.end > reference_size) {
       throw std::invalid_argument(
           "reference contigs must be contiguous and in bounds");
     }
+    contig_ids.push_back(contig.id);
     expected_contig_begin = contig.end;
     const size_t contig_length =
         static_cast<size_t>(contig.end - contig.begin);
@@ -1164,11 +1363,10 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
       }
 
       specs.push_back({
-          shard_output_path(bundle, shard_ordinal), contig.id,
-          slice_begin, slice_end,
+          static_cast<uint32_t>(contig_idx),
+          static_cast<uint32_t>(slice_begin),
           static_cast<uint32_t>(source_begin),
-          static_cast<uint32_t>(source_end), shard_window_count});
-      ++shard_ordinal;
+          static_cast<uint32_t>(shard_window_count)});
     }
   }
   if (expected_contig_begin != reference_size) {
@@ -1178,6 +1376,10 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   if (specs.empty()) {
     throw std::invalid_argument(
         "sharded index reference contains no complete windows");
+  }
+  if (specs.size() > kMaxShardCount) {
+    throw std::runtime_error(
+        "reference requires more than 2^32 logical shards");
   }
 
   const size_t available_threads = static_cast<size_t>(
@@ -1204,25 +1406,35 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   const int job_count = static_cast<int>(job_count_size);
   const int threads_per_job = static_cast<int>(
       std::max<size_t>(1, available_threads / job_count_size));
+  const auto spec_slice_end = [&](const ShardBuildSpec& spec) {
+    return static_cast<size_t>(spec.slice_begin) +
+           (static_cast<size_t>(spec.window_count) - 1) * stride +
+           window_length;
+  };
 
   std::vector<IndexShardDescriptor> descriptors(specs.size());
-  std::vector<std::exception_ptr> errors(specs.size());
-  const auto build_one = [&](size_t spec_idx) {
+  const auto build_one = [&](size_t spec_idx,
+                             std::exception_ptr* error) {
     try {
       const auto& spec = specs[spec_idx];
+      const size_t slice_end = spec_slice_end(spec);
+      const std::string& ref_id = contig_ids[spec.contig_id];
+      const std::filesystem::path part_path =
+          shard_output_path(bundle, spec_idx);
       std::string slice =
-          load_slice(spec.slice_begin, spec.slice_end);
-      if (slice.size() != spec.slice_end - spec.slice_begin) {
+          load_slice(spec.slice_begin, slice_end);
+      if (slice.size() != slice_end - spec.slice_begin) {
         throw std::runtime_error(
             "reference slice loader returned the wrong number of bases");
       }
+      const uint32_t slice_size = static_cast<uint32_t>(slice.size());
       ReferenceContig slice_contig{
-          spec.ref_id, 0, static_cast<uint32_t>(slice.size()),
+          ref_id, 0, slice_size,
           spec.source_begin};
 
       LoadedIndex reusable;
       const bool reused = load_reusable_shard(
-          spec.part_path, part_manifest, reference_id, slice,
+          part_path, part_manifest, reference_id, slice,
           slice_contig, window_length, &reusable);
 
       size_t sequence_count = 0;
@@ -1240,56 +1452,169 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
             reference_id, std::move(slice), window_length, stride,
             {slice_contig});
         install_shard_atomically(
-            spec.part_path, builder, part_manifest);
+            part_path, builder, part_manifest);
         sequence_count = builder.num_sequences();
         world_node_count = builder.num_world_nodes();
       }
+      if (sequence_count > std::numeric_limits<uint32_t>::max() ||
+          world_node_count > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("logical shard count exceeds 32-bit storage");
+      }
 
-      descriptors[spec_idx] = {
-          spec.part_path.filename().string(), spec.ref_id,
-          spec.source_begin, spec.source_end, spec.window_count,
-          sequence_count, world_node_count};
+      auto& descriptor = descriptors[spec_idx];
+      descriptor.contig_id = spec.contig_id;
+      descriptor.source_begin = spec.source_begin;
+      descriptor.source_end = static_cast<uint32_t>(
+          static_cast<size_t>(spec.source_begin) + slice_size);
+      descriptor.window_count = spec.window_count;
+      descriptor.sequence_count = static_cast<uint32_t>(sequence_count);
+      descriptor.world_node_count =
+          static_cast<uint32_t>(world_node_count);
     } catch (...) {
-      errors[spec_idx] = std::current_exception();
+      *error = std::current_exception();
     }
   };
 
-  if (job_count == 1) {
-    for (size_t spec_idx = 0; spec_idx < specs.size(); ++spec_idx) {
-      build_one(spec_idx);
-    }
-  } else {
-    const int previous_active_levels = omp_get_max_active_levels();
-    omp_set_max_active_levels(std::max(2, previous_active_levels));
-#pragma omp parallel num_threads(job_count)
-    {
-      // Bound the product of concurrent shards and each builder's nested team
-      // by the original OpenMP thread budget.
-      const int previous_nested_threads = omp_get_max_threads();
-      omp_set_num_threads(threads_per_job);
-#pragma omp for schedule(dynamic, 1)
-      for (size_t spec_idx = 0; spec_idx < specs.size(); ++spec_idx) {
-        build_one(spec_idx);
+  const size_t pack_count =
+      (specs.size() + kShardsPerPack - 1) / kShardsPerPack;
+  std::vector<std::string> pack_paths(pack_count);
+  for (size_t pack_idx = 0; pack_idx < pack_count; ++pack_idx) {
+    const std::filesystem::path pack_path =
+        shard_pack_output_path(bundle, pack_idx);
+    pack_paths[pack_idx] = pack_path.filename().string();
+    const size_t group_begin = pack_idx * kShardsPerPack;
+    const size_t group_end =
+        std::min(specs.size(), group_begin + kShardsPerPack);
+
+    bool reused_pack = false;
+    try {
+      const auto entries = read_shard_pack_directory(pack_path);
+      if (entries.size() != group_end - group_begin) {
+        throw std::runtime_error("shard pack count changed");
       }
-      omp_set_num_threads(previous_nested_threads);
+      std::vector<IndexShardDescriptor> reused_descriptors;
+      reused_descriptors.reserve(entries.size());
+      for (size_t local_idx = 0; local_idx < entries.size(); ++local_idx) {
+        const size_t spec_idx = group_begin + local_idx;
+        const auto& spec = specs[spec_idx];
+        const size_t slice_end = spec_slice_end(spec);
+        const std::string& ref_id = contig_ids[spec.contig_id];
+        std::string slice =
+            load_slice(spec.slice_begin, slice_end);
+        if (slice.size() != slice_end - spec.slice_begin) {
+          throw std::runtime_error(
+              "reference slice loader returned the wrong number of bases");
+        }
+        ReferenceContig slice_contig{
+            ref_id, 0, static_cast<uint32_t>(slice.size()),
+            spec.source_begin};
+        LoadedIndex candidate = load_index_range(
+            pack_path.string(), entries[local_idx].offset,
+            entries[local_idx].size);
+        if (!reusable_shard_matches(
+                candidate, part_manifest.signature, reference_id,
+                slice, slice_contig, window_length)) {
+          throw std::runtime_error("shard pack input changed");
+        }
+        IndexShardDescriptor descriptor;
+        descriptor.pack_id = static_cast<uint32_t>(pack_idx);
+        descriptor.file_offset = entries[local_idx].offset;
+        descriptor.file_size = entries[local_idx].size;
+        descriptor.contig_id = spec.contig_id;
+        descriptor.source_begin = spec.source_begin;
+        descriptor.source_end = static_cast<uint32_t>(
+            static_cast<size_t>(spec.source_begin) + slice.size());
+        descriptor.window_count = spec.window_count;
+        descriptor.sequence_count = static_cast<uint32_t>(
+            candidate.builder.num_sequences());
+        descriptor.world_node_count = static_cast<uint32_t>(
+            candidate.builder.num_world_nodes());
+        reused_descriptors.push_back(std::move(descriptor));
+      }
+      std::move(
+          reused_descriptors.begin(), reused_descriptors.end(),
+          descriptors.begin() + static_cast<std::ptrdiff_t>(group_begin));
+      reused_pack = true;
+    } catch (const std::exception&) {
+      reused_pack = false;
     }
-    omp_set_max_active_levels(previous_active_levels);
-  }
-  for (const auto& error : errors) {
-    if (error) std::rethrow_exception(error);
+
+    if (!reused_pack) {
+      std::vector<std::exception_ptr> errors(group_end - group_begin);
+      if (job_count == 1) {
+        for (size_t spec_idx = group_begin; spec_idx < group_end;
+             ++spec_idx) {
+          build_one(spec_idx, &errors[spec_idx - group_begin]);
+        }
+      } else {
+        const int previous_active_levels = omp_get_max_active_levels();
+        omp_set_max_active_levels(std::max(2, previous_active_levels));
+#pragma omp parallel num_threads(job_count)
+        {
+          // Bound concurrent shards times each nested team by the original
+          // OpenMP thread budget.
+          const int previous_nested_threads = omp_get_max_threads();
+          omp_set_num_threads(threads_per_job);
+#pragma omp for schedule(dynamic, 1)
+          for (size_t spec_idx = group_begin;
+               spec_idx < group_end; ++spec_idx) {
+            build_one(spec_idx, &errors[spec_idx - group_begin]);
+          }
+          omp_set_num_threads(previous_nested_threads);
+        }
+        omp_set_max_active_levels(previous_active_levels);
+      }
+      for (size_t spec_idx = group_begin; spec_idx < group_end;
+           ++spec_idx) {
+        if (errors[spec_idx - group_begin]) {
+          std::rethrow_exception(errors[spec_idx - group_begin]);
+        }
+      }
+
+      std::vector<std::filesystem::path> part_paths;
+      part_paths.reserve(group_end - group_begin);
+      for (size_t spec_idx = group_begin; spec_idx < group_end;
+           ++spec_idx) {
+        part_paths.push_back(shard_output_path(bundle, spec_idx));
+      }
+      const auto entries =
+          install_shard_pack_atomically(pack_path, part_paths);
+      for (size_t local_idx = 0; local_idx < entries.size(); ++local_idx) {
+        auto& descriptor = descriptors[group_begin + local_idx];
+        descriptor.pack_id = static_cast<uint32_t>(pack_idx);
+        descriptor.file_offset = entries[local_idx].offset;
+        descriptor.file_size = entries[local_idx].size;
+      }
+    }
+
+    for (size_t spec_idx = group_begin; spec_idx < group_end;
+         ++spec_idx) {
+      const auto part_path = shard_output_path(bundle, spec_idx);
+      std::error_code error;
+      if (std::filesystem::exists(part_path, error) &&
+          !std::filesystem::remove(part_path, error)) {
+        throw std::runtime_error(
+            "unable to remove packed shard: " + error.message());
+      }
+      if (error) {
+        throw std::runtime_error(
+            "unable to clean packed shard: " + error.message());
+      }
+    }
   }
 
   ShardedIndexManifest manifest;
   manifest.window_length = window_length;
   manifest.stride = stride;
   manifest.part_signature = part_manifest.signature;
-  manifest.shards.reserve(descriptors.size());
-  for (auto& descriptor : descriptors) {
+  manifest.pack_paths = std::move(pack_paths);
+  manifest.contig_ids = std::move(contig_ids);
+  for (const auto& descriptor : descriptors) {
     manifest.total_window_count += descriptor.window_count;
     manifest.total_sequence_count += descriptor.sequence_count;
     manifest.total_world_node_count += descriptor.world_node_count;
-    manifest.shards.push_back(std::move(descriptor));
   }
+  manifest.shards = std::move(descriptors);
   if (specs.size() > 1 && window_length >= kRouterWindow) {
     const auto router_path = router_output_path(bundle);
     auto router_data = contiguous_reference
@@ -1299,13 +1624,13 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
               [&](const ShardBuildSpec& spec) {
                 return std::string_view(
                     contiguous_reference->data() + spec.slice_begin,
-                    spec.slice_end - spec.slice_begin);
+                    spec_slice_end(spec) - spec.slice_begin);
               })
         : build_router_data(
               specs, kRouterK, kRouterWindow,
               router_path.string() + ".codes.tmp",
               [&](const ShardBuildSpec& spec) {
-                return load_slice(spec.slice_begin, spec.slice_end);
+                return load_slice(spec.slice_begin, spec_slice_end(spec));
               });
     if (router_data.entry_count != 0) {
       manifest.router_k = kRouterK;
@@ -1372,9 +1697,14 @@ LoadedIndex load_sharded_index_part(
     throw std::out_of_range("sharded index part ID is out of range");
   }
   const auto& descriptor = manifest.shards[shard_id];
-  LoadedIndex loaded = load_index(
+  if (descriptor.pack_id >= manifest.pack_paths.size() ||
+      descriptor.contig_id >= manifest.contig_ids.size()) {
+    throw std::runtime_error("sharded index part has invalid interned ID");
+  }
+  LoadedIndex loaded = load_index_range(
       resolve_index_shard_path(
-          manifest_path, descriptor.path),
+          manifest_path, manifest.pack_paths[descriptor.pack_id]),
+      descriptor.file_offset, descriptor.file_size,
       IndexLoadValidation::Structural);
   const auto& store = loaded.builder.sequence_store();
   if (!store.reference_backed ||
@@ -1388,7 +1718,7 @@ LoadedIndex load_sharded_index_part(
   const size_t source_end =
       static_cast<size_t>(contig.source_begin) +
       contig.end - contig.begin;
-  if (contig.id != descriptor.ref_id ||
+  if (contig.id != manifest.contig_ids[descriptor.contig_id] ||
       contig.source_begin != descriptor.source_begin ||
       source_end != descriptor.source_end ||
       store.size() != descriptor.sequence_count ||

@@ -248,10 +248,16 @@ concurrent parts and divides the thread budget among their internal parallel
 phases; `--shard-build-jobs N` sets an explicit concurrency limit. The product
 of part jobs and their internal worker teams never exceeds the OpenMP thread
 limit, while peak build memory is bounded by the number of concurrent parts.
-Completed shard files are content- and parameter-validated and reused after an
-interrupted build; new shards are installed atomically. The final
-`.navshard` manifest contains relative paths to ordinary v30 `.navidx` parts
-and a memory-mapped exact-minimizer router sidecar. The sidecar stores sorted
+Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
+Each container has a checked offset/length directory, and completed containers
+are content- and parameter-validated and reused after an interrupted build.
+Only one group of temporary shard files exists at a time. The final v4
+`.navshard` manifest stores each logical shard's pack ID and byte range plus a
+memory-mapped exact-minimizer router sidecar. Queries mmap only selected byte
+ranges, so packing removes millions of filesystem entries without coarsening
+the logical shards or increasing search work. Contig names and pack paths are
+interned once; each in-memory shard descriptor is a fixed 48-byte numeric
+record. The sidecar stores sorted
 32-bit minimizers plus shard IDs at exactly `ceil(log2(shard_count))` bits per
 entry. For a query at tolerance `d`, the router takes one seed of 32 to 64
 bases from each of `d + 1` disjoint query blocks and searches only shards
@@ -264,10 +270,11 @@ batch, search those parts in parallel, and merge identical sequences and all
 of their occurrences before reporting results. A fallback query loads every
 shard to preserve recall.
 Router construction writes each completed shard's sorted 32-bit minimizer list
-to a page-aligned temporary spool, then memory-maps and k-way merges the lists
-directly into the sidecar. Consumed pages are released as the merge advances,
-so the working set is bounded by one shard list plus roughly one spool page per
-shard instead of all router entries. The final query-time layout is unchanged.
+contiguously to a temporary spool, then memory-maps and k-way merges the lists
+directly into the sidecar. There is no per-shard page padding: the spool is
+exactly four bytes per minimizer, which avoids a 4 KiB penalty for each tiny
+logical shard. Offsets are 64-bit and counts are 32-bit. The final query-time
+layout is unchanged.
 Reference-window deduplication likewise uses one contiguous 64-bit open-addressed
 slot per table bucket instead of a node-allocated `string_view` hash map. Its
 32-bit hash is only a lookup hint: every match is confirmed byte-for-byte against
@@ -281,7 +288,7 @@ Deferred q-gram indexes are not materialized when the exact L1 threshold is
 non-positive even for the longest length-compatible item. In that case q-gram
 filtering is mathematically unable to remove a candidate, so construction emits
 the identical length-compatible superset directly without allocating postings.
-Query loading validates signatures, counts, file bounds, layer ranges, shard
+Query loading validates signatures, counts, pack ranges, layer ranges, shard
 coordinates, and the bundle checksum without rescanning every mapped node or
 edge; completed or resumed builds perform the full per-part validation.
 Path traces are unavailable for a shard bundle because node IDs are local to

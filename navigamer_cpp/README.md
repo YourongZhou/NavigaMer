@@ -159,12 +159,14 @@ default. `--progress-interval-seconds N` changes the interval; zero disables
 periodic heartbeats but retains phase start/finish reports. `build-scale` can
 persist a reference-window index with `--index <file>` when exactly one prefix
 length is requested. Multiple prefixes with one output index are rejected.
-`build-sharded` instead partitions window starts into independently persisted
-v33 parts, each capped by `--shard-windows`. Reference slices overlap only
+`build-sharded` instead partitions window starts into independent logical v33
+parts, each capped by `--shard-windows`, and packs up to 1,024 part images into
+one `.navpack` container. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
-contig. Valid completed parts are reused on restart, damaged parts are rebuilt,
-and new parts are installed atomically. The automatic policy keeps one part
+contig. Valid completed packs are reused on restart, damaged packs are rebuilt
+as one atomic group, and only the current group's temporary parts exist during
+construction. The automatic policy keeps one part
 below 16 OpenMP threads; on high-core systems it builds at most four parts
 concurrently and divides the thread budget among their internal parallel
 phases. Use `--shard-build-jobs N` to cap concurrent builders and their
@@ -246,19 +248,24 @@ payloads store a minimum whole-byte forward base delta from `node_id + 1`
 immediately before their local child offsets, preserving cache locality while
 avoiding a fixed 32-bit base. Finalized arrays load directly. Older files must
 be rebuilt.
-A `.navshard` bundle points to independently loadable v33 parts and, when it
+A v4 `.navshard` bundle points to independently loadable v33 byte ranges in
+`.navpack` containers and, when it
 has multiple shards and windows of at least 32 bases, a memory-mapped
 `.route` sidecar. The router uses 16-mer minimizers from 32- to 64-base seeds
 in `d + 1` disjoint query blocks. Its keys are 32-bit arrays and the parallel
 shard IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
 within edit distance `d` must contain one whole block exactly, so omitting
-shards without any of those minimizers is no-FN-safe. Unsupported
-short/ambiguous queries or an unavailable sidecar fall
-back to every part. `query-index` and `query-index-batch` search selected parts
+shards without any of those minimizers is no-FN-safe.
+Pack paths and contig names are interned once in the manifest; logical-shard
+descriptors contain only fixed-width numeric fields and occupy 48 bytes in
+memory on the supported 64-bit build. Unsupported short/ambiguous queries or
+an unavailable sidecar fall
+back to every part. Selected ranges are memory-mapped directly rather than loading
+their whole pack. `query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed
 parts. Any fallback query conservatively loads every part. Bundle query
-loading validates signatures, counts, mapped file bounds, layer ranges, shard coordinates, and
+loading validates signatures, counts, mapped pack bounds, layer ranges, shard coordinates, and
 the bundle checksum without an O(total nodes) rescan; build/restart reuse still
 performs full part validation. Path tracing is not supported for a bundle
 because node IDs are shard-local. `query-index` is the
@@ -278,11 +285,10 @@ signature, and source-sorted oracle query ordering; the source oracle schedule i
 diagnostic only.
 
 The router builder writes each completed shard's sorted 32-bit minimizer list
-to a page-aligned temporary spool, then memory-maps and k-way merges the lists
-while streaming the key column and packed shard IDs. Consumed pages are released
-as the merge advances, bounding the working set by one shard list plus roughly
-one spool page per shard instead of all router entries. Query-time layout is
-unchanged.
+contiguously to a temporary spool, then memory-maps and k-way merges the lists
+while streaming the key column and packed shard IDs. The spool contains exactly
+four bytes per minimizer, with no per-shard page padding; parallel offsets use
+64 bits and counts use 32 bits. Query-time layout is unchanged.
 
 Reference-window deduplication uses a contiguous exact open-addressed table with
 one 64-bit slot per bucket and a maximum load of 7/8. The stored 32-bit hash is

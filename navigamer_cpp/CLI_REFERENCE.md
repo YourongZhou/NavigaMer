@@ -296,11 +296,17 @@ assigned to exactly one part. Adjacent parts store only the reference overlap
 needed to materialize boundary windows, and every emitted coordinate remains
 relative to the original contig.
 
-Each part is an ordinary v33 `.navidx` file. A completed part is reused only
-after its input fingerprint, construction signature, reference slice, contig,
-and source coordinates validate. Damaged or incompatible parts are rebuilt,
-and newly completed parts are installed atomically. The final v3 `.navshard`
-manifest is written only after all parts are valid. Multi-part bundles with
+Each logical part is an ordinary v33 `.navidx` image. Up to 1,024 images are
+stored in one `.navpack` container with a checked offset/length directory. A
+completed pack is reused only after every selected image's construction
+signature, reference slice, contig, and source coordinates validate. Damaged
+or incompatible packs are rebuilt one atomic group at a time; only that group's
+temporary part files exist during construction. The final v4 `.navshard`
+manifest stores pack IDs and byte ranges and is written only after all parts
+are valid. Query loading mmaps only the selected ranges, not whole packs.
+Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
+descriptor per logical shard in memory.
+Multi-part bundles with
 windows of at least 32 bases also store a memory-mapped `.route` sidecar of
 exact 16-mer minimizers. Minimizers use a 32-bit array and parallel shard IDs
 use exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
@@ -313,10 +319,10 @@ sidecar conservatively search all parts.
 of routed parts required by the input reads; if any read cannot be routed, it
 loads all parts for the no-FN fallback.
 Router construction writes each completed shard's sorted 32-bit minimizer list
-to a page-aligned temporary spool, then memory-maps and k-way merges the lists
-directly into the sidecar. Consumed pages are released as the merge advances,
-bounding the working set by one shard list plus roughly one spool page per shard.
-This changes build peak memory, not query-time layout.
+contiguously to a temporary spool, then memory-maps and k-way merges the lists
+directly into the sidecar. The spool uses exactly four bytes per minimizer and
+has no per-shard page padding; offsets are 64-bit and counts are 32-bit. This
+changes build storage and peak memory, not query-time layout.
 
 Within each shard, reference-window deduplication uses a contiguous 64-bit-slot
 open-addressed table at no more than 7/8 load instead of a node-allocated
@@ -340,7 +346,7 @@ length-compatible candidate superset without allocating a q-gram posting index.
 | `--stride` | `1` | Step between window starts |
 | `--shard-windows` | *(required)* | Maximum number of window starts assigned to one shard |
 | `--shard-build-jobs` | auto | Maximum concurrently built parts; auto keeps one below 16 OpenMP threads, otherwise uses at most four and divides the thread budget among internal teams |
-| `--index` | *(required)* | Output `.navshard` manifest; part files are created beside it |
+| `--index` | *(required)* | Output `.navshard` manifest; packed part containers are created beside it |
 | `--progress-interval-seconds` | `600` | Periodic progress interval inside each shard build |
 
 ### `query`
@@ -384,7 +390,7 @@ occurrences are merged before TSV output. This is the warm-load batch entry
 point used for source-sorted, duplicated-read, and near-repeat locality
 experiments. It currently supports `--mode adaptive` only; every emitted hit is
 still produced by final bounded exact edit-distance verification.
-Bundle loading checks manifests, mapped ranges, compact layer layout, shard
+Bundle loading checks manifests, mapped pack ranges, compact layer layout, shard
 coordinates, and checksums without touching every persisted node and edge.
 
 **Required:** `--index`, `--reads`

@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -31,45 +32,90 @@ constexpr size_t kMappedArrayAlignment = 64;
 #if defined(__unix__) || defined(__APPLE__)
 class MappedIndexFile {
  public:
-  MappedIndexFile(void* address, size_t size)
-      : address_(address), size_(size) {}
+  MappedIndexFile(void* address, size_t mapped_size,
+                  uint64_t mapped_offset, uint64_t range_begin,
+                  uint64_t range_end)
+      : address_(address), mapped_size_(mapped_size),
+        mapped_offset_(mapped_offset), range_begin_(range_begin),
+        range_end_(range_end) {}
   ~MappedIndexFile() {
-    if (address_ && size_ != 0) munmap(address_, size_);
+    if (address_ && mapped_size_ != 0) {
+      munmap(address_, mapped_size_);
+    }
   }
 
-  const uint8_t* data() const {
-    return static_cast<const uint8_t*>(address_);
+  bool contains(uint64_t offset, size_t size) const {
+    return offset >= range_begin_ && offset <= range_end_ &&
+           size <= range_end_ - offset;
   }
-  size_t size() const { return size_; }
+  const uint8_t* data_at(uint64_t offset) const {
+    return static_cast<const uint8_t*>(address_) +
+           static_cast<size_t>(offset - mapped_offset_);
+  }
 
  private:
   void* address_ = nullptr;
-  size_t size_ = 0;
+  size_t mapped_size_ = 0;
+  uint64_t mapped_offset_ = 0;
+  uint64_t range_begin_ = 0;
+  uint64_t range_end_ = 0;
 };
 
 std::shared_ptr<MappedIndexFile> map_index_file(
-    const std::string& path) {
+    const std::string& path, uint64_t range_begin,
+    uint64_t range_length) {
   const int fd = open(path.c_str(), O_RDONLY);
   if (fd < 0) return {};
   struct stat status {};
-  if (fstat(fd, &status) != 0 || status.st_size <= 0 ||
-      static_cast<uint64_t>(status.st_size) >
-          static_cast<uint64_t>(
-              std::numeric_limits<size_t>::max())) {
+  if (fstat(fd, &status) != 0 || status.st_size <= 0) {
     close(fd);
     return {};
   }
-  const size_t size = static_cast<size_t>(status.st_size);
-  void* address = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  const uint64_t file_size = static_cast<uint64_t>(status.st_size);
+  if (range_length == 0) {
+    if (range_begin != 0) {
+      close(fd);
+      return {};
+    }
+    range_length = file_size;
+  }
+  if (range_begin > file_size || range_length > file_size - range_begin) {
+    close(fd);
+    return {};
+  }
+  const long page_size_value = sysconf(_SC_PAGESIZE);
+  if (page_size_value <= 0) {
+    close(fd);
+    return {};
+  }
+  const uint64_t page_size = static_cast<uint64_t>(page_size_value);
+  const uint64_t mapped_offset =
+      range_begin - range_begin % page_size;
+  const uint64_t prefix = range_begin - mapped_offset;
+  if (range_length > std::numeric_limits<uint64_t>::max() - prefix ||
+      prefix + range_length >
+          static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+      mapped_offset >
+          static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+    close(fd);
+    return {};
+  }
+  const size_t mapped_size =
+      static_cast<size_t>(prefix + range_length);
+  void* address = mmap(
+      nullptr, mapped_size, PROT_READ, MAP_PRIVATE, fd,
+      static_cast<off_t>(mapped_offset));
   close(fd);
   if (address == MAP_FAILED) return {};
-  return std::make_shared<MappedIndexFile>(address, size);
+  return std::make_shared<MappedIndexFile>(
+      address, mapped_size, mapped_offset, range_begin,
+      range_begin + range_length);
 }
 #else
 class MappedIndexFile {};
 
 std::shared_ptr<MappedIndexFile> map_index_file(
-    const std::string&) {
+    const std::string&, uint64_t, uint64_t) {
   return {};
 }
 #endif
@@ -531,16 +577,14 @@ FinalArray<T> read_final_array(
     }
     const uint64_t offset =
         static_cast<uint64_t>(static_cast<std::streamoff>(position));
-    if (offset > mapping->size() ||
-        byte_count >
-            mapping->size() - static_cast<size_t>(offset)) {
+    if (!mapping->contains(offset, byte_count)) {
       throw std::runtime_error(std::string(field) +
                                " exceeds mapped index range");
     }
     values.set_mapped(
         mapping,
         reinterpret_cast<const T*>(
-            mapping->data() + static_cast<size_t>(offset)),
+            mapping->data_at(offset)),
         count);
     in.seekg(static_cast<std::streamoff>(byte_count), std::ios::cur);
     if (!in) {
@@ -1132,12 +1176,27 @@ void save_index(const std::string& path,
   if (!out) throw std::runtime_error("failed to write index output: " + path);
 }
 
-LoadedIndex load_index(
-    const std::string& path,
+LoadedIndex load_index_range(
+    const std::string& path, uint64_t offset, uint64_t length,
     IndexLoadValidation validation) {
-  const auto mapping = map_index_file(path);
+  if (length == 0 || offset % kMappedArrayAlignment != 0 ||
+      offset > static_cast<uint64_t>(
+                   std::numeric_limits<std::streamoff>::max()) ||
+      length > static_cast<uint64_t>(
+                   std::numeric_limits<std::streamoff>::max()) - offset) {
+    throw std::invalid_argument(
+        "embedded index range must be non-empty, aligned, and seekable");
+  }
+  const auto mapping = map_index_file(path, offset, length);
+#if defined(__unix__) || defined(__APPLE__)
+  if (!mapping) {
+    throw std::runtime_error("unable to map index range: " + path);
+  }
+#endif
   std::ifstream in(path, std::ios::binary);
   if (!in) throw std::runtime_error("unable to open index file: " + path);
+  in.seekg(static_cast<std::streamoff>(offset));
+  if (!in) throw std::runtime_error("unable to seek to index range: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
   if (manifest.format_version != 33) {
@@ -1175,7 +1234,26 @@ LoadedIndex load_index(
     throw std::runtime_error("loaded NavigaMer index failed validation");
   }
 
+  const std::streampos end_position = in.tellg();
+  if (end_position < std::streampos(0) ||
+      static_cast<uint64_t>(
+          static_cast<std::streamoff>(end_position)) >
+          offset + length) {
+    throw std::runtime_error("embedded index exceeds its declared range");
+  }
+
   return {std::move(builder), std::move(manifest)};
+}
+
+LoadedIndex load_index(
+    const std::string& path,
+    IndexLoadValidation validation) {
+  std::error_code error;
+  const uint64_t length = std::filesystem::file_size(path, error);
+  if (error || length == 0) {
+    throw std::runtime_error("unable to stat index file: " + path);
+  }
+  return load_index_range(path, 0, length, validation);
 }
 
 }  // namespace navigamer

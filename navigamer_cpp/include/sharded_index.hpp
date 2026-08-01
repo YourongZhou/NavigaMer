@@ -14,17 +14,21 @@ namespace navigamer {
 struct IndexedReferenceFile;
 
 struct IndexShardDescriptor {
-  std::string path;
-  std::string ref_id;
+  uint64_t file_offset = 0;
+  uint64_t file_size = 0;
+  uint32_t pack_id = 0;
+  uint32_t contig_id = 0;
   uint32_t source_begin = 0;
   uint32_t source_end = 0;
-  size_t window_count = 0;
-  size_t sequence_count = 0;
-  size_t world_node_count = 0;
+  uint32_t window_count = 0;
+  uint32_t sequence_count = 0;
+  uint32_t world_node_count = 0;
 };
+static_assert(sizeof(IndexShardDescriptor) <= 48,
+              "shard descriptors must remain compact");
 
 struct ShardedIndexManifest {
-  uint32_t format_version = 3;
+  uint32_t format_version = 4;
   size_t window_length = 0;
   size_t stride = 0;
   size_t total_window_count = 0;
@@ -35,6 +39,8 @@ struct ShardedIndexManifest {
   size_t router_entry_count = 0;
   uint64_t router_checksum = 0;
   std::string part_signature;
+  std::vector<std::string> pack_paths;
+  std::vector<std::string> contig_ids;
   std::vector<IndexShardDescriptor> shards;
 };
 
