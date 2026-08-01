@@ -21,6 +21,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <omp.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 namespace navigamer {
 
@@ -35,6 +38,12 @@ bool is_acgt(char base) {
 
 double elapsed_ms_since(Clock::time_point start) {
   return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+}
+
+void release_free_allocator_pages() {
+#if defined(__GLIBC__)
+  (void)malloc_trim(0);
+#endif
 }
 
 class ScopedTimer {
@@ -5179,6 +5188,10 @@ void BioGeometryIndexBuilder::build_impl(
     ScopedTimer timer(&stats_.phase4_attach_ms);
     attach_leaves(&progress);
   }
+  // Phase 4 destroys its range index and parallel work buffers before the
+  // finalized graph is allocated.  glibc otherwise retains many of those
+  // pages in its arenas, making the two disjoint lifetimes overlap in RSS.
+  release_free_allocator_pages();
   {
     ScopedTimer timer(&stats_.assign_ids_ms);
     compact_primary_build_nodes();
