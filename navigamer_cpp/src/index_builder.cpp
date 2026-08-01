@@ -644,7 +644,8 @@ bool phase1_better_cover(size_t idx, int dist,
   return dist == current.best_dist && idx < current.best_idx;
 }
 
-Phase1CoverScanResult find_best_phase1_cover(
+template <typename CandidateIndexAt>
+Phase1CoverScanResult find_best_phase1_cover_impl(
     BuildArrayView<NodeId> candidates,
     const std::vector<BuildWorldNodeRecord>& nodes,
     const SequenceStore& sequences,
@@ -652,37 +653,50 @@ Phase1CoverScanResult find_best_phase1_cover(
     const Phase1BaseCountSignature& query_signature,
     Phase1DistanceCache* distance_cache,
     const PreparedEdlibDnaPattern* prepared_query,
+    const PreparedMyersPattern* prepared_batch_query,
     std::string_view sequence,
     int radius,
     BuildDistanceMode distance_mode,
     const Phase1CoverScanResult& initial,
-    size_t known_rejected_idx) {
+    size_t known_rejected_idx,
+    size_t scan_count,
+    CandidateIndexAt candidate_index_at) {
   Phase1CoverScanResult result = initial;
-  if (candidates.empty()) return result;
-  if (candidates.size() >= kPhase1ParallelScanMinFanout) {
+  if (scan_count == 0) return result;
+  if (scan_count >= kPhase1ParallelScanMinFanout) {
     distance_cache = nullptr;
   }
 
-  auto scan_one = [&](size_t idx, Phase1CoverScanResult& local) {
+  struct PendingDistance {
+    size_t idx = 0;
+    NodeId node_id = INVALID_NODE_ID;
+    LeafId center_sequence_id = INVALID_LEAF_ID;
+    int exact_tau = 0;
+  };
+
+  auto prepare_one = [&](size_t pos, Phase1CoverScanResult& local,
+                         PendingDistance& pending) {
+    const size_t idx = candidate_index_at(pos);
+    if (idx >= candidates.size()) return false;
     const NodeId node_id = candidates[idx];
-    if (node_id >= nodes.size()) return;
+    if (node_id >= nodes.size()) return false;
     const auto& node = nodes[node_id];
-    if (node.center_sequence_id >= sequences.size()) return;
+    if (node.center_sequence_id >= sequences.size()) return false;
     local.candidate_scans++;
     if (std::llabs(static_cast<long long>(sequence.size()) -
                    static_cast<long long>(sequences.sequence(
                        node.center_sequence_id).size())) >
         radius) {
       local.length_pruned++;
-      return;
+      return false;
     }
     if (local.best == node_id && local.best_idx == idx) {
       local.exact_distance_reused++;
-      return;
+      return false;
     }
     if (idx == known_rejected_idx) {
       local.exact_rejection_reused++;
-      return;
+      return false;
     }
     if (node.center_sequence_id < sequence_signatures.size()) {
       const int lower_bound = phase1_base_count_lower_bound(
@@ -692,7 +706,7 @@ Phase1CoverScanResult find_best_phase1_cover(
            (lower_bound > local.best_dist ||
             (lower_bound == local.best_dist && idx >= local.best_idx)))) {
         local.lower_bound_pruned++;
-        return;
+        return false;
       }
     }
     int exact_tau = radius;
@@ -702,45 +716,105 @@ Phase1CoverScanResult find_best_phase1_cover(
           local.best_dist - (idx >= local.best_idx ? 1 : 0));
       if (exact_tau < 0) {
         local.lower_bound_pruned++;
-        return;
+        return false;
       }
     }
     int dist = 0;
     if (distance_cache &&
         distance_cache->lookup(node.center_sequence_id, exact_tau, &dist)) {
       local.cross_layer_distance_reused++;
-    } else {
-      local.exact_distance_calls++;
-      dist = build_distance_bounded_prepared(
-          sequence, sequences.sequence(node.center_sequence_id), exact_tau,
-          distance_mode, prepared_query);
-      if (distance_cache) {
-        distance_cache->store(node.center_sequence_id, exact_tau, dist);
+      if (dist <= exact_tau && phase1_better_cover(idx, dist, local)) {
+        local.best = node_id;
+        local.best_dist = dist;
+        local.best_idx = idx;
       }
+      return false;
     }
-    if (dist <= exact_tau && phase1_better_cover(idx, dist, local)) {
-      local.best = node_id;
+    local.exact_distance_calls++;
+    pending = {idx, node_id, node.center_sequence_id, exact_tau};
+    return true;
+  };
+
+  auto consume_distance = [&](const PendingDistance& pending, int dist,
+                              Phase1CoverScanResult& local) {
+    if (distance_cache) {
+      distance_cache->store(
+          pending.center_sequence_id, pending.exact_tau, dist);
+    }
+    if (dist <= pending.exact_tau &&
+        phase1_better_cover(pending.idx, dist, local)) {
+      local.best = pending.node_id;
       local.best_dist = dist;
-      local.best_idx = idx;
+      local.best_idx = pending.idx;
     }
   };
 
-  if (candidates.size() < kPhase1ParallelScanMinFanout) {
-    for (size_t idx = 0; idx < candidates.size(); ++idx) {
-      scan_one(idx, result);
+  const bool batch4_available =
+      prepared_batch_query && radius >= 10 && scan_count >= 4;
+  auto scan_range = [&](size_t begin, size_t end,
+                        Phase1CoverScanResult& local) {
+    std::array<PendingDistance, 4> pending{};
+    size_t pending_count = 0;
+    const auto flush_pending = [&]() {
+      if (pending_count == 0) return;
+      bool computed_batch = false;
+      std::array<int, 4> distances{};
+      if (batch4_available && pending_count == pending.size()) {
+        std::array<std::string_view, 4> texts{};
+        int batch_tau = 0;
+        for (size_t lane = 0; lane < pending.size(); ++lane) {
+          texts[lane] = sequences.sequence(
+              pending[lane].center_sequence_id);
+          batch_tau = std::max(batch_tau, pending[lane].exact_tau);
+        }
+        computed_batch =
+            compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+                *prepared_batch_query, texts, batch_tau, distances);
+      }
+      for (size_t lane = 0; lane < pending_count; ++lane) {
+        const int dist = computed_batch
+                             ? distances[lane]
+                             : build_distance_bounded_prepared(
+                                   sequence,
+                                   sequences.sequence(
+                                       pending[lane].center_sequence_id),
+                                   pending[lane].exact_tau,
+                                   distance_mode, prepared_query);
+        consume_distance(pending[lane], dist, local);
+      }
+      pending_count = 0;
+    };
+
+    for (size_t pos = begin; pos < end; ++pos) {
+      PendingDistance next;
+      if (prepare_one(pos, local, next)) {
+        pending[pending_count++] = next;
+        if (pending_count == pending.size()) flush_pending();
+      }
     }
+    flush_pending();
+  };
+
+  if (scan_count < kPhase1ParallelScanMinFanout) {
+    scan_range(0, scan_count, result);
     return result;
   }
 
   const int thread_count = std::max(1, omp_get_max_threads());
   std::vector<Phase1CoverScanResult> local_results(
       static_cast<size_t>(thread_count), initial);
-  #pragma omp parallel for schedule(static)
-  for (size_t idx = 0; idx < candidates.size(); ++idx) {
+  #pragma omp parallel num_threads(thread_count)
+  {
     const int tid = omp_get_thread_num();
     Phase1CoverScanResult& local =
         local_results[static_cast<size_t>(std::min(tid, thread_count - 1))];
-    scan_one(idx, local);
+    const size_t begin =
+        scan_count * static_cast<size_t>(tid) /
+        static_cast<size_t>(thread_count);
+    const size_t end =
+        scan_count * static_cast<size_t>(tid + 1) /
+        static_cast<size_t>(thread_count);
+    scan_range(begin, end, local);
   }
 
   for (const auto& local : local_results) {
@@ -761,6 +835,28 @@ Phase1CoverScanResult find_best_phase1_cover(
   return result;
 }
 
+Phase1CoverScanResult find_best_phase1_cover(
+    BuildArrayView<NodeId> candidates,
+    const std::vector<BuildWorldNodeRecord>& nodes,
+    const SequenceStore& sequences,
+    const std::vector<Phase1BaseCountSignature>& sequence_signatures,
+    const Phase1BaseCountSignature& query_signature,
+    Phase1DistanceCache* distance_cache,
+    const PreparedEdlibDnaPattern* prepared_query,
+    const PreparedMyersPattern* prepared_batch_query,
+    std::string_view sequence,
+    int radius,
+    BuildDistanceMode distance_mode,
+    const Phase1CoverScanResult& initial,
+    size_t known_rejected_idx) {
+  return find_best_phase1_cover_impl(
+      candidates, nodes, sequences, sequence_signatures, query_signature,
+      distance_cache, prepared_query, prepared_batch_query, sequence, radius,
+      distance_mode,
+      initial, known_rejected_idx, candidates.size(),
+      [](size_t pos) { return pos; });
+}
+
 Phase1CoverScanResult find_best_phase1_cover_by_indices(
     BuildArrayView<NodeId> candidates,
     const std::vector<BuildWorldNodeRecord>& nodes,
@@ -769,116 +865,19 @@ Phase1CoverScanResult find_best_phase1_cover_by_indices(
     const Phase1BaseCountSignature& query_signature,
     Phase1DistanceCache* distance_cache,
     const PreparedEdlibDnaPattern* prepared_query,
+    const PreparedMyersPattern* prepared_batch_query,
     const std::vector<size_t>& candidate_indices,
     std::string_view sequence,
     int radius,
     BuildDistanceMode distance_mode,
     const Phase1CoverScanResult& initial,
     size_t known_rejected_idx) {
-  Phase1CoverScanResult result = initial;
-  if (candidate_indices.empty()) return result;
-  if (candidate_indices.size() >= kPhase1ParallelScanMinFanout) {
-    distance_cache = nullptr;
-  }
-
-  auto scan_one = [&](size_t pos, Phase1CoverScanResult& local) {
-    const size_t idx = candidate_indices[pos];
-    if (idx >= candidates.size()) return;
-    const NodeId node_id = candidates[idx];
-    if (node_id >= nodes.size()) return;
-    const auto& node = nodes[node_id];
-    if (node.center_sequence_id >= sequences.size()) return;
-    local.candidate_scans++;
-    if (std::llabs(static_cast<long long>(sequence.size()) -
-                   static_cast<long long>(sequences.sequence(
-                       node.center_sequence_id).size())) >
-        radius) {
-      local.length_pruned++;
-      return;
-    }
-    if (local.best == node_id && local.best_idx == idx) {
-      local.exact_distance_reused++;
-      return;
-    }
-    if (idx == known_rejected_idx) {
-      local.exact_rejection_reused++;
-      return;
-    }
-    if (node.center_sequence_id < sequence_signatures.size()) {
-      const int lower_bound = phase1_base_count_lower_bound(
-          query_signature, sequence_signatures[node.center_sequence_id]);
-      if (lower_bound > radius ||
-          (local.best != INVALID_NODE_ID &&
-           (lower_bound > local.best_dist ||
-            (lower_bound == local.best_dist && idx >= local.best_idx)))) {
-        local.lower_bound_pruned++;
-        return;
-      }
-    }
-    int exact_tau = radius;
-    if (local.best != INVALID_NODE_ID) {
-      exact_tau = std::min(
-          exact_tau,
-          local.best_dist - (idx >= local.best_idx ? 1 : 0));
-      if (exact_tau < 0) {
-        local.lower_bound_pruned++;
-        return;
-      }
-    }
-    int dist = 0;
-    if (distance_cache &&
-        distance_cache->lookup(node.center_sequence_id, exact_tau, &dist)) {
-      local.cross_layer_distance_reused++;
-    } else {
-      local.exact_distance_calls++;
-      dist = build_distance_bounded_prepared(
-          sequence, sequences.sequence(node.center_sequence_id), exact_tau,
-          distance_mode, prepared_query);
-      if (distance_cache) {
-        distance_cache->store(node.center_sequence_id, exact_tau, dist);
-      }
-    }
-    if (dist <= exact_tau && phase1_better_cover(idx, dist, local)) {
-      local.best = node_id;
-      local.best_dist = dist;
-      local.best_idx = idx;
-    }
-  };
-
-  if (candidate_indices.size() < kPhase1ParallelScanMinFanout) {
-    for (size_t pos = 0; pos < candidate_indices.size(); ++pos) {
-      scan_one(pos, result);
-    }
-    return result;
-  }
-
-  const int thread_count = std::max(1, omp_get_max_threads());
-  std::vector<Phase1CoverScanResult> local_results(
-      static_cast<size_t>(thread_count), initial);
-  #pragma omp parallel for schedule(static)
-  for (size_t pos = 0; pos < candidate_indices.size(); ++pos) {
-    const int tid = omp_get_thread_num();
-    Phase1CoverScanResult& local =
-        local_results[static_cast<size_t>(std::min(tid, thread_count - 1))];
-    scan_one(pos, local);
-  }
-
-  for (const auto& local : local_results) {
-    result.candidate_scans += local.candidate_scans;
-    result.length_pruned += local.length_pruned;
-    result.lower_bound_pruned += local.lower_bound_pruned;
-    result.exact_distance_reused += local.exact_distance_reused;
-    result.exact_rejection_reused += local.exact_rejection_reused;
-    result.cross_layer_distance_reused += local.cross_layer_distance_reused;
-    result.exact_distance_calls += local.exact_distance_calls;
-    if (local.best != INVALID_NODE_ID &&
-        phase1_better_cover(local.best_idx, local.best_dist, result)) {
-      result.best = local.best;
-      result.best_dist = local.best_dist;
-      result.best_idx = local.best_idx;
-    }
-  }
-  return result;
+  return find_best_phase1_cover_impl(
+      candidates, nodes, sequences, sequence_signatures, query_signature,
+      distance_cache, prepared_query, prepared_batch_query, sequence, radius,
+      distance_mode,
+      initial, known_rejected_idx, candidate_indices.size(),
+      [&](size_t pos) { return candidate_indices[pos]; });
 }
 
 enum class Phase1CoverSource {
@@ -2759,9 +2758,18 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
     distance_cache.begin_query();
     PreparedEdlibDnaPattern prepared_query;
     const PreparedEdlibDnaPattern* prepared_query_ptr = nullptr;
+    PreparedMyersPattern prepared_batch_query;
+    const PreparedMyersPattern* prepared_batch_query_ptr = nullptr;
     if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
       prepared_query = prepare_edlib_dna_pattern(sequence);
       prepared_query_ptr = &prepared_query;
+      if (search_graph_view_.sequences.reference_backed &&
+          myers_batch4_avx2_runtime_supported()) {
+        prepared_batch_query = prepare_myers_pattern(sequence);
+        if (prepared_batch_query.supported) {
+          prepared_batch_query_ptr = &prepared_batch_query;
+        }
+      }
     }
     const Phase1BaseCountSignature query_signature =
         sequence_signatures[sequence_id];
@@ -2829,7 +2837,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
           scan = find_best_phase1_cover(
               candidates, build_nodes_, search_graph_view_.sequences,
               sequence_signatures, query_signature, &distance_cache,
-              prepared_query_ptr,
+              prepared_query_ptr, prepared_batch_query_ptr,
               sequence, radius,
               range_config_.distance_mode, initial, known_rejected_idx);
           add_phase1_scan_stats(scan);
@@ -2864,7 +2872,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               scan = find_best_phase1_cover(
                   candidates, build_nodes_, search_graph_view_.sequences,
                   sequence_signatures, query_signature, &distance_cache,
-                  prepared_query_ptr,
+                  prepared_query_ptr, prepared_batch_query_ptr,
                   sequence, radius,
                   range_config_.distance_mode, initial, known_rejected_idx);
               add_phase1_scan_stats(scan);
@@ -2876,7 +2884,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               scan = find_best_phase1_cover_by_indices(
                   candidates, build_nodes_, search_graph_view_.sequences,
                   sequence_signatures, query_signature, &distance_cache,
-                  prepared_query_ptr,
+                  prepared_query_ptr, prepared_batch_query_ptr,
                   candidate_query.candidate_indices, sequence, radius,
                   range_config_.distance_mode, initial, known_rejected_idx);
               add_phase1_scan_stats(scan);
@@ -2885,7 +2893,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               scan = find_best_phase1_cover_by_indices(
                   candidates, build_nodes_, search_graph_view_.sequences,
                   sequence_signatures, query_signature, &distance_cache,
-                  prepared_query_ptr,
+                  prepared_query_ptr, prepared_batch_query_ptr,
                   candidate_query.candidate_indices, sequence, radius,
                   range_config_.distance_mode, initial, known_rejected_idx);
               add_phase1_scan_stats(scan);
@@ -2899,7 +2907,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               scan = find_best_phase1_cover_by_indices(
                   candidates, build_nodes_, search_graph_view_.sequences,
                   sequence_signatures, query_signature, &distance_cache,
-                  prepared_query_ptr,
+                  prepared_query_ptr, prepared_batch_query_ptr,
                   candidate_query.candidate_indices, sequence, radius,
                   range_config_.distance_mode, initial, known_rejected_idx);
               add_phase1_scan_stats(scan);
