@@ -153,6 +153,8 @@ class ExactRangeJoinIndex {
     };
 
     struct Range {
+      using value_type = Posting;
+
       Iterator first;
       Iterator last;
       bool found = false;
@@ -375,8 +377,7 @@ class ExactRangeJoinIndex {
 
   using PostingLists16 = CompactPostingLists<uint16_t>;
   using PostingLists = CompactPostingLists<uint32_t>;
-  using PositionalPostingLists =
-      std::unordered_map<uint64_t, std::vector<uint32_t>>;
+  using PositionalPostingLists = CompactPostingLists<uint32_t>;
   using WidePositionalPostingLists =
       std::unordered_map<uint64_t, std::vector<uint64_t>>;
 
@@ -398,6 +399,8 @@ class ExactRangeJoinIndex {
   std::unordered_map<int, PostingLists> postings_by_seed_len_;
   std::unordered_map<int, PositionalPostingLists>
       positional_postings_by_seed_len_;
+  std::unordered_map<int, uint8_t>
+      positional_position_bits_by_seed_len_;
   std::unordered_map<int, WidePositionalPostingLists>
       wide_positional_postings_by_seed_len_;
   std::unordered_map<int, std::vector<uint16_t>>

@@ -267,6 +267,7 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
   postings16_by_seed_len_.clear();
   postings_by_seed_len_.clear();
   positional_postings_by_seed_len_.clear();
+  positional_position_bits_by_seed_len_.clear();
   wide_positional_postings_by_seed_len_.clear();
   unindexable_items16_by_seed_len_.clear();
   unindexable_items_by_seed_len_.clear();
@@ -448,10 +449,9 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
   }
 
   if (enable_positional_postings_) {
-    const auto populate_positional = [&](auto& postings,
-                                         auto& unindexable_items) {
-      using Posting =
-          typename std::decay_t<decltype(postings)>::mapped_type::value_type;
+    const auto generate_positional = [&](auto& unindexable_items,
+                                         bool collect_unindexable,
+                                         auto&& emit) {
       using CompactIndex =
           typename std::decay_t<decltype(unindexable_items)>::value_type;
       const uint64_t mask =
@@ -466,7 +466,9 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
           continue;
         }
         if (seed_len > 32 || !is_acgt_sequence(sequence)) {
-          unindexable_items.push_back(compact_idx);
+          if (collect_unindexable) {
+            unindexable_items.push_back(compact_idx);
+          }
           continue;
         }
         const size_t last =
@@ -482,33 +484,64 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
                 pos + static_cast<size_t>(seed_len) - 1;
             code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
           }
-          if constexpr (std::is_same_v<Posting, uint32_t>) {
-            postings[code].push_back(
-                (static_cast<uint32_t>(item_idx) << 16) |
-                static_cast<uint32_t>(pos));
-          } else {
-            postings[code].push_back(
-                (static_cast<uint64_t>(item_idx) << 32) |
-                static_cast<uint64_t>(pos));
-          }
+          emit(code, item_idx, pos);
         }
       }
     };
 
     if (positional_postings_use_32bit_) {
       PositionalPostingLists postings;
-      postings.reserve(item_count());
       std::vector<uint16_t> unindexable_items;
-      populate_positional(postings, unindexable_items);
+      uint32_t maximum_position = 0;
+      for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
+        const size_t length = item_sequence(item_idx).size();
+        if (length >= static_cast<size_t>(seed_len)) {
+          maximum_position = std::max(
+              maximum_position,
+              static_cast<uint32_t>(
+                  length - static_cast<size_t>(seed_len)));
+        }
+      }
+      uint8_t position_bits = 1;
+      for (uint32_t value = maximum_position;
+           (value >>= 1) != 0;) {
+        ++position_bits;
+      }
+      generate_positional(
+          unindexable_items, true,
+          [&](uint64_t code, size_t, size_t) { postings.count(code); });
+      const uint32_t maximum_item =
+          item_count() == 0
+              ? 0
+              : static_cast<uint32_t>(item_count() - 1);
+      const uint32_t maximum_packed =
+          (maximum_item << position_bits) | maximum_position;
+      postings.finish_counting(maximum_packed);
+      generate_positional(
+          unindexable_items, false,
+          [&](uint64_t code, size_t item_idx, size_t position) {
+            postings.append(
+                code,
+                (static_cast<uint32_t>(item_idx) << position_bits) |
+                    static_cast<uint32_t>(position));
+          });
       positional_postings_by_seed_len_.emplace(
           seed_len, std::move(postings));
+      positional_position_bits_by_seed_len_.emplace(
+          seed_len, position_bits);
       unindexable_items16_by_seed_len_.emplace(
           seed_len, std::move(unindexable_items));
     } else {
       WidePositionalPostingLists postings;
       postings.reserve(item_count());
       std::vector<uint32_t> unindexable_items;
-      populate_positional(postings, unindexable_items);
+      generate_positional(
+          unindexable_items, true,
+          [&](uint64_t code, size_t item_idx, size_t position) {
+            postings[code].push_back(
+                (static_cast<uint64_t>(item_idx) << 32) |
+                static_cast<uint64_t>(position));
+          });
       wide_positional_postings_by_seed_len_.emplace(
           seed_len, std::move(postings));
       unindexable_items_by_seed_len_.emplace(
@@ -1041,16 +1074,18 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
     return true;
   };
   const auto consume_positional_indices =
-      [&](const auto& indices, size_t block_start) {
+      [&](const auto& indices, size_t block_start,
+          uint8_t position_bits) {
         using Posting =
             typename std::decay_t<decltype(indices)>::value_type;
         for (Posting packed : indices) {
           uint32_t item_idx = 0;
           uint32_t position = 0;
           if constexpr (std::is_same_v<Posting, uint32_t>) {
-            item_idx = packed >> 16;
-            position =
-                packed & std::numeric_limits<uint16_t>::max();
+            const uint32_t position_mask =
+                (uint32_t{1} << position_bits) - 1;
+            item_idx = packed >> position_bits;
+            position = packed & position_mask;
           } else {
             item_idx = static_cast<uint32_t>(packed >> 32);
             position = static_cast<uint32_t>(
@@ -1087,15 +1122,17 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
       return fallback;
     }
     if (positional_postings_ptr) {
-      PositionalPostingLists::const_iterator posting;
+      PositionalPostingLists::Range posting;
       {
         ScopedTimer timer(&result.range_posting_lookup_ms);
         posting = positional_postings_ptr->find(seed);
       }
-      if (posting != positional_postings_ptr->end()) {
+      if (posting) {
         ScopedTimer timer(&result.range_seed_union_ms);
+        const uint8_t position_bits =
+            positional_position_bits_by_seed_len_.at(result.seed_len);
         if (!consume_positional_indices(
-                posting->second, block_start)) {
+                posting, block_start, position_bits)) {
           return result;
         }
       }
@@ -1108,7 +1145,7 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
       if (posting != wide_positional_postings_ptr->end()) {
         ScopedTimer timer(&result.range_seed_union_ms);
         if (!consume_positional_indices(
-                posting->second, block_start)) {
+                posting->second, block_start, 32)) {
           return result;
         }
       }
