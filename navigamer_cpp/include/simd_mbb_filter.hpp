@@ -31,6 +31,18 @@ const char* simd_mode_name(SimdMode mode);
 SimdMode parse_simd_mode(const std::string& value);
 bool simd_avx2_runtime_supported();
 
+// Rank/unrank one pair of quantized beacon distances among only the states
+// permitted by the triangle inequality for the exact beacon-pair distance.
+// Width must be 6 or 12 and both quantized values must be in [0, 10].
+uint32_t metric_pair_rank_bits(
+    uint8_t beacon_pair_distance, uint32_t quantization_bin_width);
+uint8_t metric_pair_rank(
+    uint8_t first, uint8_t second,
+    uint8_t beacon_pair_distance, uint32_t quantization_bin_width);
+uint8_t metric_pair_code(
+    uint8_t rank, uint8_t beacon_pair_distance,
+    uint32_t quantization_bin_width);
+
 std::vector<uint32_t> filter_mbb_survivors(
     const uint8_t* center_dist_by_dim,
     size_t child_count,

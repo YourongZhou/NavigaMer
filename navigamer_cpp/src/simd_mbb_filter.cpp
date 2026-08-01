@@ -16,6 +16,75 @@
 namespace navigamer {
 namespace {
 
+struct MetricPairCodebook {
+  std::array<uint8_t, 121> ranks{};
+  std::array<uint8_t, 128> codes{};
+  uint8_t count = 0;
+  uint8_t bits = 0;
+};
+
+bool metric_pair_feasible(
+    uint32_t first, uint32_t second,
+    uint32_t distance, uint32_t width) {
+  const uint32_t first_lo = first * width;
+  const uint32_t first_hi = first_lo + width - 1;
+  const uint32_t second_lo = second * width;
+  const uint32_t second_hi = second_lo + width - 1;
+  return distance <= first_hi + second_hi &&
+         first_lo <= second_hi + distance &&
+         second_lo <= first_hi + distance;
+}
+
+const std::array<std::array<MetricPairCodebook, 256>, 2>&
+metric_pair_codebooks() {
+  static const auto codebooks = [] {
+    std::array<std::array<MetricPairCodebook, 256>, 2> tables{};
+    for (size_t width_idx = 0; width_idx < tables.size(); ++width_idx) {
+      const uint32_t width = width_idx == 0 ? 6 : 12;
+      for (size_t distance = 0; distance < tables[width_idx].size();
+           ++distance) {
+        auto& table = tables[width_idx][distance];
+        table.ranks.fill(std::numeric_limits<uint8_t>::max());
+        for (uint32_t second = 0; second <= 10; ++second) {
+          for (uint32_t first = 0; first <= 10; ++first) {
+            if (!metric_pair_feasible(
+                    first, second, distance, width)) {
+              continue;
+            }
+            const uint8_t code = static_cast<uint8_t>(first + 11 * second);
+            table.ranks[code] = table.count;
+            table.codes[table.count++] = code;
+          }
+        }
+        if (table.count != 0) {
+          uint32_t maximum = table.count - 1;
+          do {
+            ++table.bits;
+            maximum >>= 1;
+          } while (maximum != 0);
+        }
+      }
+    }
+    return tables;
+  }();
+  return codebooks;
+}
+
+const MetricPairCodebook& metric_pair_codebook(
+    uint8_t distance, uint32_t width) {
+  if (width != 6 && width != 12) {
+    throw std::invalid_argument(
+        "metric pair bin width must be 6 or 12");
+  }
+  const auto& codebook =
+      metric_pair_codebooks()[width == 6 ? 0 : 1][distance];
+  if (codebook.count == 0) {
+    throw std::invalid_argument(
+        "beacon-pair distance has no representable metric state");
+  }
+  return codebook;
+}
+
 constexpr std::array<uint16_t, 121> paired_base11_midpoints(
     uint32_t bin_width) {
   std::array<uint16_t, 121> values{};
@@ -168,24 +237,51 @@ std::vector<uint32_t> filter_paired_base11_scalar(
       bin_width == 6 ? kPairedBase11Midpoints6
                      : kPairedBase11Midpoints12;
   const size_t pairs_per_child = (dim + 1) / 2;
+  const size_t full_pairs = dim / 2;
+  std::array<uint8_t, 5> pair_bits{};
+  std::array<uint8_t, 5> pair_bit_offsets{};
+  std::array<const MetricPairCodebook*, 5> pair_codebooks{};
+  uint32_t bits_per_child = 0;
+  for (size_t pair = 0; pair < full_pairs; ++pair) {
+    pair_bit_offsets[pair] = static_cast<uint8_t>(bits_per_child);
+    pair_codebooks[pair] = &metric_pair_codebook(
+        center_dist_by_child[pair], bin_width);
+    pair_bits[pair] = pair_codebooks[pair]->bits;
+    bits_per_child += pair_bits[pair];
+  }
+  if (dim & 1) {
+    pair_bit_offsets[full_pairs] =
+        static_cast<uint8_t>(bits_per_child);
+    pair_bits[full_pairs] = 4;
+    bits_per_child += 4;
+  }
+  const uint8_t* packed = center_dist_by_child + full_pairs;
   for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
     bool ok = true;
-    const size_t pair_begin = child_idx * pairs_per_child;
     for (size_t pair_dim = 0; pair_dim < pairs_per_child; ++pair_dim) {
-      const size_t pair = pair_begin + pair_dim;
-      const size_t bit_offset = pair * 7;
+      const size_t bit_offset =
+          child_idx * bits_per_child + pair_bit_offsets[pair_dim];
       const size_t byte_offset = bit_offset >> 3;
       const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
-      uint16_t word = center_dist_by_child[byte_offset];
-      if (shift + 7 > 8) {
+      const uint32_t encoded_bits = pair_bits[pair_dim];
+      uint16_t word = packed[byte_offset];
+      if (shift + encoded_bits > 8) {
         word |= static_cast<uint16_t>(
-                    center_dist_by_child[byte_offset + 1])
+                    packed[byte_offset + 1])
                 << 8;
       }
-      const uint8_t code =
-          static_cast<uint8_t>((word >> shift) & 0x7f);
+      const uint8_t rank = static_cast<uint8_t>(
+          (word >> shift) & ((uint32_t{1} << encoded_bits) - 1));
+      uint8_t code = rank;
+      if (pair_dim < full_pairs) {
+        const auto& codebook = *pair_codebooks[pair_dim];
+        if (rank >= codebook.count) {
+          throw std::runtime_error("invalid metric pair rank");
+        }
+        code = codebook.codes[rank];
+      }
       if (code >= midpoint_table.size()) {
-        throw std::runtime_error("invalid paired base-11 MBB code");
+        throw std::runtime_error("invalid metric-ranked MBB code");
       }
       const size_t first_dim = pair_dim * 2;
       const uint16_t midpoints = midpoint_table[code];
@@ -634,6 +730,43 @@ std::vector<uint32_t> filter_leaf_avx2(const uint8_t* dist_by_dim,
 #endif
 
 }  // namespace
+
+uint32_t metric_pair_rank_bits(
+    uint8_t beacon_pair_distance,
+    uint32_t quantization_bin_width) {
+  return metric_pair_codebook(
+             beacon_pair_distance, quantization_bin_width)
+      .bits;
+}
+
+uint8_t metric_pair_rank(
+    uint8_t first, uint8_t second,
+    uint8_t beacon_pair_distance,
+    uint32_t quantization_bin_width) {
+  if (first > 10 || second > 10) {
+    throw std::invalid_argument(
+        "metric pair quantized distance exceeds base-11 range");
+  }
+  const auto& table = metric_pair_codebook(
+      beacon_pair_distance, quantization_bin_width);
+  const uint8_t rank = table.ranks[first + 11 * second];
+  if (rank == std::numeric_limits<uint8_t>::max()) {
+    throw std::runtime_error(
+        "metric pair violates the beacon triangle inequality");
+  }
+  return rank;
+}
+
+uint8_t metric_pair_code(
+    uint8_t rank, uint8_t beacon_pair_distance,
+    uint32_t quantization_bin_width) {
+  const auto& table = metric_pair_codebook(
+      beacon_pair_distance, quantization_bin_width);
+  if (rank >= table.count) {
+    throw std::runtime_error("invalid metric pair rank");
+  }
+  return table.codes[rank];
+}
 
 const char* simd_mode_name(SimdMode mode) {
   switch (mode) {

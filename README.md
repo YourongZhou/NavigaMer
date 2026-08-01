@@ -251,11 +251,15 @@ limit, while peak build memory is bounded by the number of concurrent parts.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
-Only one group of temporary shard files exists at a time. The final v5
+Only one group of temporary shard files exists at a time. The final v6
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph
 payloads, rather than repeating the common manifest for every logical shard.
+Paired child-MBB coordinates are ranked only among quantized states permitted
+by their exact beacon-pair distance. This reconstructs the same conservative
+distance bins while using fewer than the former fixed seven bits whenever the
+triangle inequality excludes states.
 Queries mmap only selected byte ranges, so packing removes millions of
 filesystem entries without coarsening the logical shards or increasing search
 work. Contig names and pack paths are interned once; each in-memory shard

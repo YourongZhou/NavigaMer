@@ -5,6 +5,7 @@
 #include "tools.hpp"
 #include "range_join.hpp"
 #include "phase2_distance_verifier.hpp"
+#include "simd_mbb_filter.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -1212,9 +1213,10 @@ static_assert(sizeof(BuildNodeGeometry) == 32,
 struct SearchGraphView {
   static constexpr uint32_t COARSE_CHILD_MBB_BIN_WIDTH = 12;
   static constexpr uint32_t FINE_CHILD_MBB_BIN_WIDTH = 6;
-  // Child MBB values in [0, 10] use two exact base-11 digits per 7-bit code.
-  // Seven bits are otherwise unreachable for a <=255-base sequence with the
-  // fixed 6/12-wide child bins, so the node-local width is also the format tag.
+  // Child MBB values in [0, 10] use the 7-bit width as a format tag. Each
+  // beacon-pair distance is stored once, then every child pair is ranked only
+  // among base-11 states permitted by the triangle inequality. An odd final
+  // dimension remains one exact 4-bit digit.
   static constexpr uint32_t PAIRED_BASE11_CHILD_MBB_BITS = 7;
 
   static constexpr uint32_t child_mbb_quantization_error(
@@ -1625,12 +1627,23 @@ struct SearchGraphView {
       NodeId node_id, const PackedWorldNodeRecordRef& node,
       uint32_t child_count_value, uint32_t beacon_count_value) const {
     const uint32_t bits = child_mbb_bits(node_id, node);
+    if (bits == PAIRED_BASE11_CHILD_MBB_BITS) {
+      const size_t full_pairs = beacon_count_value / 2;
+      const uint32_t bin_width = child_mbb_bin_width(node_id);
+      uint32_t bits_per_child = (beacon_count_value & 1) ? 4 : 0;
+      for (size_t pair = 0; pair < full_pairs; ++pair) {
+        bits_per_child += metric_pair_rank_bits(
+            child_beacon_dists[node.child_mbb_begin() + pair],
+            bin_width);
+      }
+      return full_pairs + static_cast<size_t>(
+          (static_cast<uint64_t>(child_count_value) *
+               bits_per_child +
+           7) /
+          8);
+    }
     const uint64_t cells =
-        bits == PAIRED_BASE11_CHILD_MBB_BITS
-            ? static_cast<uint64_t>(child_count_value) *
-                  ((beacon_count_value + 1) / 2)
-            : static_cast<uint64_t>(child_count_value) *
-                  beacon_count_value;
+        static_cast<uint64_t>(child_count_value) * beacon_count_value;
     return static_cast<size_t>(
         (cells * bits + 7) / 8);
   }
@@ -1643,10 +1656,16 @@ struct SearchGraphView {
       NodeId node_id, const PackedWorldNodeRecordRef& node,
       uint32_t child_count_value, uint32_t beacon_count_value) const {
     const uint32_t begin = node.child_mbb_begin();
-    return begin <= child_beacon_dists.size() &&
-           child_mbb_byte_count(
+    if (begin > child_beacon_dists.size()) return false;
+    if (child_mbb_bits(node_id, node) ==
+            PAIRED_BASE11_CHILD_MBB_BITS &&
+        beacon_count_value / 2 >
+            child_beacon_dists.size() - begin) {
+      return false;
+    }
+    return child_mbb_byte_count(
                node_id, node, child_count_value, beacon_count_value) <=
-               child_beacon_dists.size() - begin;
+           child_beacon_dists.size() - begin;
   }
   bool child_mbb_range_valid(NodeId node_id) const {
     const auto node = node_records[node_id];
@@ -1681,19 +1700,39 @@ struct SearchGraphView {
     if (bits == PAIRED_BASE11_CHILD_MBB_BITS) {
       const size_t dimension = cell_offset / children;
       const size_t child = cell_offset % children;
-      const size_t pairs_per_child = (beacons + 1) / 2;
-      const size_t pair = child * pairs_per_child + dimension / 2;
-      const size_t bit_offset = pair * bits;
-      const size_t byte_offset = bit_offset >> 3;
+      const size_t pair = dimension / 2;
+      const size_t full_pairs = beacons / 2;
+      uint32_t bits_per_child = (beacons & 1) ? 4 : 0;
+      size_t pair_bit_offset = 0;
+      for (size_t prior = 0; prior < full_pairs; ++prior) {
+        const uint32_t pair_bits = metric_pair_rank_bits(
+            child_beacon_dists[begin + prior], bin_width);
+        bits_per_child += pair_bits;
+        if (prior < pair) pair_bit_offset += pair_bits;
+      }
+      const bool full_pair = pair < full_pairs;
+      const uint32_t encoded_bits =
+          full_pair
+              ? metric_pair_rank_bits(
+                    child_beacon_dists[begin + pair], bin_width)
+              : 4;
+      const size_t bit_offset =
+          child * bits_per_child + pair_bit_offset;
+      const size_t byte_offset = begin + full_pairs + (bit_offset >> 3);
       const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
-      uint16_t word = child_beacon_dists[begin + byte_offset];
-      if (shift + bits > 8) {
+      uint16_t word = child_beacon_dists[byte_offset];
+      if (shift + encoded_bits > 8) {
         word |= static_cast<uint16_t>(
-                    child_beacon_dists[begin + byte_offset + 1])
+                    child_beacon_dists[byte_offset + 1])
                 << 8;
       }
-      const uint8_t code = static_cast<uint8_t>(
-          (word >> shift) & ((uint32_t{1} << bits) - 1));
+      const uint8_t rank = static_cast<uint8_t>(
+          (word >> shift) & ((uint32_t{1} << encoded_bits) - 1));
+      const uint8_t code =
+          full_pair
+              ? metric_pair_code(
+                    rank, child_beacon_dists[begin + pair], bin_width)
+              : rank;
       encoded = dimension & 1 ? code / 11 : code % 11;
     } else if (bits == 8) {
       encoded = child_beacon_dists[begin + cell_offset];

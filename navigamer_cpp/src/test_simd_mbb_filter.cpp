@@ -1,10 +1,12 @@
 #include "simd_mbb_filter.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -56,22 +58,105 @@ std::vector<uint8_t> pack_distances(
 std::vector<uint8_t> pack_paired_base11(
     const std::vector<uint8_t>& values,
     size_t child_count,
-    size_t dim) {
+    size_t dim,
+    uint32_t bin_width,
+    const std::vector<uint8_t>& pair_distances) {
   const size_t pairs_per_child = (dim + 1) / 2;
-  std::vector<uint8_t> codes(child_count * pairs_per_child, 0);
+  const size_t full_pairs = dim / 2;
+  assert(pair_distances.size() == full_pairs);
+  std::vector<uint8_t> pair_bits(pairs_per_child, 4);
+  uint32_t bits_per_child = (dim & 1) ? 4 : 0;
+  for (size_t pair = 0; pair < full_pairs; ++pair) {
+    pair_bits[pair] = static_cast<uint8_t>(
+        navigamer::metric_pair_rank_bits(
+            pair_distances[pair], bin_width));
+    bits_per_child += pair_bits[pair];
+  }
+  std::vector<uint8_t> packed(
+      full_pairs + (child_count * bits_per_child + 7) / 8, 0);
+  std::copy(
+      pair_distances.begin(), pair_distances.end(), packed.begin());
   for (size_t child = 0; child < child_count; ++child) {
+    size_t bit_offset = child * bits_per_child;
     for (size_t pair_dim = 0; pair_dim < pairs_per_child; ++pair_dim) {
       const size_t first_dim = pair_dim * 2;
       const uint8_t first = values[first_dim * child_count + child];
-      const uint8_t second =
-          first_dim + 1 < dim
-              ? values[(first_dim + 1) * child_count + child]
-              : 0;
-      codes[child * pairs_per_child + pair_dim] =
-          static_cast<uint8_t>(first + 11 * second);
+      uint8_t rank = first;
+      if (pair_dim < full_pairs) {
+        const uint8_t second =
+            values[(first_dim + 1) * child_count + child];
+        rank = navigamer::metric_pair_rank(
+            first, second, pair_distances[pair_dim], bin_width);
+      }
+      const size_t byte_offset = full_pairs + (bit_offset >> 3);
+      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+      packed[byte_offset] |= static_cast<uint8_t>(rank << shift);
+      if (shift + pair_bits[pair_dim] > 8) {
+        packed[byte_offset + 1] |=
+            static_cast<uint8_t>(rank >> (8 - shift));
+      }
+      bit_offset += pair_bits[pair_dim];
     }
   }
-  return pack_distances(codes, 7);
+  return packed;
+}
+
+bool metric_pair_feasible(
+    uint8_t first, uint8_t second,
+    uint8_t distance, uint32_t width) {
+  const uint32_t first_lo = first * width;
+  const uint32_t first_hi = first_lo + width - 1;
+  const uint32_t second_lo = second * width;
+  const uint32_t second_hi = second_lo + width - 1;
+  return distance <= first_hi + second_hi &&
+         first_lo <= second_hi + distance &&
+         second_lo <= first_hi + distance;
+}
+
+void assert_metric_pair_codebooks() {
+  for (uint32_t width : {uint32_t{6}, uint32_t{12}}) {
+    for (uint32_t distance = 0; distance <= 255; ++distance) {
+      std::array<bool, 128> ranks_seen{};
+      size_t feasible_count = 0;
+      for (uint8_t second = 0; second <= 10; ++second) {
+        for (uint8_t first = 0; first <= 10; ++first) {
+          if (!metric_pair_feasible(
+                  first, second, static_cast<uint8_t>(distance), width)) {
+            continue;
+          }
+          const uint8_t rank = navigamer::metric_pair_rank(
+              first, second, static_cast<uint8_t>(distance), width);
+          assert(!ranks_seen[rank]);
+          ranks_seen[rank] = true;
+          assert(navigamer::metric_pair_code(
+                     rank, static_cast<uint8_t>(distance), width) ==
+                 first + 11 * second);
+          ++feasible_count;
+        }
+      }
+      if (feasible_count == 0) {
+        bool rejected = false;
+        try {
+          (void)navigamer::metric_pair_rank_bits(
+              static_cast<uint8_t>(distance), width);
+        } catch (const std::invalid_argument&) {
+          rejected = true;
+        }
+        assert(rejected);
+        continue;
+      }
+      const uint32_t bits = navigamer::metric_pair_rank_bits(
+          static_cast<uint8_t>(distance), width);
+      assert(bits >= 1 && bits <= 7);
+      assert((uint32_t{1} << bits) >= feasible_count);
+      if (bits > 1) {
+        assert((uint32_t{1} << (bits - 1)) < feasible_count);
+      }
+      for (size_t rank = 0; rank < feasible_count; ++rank) {
+        assert(ranks_seen[rank]);
+      }
+    }
+  }
 }
 
 void assert_random_equivalence() {
@@ -216,36 +301,65 @@ void assert_quantized_filter_has_no_false_negatives() {
 }
 
 void assert_paired_base11_equivalence() {
-  constexpr uint32_t bin_width = 6;
-  constexpr int32_t quantization_error = bin_width / 2;
   std::mt19937 rng(20260802);
-  std::uniform_int_distribution<int> pick_encoded(0, 10);
-  std::uniform_int_distribution<int> pick_query(0, 80);
-  for (size_t dim : {size_t{2}, size_t{3}, size_t{10}}) {
-    for (size_t child_count : {size_t{1}, size_t{7}, size_t{44},
-                               size_t{257}}) {
-      std::vector<uint8_t> encoded(dim * child_count);
-      std::vector<uint8_t> midpoints(dim * child_count);
-      for (size_t idx = 0; idx < encoded.size(); ++idx) {
-        encoded[idx] = static_cast<uint8_t>(pick_encoded(rng));
-        midpoints[idx] = static_cast<uint8_t>(
-            encoded[idx] * bin_width + quantization_error);
-      }
-      const auto packed =
-          pack_paired_base11(encoded, child_count, dim);
-      std::vector<int> query(dim);
-      for (int& value : query) value = pick_query(rng);
-      for (int32_t tolerance : {0, 2, 9}) {
-        constexpr int32_t child_radius = 7;
-        const auto expected = reference_survivors(
-            midpoints, child_count, dim, query, child_radius,
-            tolerance + quantization_error);
-        navigamer::MBBFilterSimdStats stats;
-        const auto actual = navigamer::filter_mbb_survivors(
-            packed.data(), child_count, dim, query.data(), child_radius,
-            tolerance, navigamer::SimdMode::Auto, &stats, 7, bin_width);
-        assert(actual == expected);
-        assert(stats.scalar_checks == child_count);
+  std::uniform_int_distribution<int> pick_query(0, 140);
+  std::uniform_int_distribution<int> pick_state(0, 120);
+  for (uint32_t bin_width : {uint32_t{6}, uint32_t{12}}) {
+    const int32_t quantization_error = bin_width / 2;
+    for (size_t dim : {size_t{2}, size_t{3}, size_t{10}}) {
+      for (size_t child_count : {size_t{1}, size_t{7}, size_t{44},
+                                 size_t{257}}) {
+        const size_t full_pairs = dim / 2;
+        std::vector<uint8_t> pair_distances(full_pairs);
+        std::vector<std::vector<uint8_t>> feasible_codes(full_pairs);
+        for (size_t pair = 0; pair < full_pairs; ++pair) {
+          pair_distances[pair] = static_cast<uint8_t>(
+              1 + (pair * 17 + child_count) % 60);
+          for (uint8_t second = 0; second <= 10; ++second) {
+            for (uint8_t first = 0; first <= 10; ++first) {
+              if (metric_pair_feasible(
+                      first, second, pair_distances[pair], bin_width)) {
+                feasible_codes[pair].push_back(first + 11 * second);
+              }
+            }
+          }
+          assert(!feasible_codes[pair].empty());
+        }
+        std::vector<uint8_t> encoded(dim * child_count);
+        std::vector<uint8_t> midpoints(dim * child_count);
+        for (size_t child = 0; child < child_count; ++child) {
+          for (size_t pair = 0; pair < full_pairs; ++pair) {
+            const auto& codes = feasible_codes[pair];
+            const uint8_t code = codes[
+                static_cast<size_t>(pick_state(rng)) % codes.size()];
+            encoded[(pair * 2) * child_count + child] = code % 11;
+            encoded[(pair * 2 + 1) * child_count + child] = code / 11;
+          }
+          if (dim & 1) {
+            encoded[(dim - 1) * child_count + child] =
+                static_cast<uint8_t>(pick_state(rng) % 11);
+          }
+        }
+        for (size_t idx = 0; idx < encoded.size(); ++idx) {
+          midpoints[idx] = static_cast<uint8_t>(
+              encoded[idx] * bin_width + quantization_error);
+        }
+        const auto packed = pack_paired_base11(
+            encoded, child_count, dim, bin_width, pair_distances);
+        std::vector<int> query(dim);
+        for (int& value : query) value = pick_query(rng);
+        for (int32_t tolerance : {0, 2, 9}) {
+          constexpr int32_t child_radius = 7;
+          const auto expected = reference_survivors(
+              midpoints, child_count, dim, query, child_radius,
+              tolerance + quantization_error);
+          navigamer::MBBFilterSimdStats stats;
+          const auto actual = navigamer::filter_mbb_survivors(
+              packed.data(), child_count, dim, query.data(), child_radius,
+              tolerance, navigamer::SimdMode::Auto, &stats, 7, bin_width);
+          assert(actual == expected);
+          assert(stats.scalar_checks == child_count);
+        }
       }
     }
   }
@@ -266,6 +380,7 @@ void assert_mode_parsing() {
 
 int main() {
   assert_mode_parsing();
+  assert_metric_pair_codebooks();
   assert_random_equivalence();
   assert_packed_equivalence();
   assert_quantized_filter_has_no_false_negatives();

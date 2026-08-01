@@ -2,6 +2,7 @@
 #include "build_progress.hpp"
 #include "phase1_seed_index.hpp"
 #include "phase2_distance_verifier.hpp"
+#include "simd_mbb_filter.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -111,6 +112,7 @@ uint8_t pack_build_distances(
 uint8_t pack_build_child_distances(
     BuildArrayView<uint8_t> values, size_t child_count,
     size_t beacon_count, uint32_t bin_width,
+    BuildArrayView<uint8_t> beacon_pair_distances,
     CompactBuildVector<uint8_t>& output) {
   if (values.size() != child_count * beacon_count) {
     throw std::invalid_argument(
@@ -128,32 +130,47 @@ uint8_t pack_build_child_distances(
 
   constexpr uint8_t bits =
       SearchGraphView::PAIRED_BASE11_CHILD_MBB_BITS;
+  const size_t full_pairs = beacon_count / 2;
+  if (beacon_pair_distances.size() != full_pairs) {
+    throw std::invalid_argument(
+        "beacon pair distance count is inconsistent");
+  }
   const size_t pairs_per_child = (beacon_count + 1) / 2;
-  const size_t pair_count = child_count * pairs_per_child;
-  const size_t byte_count = static_cast<size_t>(
-      (static_cast<uint64_t>(pair_count) * bits + 7) / 8);
+  uint32_t bits_per_child = (beacon_count & 1) ? 4 : 0;
+  for (uint8_t distance : beacon_pair_distances) {
+    bits_per_child += metric_pair_rank_bits(distance, bin_width);
+  }
+  const size_t byte_count = full_pairs + static_cast<size_t>(
+      (static_cast<uint64_t>(child_count) * bits_per_child + 7) / 8);
   output.assign(byte_count, uint8_t{0});
+  std::copy(
+      beacon_pair_distances.begin(), beacon_pair_distances.end(),
+      output.begin());
   for (size_t child = 0; child < child_count; ++child) {
+    size_t bit_offset = child * bits_per_child;
     for (size_t pair_dim = 0; pair_dim < pairs_per_child; ++pair_dim) {
       const size_t first_dim = pair_dim * 2;
       const uint8_t first = static_cast<uint8_t>(
           values[first_dim * child_count + child] / bin_width);
-      const uint8_t second =
-          first_dim + 1 < beacon_count
-              ? static_cast<uint8_t>(
-                    values[(first_dim + 1) * child_count + child] /
-                    bin_width)
-              : 0;
-      const uint8_t code = static_cast<uint8_t>(first + 11 * second);
-      const size_t pair = child * pairs_per_child + pair_dim;
-      const size_t bit_offset = pair * bits;
-      const size_t byte_offset = bit_offset >> 3;
-      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
-      output[byte_offset] |= static_cast<uint8_t>(code << shift);
-      if (shift + bits > 8) {
-        output[byte_offset + 1] |=
-            static_cast<uint8_t>(code >> (8 - shift));
+      uint8_t encoded = first;
+      uint32_t encoded_bits = 4;
+      if (first_dim + 1 < beacon_count) {
+        const uint8_t second = static_cast<uint8_t>(
+            values[(first_dim + 1) * child_count + child] /
+            bin_width);
+        const uint8_t distance = beacon_pair_distances[pair_dim];
+        encoded = metric_pair_rank(
+            first, second, distance, bin_width);
+        encoded_bits = metric_pair_rank_bits(distance, bin_width);
       }
+      const size_t byte_offset = full_pairs + (bit_offset >> 3);
+      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+      output[byte_offset] |= static_cast<uint8_t>(encoded << shift);
+      if (shift + encoded_bits > 8) {
+        output[byte_offset + 1] |=
+            static_cast<uint8_t>(encoded >> (8 - shift));
+      }
+      bit_offset += encoded_bits;
     }
   }
   return bits;
@@ -3668,6 +3685,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
               : build_nodes_.size(),
           uint8_t{0});
       std::vector<uint8_t> raw_distances;
+      std::vector<uint8_t> beacon_pair_distances;
 
 #pragma omp single
       actual_threads = omp_get_num_threads();
@@ -3727,6 +3745,16 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
           const size_t child_count = node.child_or_leaf_ids.size();
           const size_t beacon_count = geometry.beacon_ids.size();
           const size_t mbb_cell_count = child_count * beacon_count;
+          beacon_pair_distances.resize(beacon_count / 2);
+          for (size_t pair_idx = 0;
+               pair_idx < beacon_pair_distances.size(); ++pair_idx) {
+            const auto first = search_graph_view_.sequences.sequence(
+                geometry.beacon_ids[pair_idx * 2]);
+            const auto second = search_graph_view_.sequences.sequence(
+                geometry.beacon_ids[pair_idx * 2 + 1]);
+            beacon_pair_distances[pair_idx] = static_cast<uint8_t>(
+                build_distance(first, second, range_config_.distance_mode));
+          }
           raw_distances.assign(mbb_cell_count, 0);
           for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
             const auto& child =
@@ -3761,6 +3789,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
           build_geometry_mbb_bits_[node.geometry_index] =
               pack_build_child_distances(
                   raw_distances, child_count, beacon_count, bin_width,
+                  beacon_pair_distances,
                   geometry.link_beacon_dists);
         }
 
@@ -4973,15 +5002,32 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         const uint8_t mbb_bits = plan_bits(
             finalization_plan, kPlanMbbBitsShift,
             kPlanThreeBitMask);
-        const uint64_t mbb_values =
-            mbb_bits ==
-                    SearchGraphView::PAIRED_BASE11_CHILD_MBB_BITS
-                ? static_cast<uint64_t>(node.child_or_leaf_ids.size()) *
-                      ((geometry.beacon_ids.size() + 1) / 2)
-                : static_cast<uint64_t>(node.child_or_leaf_ids.size()) *
-                      geometry.beacon_ids.size();
-        const size_t expected_bytes = static_cast<size_t>(
-            (mbb_values * mbb_bits + 7) / 8);
+        size_t expected_bytes = 0;
+        if (mbb_bits ==
+            SearchGraphView::PAIRED_BASE11_CHILD_MBB_BITS) {
+          const size_t full_pairs = geometry.beacon_ids.size() / 2;
+          const uint32_t bin_width =
+              layer_idx + 2 == primary_layers_.size()
+                  ? SearchGraphView::FINE_CHILD_MBB_BIN_WIDTH
+                  : SearchGraphView::COARSE_CHILD_MBB_BIN_WIDTH;
+          uint32_t bits_per_child =
+              (geometry.beacon_ids.size() & 1) ? 4 : 0;
+          for (size_t pair = 0; pair < full_pairs; ++pair) {
+            bits_per_child += metric_pair_rank_bits(
+                geometry.link_beacon_dists[pair], bin_width);
+          }
+          expected_bytes = full_pairs + static_cast<size_t>(
+              (static_cast<uint64_t>(node.child_or_leaf_ids.size()) *
+                   bits_per_child +
+               7) /
+              8);
+        } else {
+          const uint64_t mbb_values =
+              static_cast<uint64_t>(node.child_or_leaf_ids.size()) *
+              geometry.beacon_ids.size();
+          expected_bytes = static_cast<size_t>(
+              (mbb_values * mbb_bits + 7) / 8);
+        }
         if (geometry.link_beacon_dists.size() != expected_bytes) {
           throw std::runtime_error(
               "packed child distance array does not match "

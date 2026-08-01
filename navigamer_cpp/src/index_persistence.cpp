@@ -25,7 +25,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '5'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '6'};
 constexpr std::array<char, 8> kPayloadMagic = {
     'N', 'G', 'P', 'A', 'Y', 'L', '0', '1'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 33) {
+  if (manifest.format_version != 34) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 33) {
+  if (manifest.format_version != 34) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -1193,7 +1193,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 33;
+  stored.format_version = 34;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
