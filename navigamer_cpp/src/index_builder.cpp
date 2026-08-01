@@ -274,7 +274,17 @@ class ReferenceSequenceTable {
 
   explicit ReferenceSequenceTable(size_t maximum_items)
       : capacity_(capacity_for(maximum_items)),
-        slots_(new uint64_t[capacity_]()) {}
+        id_bits_(id_bits_for(maximum_items)) {
+    // Keep at least eight hash bits in compact slots. Exact sequence equality
+    // below makes fingerprint collisions harmless; larger tables retain the
+    // full hash to avoid excessive comparisons.
+    if (id_bits_ <= 24) {
+      id_mask_ = (uint32_t{1} << id_bits_) - 1;
+      compact_slots_.reset(new uint32_t[capacity_]());
+    } else {
+      wide_slots_.reset(new uint64_t[capacity_]());
+    }
+  }
 
   template <typename PositionOf>
   Lookup find(uint32_t hash, std::string_view sequence,
@@ -282,11 +292,22 @@ class ReferenceSequenceTable {
               PositionOf&& position_of) const {
     size_t slot = static_cast<size_t>(hash % capacity_);
     for (size_t probe = 0; probe < capacity_; ++probe) {
-      const uint64_t packed = slots_[slot];
-      if (packed == 0) return {INVALID_LEAF_ID, slot};
-      const LeafId id =
-          static_cast<LeafId>(static_cast<uint32_t>(packed) - 1);
-      if (static_cast<uint32_t>(packed >> 32) == hash) {
+      LeafId id = INVALID_LEAF_ID;
+      bool fingerprint_matches = false;
+      if (compact_slots_) {
+        const uint32_t packed = compact_slots_[slot];
+        if (packed == 0) return {INVALID_LEAF_ID, slot};
+        id = static_cast<LeafId>((packed & id_mask_) - 1);
+        fingerprint_matches =
+            (packed >> id_bits_) == (hash >> id_bits_);
+      } else {
+        const uint64_t packed = wide_slots_[slot];
+        if (packed == 0) return {INVALID_LEAF_ID, slot};
+        id = static_cast<LeafId>(static_cast<uint32_t>(packed) - 1);
+        fingerprint_matches =
+            static_cast<uint32_t>(packed >> 32) == hash;
+      }
+      if (fingerprint_matches) {
         const size_t source_pos = position_of(id);
         if (source_pos <= reference.size() &&
             sequence.size() <= reference.size() - source_pos &&
@@ -301,17 +322,42 @@ class ReferenceSequenceTable {
 
   void insert(const Lookup& lookup, uint32_t hash, LeafId id) {
     if (lookup.id != INVALID_LEAF_ID ||
-        slots_[lookup.slot] != 0 ||
+        (compact_slots_ ? compact_slots_[lookup.slot] != 0
+                        : wide_slots_[lookup.slot] != 0) ||
         size_ >= capacity_) {
       throw std::runtime_error("invalid reference sequence table insertion");
     }
-    slots_[lookup.slot] =
-        (static_cast<uint64_t>(hash) << 32) |
-        (static_cast<uint64_t>(id) + 1);
+    if (compact_slots_) {
+      const uint32_t encoded_id = id + 1;
+      if (encoded_id > id_mask_) {
+        throw std::runtime_error(
+            "reference sequence ID exceeds compact hash table storage");
+      }
+      compact_slots_[lookup.slot] =
+          ((hash >> id_bits_) << id_bits_) | encoded_id;
+    } else {
+      wide_slots_[lookup.slot] =
+          (static_cast<uint64_t>(hash) << 32) |
+          (static_cast<uint64_t>(id) + 1);
+    }
     ++size_;
   }
 
  private:
+  static uint8_t id_bits_for(size_t maximum_items) {
+    if (maximum_items >
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+      throw std::runtime_error("reference sequence table is too large");
+    }
+    uint8_t bits = 0;
+    uint32_t encoded_max = static_cast<uint32_t>(maximum_items);
+    do {
+      ++bits;
+      encoded_max >>= 1;
+    } while (encoded_max != 0);
+    return bits;
+  }
+
   static size_t capacity_for(size_t maximum_items) {
     if (maximum_items == 0) return 1;
     const size_t extra =
@@ -325,7 +371,10 @@ class ReferenceSequenceTable {
 
   size_t capacity_ = 0;
   size_t size_ = 0;
-  std::unique_ptr<uint64_t[]> slots_;
+  uint8_t id_bits_ = 0;
+  uint32_t id_mask_ = 0;
+  std::unique_ptr<uint32_t[]> compact_slots_;
+  std::unique_ptr<uint64_t[]> wide_slots_;
 };
 
 struct Phase1CoverScanResult {
