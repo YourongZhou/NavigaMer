@@ -355,18 +355,18 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 32
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 33
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
 for at most 10 deterministic beacons per non-finest parent. Reducing the
 beacon cap only removes safe metric constraints and therefore cannot create a
 false negative. Coarse layers store child-center distances as
-`floor(distance / 8)`; the last transition into the finest world layer uses
+`floor(distance / 12)`; the last transition into the finest world layer uses
 `floor(distance / 6)` to preserve more pruning precision while fitting the
 observed distance range in three bits. Search decodes the bin midpoint and
 widens every corresponding metric bound by the matching maximum reconstruction
-error, four or three, so the representation
+error, six or three, so the representation
 may retain extra children but cannot prune a true result. Values use the exact
 minimum bit width required by each parent's largest quantized value, with each
 node starting on a byte boundary for constant-time lookup. The

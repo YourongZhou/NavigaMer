@@ -47,17 +47,17 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 32 stores the shared
+edit distance fits in one byte. Persisted format version 33 stores the shared
 reference as raw bases in the memory-mapped index, so loading does not allocate
 or eagerly fault a full decoded reference into heap memory, and
 keeps long literal inputs in the manifest only as content fingerprints. It
 stores one child-center-to-beacon distance per MBB cell instead of separate
 lower and upper bounds. Non-finest parents use at most 10 deterministic
 beacons; reducing the sampling cap only relaxes pruning, so it cannot introduce
-false negatives. Child-center distances use eight-base integer bins in coarse
+false negatives. Child-center distances use twelve-base integer bins in coarse
 layers and six-base bins in the last transition into the finest world layer,
 where pruning precision matters most. Search decodes each bin midpoint and
-widens the metric bound by the matching maximum reconstruction error (four or
+widens the metric bound by the matching maximum reconstruction error (six or
 three), so quantization can retain extra children but cannot prune a true result.
 Each parent uses the exact
 minimum integer bit width required by its largest quantized value; nodes remain

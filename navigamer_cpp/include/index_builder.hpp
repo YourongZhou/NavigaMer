@@ -706,7 +706,7 @@ static_assert(sizeof(BuildNodeGeometry) <= 48,
               "primary-node build geometry must remain compact");
 
 struct SearchGraphView {
-  static constexpr uint32_t COARSE_CHILD_MBB_BIN_WIDTH = 8;
+  static constexpr uint32_t COARSE_CHILD_MBB_BIN_WIDTH = 12;
   static constexpr uint32_t FINE_CHILD_MBB_BIN_WIDTH = 6;
 
   static constexpr uint32_t child_mbb_quantization_error(
@@ -733,7 +733,7 @@ struct SearchGraphView {
   FinalArray<int16_t> leaf_id_deltas16;
   FinalArray<LeafId> leaf_ids;
 
-  // Each child-center-to-beacon distance d is stored as floor(d / 8) above
+  // Each child-center-to-beacon distance d is stored as floor(d / 12) above
   // the last non-finest layer and floor(d / 6) in that final child-world
   // transition. Search decodes the bin midpoint and widens every pruning
   // threshold by the matching error bound, so the lossy representation can
