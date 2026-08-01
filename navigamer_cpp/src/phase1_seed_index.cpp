@@ -74,6 +74,72 @@ IncrementalPigeonholeIndex::IncrementalPigeonholeIndex(
     throw std::invalid_argument(
         "phase1 seed maximum length must be in [min_seed_len, 32]");
   }
+  if (config_.fixed_query_length != 0 && config_.max_tau < 0) {
+    throw std::invalid_argument(
+        "fixed phase1 seed layout requires a non-negative maximum threshold");
+  }
+}
+
+size_t IncrementalPigeonholeIndex::posting_entry_count() const {
+  size_t count = 0;
+  for (const auto& state_entry : states_) {
+    const auto& state = state_entry.second;
+    count += state.compact_entries.size();
+    count += state.compact24_entries.size();
+    count += state.packed_entries.size();
+    count += state.wide_entries.size();
+  }
+  return count;
+}
+
+size_t IncrementalPigeonholeIndex::full_posting_entry_count() const {
+  size_t count = 0;
+  for (const auto& state_entry : states_) {
+    count += state_entry.second.full_posting_entry_count;
+  }
+  return count;
+}
+
+size_t IncrementalPigeonholeIndex::posting_bytes() const {
+  size_t bytes = 0;
+  for (const auto& state_entry : states_) {
+    const auto& state = state_entry.second;
+    bytes += state.compact_entries.capacity() * sizeof(uint32_t);
+    bytes += state.compact24_entries.capacity() *
+             sizeof(SeedState::Compact24PostingEntry);
+    bytes += state.packed_entries.capacity() * sizeof(uint64_t);
+    bytes += state.wide_entries.capacity() *
+             sizeof(SeedState::WidePostingEntry);
+  }
+  return bytes;
+}
+
+uint8_t IncrementalPigeonholeIndex::position_stride_for(
+    int seed_len) const {
+  if (config_.fixed_query_length == 0 || config_.max_tau < 0 ||
+      config_.fixed_query_length >
+          static_cast<size_t>(std::numeric_limits<uint8_t>::max())) {
+    return 1;
+  }
+  size_t stride = std::numeric_limits<size_t>::max();
+  for (int tau = 0; tau <= config_.max_tau; ++tau) {
+    const size_t block_count = static_cast<size_t>(tau) + 1;
+    if (block_count > config_.fixed_query_length) continue;
+    const size_t block_len = config_.fixed_query_length / block_count;
+    const int layout_seed_len = std::min(
+        config_.max_seed_len, static_cast<int>(block_len));
+    if (layout_seed_len != seed_len ||
+        layout_seed_len < config_.min_seed_len) {
+      continue;
+    }
+    stride = std::min(
+        stride, block_len - static_cast<size_t>(seed_len) + 1);
+  }
+  if (stride == std::numeric_limits<size_t>::max() || stride == 0 ||
+      stride > std::numeric_limits<uint8_t>::max()) {
+    return 1;
+  }
+  return static_cast<uint8_t>(stride);
 }
 
 void IncrementalPigeonholeIndex::append(size_t item_id,
@@ -94,6 +160,7 @@ IncrementalPigeonholeIndex::SeedState&
 IncrementalPigeonholeIndex::ensure_state(int seed_len) {
   auto [it, inserted] = states_.try_emplace(seed_len);
   SeedState& state = it->second;
+  if (inserted) state.position_stride = position_stride_for(seed_len);
   while (state.indexed_count < items_.size()) {
     index_item(state, seed_len, static_cast<uint32_t>(state.indexed_count));
     state.indexed_count++;
@@ -214,6 +281,10 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
 
   const size_t seed_count =
       sequence.size() - static_cast<size_t>(seed_len) + 1;
+  state.full_posting_entry_count += seed_count;
+  const size_t indexed_seed_count =
+      (seed_count + state.position_stride - 1) /
+      state.position_stride;
   if (seed_count - 1 > std::numeric_limits<uint32_t>::max()) {
     state.unindexable_items.push_back(item_idx);
     return;
@@ -222,7 +293,7 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
           SeedState::PostingStorage::Compact16 &&
       (item_idx > std::numeric_limits<uint8_t>::max() ||
        seed_count - 1 > std::numeric_limits<uint8_t>::max() ||
-       seed_count > kInvalidCompactPostingIndex -
+       indexed_seed_count > kInvalidCompactPostingIndex -
                         state.compact_entries.size())) {
     promote_to_compact24_postings(state);
   }
@@ -230,7 +301,7 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
           SeedState::PostingStorage::Compact24 &&
       (item_idx > std::numeric_limits<uint16_t>::max() ||
        seed_count - 1 > std::numeric_limits<uint8_t>::max() ||
-       seed_count > kInvalidCompact24PostingIndex -
+       indexed_seed_count > kInvalidCompact24PostingIndex -
                         state.compact24_entries.size())) {
     promote_to_packed_postings(state);
   }
@@ -256,6 +327,9 @@ void IncrementalPigeonholeIndex::index_item(SeedState& state, int seed_len,
     if (start > std::numeric_limits<uint32_t>::max()) {
       state.unindexable_items.push_back(item_idx);
       return;
+    }
+    if (start % state.position_stride != 0) {
+      continue;
     }
     if (state.posting_storage ==
         SeedState::PostingStorage::Compact16) {
@@ -319,6 +393,11 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
   }
 
   Phase1SeedQueryResult result;
+  if (config_.fixed_query_length != 0 &&
+      (sequence.size() != config_.fixed_query_length ||
+       tau > config_.max_tau)) {
+    return result;
+  }
   const size_t block_count = static_cast<size_t>(tau) + 1;
   if (block_count == 0 || block_count > sequence.size()) return result;
 
@@ -332,7 +411,20 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
     return result;
   }
 
-  SeedState& state = ensure_state(result.seed_len);
+  int indexed_seed_len = result.seed_len;
+  if (config_.fixed_query_length != 0 && config_.max_tau >= 0) {
+    const size_t maximum_block_count =
+        static_cast<size_t>(config_.max_tau) + 1;
+    if (maximum_block_count > config_.fixed_query_length) return result;
+    const size_t maximum_radius_block_len =
+        config_.fixed_query_length / maximum_block_count;
+    indexed_seed_len = std::min(
+        config_.max_seed_len,
+        static_cast<int>(maximum_radius_block_len));
+    if (indexed_seed_len < config_.min_seed_len) return result;
+  }
+
+  SeedState& state = ensure_state(indexed_seed_len);
   begin_query();
 
   auto add_item = [&](uint32_t item_idx) {
@@ -344,70 +436,106 @@ Phase1SeedQueryResult IncrementalPigeonholeIndex::query(
     seen_epoch_[item_idx] = epoch_;
     result.candidate_indices.push_back(items_[item_idx].item_id);
   };
+  // The indexed occurrence may be shifted within an edit-free pigeonhole
+  // block to land on the state's modulo grid. Verify the original logical
+  // seed, not the shifted prefix. This preserves exactly the candidate set of
+  // the dense logical-seed index while storing only one short-prefix state.
+  const auto logical_seed_matches = [&](uint32_t item_idx,
+                                        size_t indexed_item_position,
+                                        size_t block_start,
+                                        size_t seed_offset) {
+    if (item_idx >= items_.size() || indexed_item_position < seed_offset) {
+      return false;
+    }
+    const std::string_view item_sequence = items_[item_idx].sequence;
+    const size_t item_position = indexed_item_position - seed_offset;
+    const size_t logical_seed_len = static_cast<size_t>(result.seed_len);
+    if (item_position + logical_seed_len > item_sequence.size() ||
+        block_start + logical_seed_len > sequence.size()) {
+      return false;
+    }
+    return item_sequence.substr(item_position, logical_seed_len) ==
+           sequence.substr(block_start, logical_seed_len);
+  };
+  const auto posting_matches = [&](uint32_t item_idx, size_t item_position,
+                                   size_t block_start, size_t seed_offset) {
+    if (item_position < seed_offset) return false;
+    const size_t logical_item_position = item_position - seed_offset;
+    return std::llabs(
+               static_cast<long long>(logical_item_position) -
+               static_cast<long long>(block_start)) <= tau &&
+           logical_seed_matches(
+               item_idx, item_position, block_start, seed_offset);
+  };
 
   for (size_t block_idx = 0; block_idx < block_count; ++block_idx) {
     const size_t block_start = block_idx * block_len;
-    uint64_t code = 0;
-    if (!encode_seed(sequence, block_start, result.seed_len, code)) return {};
-    if (state.posting_storage ==
-        SeedState::PostingStorage::Compact16) {
-      const uint16_t posting = state.compact_heads.find(code);
-      if (posting == kInvalidCompactPostingIndex) continue;
-      for (uint16_t entry_idx = posting;
-           entry_idx != kInvalidCompactPostingIndex;) {
-        const uint32_t entry = state.compact_entries[entry_idx];
-        const uint16_t packed = static_cast<uint16_t>(entry >> 16);
-        entry_idx = static_cast<uint16_t>(entry);
-        result.posting_entries_visited++;
-        const uint32_t item_idx = packed >> 8;
-        const uint32_t position = packed & 0xff;
-        if (std::llabs(static_cast<long long>(position) -
-                       static_cast<long long>(block_start)) <= tau) {
-          add_item(item_idx);
+    for (size_t seed_offset = 0;
+         seed_offset < state.position_stride; ++seed_offset) {
+      const size_t seed_start = block_start + seed_offset;
+      uint64_t code = 0;
+      if (!encode_seed(sequence, seed_start, indexed_seed_len, code)) return {};
+      if (state.posting_storage ==
+          SeedState::PostingStorage::Compact16) {
+        const uint16_t posting = state.compact_heads.find(code);
+        if (posting == kInvalidCompactPostingIndex) continue;
+        for (uint16_t entry_idx = posting;
+             entry_idx != kInvalidCompactPostingIndex;) {
+          const uint32_t entry = state.compact_entries[entry_idx];
+          const uint16_t packed = static_cast<uint16_t>(entry >> 16);
+          entry_idx = static_cast<uint16_t>(entry);
+          result.posting_entries_visited++;
+          const uint32_t item_idx = packed >> 8;
+          const uint32_t position = packed & 0xff;
+          if (posting_matches(
+                  item_idx, position, block_start, seed_offset)) {
+            add_item(item_idx);
+          }
         }
-      }
-    } else if (state.posting_storage ==
-               SeedState::PostingStorage::Compact24) {
-      const uint32_t posting = state.compact24_heads.find(code);
-      if (posting == std::numeric_limits<uint32_t>::max()) continue;
-      for (uint32_t entry_idx = posting;
-           entry_idx != kInvalidCompact24PostingIndex;) {
-        const auto& entry = state.compact24_entries[entry_idx];
-        entry_idx = entry.next();
-        result.posting_entries_visited++;
-        if (std::llabs(static_cast<long long>(entry.position) -
-                       static_cast<long long>(block_start)) <= tau) {
-          add_item(entry.item_idx);
+      } else if (state.posting_storage ==
+                 SeedState::PostingStorage::Compact24) {
+        const uint32_t posting = state.compact24_heads.find(code);
+        if (posting == std::numeric_limits<uint32_t>::max()) continue;
+        for (uint32_t entry_idx = posting;
+             entry_idx != kInvalidCompact24PostingIndex;) {
+          const auto& entry = state.compact24_entries[entry_idx];
+          entry_idx = entry.next();
+          result.posting_entries_visited++;
+          if (posting_matches(
+                  entry.item_idx, entry.position, block_start, seed_offset)) {
+            add_item(entry.item_idx);
+          }
         }
-      }
-    } else if (state.posting_storage ==
-               SeedState::PostingStorage::Packed32) {
-      const uint32_t posting = state.packed_heads.find(code);
-      if (posting == kInvalidPostingIndex) continue;
-      for (uint32_t entry_idx = posting;
-           entry_idx != kInvalidPostingIndex;) {
-        const uint64_t entry = state.packed_entries[entry_idx];
-        const uint32_t packed = static_cast<uint32_t>(entry >> 32);
-        entry_idx = static_cast<uint32_t>(entry);
-        result.posting_entries_visited++;
-        const uint32_t item_idx = packed >> 8;
-        const uint32_t position = packed & 0xff;
-        if (std::llabs(static_cast<long long>(position) -
-                       static_cast<long long>(block_start)) <= tau) {
-          add_item(item_idx);
+      } else if (state.posting_storage ==
+                 SeedState::PostingStorage::Packed32) {
+        const uint32_t posting = state.packed_heads.find(code);
+        if (posting == kInvalidPostingIndex) continue;
+        for (uint32_t entry_idx = posting;
+             entry_idx != kInvalidPostingIndex;) {
+          const uint64_t entry = state.packed_entries[entry_idx];
+          const uint32_t packed = static_cast<uint32_t>(entry >> 32);
+          entry_idx = static_cast<uint32_t>(entry);
+          result.posting_entries_visited++;
+          const uint32_t item_idx = packed >> 8;
+          const uint32_t position = packed & 0xff;
+          if (posting_matches(
+                  item_idx, position, block_start, seed_offset)) {
+            add_item(item_idx);
+          }
         }
-      }
-    } else {
-      const uint32_t posting = state.wide_heads.find(code);
-      if (posting == kInvalidPostingIndex) continue;
-      for (uint32_t entry_idx = posting;
-           entry_idx != kInvalidPostingIndex;) {
-        const auto& seed_posting = state.wide_entries[entry_idx];
-        entry_idx = seed_posting.next;
-        result.posting_entries_visited++;
-        if (std::llabs(static_cast<long long>(seed_posting.position) -
-                       static_cast<long long>(block_start)) <= tau) {
-          add_item(seed_posting.item_idx);
+      } else {
+        const uint32_t posting = state.wide_heads.find(code);
+        if (posting == kInvalidPostingIndex) continue;
+        for (uint32_t entry_idx = posting;
+             entry_idx != kInvalidPostingIndex;) {
+          const auto& seed_posting = state.wide_entries[entry_idx];
+          entry_idx = seed_posting.next;
+          result.posting_entries_visited++;
+          if (posting_matches(
+                  seed_posting.item_idx, seed_posting.position,
+                  block_start, seed_offset)) {
+            add_item(seed_posting.item_idx);
+          }
         }
       }
     }

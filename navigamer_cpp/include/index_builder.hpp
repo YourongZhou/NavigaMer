@@ -1041,6 +1041,9 @@ class BioGeometryIndexBuilder {
     size_t phase1_metric_build_distance_calls = 0;
     size_t phase1_pigeonhole_queries = 0;
     size_t phase1_seed_posting_entries_visited = 0;
+    size_t phase1_seed_posting_entries_stored = 0;
+    size_t phase1_seed_full_posting_entries = 0;
+    size_t phase1_seed_posting_bytes = 0;
     size_t phase1_pigeonhole_candidates = 0;
     size_t phase1_pigeonhole_fallbacks = 0;
     size_t phase1_hint_checks = 0;

@@ -16,6 +16,11 @@ namespace navigamer {
 struct Phase1SeedIndexConfig {
   int min_seed_len = 8;
   int max_seed_len = 20;
+  // A phase-1 candidate group is queried at one fixed length and bounded
+  // radius. This permits an exact modulo-grid posting layout. Zero length
+  // keeps the general all-position behavior.
+  size_t fixed_query_length = 0;
+  int max_tau = -1;
 };
 
 struct Phase1SeedQueryResult {
@@ -33,6 +38,9 @@ class IncrementalPigeonholeIndex {
   void append(size_t item_id, std::string_view sequence);
   Phase1SeedQueryResult query(std::string_view sequence, int tau);
   size_t size() const { return items_.size(); }
+  size_t posting_entry_count() const;
+  size_t full_posting_entry_count() const;
+  size_t posting_bytes() const;
 
  private:
   template <typename Head>
@@ -320,6 +328,8 @@ class IncrementalPigeonholeIndex {
                   "wide phase1 posting entry must remain compact");
 
     size_t indexed_count = 0;
+    size_t full_posting_entry_count = 0;
+    uint8_t position_stride = 1;
     PostingStorage posting_storage = PostingStorage::Compact16;
     PostingHeadMap<uint16_t> compact_heads;
     std::vector<uint32_t> compact_entries;
@@ -343,6 +353,7 @@ class IncrementalPigeonholeIndex {
   static void promote_to_packed_postings(SeedState& state);
   static void promote_to_wide_postings(SeedState& state);
   void index_item(SeedState& state, int seed_len, uint32_t item_idx);
+  uint8_t position_stride_for(int seed_len) const;
   void begin_query();
 };
 

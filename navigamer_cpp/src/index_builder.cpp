@@ -823,12 +823,24 @@ bool phase1_length_compatible(size_t lhs_len, size_t rhs_len, int radius) {
 
 class Phase1CoverGroupIndex {
  public:
+  size_t seed_posting_entry_count() const {
+    return seed_index_ ? seed_index_->posting_entry_count() : 0;
+  }
+
+  size_t seed_posting_bytes() const {
+    return seed_index_ ? seed_index_->posting_bytes() : 0;
+  }
+
+  size_t seed_full_posting_entry_count() const {
+    return seed_index_ ? seed_index_->full_posting_entry_count() : 0;
+  }
+
   Phase1CandidateQueryResult query(
       const std::vector<NodeId>& candidates,
       const std::vector<BuildWorldNodeRecord>& nodes,
       const SequenceStore& sequences,
       std::string_view sequence,
-      int radius,
+      int radius, int maximum_radius,
       const BuildRangeConfig& config) {
     nodes_ = &nodes;
     sequences_ = &sequences;
@@ -847,7 +859,8 @@ class Phase1CoverGroupIndex {
         metric_build_distance_calls_ - build_calls_before;
 
     if (candidates.size() >= config.phase1_qgram_min_fanout) {
-      auto seed = query_pigeonhole(candidates, sequence, radius, config);
+      auto seed = query_pigeonhole(
+          candidates, sequence, radius, maximum_radius, config);
       seed.metric_build_distance_calls = result.metric_build_distance_calls;
       if (seed.source == Phase1CoverSource::Pigeonhole) return seed;
 
@@ -1046,7 +1059,7 @@ class Phase1CoverGroupIndex {
   Phase1CandidateQueryResult query_pigeonhole(
       const std::vector<NodeId>& candidates,
       std::string_view sequence,
-      int radius,
+      int radius, int maximum_radius,
       const BuildRangeConfig& config) {
     Phase1CandidateQueryResult result;
     result.total_possible = candidates.size();
@@ -1055,11 +1068,16 @@ class Phase1CoverGroupIndex {
     const int min_seed_len = config.range_join.min_seed_len;
     const int max_seed_len = config.range_join.max_seed_len;
     if (!seed_index_ || seed_min_len_ != min_seed_len ||
-        seed_max_len_ != max_seed_len) {
+        seed_max_len_ != max_seed_len ||
+        seed_query_length_ != sequence.size() ||
+        seed_tau_ != maximum_radius) {
       seed_index_ = std::make_unique<IncrementalPigeonholeIndex>(
-          Phase1SeedIndexConfig{min_seed_len, max_seed_len});
+          Phase1SeedIndexConfig{
+              min_seed_len, max_seed_len, sequence.size(), maximum_radius});
       seed_min_len_ = min_seed_len;
       seed_max_len_ = max_seed_len;
+      seed_query_length_ = sequence.size();
+      seed_tau_ = maximum_radius;
       seed_synced_items_ = 0;
     }
     while (seed_synced_items_ < candidates.size()) {
@@ -1278,6 +1296,8 @@ class Phase1CoverGroupIndex {
   std::unique_ptr<IncrementalPigeonholeIndex> seed_index_;
   int seed_min_len_ = 0;
   int seed_max_len_ = 0;
+  size_t seed_query_length_ = 0;
+  int seed_tau_ = -1;
   size_t seed_synced_items_ = 0;
   const std::vector<BuildWorldNodeRecord>* nodes_ = nullptr;
   const SequenceStore* sequences_ = nullptr;
@@ -2684,7 +2704,7 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
               cover_group_indexes[candidate_group];
           auto candidate_query = group_index.query(
               *candidates, build_nodes_, search_graph_view_.sequences,
-              sequence, candidate_radius, range_config_);
+              sequence, candidate_radius, radius, range_config_);
           stats_.phase1_metric_build_distance_calls +=
               candidate_query.metric_build_distance_calls;
           stats_.phase1_pigeonhole_queries +=
@@ -2805,6 +2825,14 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
                 << stats_.phase1_seed_posting_entries_visited << "\n"
                 << std::defaultfloat << std::setprecision(6);
     }
+  }
+  for (const auto& group_index : cover_group_indexes) {
+    stats_.phase1_seed_posting_entries_stored +=
+        group_index.second.seed_posting_entry_count();
+    stats_.phase1_seed_full_posting_entries +=
+        group_index.second.seed_full_posting_entry_count();
+    stats_.phase1_seed_posting_bytes +=
+        group_index.second.seed_posting_bytes();
   }
   if (progress) progress->finish_phase();
 }
@@ -4237,6 +4265,12 @@ void BioGeometryIndexBuilder::print_summary() const {
             << " pigeonhole_queries=" << stats.phase1_pigeonhole_queries
             << " seed_postings="
             << stats.phase1_seed_posting_entries_visited
+            << " stored_seed_postings="
+            << stats.phase1_seed_posting_entries_stored
+            << " full_seed_postings="
+            << stats.phase1_seed_full_posting_entries
+            << " seed_posting_bytes="
+            << stats.phase1_seed_posting_bytes
             << " pigeonhole_candidates="
             << stats.phase1_pigeonhole_candidates
             << " pigeonhole_fallbacks="
