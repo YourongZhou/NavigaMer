@@ -4080,12 +4080,13 @@ void BioGeometryIndexBuilder::compact_primary_build_nodes() {
         "cannot compact more primary nodes than build nodes");
   }
 
-  std::vector<BuildWorldNodeRecord> compacted_nodes(world_node_count_);
+  // primary_layers_ is already the final-ID-ordered list of old node IDs.  It
+  // can therefore double as the current-location table while an in-place
+  // permutation moves every primary record into the final dense prefix.
   size_t expected_node_id = 0;
   for (size_t layer_idx = 0; layer_idx < primary_layers_.size(); ++layer_idx) {
-    const bool is_finest = layer_idx + 1 == primary_layers_.size();
     auto& layer = primary_layers_[layer_idx];
-    for (NodeId& old_node_id : layer) {
+    for (NodeId old_node_id : layer) {
       if (old_node_id >= build_nodes_.size()) {
         throw std::runtime_error(
             "cannot compact invalid primary build node id");
@@ -4098,30 +4099,10 @@ void BioGeometryIndexBuilder::compact_primary_build_nodes() {
         throw std::runtime_error(
             "primary build nodes are not in final NodeId order");
       }
-
-      auto& old_node = build_nodes_[old_node_id];
-      if (old_node.geometry_index != node_id) {
+      if (build_nodes_[old_node_id].geometry_index != node_id) {
         throw std::runtime_error(
             "primary build geometry is not in final NodeId order");
       }
-      if (!is_finest) {
-        for (NodeId& child_id : old_node.child_or_leaf_ids) {
-          if (child_id >= build_nodes_.size()) {
-            throw std::runtime_error(
-                "cannot compact invalid primary child id");
-          }
-          const uint32_t child_node_id =
-              build_nodes_[child_id].geometry_index;
-          if (child_node_id >= world_node_count_) {
-            throw std::runtime_error(
-                "primary child has no final NodeId");
-          }
-          child_id = child_node_id;
-        }
-      }
-
-      compacted_nodes[node_id] = std::move(old_node);
-      old_node_id = node_id;
       ++expected_node_id;
     }
   }
@@ -4130,7 +4111,60 @@ void BioGeometryIndexBuilder::compact_primary_build_nodes() {
         "primary layer sizes do not match world node count");
   }
 
-  build_nodes_.swap(compacted_nodes);
+  // Rewrite every child while all old records are still in place.  This keeps
+  // the source geometry lookup independent of the subsequent in-place moves.
+  for (size_t layer_idx = 0; layer_idx < primary_layers_.size(); ++layer_idx) {
+    if (layer_idx + 1 == primary_layers_.size()) break;
+    for (NodeId old_node_id : primary_layers_[layer_idx]) {
+      for (NodeId& child_id : build_nodes_[old_node_id].child_or_leaf_ids) {
+        if (child_id >= build_nodes_.size()) {
+          throw std::runtime_error(
+              "cannot compact invalid primary child id");
+        }
+        const uint32_t child_node_id =
+            build_nodes_[child_id].geometry_index;
+        if (child_node_id >= world_node_count_) {
+          throw std::runtime_error(
+              "primary child has no final NodeId");
+        }
+        child_id = child_node_id;
+      }
+    }
+  }
+
+  const auto location_for_final_id =
+      [&](NodeId final_node_id) -> NodeId& {
+        size_t layer_begin = 0;
+        for (auto& layer : primary_layers_) {
+          const size_t layer_end = layer_begin + layer.size();
+          if (final_node_id < layer_end) {
+            return layer[static_cast<size_t>(final_node_id) - layer_begin];
+          }
+          layer_begin = layer_end;
+        }
+        throw std::runtime_error("final NodeId has no primary-layer entry");
+      };
+
+  for (NodeId node_id = 0; node_id < world_node_count_; ++node_id) {
+    NodeId& source_location = location_for_final_id(node_id);
+    const NodeId source_node_id = source_location;
+    if (source_node_id != node_id) {
+      const uint32_t displaced_geometry_index =
+          build_nodes_[node_id].geometry_index;
+      std::swap(build_nodes_[node_id], build_nodes_[source_node_id]);
+      if (displaced_geometry_index < world_node_count_) {
+        NodeId& displaced_location = location_for_final_id(
+            static_cast<NodeId>(displaced_geometry_index));
+        if (displaced_location != node_id) {
+          throw std::runtime_error(
+              "primary build-node location table is inconsistent");
+        }
+        displaced_location = source_node_id;
+      }
+    }
+    source_location = node_id;
+  }
+  build_nodes_.resize(world_node_count_);
   extended_layers_.clear();
   extended_layers_.shrink_to_fit();
 }
