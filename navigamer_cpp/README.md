@@ -349,15 +349,17 @@ records and reports contig-local coordinates without scanning the reference.
 All construction/search kernels consume `std::string_view` values into the
 single stored reference instead of owning one object or string per window.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 27
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 28
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
 for at most 10 deterministic beacons per non-finest parent. Reducing the
 beacon cap only removes safe metric constraints and therefore cannot create a
 false negative. Values use the exact minimum bit width required by each parent,
-with each node starting on a byte boundary for constant-time lookup. No
-distance is truncated.
+with each node starting on a byte boundary for constant-time lookup. The
+three-bit width code shares the node's 32-bit MBB field with its 29-bit byte
+offset, removing the former side array and one query-time load. A shard may
+contain up to 512 MiB of packed child-MBB data. No distance is truncated.
 The child-layer radius
 reconstructs the original lower and upper bounds during search. This is exactly
 equivalent to testing whether the two beacon distances differ by at most the

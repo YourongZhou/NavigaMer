@@ -1728,11 +1728,8 @@ size_t BioGeometryIndexBuilder::primary_layer_size(int idx) const {
 
 bool BioGeometryIndexBuilder::validate_integer_ids() const {
   const auto& view = search_graph_view_;
-  const size_t non_finest_node_count =
-      view.layer_begin.empty() ? 0 : view.layer_begin.back();
   if (view.node_records.size() != world_node_count_ ||
-      view.sequences.size() != sequence_count_ ||
-      view.child_mbb_bits_by_node.size() != non_finest_node_count) {
+      view.sequences.size() != sequence_count_) {
     return false;
   }
   if (view.sequences.reference_backed) {
@@ -1962,13 +1959,10 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
 
 bool BioGeometryIndexBuilder::validate_search_graph_view() const {
   const auto& view = search_graph_view_;
-  const size_t non_finest_node_count =
-      view.layer_begin.empty() ? 0 : view.layer_begin.back();
   if (view.node_records.size() != world_node_count_ ||
       view.sequences.size() != sequence_count_ ||
       view.layer_begin.size() != static_cast<size_t>(num_primary_layers()) ||
-      view.layer_end.size() != static_cast<size_t>(num_primary_layers()) ||
-      view.child_mbb_bits_by_node.size() != non_finest_node_count) {
+      view.layer_end.size() != static_cast<size_t>(num_primary_layers())) {
     return false;
   }
   uint32_t expected_layer_begin = 0;
@@ -2070,7 +2064,6 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
   size_t expected_beacon_id32_begin = 0;
   size_t expected_count_overflow = 0;
   if (view.layer_begin.empty() ||
-      view.child_mbb_bits_by_node.size() != view.layer_begin.back() ||
       view.beacon_begins.size() != view.layer_begin.back()) {
     return false;
   }
@@ -2121,7 +2114,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
                WorldNodeRecord::LinkStorage::Delta16 &&
            node.link_storage() !=
                WorldNodeRecord::LinkStorage::Delta8) ||
-          node.mbb_begin != expected_mbb_begin ||
+          node.child_mbb_begin() != expected_mbb_begin ||
           !view.child_mbb_range_valid(node_id)) {
         return false;
       }
@@ -3931,6 +3924,11 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       }
     }
   }
+  if (total_mbb_bytes >
+      static_cast<size_t>(WorldNodeRecord::CHILD_MBB_BEGIN_MASK) + 1) {
+    throw std::length_error(
+        "packed child MBB storage exceeds 29-bit shard range");
+  }
   view.child_id_base_deltas8.reserve(total_child_base_deltas8_bytes);
   view.child_id_deltas16.reserve(total_child_deltas16);
   view.child_ids.reserve(total_child_ids32);
@@ -3938,10 +3936,6 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   view.leaf_id_deltas16.reserve(total_leaf_deltas16);
   view.leaf_ids.reserve(total_leaf_ids32);
   view.child_beacon_dists.reserve(total_mbb_bytes);
-  view.child_mbb_bits_by_node.reserve(
-      primary_layers_.empty()
-          ? 0
-          : world_node_count_ - primary_layers_.back().size());
   view.beacon_begins.reserve(
       primary_layers_.empty()
           ? 0
@@ -4173,21 +4167,17 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             geometry.link_beacon_dists.begin(),
             geometry.link_beacon_dists.end());
       } else {
-        record.mbb_begin =
-            to_u32(view.child_beacon_dists.size(),
-                   "child_beacon_dists");
         const size_t mbb_cells =
             node.child_or_leaf_ids.size() * geometry.beacon_ids.size();
         if (geometry.link_beacon_dists.size() != mbb_cells) {
           throw std::runtime_error(
               "child distance array does not match child/beacon dimensions");
         }
-        if (view.child_mbb_bits_by_node.size() != node_id) {
-          throw std::runtime_error(
-              "child MBB widths are not a dense NodeId prefix");
-        }
         const uint8_t mbb_bits = build_mbb_bits[build_node_id];
-        view.child_mbb_bits_by_node.push_back(mbb_bits);
+        record.set_child_mbb_layout(
+            to_u32(view.child_beacon_dists.size(),
+                   "child_beacon_dists"),
+            mbb_bits);
         append_packed_mbb(
             geometry.link_beacon_dists, mbb_bits);
       }

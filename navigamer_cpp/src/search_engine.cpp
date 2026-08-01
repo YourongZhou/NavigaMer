@@ -3286,7 +3286,7 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
   };
   stats.child_edge_considered_count += child_count;
   const size_t dim = view.beacon_count(node_id);
-  const size_t mbb_begin = node.mbb_begin;
+  const size_t mbb_begin = node.child_mbb_begin();
   const bool mbb_ok =
       !query_beacon_dists.empty() &&
       query_beacon_dists.size() == dim &&

@@ -572,6 +572,9 @@ struct WorldNodeRecord {
   static constexpr uint32_t LINK_STORAGE_MASK =
       uint32_t{3} << LINK_STORAGE_SHIFT;
   static constexpr uint32_t COUNT_OVERFLOW_CODE = BEACON_COUNT_MASK;
+  static constexpr uint32_t CHILD_MBB_BEGIN_BITS = 29;
+  static constexpr uint32_t CHILD_MBB_BEGIN_MASK =
+      (uint32_t{1} << CHILD_MBB_BEGIN_BITS) - 1;
 
   LeafId center_sequence_id = INVALID_LEAF_ID;
 
@@ -581,10 +584,28 @@ struct WorldNodeRecord {
   // offset/count pair; the packed link encoding selects the exact array.
   uint32_t link_begin = 0;
   uint32_t packed_counts = 0;
+  // Finest nodes store the raw leaf-distance byte offset. Non-finest nodes
+  // store a 29-bit child-MBB byte offset plus the exact 1..8-bit cell width.
   uint32_t mbb_begin = 0;
 
   uint32_t child_begin() const { return link_begin; }
   uint32_t leaf_begin() const { return link_begin; }
+  uint32_t child_mbb_begin() const {
+    return mbb_begin & CHILD_MBB_BEGIN_MASK;
+  }
+  uint32_t child_mbb_bits() const {
+    return (mbb_begin >> CHILD_MBB_BEGIN_BITS) + 1;
+  }
+  void set_child_mbb_layout(uint32_t begin, uint32_t bits) {
+    if (begin > CHILD_MBB_BEGIN_MASK) {
+      throw std::length_error(
+          "packed child MBB storage exceeds 29-bit offset range");
+    }
+    if (bits == 0 || bits > 8) {
+      throw std::invalid_argument("child MBB bit width must be 1..8");
+    }
+    mbb_begin = begin | ((bits - 1) << CHILD_MBB_BEGIN_BITS);
+  }
   bool counts_overflow() const {
     return ((packed_counts >> BEACON_COUNT_SHIFT) &
             BEACON_COUNT_MASK) == COUNT_OVERFLOW_CODE;
@@ -681,9 +702,6 @@ struct SearchGraphView {
   FinalArray<LeafId> leaf_ids;
 
   FinalArray<uint8_t> child_beacon_dists;
-  // Exact bit width used by each non-finest node's child MBB values. Those
-  // NodeIds form a dense prefix, so lookup needs no stored node identifier.
-  FinalArray<uint8_t> child_mbb_bits_by_node;
   // Explicit beacons only exist above the finest layer. Those NodeIds form a
   // dense prefix, so this side array needs no per-entry node identifier.
   FinalArray<uint32_t> beacon_begins;
@@ -808,8 +826,10 @@ struct SearchGraphView {
   }
   size_t base_delta8_child_edge_count() const {
     size_t count = 0;
+    const NodeId non_finest_node_count =
+        layer_begin.empty() ? 0 : layer_begin.back();
     for (NodeId node_id = 0;
-         node_id < child_mbb_bits_by_node.size(); ++node_id) {
+         node_id < non_finest_node_count; ++node_id) {
       if (child_ids_are_base_delta8(node_id)) {
         count += child_count(node_id);
       }
@@ -822,10 +842,10 @@ struct SearchGraphView {
   }
 
   uint32_t child_mbb_bits(NodeId node_id) const {
-    if (node_id >= child_mbb_bits_by_node.size()) {
+    if (layer_begin.empty() || node_id >= layer_begin.back()) {
       throw std::runtime_error("child MBB node width is missing");
     }
-    const uint32_t bits = child_mbb_bits_by_node[node_id];
+    const uint32_t bits = node_records[node_id].child_mbb_bits();
     if (bits == 0 || bits > 8) {
       throw std::runtime_error("child MBB node width is invalid");
     }
@@ -840,9 +860,10 @@ struct SearchGraphView {
   }
   bool child_mbb_range_valid(NodeId node_id) const {
     const auto& node = node_records[node_id];
-    return node.mbb_begin <= child_beacon_dists.size() &&
+    const uint32_t begin = node.child_mbb_begin();
+    return begin <= child_beacon_dists.size() &&
            child_mbb_byte_count(node_id) <=
-               child_beacon_dists.size() - node.mbb_begin;
+               child_beacon_dists.size() - begin;
   }
   uint8_t child_beacon_distance(
       NodeId node_id, size_t cell_offset) const {
@@ -859,17 +880,18 @@ struct SearchGraphView {
   uint8_t child_beacon_distance_unchecked(
       NodeId node_id, size_t cell_offset, uint32_t bits) const {
     const auto& node = node_records[node_id];
+    const uint32_t begin = node.child_mbb_begin();
     if (bits == 8) {
-      return child_beacon_dists[node.mbb_begin + cell_offset];
+      return child_beacon_dists[begin + cell_offset];
     }
     const size_t bit_offset = cell_offset * bits;
     const size_t byte_offset = bit_offset >> 3;
     const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
-    uint16_t word = child_beacon_dists[node.mbb_begin + byte_offset];
+    uint16_t word = child_beacon_dists[begin + byte_offset];
     if (shift + bits > 8) {
       word |= static_cast<uint16_t>(
                   child_beacon_dists[
-                      node.mbb_begin + byte_offset + 1])
+                      begin + byte_offset + 1])
               << 8;
     }
     return static_cast<uint8_t>(
