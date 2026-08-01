@@ -318,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 31) {
+  if (manifest.format_version != 32) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -872,7 +872,10 @@ void write_search_graph_view(std::ostream& out,
       out, view.center_sequence_id_bits);
   write_final_array(
       out, view.center_sequence_ids, "center_sequence_ids");
-  write_final_array(out, view.node_records, "node_records");
+  write_pod<PackedWorldNodeLayout>(out, view.node_records.layout());
+  write_size(out, view.node_records.size());
+  write_final_array(
+      out, view.node_records.bytes(), "node_record_bytes");
   write_final_array(
       out, view.node_count_overflows, "node_count_overflows");
   write_u32_vector(out, view.layer_begin);
@@ -909,8 +912,16 @@ SearchGraphView read_search_graph_view(
   view.center_sequence_ids =
       read_final_array<uint8_t>(
           in, mapping, "center_sequence_ids");
-  view.node_records = read_final_array<WorldNodeRecord>(
-      in, mapping, "node_records");
+  const PackedWorldNodeLayout node_layout =
+      read_pod<PackedWorldNodeLayout>(in, "node_record_layout");
+  if (!node_layout.valid()) {
+    throw std::runtime_error("packed world node layout is invalid");
+  }
+  const size_t node_count = read_size(in, "node_record_count");
+  view.node_records.set_loaded(
+      node_count, node_layout,
+      read_final_array<uint8_t>(
+          in, mapping, "node_record_bytes"));
   view.node_count_overflows =
       read_final_array<NodeCountOverflowRecord>(
           in, mapping, "node_count_overflows");
@@ -1054,7 +1065,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 31) {
+  if (manifest.format_version != 32) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1091,14 +1102,16 @@ bool index_matches_manifest(
 void save_index(const std::string& path,
                 const BioGeometryIndexBuilder& builder,
                 const IndexBuildManifest& manifest) {
-  if (!builder.validate_integer_ids() || !builder.validate_search_graph_view()) {
+  // Full graph validation already finishes with the integer-ID validation.
+  // Do not scan every packed node and edge a second time before saving.
+  if (!builder.validate_search_graph_view()) {
     throw std::runtime_error("cannot persist invalid NavigaMer index");
   }
 
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 31;
+  stored.format_version = 32;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
@@ -1122,7 +1135,7 @@ LoadedIndex load_index(
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 31) {
+  if (manifest.format_version != 32) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1151,8 +1164,7 @@ LoadedIndex load_index(
 
   const bool valid =
       validation == IndexLoadValidation::Full
-          ? builder.validate_integer_ids() &&
-                builder.validate_search_graph_view()
+          ? builder.validate_search_graph_view()
           : validate_structural_layout(builder);
   if (!valid) {
     throw std::runtime_error("loaded NavigaMer index failed validation");

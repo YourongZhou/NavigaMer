@@ -443,7 +443,7 @@ void assert_child_id_encodings_are_exact() {
   view.child_id_deltas16 = {0, UINT16_MAX};
   view.child_ids = {70000, UINT32_MAX - 1};
 
-  view.node_records[0].link_begin = 0;
+  view.node_records[0].set_link_begin_value(0);
   view.set_node_counts(
       0, 2, 0,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
@@ -451,7 +451,7 @@ void assert_child_id_encodings_are_exact() {
   assert(view.child_id(0, 0) == 1000);
   assert(view.child_id(0, 1) == 1255);
 
-  view.node_records[1].link_begin = 0;
+  view.node_records[1].set_link_begin_value(0);
   view.set_node_counts(
       1, 2, 0,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
@@ -469,7 +469,7 @@ void assert_child_id_encodings_are_exact() {
   assert(view.child_id(2, 0) == 5000);
   assert(view.child_id(2, 1) == 7047);
 
-  view.node_records[3].link_begin = 0;
+  view.node_records[3].set_link_begin_value(0);
   view.set_node_counts(
       3, 2, 0,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
@@ -539,9 +539,9 @@ void assert_leaf_id_encodings_are_exact() {
   view.leaf_id_deltas16 = {-30000, 30000};
   view.leaf_ids = {17, UINT32_MAX - 1};
 
-  auto& delta8 = view.node_records[0];
+  auto delta8 = view.node_records[0];
   view.set_center_sequence_id(0, 200);
-  delta8.link_begin = 0;
+  delta8.set_link_begin_value(0);
   delta8.set_link_storage(
       navigamer::WorldNodeRecord::LinkStorage::Delta8);
   view.set_node_counts(
@@ -550,9 +550,9 @@ void assert_leaf_id_encodings_are_exact() {
   assert(view.leaf_id(0, 0) == 80);
   assert(view.leaf_id(0, 1) == 327);
 
-  auto& delta16 = view.node_records[1];
+  auto delta16 = view.node_records[1];
   view.set_center_sequence_id(1, 40000);
-  delta16.link_begin = 0;
+  delta16.set_link_begin_value(0);
   delta16.set_link_storage(
       navigamer::WorldNodeRecord::LinkStorage::Delta16);
   view.set_node_counts(
@@ -561,9 +561,9 @@ void assert_leaf_id_encodings_are_exact() {
   assert(view.leaf_id(1, 0) == 10000);
   assert(view.leaf_id(1, 1) == 70000);
 
-  auto& absolute32 = view.node_records[2];
+  auto absolute32 = view.node_records[2];
   view.set_center_sequence_id(2, 0);
-  absolute32.link_begin = 0;
+  absolute32.set_link_begin_value(0);
   view.set_node_counts(
       2, 2, 1,
       navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
@@ -575,7 +575,7 @@ void assert_leaf_id_encodings_are_exact() {
     navigamer::SearchGraphView packed_view;
     packed_view.node_records.resize(1);
     packed_view.initialize_center_sequence_ids(100001);
-    auto& packed = packed_view.node_records[0];
+    auto packed = packed_view.node_records[0];
     packed_view.set_center_sequence_id(0, 100000);
     packed.set_link_storage(
         navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
@@ -638,6 +638,58 @@ void assert_leaf_id_encodings_are_exact() {
   }
 }
 
+void assert_compact_node_layout_is_exact() {
+  const auto layout = navigamer::PackedWorldNodeLayout::compact(
+      1094080, 3657858, 1501);
+  assert(layout.link_begin_bits == 21);
+  assert(layout.mbb_begin_bits == 22);
+  assert(layout.link_count_bits == 11);
+  assert(layout.record_bytes == 9);
+  assert(layout.valid());
+
+  navigamer::PackedWorldNodeArray records;
+  records.initialize(2, layout);
+  {
+    auto node = records[0];
+    node.set_packed_child_layout(1094080, 15);
+    node.set_link_storage(
+        navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    node.set_inline_counts(
+        1501, 10,
+        navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
+    node.set_child_mbb_layout(3657858, 7);
+  }
+  {
+    const auto node = records[0];
+    assert(node.child_begin() == 1094080);
+    assert(node.packed_child_bits() == 15);
+    assert(node.link_storage() ==
+           navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    assert(!node.counts_overflow());
+    assert(node.inline_link_count_or_overflow_index() == 1501);
+    assert(node.inline_beacon_count() == 10);
+    assert(node.beacon_storage() ==
+           navigamer::WorldNodeRecord::BeaconStorage::Absolute32);
+    assert(node.child_mbb_begin() == 3657858);
+    assert(node.child_mbb_bits() == 7);
+  }
+  {
+    auto node = records[1];
+    node.set_count_overflow(
+        1501,
+        navigamer::WorldNodeRecord::BeaconStorage::Delta16);
+    assert(node.counts_overflow());
+    assert(node.inline_link_count_or_overflow_index() == 1501);
+  }
+  assert(records.bytes().size() == 18);
+
+  const auto widest = navigamer::PackedWorldNodeLayout::compact(
+      navigamer::WorldNodeRecord::PACKED_CHILD_BEGIN_MASK,
+      navigamer::WorldNodeRecord::CHILD_MBB_BEGIN_MASK,
+      navigamer::WorldNodeRecord::LINK_COUNT_MASK);
+  assert(widest.record_bytes == sizeof(navigamer::WorldNodeRecord));
+}
+
 }  // namespace
 
 int main() {
@@ -652,6 +704,7 @@ int main() {
   assert_child_id_encodings_are_exact();
   assert_all_packed_child_widths_are_exact();
   assert_leaf_id_encodings_are_exact();
+  assert_compact_node_layout_is_exact();
   std::cout << "search graph view tests passed\n";
   return 0;
 }

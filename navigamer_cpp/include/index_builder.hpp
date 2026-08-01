@@ -713,7 +713,348 @@ struct WorldNodeRecord {
   }
 };
 static_assert(sizeof(WorldNodeRecord) == 12,
-              "finalized world node must remain a compact 12 bytes");
+              "scratch world node must remain 12 bytes");
+
+struct PackedWorldNodeLayout {
+  uint8_t link_begin_bits = WorldNodeRecord::PACKED_CHILD_BEGIN_BITS;
+  uint8_t mbb_begin_bits = WorldNodeRecord::CHILD_MBB_BEGIN_BITS;
+  uint8_t link_count_bits = WorldNodeRecord::LINK_COUNT_BITS;
+  uint8_t record_bytes = sizeof(WorldNodeRecord);
+
+  static uint8_t bits_for_value(uint64_t maximum) {
+    uint8_t bits = 1;
+    while ((maximum >>= 1) != 0) ++bits;
+    return bits;
+  }
+
+  static PackedWorldNodeLayout compact(uint64_t maximum_link_begin,
+                                       uint64_t maximum_mbb_begin,
+                                       uint64_t maximum_link_count) {
+    PackedWorldNodeLayout layout;
+    layout.link_begin_bits = bits_for_value(maximum_link_begin);
+    layout.mbb_begin_bits = bits_for_value(maximum_mbb_begin);
+    layout.link_count_bits = bits_for_value(maximum_link_count);
+    if (layout.link_begin_bits >
+            WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
+        layout.mbb_begin_bits >
+            WorldNodeRecord::CHILD_MBB_BEGIN_BITS ||
+        layout.link_count_bits > WorldNodeRecord::LINK_COUNT_BITS) {
+      throw std::length_error("world node layout exceeds supported range");
+    }
+    const uint32_t total_bits =
+        layout.link_begin_bits + 4 + 2 + layout.link_count_bits +
+        WorldNodeRecord::BEACON_COUNT_BITS + 2 +
+        layout.mbb_begin_bits + 3;
+    layout.record_bytes = static_cast<uint8_t>((total_bits + 7) / 8);
+    return layout;
+  }
+
+  bool operator==(const PackedWorldNodeLayout& other) const {
+    return link_begin_bits == other.link_begin_bits &&
+           mbb_begin_bits == other.mbb_begin_bits &&
+           link_count_bits == other.link_count_bits &&
+           record_bytes == other.record_bytes;
+  }
+  bool operator!=(const PackedWorldNodeLayout& other) const {
+    return !(*this == other);
+  }
+  bool valid() const {
+    if (link_begin_bits == 0 ||
+        link_begin_bits > WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
+        mbb_begin_bits == 0 ||
+        mbb_begin_bits > WorldNodeRecord::CHILD_MBB_BEGIN_BITS ||
+        link_count_bits == 0 ||
+        link_count_bits > WorldNodeRecord::LINK_COUNT_BITS) {
+      return false;
+    }
+    const uint32_t total_bits =
+        link_begin_bits + 4 + 2 + link_count_bits +
+        WorldNodeRecord::BEACON_COUNT_BITS + 2 +
+        mbb_begin_bits + 3;
+    return record_bytes == (total_bits + 7) / 8;
+  }
+};
+static_assert(sizeof(PackedWorldNodeLayout) == 4,
+              "packed node layout header must remain four bytes");
+
+class PackedWorldNodeRecordRef {
+ public:
+  using BeaconStorage = WorldNodeRecord::BeaconStorage;
+  using LinkStorage = WorldNodeRecord::LinkStorage;
+
+  PackedWorldNodeRecordRef(uint8_t* data,
+                           const PackedWorldNodeLayout* layout)
+      : data_(data), layout_(layout) {
+    reload();
+  }
+
+ private:
+  void reload() {
+    low_ = 0;
+    high_ = 0;
+    if (layout_->record_bytes == 9) {
+      std::memcpy(&low_, data_, sizeof(low_));
+      high_ = data_[sizeof(low_)];
+      return;
+    }
+    const size_t low_bytes =
+        std::min<size_t>(layout_->record_bytes, sizeof(low_));
+    std::memcpy(&low_, data_, low_bytes);
+    if (layout_->record_bytes > sizeof(low_)) {
+      std::memcpy(&high_, data_ + sizeof(low_),
+                  layout_->record_bytes - sizeof(low_));
+    }
+  }
+
+ public:
+
+  uint32_t link_begin_value() const {
+    return read(link_begin_shift(), layout_->link_begin_bits);
+  }
+  void set_link_begin_value(uint32_t begin) {
+    write(link_begin_shift(), layout_->link_begin_bits, begin,
+          "link begin");
+  }
+  uint32_t child_begin() const { return link_begin_value(); }
+  uint32_t leaf_begin() const { return link_begin_value(); }
+  uint32_t packed_child_bits() const {
+    return read(link_width_shift(), 4) + 1;
+  }
+  uint32_t packed_leaf_bits() const { return packed_child_bits(); }
+  void set_packed_child_layout(uint32_t begin, uint32_t bits) {
+    set_packed_link_layout(begin, bits, "child");
+  }
+  void set_packed_leaf_layout(uint32_t begin, uint32_t bits) {
+    set_packed_link_layout(begin, bits, "leaf");
+  }
+  uint32_t mbb_begin_value() const {
+    return read(mbb_begin_shift(), layout_->mbb_begin_bits);
+  }
+  void set_mbb_begin_value(uint32_t begin) {
+    write(mbb_begin_shift(), layout_->mbb_begin_bits, begin,
+          "MBB begin");
+  }
+  uint32_t child_mbb_begin() const { return mbb_begin_value(); }
+  uint32_t leaf_mbb_begin() const { return mbb_begin_value(); }
+  uint32_t child_mbb_bits() const {
+    return read(mbb_width_shift(), 3) + 1;
+  }
+  uint32_t leaf_mbb_bits() const { return child_mbb_bits(); }
+  void set_child_mbb_layout(uint32_t begin, uint32_t bits) {
+    set_mbb_layout(begin, bits, "child");
+  }
+  void set_leaf_mbb_layout(uint32_t begin, uint32_t bits) {
+    set_mbb_layout(begin, bits, "leaf");
+  }
+  bool counts_overflow() const {
+    return inline_beacon_count() ==
+           WorldNodeRecord::COUNT_OVERFLOW_CODE;
+  }
+  uint32_t inline_link_count_or_overflow_index() const {
+    return read(link_count_shift(), layout_->link_count_bits);
+  }
+  uint32_t inline_link_count_mask() const {
+    return mask(layout_->link_count_bits);
+  }
+  uint32_t inline_beacon_count() const {
+    return read(beacon_count_shift(),
+                WorldNodeRecord::BEACON_COUNT_BITS);
+  }
+  BeaconStorage beacon_storage() const {
+    return static_cast<BeaconStorage>(read(beacon_storage_shift(), 2));
+  }
+  LinkStorage link_storage() const {
+    return static_cast<LinkStorage>(read(link_storage_shift(), 2));
+  }
+  void set_link_storage(LinkStorage storage) {
+    write(link_storage_shift(), 2, static_cast<uint32_t>(storage),
+          "link storage");
+  }
+  void set_inline_counts(uint32_t link_count, uint32_t beacon_count,
+                         BeaconStorage storage) {
+    if (link_count > inline_link_count_mask() ||
+        beacon_count >= WorldNodeRecord::COUNT_OVERFLOW_CODE) {
+      throw std::length_error("node counts exceed inline packed range");
+    }
+    write(link_count_shift(), layout_->link_count_bits, link_count,
+          "link count");
+    write(beacon_count_shift(), WorldNodeRecord::BEACON_COUNT_BITS,
+          beacon_count, "beacon count");
+    write(beacon_storage_shift(), 2, static_cast<uint32_t>(storage),
+          "beacon storage");
+  }
+  void set_count_overflow(uint32_t overflow_index,
+                          BeaconStorage storage) {
+    if (overflow_index > inline_link_count_mask()) {
+      throw std::length_error("too many node-count overflow records");
+    }
+    write(link_count_shift(), layout_->link_count_bits, overflow_index,
+          "node-count overflow index");
+    write(beacon_count_shift(), WorldNodeRecord::BEACON_COUNT_BITS,
+          WorldNodeRecord::COUNT_OVERFLOW_CODE, "beacon count");
+    write(beacon_storage_shift(), 2, static_cast<uint32_t>(storage),
+          "beacon storage");
+  }
+
+ private:
+  static uint32_t mask(uint32_t bits) {
+    return bits == 32 ? std::numeric_limits<uint32_t>::max()
+                      : (uint32_t{1} << bits) - 1;
+  }
+  uint32_t link_begin_shift() const { return 0; }
+  uint32_t link_width_shift() const {
+    return layout_->link_begin_bits;
+  }
+  uint32_t link_storage_shift() const {
+    return link_width_shift() + 4;
+  }
+  uint32_t link_count_shift() const {
+    return link_storage_shift() + 2;
+  }
+  uint32_t beacon_count_shift() const {
+    return link_count_shift() + layout_->link_count_bits;
+  }
+  uint32_t beacon_storage_shift() const {
+    return beacon_count_shift() + WorldNodeRecord::BEACON_COUNT_BITS;
+  }
+  uint32_t mbb_begin_shift() const {
+    return beacon_storage_shift() + 2;
+  }
+  uint32_t mbb_width_shift() const {
+    return mbb_begin_shift() + layout_->mbb_begin_bits;
+  }
+  uint32_t read(uint32_t bit_offset, uint32_t bits) const {
+    uint64_t value = 0;
+    if (bit_offset >= 64) {
+      value = high_ >> (bit_offset - 64);
+    } else if (bit_offset + bits <= 64) {
+      value = low_ >> bit_offset;
+    } else {
+      value = (low_ >> bit_offset) |
+              (high_ << (64 - bit_offset));
+    }
+    return static_cast<uint32_t>(value & mask(bits));
+  }
+  void write(uint32_t bit_offset, uint32_t bits, uint32_t value,
+             const char* field) {
+    const uint64_t field_mask = mask(bits);
+    if (static_cast<uint64_t>(value) > field_mask) {
+      throw std::length_error(std::string("packed world node ") + field +
+                              " exceeds layout range");
+    }
+    // Builder finalization can hold more than one proxy to the same record.
+    // Refresh before a mutation so one proxy never overwrites another field
+    // with an older cached word. Query proxies remain a single-load snapshot.
+    reload();
+    if (bit_offset >= 64) {
+      const uint32_t shift = bit_offset - 64;
+      const uint64_t shifted_mask = field_mask << shift;
+      high_ = (high_ & ~shifted_mask) |
+              (static_cast<uint64_t>(value) << shift);
+    } else if (bit_offset + bits <= 64) {
+      const uint64_t shifted_mask = field_mask << bit_offset;
+      low_ = (low_ & ~shifted_mask) |
+             (static_cast<uint64_t>(value) << bit_offset);
+    } else {
+      const uint32_t low_bits = 64 - bit_offset;
+      const uint64_t low_mask = (uint64_t{1} << low_bits) - 1;
+      low_ = (low_ & ~(low_mask << bit_offset)) |
+             ((static_cast<uint64_t>(value) & low_mask) << bit_offset);
+      const uint32_t high_bits = bits - low_bits;
+      const uint64_t high_mask = (uint64_t{1} << high_bits) - 1;
+      high_ = (high_ & ~high_mask) |
+              (static_cast<uint64_t>(value) >> low_bits);
+    }
+    const size_t low_bytes =
+        std::min<size_t>(layout_->record_bytes, sizeof(low_));
+    std::memcpy(data_, &low_, low_bytes);
+    if (layout_->record_bytes > sizeof(low_)) {
+      std::memcpy(data_ + sizeof(low_), &high_,
+                  layout_->record_bytes - sizeof(low_));
+    }
+  }
+  void set_packed_link_layout(uint32_t begin, uint32_t bits,
+                              const char* kind) {
+    if (bits == 0 || bits > 16) {
+      throw std::invalid_argument(
+          std::string("packed ") + kind + "-ID bit width must be 1..16");
+    }
+    set_link_begin_value(begin);
+    write(link_width_shift(), 4, bits - 1, "link width");
+  }
+  void set_mbb_layout(uint32_t begin, uint32_t bits,
+                      const char* kind) {
+    if (bits == 0 || bits > 8) {
+      throw std::invalid_argument(
+          std::string(kind) + " MBB bit width must be 1..8");
+    }
+    set_mbb_begin_value(begin);
+    write(mbb_width_shift(), 3, bits - 1, "MBB width");
+  }
+
+  uint8_t* data_ = nullptr;
+  const PackedWorldNodeLayout* layout_ = nullptr;
+  uint64_t low_ = 0;
+  uint64_t high_ = 0;
+};
+
+class PackedWorldNodeArray {
+ public:
+  size_t size() const { return count_; }
+  bool empty() const { return count_ == 0; }
+  const uint8_t* data() const { return bytes_.data(); }
+  bool is_mapped() const { return bytes_.is_mapped(); }
+  const PackedWorldNodeLayout& layout() const { return layout_; }
+  const FinalArray<uint8_t>& bytes() const { return bytes_; }
+  FinalArray<uint8_t>& bytes() { return bytes_; }
+
+  PackedWorldNodeRecordRef operator[](size_t index) const {
+    return PackedWorldNodeRecordRef(
+        const_cast<uint8_t*>(bytes_.data()) + index * layout_.record_bytes,
+        &layout_);
+  }
+  PackedWorldNodeRecordRef at(size_t index) const {
+    if (index >= count_) throw std::out_of_range("packed world node index");
+    return (*this)[index];
+  }
+  const uint8_t* record_data(size_t index) const {
+    return bytes_.data() + index * layout_.record_bytes;
+  }
+
+  void assign(size_t count, const WorldNodeRecord&) {
+    initialize(count, PackedWorldNodeLayout{});
+  }
+  void resize(size_t count) {
+    initialize(count, PackedWorldNodeLayout{});
+  }
+  void initialize(size_t count, PackedWorldNodeLayout layout) {
+    if (!layout.valid() ||
+        count > std::numeric_limits<size_t>::max() /
+                    layout.record_bytes) {
+      throw std::length_error("packed world node array is too large");
+    }
+    count_ = count;
+    layout_ = layout;
+    bytes_.assign(count * layout_.record_bytes, uint8_t{0});
+  }
+  void set_loaded(size_t count, PackedWorldNodeLayout layout,
+                  FinalArray<uint8_t> bytes) {
+    if (!layout.valid() ||
+        count > std::numeric_limits<size_t>::max() /
+                    layout.record_bytes ||
+        bytes.size() != count * layout.record_bytes) {
+      throw std::runtime_error("packed world node byte count is invalid");
+    }
+    count_ = count;
+    layout_ = layout;
+    bytes_ = std::move(bytes);
+  }
+
+ private:
+  size_t count_ = 0;
+  PackedWorldNodeLayout layout_;
+  FinalArray<uint8_t> bytes_;
+};
 
 template <typename T>
 class BuildArrayView {
@@ -883,7 +1224,7 @@ struct SearchGraphView {
 
   // Canonical array representation. NodeId and LeafId are positions in
   // node_records and sequences respectively.
-  FinalArray<WorldNodeRecord> node_records;
+  PackedWorldNodeArray node_records;
   // Fixed-width packed LeafIds use max(1, ceil(log2(sequence_count))) bits.
   // Keeping centers separate shrinks every hot node record from 16 to 12
   // bytes without changing center lookup complexity.
@@ -950,13 +1291,16 @@ struct SearchGraphView {
     }
   }
 
-  uint32_t link_count(NodeId node_id) const {
-    const auto& node = node_records[node_id];
+  uint32_t link_count(const PackedWorldNodeRecordRef& node) const {
     if (!node.counts_overflow()) {
       return node.inline_link_count_or_overflow_index();
     }
     return node_count_overflows[
         node.inline_link_count_or_overflow_index()].link_count;
+  }
+  uint32_t link_count(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return link_count(node);
   }
 
   LeafId center_sequence_id(NodeId node_id) const {
@@ -990,26 +1334,29 @@ struct SearchGraphView {
   uint32_t leaf_count(NodeId node_id) const {
     return link_count(node_id);
   }
-  uint32_t beacon_count(NodeId node_id) const {
-    const auto& node = node_records[node_id];
+  uint32_t beacon_count(const PackedWorldNodeRecordRef& node) const {
     if (!node.counts_overflow()) {
       return node.inline_beacon_count();
     }
     return node_count_overflows[
         node.inline_link_count_or_overflow_index()].beacon_count;
   }
+  uint32_t beacon_count(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return beacon_count(node);
+  }
   void set_node_counts(NodeId node_id, uint32_t link_count_value,
                        uint32_t beacon_count_value,
                        WorldNodeRecord::BeaconStorage storage) {
-    auto& node = node_records[node_id];
-    if (link_count_value <= WorldNodeRecord::LINK_COUNT_MASK &&
+    auto node = node_records[node_id];
+    if (link_count_value <= node.inline_link_count_mask() &&
         beacon_count_value < WorldNodeRecord::COUNT_OVERFLOW_CODE) {
       node.set_inline_counts(
           link_count_value, beacon_count_value, storage);
       return;
     }
     if (node_count_overflows.size() >
-        WorldNodeRecord::LINK_COUNT_MASK) {
+        node.inline_link_count_mask()) {
       throw std::length_error("too many node-count overflow records");
     }
     const uint32_t overflow_index =
@@ -1086,13 +1433,18 @@ struct SearchGraphView {
     return node_records[node_id].link_storage() ==
            WorldNodeRecord::LinkStorage::PackedDelta;
   }
-  size_t packed_child_byte_count(NodeId node_id) const {
-    const auto& node = node_records[node_id];
+  size_t packed_child_byte_count(
+      const PackedWorldNodeRecordRef& node,
+      uint32_t child_count_value) const {
     const uint64_t bit_count =
-        static_cast<uint64_t>(child_count(node_id)) *
+        static_cast<uint64_t>(child_count_value) *
         node.packed_child_bits();
     return sizeof(NodeId) +
            static_cast<size_t>((bit_count + 7) / 8);
+  }
+  size_t packed_child_byte_count(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return packed_child_byte_count(node, link_count(node));
   }
   void set_child_ids_base_delta8(NodeId node_id) {
     node_records[node_id].set_link_storage(
@@ -1105,8 +1457,8 @@ struct SearchGraphView {
 #if defined(__GNUC__) || defined(__clang__)
   __attribute__((always_inline))
 #endif
-  inline ChildIdAccessor child_ids_for(NodeId node_id) const {
-    const auto& node = node_records[node_id];
+  inline ChildIdAccessor child_ids_for(
+      NodeId node_id, const PackedWorldNodeRecordRef& node) const {
     switch (node.link_storage()) {
       case WorldNodeRecord::LinkStorage::Delta8: {
         const uint8_t* segment =
@@ -1133,6 +1485,10 @@ struct SearchGraphView {
                 child_ids.data() + node.child_begin(), 0};
     }
     throw std::runtime_error("invalid child ID storage");
+  }
+  inline ChildIdAccessor child_ids_for(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return child_ids_for(node_id, node);
   }
   NodeId child_id(NodeId node_id, uint32_t child_offset) const {
     return child_ids_for(node_id).at(child_offset);
@@ -1177,15 +1533,20 @@ struct SearchGraphView {
     return count;
   }
 
-  uint32_t child_mbb_bits(NodeId node_id) const {
+  uint32_t child_mbb_bits(
+      NodeId node_id, const PackedWorldNodeRecordRef& node) const {
     if (layer_begin.empty() || node_id >= layer_begin.back()) {
       throw std::runtime_error("child MBB node width is missing");
     }
-    const uint32_t bits = node_records[node_id].child_mbb_bits();
+    const uint32_t bits = node.child_mbb_bits();
     if (bits == 0 || bits > 8) {
       throw std::runtime_error("child MBB node width is invalid");
     }
     return bits;
+  }
+  uint32_t child_mbb_bits(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return child_mbb_bits(node_id, node);
   }
   uint32_t child_mbb_bin_width(NodeId node_id) const {
     if (layer_begin.size() < 2 || node_id >= layer_begin.back()) {
@@ -1197,23 +1558,37 @@ struct SearchGraphView {
                ? FINE_CHILD_MBB_BIN_WIDTH
                : COARSE_CHILD_MBB_BIN_WIDTH;
   }
-  size_t child_mbb_byte_count(NodeId node_id) const {
-    const uint32_t bits = child_mbb_bits(node_id);
+  size_t child_mbb_byte_count(
+      NodeId node_id, const PackedWorldNodeRecordRef& node,
+      uint32_t child_count_value, uint32_t beacon_count_value) const {
+    const uint32_t bits = child_mbb_bits(node_id, node);
     const uint64_t cells =
         bits == PAIRED_BASE11_CHILD_MBB_BITS
-            ? static_cast<uint64_t>(child_count(node_id)) *
-                  ((beacon_count(node_id) + 1) / 2)
-            : static_cast<uint64_t>(child_count(node_id)) *
-                  beacon_count(node_id);
+            ? static_cast<uint64_t>(child_count_value) *
+                  ((beacon_count_value + 1) / 2)
+            : static_cast<uint64_t>(child_count_value) *
+                  beacon_count_value;
     return static_cast<size_t>(
         (cells * bits + 7) / 8);
   }
-  bool child_mbb_range_valid(NodeId node_id) const {
-    const auto& node = node_records[node_id];
+  size_t child_mbb_byte_count(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return child_mbb_byte_count(
+        node_id, node, link_count(node), beacon_count(node));
+  }
+  bool child_mbb_range_valid(
+      NodeId node_id, const PackedWorldNodeRecordRef& node,
+      uint32_t child_count_value, uint32_t beacon_count_value) const {
     const uint32_t begin = node.child_mbb_begin();
     return begin <= child_beacon_dists.size() &&
-           child_mbb_byte_count(node_id) <=
+           child_mbb_byte_count(
+               node_id, node, child_count_value, beacon_count_value) <=
                child_beacon_dists.size() - begin;
+  }
+  bool child_mbb_range_valid(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return child_mbb_range_valid(
+        node_id, node, link_count(node), beacon_count(node));
   }
   uint8_t child_beacon_distance(
       NodeId node_id, size_t cell_offset) const {
@@ -1231,14 +1606,19 @@ struct SearchGraphView {
   uint8_t child_beacon_distance_unchecked(
       NodeId node_id, size_t cell_offset, uint32_t bits,
       uint32_t bin_width) const {
-    const auto& node = node_records[node_id];
-    const uint32_t begin = node.child_mbb_begin();
+    const auto node = node_records[node_id];
+    return child_beacon_distance_unchecked(
+        node.child_mbb_begin(), link_count(node), beacon_count(node),
+        cell_offset, bits, bin_width);
+  }
+  uint8_t child_beacon_distance_unchecked(
+      uint32_t begin, size_t children, size_t beacons,
+      size_t cell_offset, uint32_t bits, uint32_t bin_width) const {
     uint8_t encoded = 0;
     if (bits == PAIRED_BASE11_CHILD_MBB_BITS) {
-      const size_t children = child_count(node_id);
       const size_t dimension = cell_offset / children;
       const size_t child = cell_offset % children;
-      const size_t pairs_per_child = (beacon_count(node_id) + 1) / 2;
+      const size_t pairs_per_child = (beacons + 1) / 2;
       const size_t pair = child * pairs_per_child + dimension / 2;
       const size_t bit_offset = pair * bits;
       const size_t byte_offset = bit_offset >> 3;
@@ -1274,30 +1654,48 @@ struct SearchGraphView {
     return static_cast<uint8_t>(std::min<uint32_t>(midpoint, 255));
   }
 
-  uint32_t leaf_mbb_bits(NodeId node_id) const {
+  uint32_t leaf_mbb_bits(
+      NodeId node_id, const PackedWorldNodeRecordRef& node) const {
     if (layer_begin.empty() || node_id < layer_begin.back() ||
         node_id >= node_records.size()) {
       throw std::runtime_error("leaf MBB node width is missing");
     }
-    const uint32_t bits = node_records[node_id].leaf_mbb_bits();
+    const uint32_t bits = node.leaf_mbb_bits();
     if (bits == 0 || bits > 8) {
       throw std::runtime_error("leaf MBB node width is invalid");
     }
     return bits;
   }
-  size_t leaf_mbb_byte_count(NodeId node_id) const {
-    const uint64_t cells =
-        static_cast<uint64_t>(leaf_count(node_id)) *
-        beacon_count(node_id);
-    return static_cast<size_t>(
-        (cells * leaf_mbb_bits(node_id) + 7) / 8);
+  uint32_t leaf_mbb_bits(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return leaf_mbb_bits(node_id, node);
   }
-  bool leaf_mbb_range_valid(NodeId node_id) const {
-    const auto& node = node_records[node_id];
+  size_t leaf_mbb_byte_count(
+      NodeId node_id, const PackedWorldNodeRecordRef& node,
+      uint32_t leaf_count_value, uint32_t beacon_count_value) const {
+    const uint64_t cells =
+        static_cast<uint64_t>(leaf_count_value) * beacon_count_value;
+    return static_cast<size_t>(
+        (cells * leaf_mbb_bits(node_id, node) + 7) / 8);
+  }
+  size_t leaf_mbb_byte_count(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return leaf_mbb_byte_count(
+        node_id, node, link_count(node), beacon_count(node));
+  }
+  bool leaf_mbb_range_valid(
+      NodeId node_id, const PackedWorldNodeRecordRef& node,
+      uint32_t leaf_count_value, uint32_t beacon_count_value) const {
     const uint32_t begin = node.leaf_mbb_begin();
     return begin <= leaf_beacon_dists.size() &&
-           leaf_mbb_byte_count(node_id) <=
+           leaf_mbb_byte_count(
+               node_id, node, leaf_count_value, beacon_count_value) <=
                leaf_beacon_dists.size() - begin;
+  }
+  bool leaf_mbb_range_valid(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return leaf_mbb_range_valid(
+        node_id, node, link_count(node), beacon_count(node));
   }
   uint8_t leaf_beacon_distance(
       NodeId node_id, size_t cell_offset) const {
@@ -1329,19 +1727,30 @@ struct SearchGraphView {
         (word >> shift) & ((uint32_t{1} << bits) - 1));
   }
 
-  size_t packed_leaf_byte_count(NodeId node_id) const {
-    const auto& node = node_records[node_id];
+  size_t packed_leaf_byte_count(
+      const PackedWorldNodeRecordRef& node,
+      uint32_t leaf_count_value) const {
     const uint64_t bit_count =
-        static_cast<uint64_t>(leaf_count(node_id)) *
+        static_cast<uint64_t>(leaf_count_value) *
         node.packed_leaf_bits();
     return static_cast<size_t>((bit_count + 7) / 8);
+  }
+  size_t packed_leaf_byte_count(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return packed_leaf_byte_count(node, link_count(node));
   }
 #if defined(__GNUC__) || defined(__clang__)
   __attribute__((always_inline))
 #endif
   inline LeafId packed_leaf_id(
       NodeId node_id, uint32_t leaf_offset) const {
-    const auto& node = node_records[node_id];
+    const auto node = node_records[node_id];
+    return packed_leaf_id(
+        node, center_sequence_id(node_id), leaf_offset);
+  }
+  inline LeafId packed_leaf_id(
+      const PackedWorldNodeRecordRef& node, LeafId center,
+      uint32_t leaf_offset) const {
     const uint32_t bits = node.packed_leaf_bits();
     const uint8_t* data =
         reinterpret_cast<const uint8_t*>(leaf_id_deltas8.data()) +
@@ -1364,12 +1773,16 @@ struct SearchGraphView {
             ? -static_cast<int64_t>((zigzag >> 1) + 1)
             : static_cast<int64_t>(zigzag >> 1);
     return static_cast<LeafId>(
-        static_cast<int64_t>(center_sequence_id(node_id)) + delta);
+        static_cast<int64_t>(center) + delta);
   }
 
   LeafId leaf_id(NodeId node_id, uint32_t leaf_offset) const {
-    const auto& node = node_records[node_id];
+    const auto node = node_records[node_id];
     const LeafId center = center_sequence_id(node_id);
+    return leaf_id(node, center, leaf_offset);
+  }
+  LeafId leaf_id(const PackedWorldNodeRecordRef& node, LeafId center,
+                 uint32_t leaf_offset) const {
     switch (node.link_storage()) {
       case WorldNodeRecord::LinkStorage::Delta8:
         return center +
@@ -1380,15 +1793,20 @@ struct SearchGraphView {
       case WorldNodeRecord::LinkStorage::Absolute32:
         return leaf_ids[node.leaf_begin() + leaf_offset];
       case WorldNodeRecord::LinkStorage::PackedDelta:
-        return packed_leaf_id(node_id, leaf_offset);
+        return packed_leaf_id(node, center, leaf_offset);
     }
     return INVALID_LEAF_ID;
   }
 
   LeafId beacon_sequence_id(NodeId node_id,
                             uint32_t beacon_offset) const {
-    const auto& node = node_records[node_id];
+    const auto node = node_records[node_id];
     const LeafId center = center_sequence_id(node_id);
+    return beacon_sequence_id(node_id, node, center, beacon_offset);
+  }
+  LeafId beacon_sequence_id(
+      NodeId node_id, const PackedWorldNodeRecordRef& node,
+      LeafId center, uint32_t beacon_offset) const {
     const uint32_t beacon_begin =
         node.beacon_storage() ==
                 WorldNodeRecord::BeaconStorage::ImplicitCenter
