@@ -274,37 +274,42 @@ void ExactRangeJoinIndex::reset_after_items_changed() {
   seed_index_capacity_ =
       count <= static_cast<size_t>(
                            std::numeric_limits<uint32_t>::max());
-  if (enable_positional_postings_ && seed_index_capacity_ &&
-      uniform_sequence_length != 0) {
-    seed_index_capacity_ =
-        uniform_sequence_length <=
-        static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1;
-  } else if (enable_positional_postings_ && seed_index_capacity_) {
-    for (size_t item_idx = 0; item_idx < count; ++item_idx) {
-      if (item_sequence(item_idx).size() >
-          static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1) {
-        seed_index_capacity_ = false;
-        break;
+  uint64_t maximum_position = 0;
+  if (enable_positional_postings_ && seed_index_capacity_) {
+    if (uniform_sequence_length != 0) {
+      seed_index_capacity_ =
+          uniform_sequence_length <=
+          static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1;
+      maximum_position = uniform_sequence_length - 1;
+    } else {
+      for (size_t item_idx = 0; item_idx < count; ++item_idx) {
+        const size_t length = item_sequence(item_idx).size();
+        if (length >
+            static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1) {
+          seed_index_capacity_ = false;
+          break;
+        }
+        if (length != 0) {
+          maximum_position = std::max<uint64_t>(
+              maximum_position, static_cast<uint64_t>(length - 1));
+        }
       }
     }
   }
   seed_index_uses_16bit_ =
       count <= static_cast<size_t>(
                            std::numeric_limits<uint16_t>::max());
-  positional_postings_use_32bit_ = seed_index_uses_16bit_;
-  if (positional_postings_use_32bit_ && uniform_sequence_length != 0) {
-    positional_postings_use_32bit_ =
-        uniform_sequence_length <=
-        static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
-  } else if (positional_postings_use_32bit_) {
-    for (size_t item_idx = 0; item_idx < count; ++item_idx) {
-      if (item_sequence(item_idx).size() >
-          static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1) {
-        positional_postings_use_32bit_ = false;
-        break;
-      }
-    }
-  }
+  const auto bit_width = [](uint64_t value) {
+    uint8_t width = 1;
+    while ((value >>= 1) != 0) ++width;
+    return width;
+  };
+  const uint8_t position_bits = bit_width(maximum_position);
+  const uint8_t item_bits = bit_width(count == 0 ? 0 : count - 1);
+  positional_postings_use_32bit_ =
+      enable_positional_postings_ && seed_index_capacity_ &&
+      position_bits < 32 &&
+      item_bits <= static_cast<uint8_t>(32 - position_bits);
   size_t min_item_sequence_length =
       count == 0 ? 0 : std::numeric_limits<size_t>::max();
   max_item_sequence_length_ =

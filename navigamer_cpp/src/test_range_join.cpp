@@ -372,15 +372,18 @@ void test_compact_slot_supports_16bit_boundary_and_overflow() {
   const size_t boundary =
       static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
   for (size_t item_count : {boundary, boundary + 1}) {
-    std::vector<const char*> sequence_data(item_count, sequence.data());
-    navigamer::ExactRangeJoinIndex index(config, true);
-    index.build_uniform_identity_views(
-        std::move(sequence_data), sequence.size());
+    for (bool positional : {false, true}) {
+      std::vector<const char*> sequence_data(item_count, sequence.data());
+      navigamer::ExactRangeJoinIndex index(
+          config, true, false, positional);
+      index.build_uniform_identity_views(
+          std::move(sequence_data), sequence.size());
 
-    const auto result = index.query(sequence, 0);
-    assert(result.candidate_item_ids.size() == item_count);
-    assert(result.candidate_item_ids.front() == 0);
-    assert(result.candidate_item_ids.back() == item_count - 1);
+      const auto result = index.query(sequence, 0);
+      assert(result.candidate_item_ids.size() == item_count);
+      assert(result.candidate_item_ids.front() == 0);
+      assert(result.candidate_item_ids.back() == item_count - 1);
+    }
   }
 }
 
