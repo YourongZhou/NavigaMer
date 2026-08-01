@@ -863,8 +863,8 @@ static_assert(sizeof(BuildWorldNodeRecord) == 24,
 // expanded-layer node avoids two empty vector headers on auxiliary nodes.
 struct BuildNodeGeometry {
   CompactBuildVector<LeafId> beacon_ids;
-  // Non-finest nodes store dimension-major child MBB distances here;
-  // finest nodes reuse the same vector for one distance per leaf.
+  // Bit-packed, dimension-major child MBB distances. Finest nodes use the
+  // same storage for one packed distance per leaf.
   CompactBuildVector<uint8_t> link_beacon_dists;
 };
 static_assert(sizeof(BuildNodeGeometry) == 32,
@@ -1501,6 +1501,7 @@ class BioGeometryIndexBuilder {
   std::vector<int> expanded_radii_;
   std::vector<BuildWorldNodeRecord> build_nodes_;
   std::vector<BuildNodeGeometry> build_node_geometry_;
+  std::vector<uint8_t> build_geometry_mbb_bits_;
   std::vector<std::vector<NodeId>> extended_layers_;
   std::vector<std::vector<NodeId>> primary_layers_;
 
