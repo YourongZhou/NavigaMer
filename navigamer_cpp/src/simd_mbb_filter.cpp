@@ -72,7 +72,7 @@ std::vector<uint32_t> filter_scalar(const uint8_t* center_dist_by_dim,
 }
 
 uint8_t packed_distance(const uint8_t* data, size_t cell,
-                        uint32_t bits, uint32_t quantization_shift) {
+                        uint32_t bits, uint32_t bin_width) {
   const size_t bit_offset = cell * bits;
   const size_t byte_offset = bit_offset >> 3;
   const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
@@ -82,12 +82,8 @@ uint8_t packed_distance(const uint8_t* data, size_t cell,
   }
   const uint32_t encoded =
       (word >> shift) & ((uint32_t{1} << bits) - 1);
-  if (quantization_shift == 0) {
-    return static_cast<uint8_t>(encoded);
-  }
   const uint32_t midpoint =
-      (encoded << quantization_shift) +
-      (uint32_t{1} << (quantization_shift - 1));
+      encoded * bin_width + bin_width / 2;
   return static_cast<uint8_t>(std::min<uint32_t>(midpoint, 255));
 }
 
@@ -98,7 +94,7 @@ std::vector<uint32_t> filter_packed_scalar(
     const int* query_beacon_dists,
     int32_t tolerance,
     uint32_t bits,
-    uint32_t quantization_shift,
+    uint32_t bin_width,
     MBBFilterSimdStats* stats) {
   if (stats) stats->scalar_checks += child_count;
   std::vector<uint32_t> survivors;
@@ -115,7 +111,7 @@ std::vector<uint32_t> filter_packed_scalar(
           tolerance;
       const uint8_t center_dist =
           packed_distance(
-              center_dist_by_dim, cell, bits, quantization_shift);
+              center_dist_by_dim, cell, bits, bin_width);
       if (center_dist < query_lo || center_dist > query_hi) {
         ok = false;
         break;
@@ -561,33 +557,33 @@ std::vector<uint32_t> filter_mbb_survivors(
     SimdMode mode,
     MBBFilterSimdStats* stats,
     uint32_t packed_bits,
-    uint32_t quantization_shift) {
+    uint32_t quantization_bin_width) {
   validate_inputs(center_dist_by_dim, child_count, dim,
                   query_beacon_dists);
   if (packed_bits == 0 || packed_bits > 8) {
     throw std::invalid_argument("MBB packed width must be in [1, 8]");
   }
-  if (quantization_shift > 7) {
+  if (quantization_bin_width == 0 ||
+      quantization_bin_width > 255) {
     throw std::invalid_argument(
-        "MBB quantization shift must be in [0, 7]");
+        "MBB quantization bin width must be in [1, 255]");
   }
   if (child_radius < 0) {
     throw std::invalid_argument("MBB child radius must be nonnegative");
   }
   const int64_t quantization_error =
-      quantization_shift == 0
-          ? 0
-          : int64_t{1} << (quantization_shift - 1);
+      quantization_bin_width / 2;
   const int32_t effective_tolerance = static_cast<int32_t>(
       std::min<int64_t>(
           std::numeric_limits<int32_t>::max(),
           static_cast<int64_t>(child_radius) + tolerance +
               quantization_error));
-  if (packed_bits != 8 || quantization_shift != 0) {
+  if (packed_bits != 8 || quantization_bin_width != 1) {
     if (stats && mode != SimdMode::Scalar) ++stats->simd_fallbacks;
     return filter_packed_scalar(
         center_dist_by_dim, child_count, dim, query_beacon_dists,
-        effective_tolerance, packed_bits, quantization_shift, stats);
+        effective_tolerance, packed_bits,
+        quantization_bin_width, stats);
   }
   if (mode == SimdMode::Scalar || child_count == 0) {
     return filter_scalar(center_dist_by_dim, child_count, dim,

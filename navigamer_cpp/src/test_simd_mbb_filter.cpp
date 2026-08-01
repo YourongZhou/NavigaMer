@@ -140,15 +140,19 @@ void assert_packed_equivalence() {
 void assert_quantized_filter_has_no_false_negatives() {
   std::mt19937 rng(20260803);
   std::uniform_int_distribution<int> pick_distance(0, 255);
-  for (uint32_t shift : {uint32_t{2}, uint32_t{3}}) {
-    const uint32_t bits = 8 - shift;
+  for (uint32_t bin_width :
+       {uint32_t{4}, uint32_t{6}, uint32_t{8}}) {
+    uint32_t maximum_encoded = 255 / bin_width;
+    uint32_t bits = 1;
+    while ((maximum_encoded >>= 1) != 0) ++bits;
     for (size_t dim : {size_t{1}, size_t{4}, size_t{10}}) {
       for (size_t child_count : {size_t{1}, size_t{31}, size_t{257}}) {
         std::vector<uint8_t> exact(dim * child_count);
         std::vector<uint8_t> encoded(dim * child_count);
         for (size_t idx = 0; idx < exact.size(); ++idx) {
           exact[idx] = static_cast<uint8_t>(pick_distance(rng));
-          encoded[idx] = static_cast<uint8_t>(exact[idx] >> shift);
+          encoded[idx] =
+              static_cast<uint8_t>(exact[idx] / bin_width);
         }
         const auto packed = pack_distances(encoded, bits);
         std::vector<int> query(dim);
@@ -158,7 +162,8 @@ void assert_quantized_filter_has_no_false_negatives() {
               exact, child_count, dim, query, 7, tolerance);
           const auto actual = navigamer::filter_mbb_survivors(
               packed.data(), child_count, dim, query.data(), 7,
-              tolerance, navigamer::SimdMode::Auto, nullptr, bits, shift);
+              tolerance, navigamer::SimdMode::Auto, nullptr, bits,
+              bin_width);
           assert(std::includes(
               actual.begin(), actual.end(), expected.begin(), expected.end()));
         }
@@ -169,7 +174,8 @@ void assert_quantized_filter_has_no_false_negatives() {
     std::vector<uint8_t> encoded(256);
     for (size_t distance = 0; distance < exact.size(); ++distance) {
       exact[distance] = static_cast<uint8_t>(distance);
-      encoded[distance] = static_cast<uint8_t>(distance >> shift);
+      encoded[distance] =
+          static_cast<uint8_t>(distance / bin_width);
     }
     const auto packed = pack_distances(encoded, bits);
     for (int query_distance = 0; query_distance <= 255; ++query_distance) {
@@ -179,7 +185,8 @@ void assert_quantized_filter_has_no_false_negatives() {
             exact, exact.size(), 1, query, 0, tolerance);
         const auto actual = navigamer::filter_mbb_survivors(
             packed.data(), exact.size(), 1, query.data(), 0,
-            tolerance, navigamer::SimdMode::Auto, nullptr, bits, shift);
+            tolerance, navigamer::SimdMode::Auto, nullptr, bits,
+            bin_width);
         assert(std::includes(
             actual.begin(), actual.end(), expected.begin(), expected.end()));
       }

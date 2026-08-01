@@ -1484,11 +1484,11 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
     std::vector<uint32_t> candidates;
     candidates.reserve(child_count);
     const uint32_t mbb_bits = view.child_mbb_bits(node_id);
-    const uint32_t quantization_shift =
-        view.child_mbb_quantization_shift(node_id);
+    const uint32_t quantization_bin_width =
+        view.child_mbb_bin_width(node_id);
     const uint32_t quantization_error =
         SearchGraphView::child_mbb_quantization_error(
-            quantization_shift);
+            quantization_bin_width);
     for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
       bool prunable = false;
       for (size_t dim = 0; dim < beacon_count; ++dim) {
@@ -1496,7 +1496,8 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
         const int q = query_beacon_dists[dim];
         const int center_dist =
             view.child_beacon_distance_unchecked(
-                node_id, cell, mbb_bits, quantization_shift);
+                node_id, cell, mbb_bits,
+                quantization_bin_width);
         if (std::abs(
                 static_cast<int64_t>(q) - center_dist) >
             static_cast<int64_t>(child_radius) + tolerance +
@@ -2002,11 +2003,11 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_local_router_vi
     return candidates;
   }
   const uint32_t mbb_bits = view.child_mbb_bits(node_id);
-  const uint32_t quantization_shift =
-      view.child_mbb_quantization_shift(node_id);
+  const uint32_t quantization_bin_width =
+      view.child_mbb_bin_width(node_id);
   const uint32_t quantization_error =
       SearchGraphView::child_mbb_quantization_error(
-          quantization_shift);
+          quantization_bin_width);
 
   struct RankedChild {
     NodeId child_id = INVALID_NODE_ID;
@@ -2036,7 +2037,8 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_local_router_vi
       const size_t cell = dim * child_count + child_idx;
       const uint8_t center_dist =
           view.child_beacon_distance_unchecked(
-              node_id, cell, mbb_bits, quantization_shift);
+              node_id, cell, mbb_bits,
+              quantization_bin_width);
       const int lo =
           reconstructed_mbb_lo(
               center_dist,
@@ -2352,11 +2354,11 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_best_first_view
       view.child_mbb_range_valid(node_id);
   if (candidates.size() < 2 || !mbb_ready) return candidates;
   const uint32_t mbb_bits = view.child_mbb_bits(node_id);
-  const uint32_t quantization_shift =
-      view.child_mbb_quantization_shift(node_id);
+  const uint32_t quantization_bin_width =
+      view.child_mbb_bin_width(node_id);
   const uint32_t quantization_error =
       SearchGraphView::child_mbb_quantization_error(
-          quantization_shift);
+          quantization_bin_width);
 
   struct RankedChild {
     NodeId child_id = INVALID_NODE_ID;
@@ -2388,7 +2390,8 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_best_first_view
       const size_t cell = dim * child_count + child_idx;
       const uint8_t center_dist =
           view.child_beacon_distance_unchecked(
-              node_id, cell, mbb_bits, quantization_shift);
+              node_id, cell, mbb_bits,
+              quantization_bin_width);
       const int lo =
           reconstructed_mbb_lo(
               center_dist,
@@ -3332,8 +3335,8 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
   } else {
     ScopedSearchTimer timer(stats.query_profile_enabled, &stats.mbb_filter_ms);
     const uint32_t mbb_bits = view.child_mbb_bits(node_id);
-    const uint32_t quantization_shift =
-        view.child_mbb_quantization_shift(node_id);
+    const uint32_t quantization_bin_width =
+        view.child_mbb_bin_width(node_id);
     MBBFilterSimdStats simd_stats;
     if (config_.search_prefetch) {
       prefetch_read(
@@ -3350,7 +3353,7 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
         config_.simd_mode,
         &simd_stats,
         mbb_bits,
-        quantization_shift);
+        quantization_bin_width);
 
     stats.edge_access_count += child_count;
     stats.mbb_check_count += child_count;
@@ -3424,11 +3427,11 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
   } else {
     ScopedSearchTimer timer(stats.query_profile_enabled, &stats.mbb_filter_ms);
     const uint32_t mbb_bits = view.child_mbb_bits(node_id);
-    const uint32_t quantization_shift =
-        view.child_mbb_quantization_shift(node_id);
+    const uint32_t quantization_bin_width =
+        view.child_mbb_bin_width(node_id);
     const uint32_t quantization_error =
         SearchGraphView::child_mbb_quantization_error(
-            quantization_shift);
+            quantization_bin_width);
     for (size_t child_offset : child_offsets) {
       stats.edge_access_count++;
       stats.mbb_check_count++;
@@ -3442,7 +3445,8 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
         const int q_b = query_beacon_dists[dim_idx];
         const int center_dist =
             view.child_beacon_distance_unchecked(
-                node_id, cell, mbb_bits, quantization_shift);
+                node_id, cell, mbb_bits,
+                quantization_bin_width);
         if (std::abs(
                 static_cast<int64_t>(q_b) - center_dist) >
             static_cast<int64_t>(child_radius) + tolerance +

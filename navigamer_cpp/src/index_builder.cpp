@@ -3997,9 +3997,9 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   size_t total_beacon_ids32 = 0;
   size_t total_mbb_bytes = 0;
   std::vector<uint8_t> build_mbb_bits(build_nodes_.size(), 8);
-  std::vector<uint8_t> build_mbb_quantization_shifts(
+  std::vector<uint8_t> build_mbb_bin_widths(
       build_nodes_.size(),
-      SearchGraphView::FINE_CHILD_MBB_QUANTIZATION_SHIFT);
+      SearchGraphView::FINE_CHILD_MBB_BIN_WIDTH);
   std::vector<WorldNodeRecord::LinkStorage> build_child_storage(
       build_nodes_.size(), WorldNodeRecord::LinkStorage::Absolute32);
   std::vector<NodeId> build_child_base(build_nodes_.size(), 0);
@@ -4024,12 +4024,12 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         total_leaf_beacon_cells +=
             geometry.link_beacon_dists.size();
       } else {
-        const uint32_t quantization_shift =
+        const uint32_t bin_width =
             layer_idx + 2 == primary_layers_.size()
-                ? SearchGraphView::FINE_CHILD_MBB_QUANTIZATION_SHIFT
-                : SearchGraphView::COARSE_CHILD_MBB_QUANTIZATION_SHIFT;
-        build_mbb_quantization_shifts[build_node_id] =
-            static_cast<uint8_t>(quantization_shift);
+                ? SearchGraphView::FINE_CHILD_MBB_BIN_WIDTH
+                : SearchGraphView::COARSE_CHILD_MBB_BIN_WIDTH;
+        build_mbb_bin_widths[build_node_id] =
+            static_cast<uint8_t>(bin_width);
         const auto choice = child_storage_for(build_node_id);
         const auto storage = choice.storage;
         build_child_storage[build_node_id] = storage;
@@ -4058,7 +4058,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
                                : *std::max_element(
                                      geometry.link_beacon_dists.begin(),
                                      geometry.link_beacon_dists.end());
-        maximum >>= quantization_shift;
+        maximum /= bin_width;
         uint8_t bits = 1;
         while (maximum >>= 1) ++bits;
         build_mbb_bits[build_node_id] = bits;
@@ -4104,7 +4104,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
 
   const auto append_packed_mbb =
       [&](const std::vector<uint8_t>& values, uint32_t bits,
-          uint32_t quantization_shift) {
+          uint32_t bin_width) {
         if (bits == 0 || bits > 8) {
           throw std::runtime_error("invalid child MBB bit width");
         }
@@ -4113,8 +4113,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         const size_t byte_begin = view.child_beacon_dists.size();
         view.child_beacon_dists.resize(byte_begin + byte_count);
         for (size_t value_idx = 0; value_idx < values.size(); ++value_idx) {
-          const uint32_t value =
-              values[value_idx] >> quantization_shift;
+          const uint32_t value = values[value_idx] / bin_width;
           if (value >= (uint32_t{1} << bits)) {
             throw std::runtime_error(
                 "child MBB value exceeds node bit width");
@@ -4375,7 +4374,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             mbb_bits);
         append_packed_mbb(
             geometry.link_beacon_dists, mbb_bits,
-            build_mbb_quantization_shifts[build_node_id]);
+            build_mbb_bin_widths[build_node_id]);
       }
     }
     view.layer_end[layer_idx] =
