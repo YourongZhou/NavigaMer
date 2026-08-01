@@ -172,6 +172,11 @@ concurrently and divides the thread budget among their internal parallel
 phases. Use `--shard-build-jobs N` to cap concurrent builders and their
 aggregate memory; nested teams remain inside the original OpenMP thread
 budget.
+For a human stride-1 build, `--shard-windows 100000` is the recommended
+starting point. Packing keeps the resulting logical-shard count manageable,
+while bounded parts limit Phase-2 join growth, packed-offset widths, mapped
+query working sets, and build memory. Benchmark adjacent sizes on the target
+reference before committing to a full build.
 
 Indexed leaf attachment directly verifies range candidates by default. Use
 `--leaf-qgram-postfilter on` to apply a safe q-gram L1 necessary condition
