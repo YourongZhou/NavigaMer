@@ -3985,6 +3985,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
                                : *std::max_element(
                                      geometry.link_beacon_dists.begin(),
                                      geometry.link_beacon_dists.end());
+        maximum >>= SearchGraphView::CHILD_MBB_QUANTIZATION_SHIFT;
         uint8_t bits = 1;
         while (maximum >>= 1) ++bits;
         build_mbb_bits[build_node_id] = bits;
@@ -4033,16 +4034,14 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         if (bits == 0 || bits > 8) {
           throw std::runtime_error("invalid child MBB bit width");
         }
-        if (bits == 8) {
-          view.child_beacon_dists.append(values.begin(), values.end());
-          return;
-        }
         const size_t byte_count = static_cast<size_t>(
             (static_cast<uint64_t>(values.size()) * bits + 7) / 8);
         const size_t byte_begin = view.child_beacon_dists.size();
         view.child_beacon_dists.resize(byte_begin + byte_count);
         for (size_t value_idx = 0; value_idx < values.size(); ++value_idx) {
-          const uint32_t value = values[value_idx];
+          const uint32_t value =
+              values[value_idx] >>
+              SearchGraphView::CHILD_MBB_QUANTIZATION_SHIFT;
           if (value >= (uint32_t{1} << bits)) {
             throw std::runtime_error(
                 "child MBB value exceeds node bit width");

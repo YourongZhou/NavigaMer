@@ -682,6 +682,10 @@ static_assert(sizeof(BuildNodeGeometry) <= 48,
               "primary-node build geometry must remain compact");
 
 struct SearchGraphView {
+  static constexpr uint32_t CHILD_MBB_QUANTIZATION_SHIFT = 2;
+  static constexpr uint32_t CHILD_MBB_QUANTIZATION_ERROR =
+      uint32_t{1} << (CHILD_MBB_QUANTIZATION_SHIFT - 1);
+
   // Canonical array representation. NodeId and LeafId are positions in
   // node_records and sequences respectively.
   FinalArray<WorldNodeRecord> node_records;
@@ -701,6 +705,10 @@ struct SearchGraphView {
   FinalArray<int16_t> leaf_id_deltas16;
   FinalArray<LeafId> leaf_ids;
 
+  // Each child-center-to-beacon distance d is stored as floor(d / 4), packed
+  // at the narrowest per-parent width. Search decodes the bin midpoint and
+  // widens every pruning threshold by CHILD_MBB_QUANTIZATION_ERROR, so the
+  // lossy representation can only retain extra children, never remove one.
   FinalArray<uint8_t> child_beacon_dists;
   // Explicit beacons only exist above the finest layer. Those NodeIds form a
   // dense prefix, so this side array needs no per-entry node identifier.
@@ -881,21 +889,27 @@ struct SearchGraphView {
       NodeId node_id, size_t cell_offset, uint32_t bits) const {
     const auto& node = node_records[node_id];
     const uint32_t begin = node.child_mbb_begin();
+    uint8_t encoded = 0;
     if (bits == 8) {
-      return child_beacon_dists[begin + cell_offset];
+      encoded = child_beacon_dists[begin + cell_offset];
+    } else {
+      const size_t bit_offset = cell_offset * bits;
+      const size_t byte_offset = bit_offset >> 3;
+      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+      uint16_t word = child_beacon_dists[begin + byte_offset];
+      if (shift + bits > 8) {
+        word |= static_cast<uint16_t>(
+                    child_beacon_dists[
+                        begin + byte_offset + 1])
+                << 8;
+      }
+      encoded = static_cast<uint8_t>(
+          (word >> shift) & ((uint32_t{1} << bits) - 1));
     }
-    const size_t bit_offset = cell_offset * bits;
-    const size_t byte_offset = bit_offset >> 3;
-    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
-    uint16_t word = child_beacon_dists[begin + byte_offset];
-    if (shift + bits > 8) {
-      word |= static_cast<uint16_t>(
-                  child_beacon_dists[
-                      begin + byte_offset + 1])
-              << 8;
-    }
-    return static_cast<uint8_t>(
-        (word >> shift) & ((uint32_t{1} << bits) - 1));
+    const uint32_t midpoint =
+        (static_cast<uint32_t>(encoded) << CHILD_MBB_QUANTIZATION_SHIFT) +
+        CHILD_MBB_QUANTIZATION_ERROR;
+    return static_cast<uint8_t>(std::min<uint32_t>(midpoint, 255));
   }
 
   LeafId leaf_id(NodeId node_id, uint32_t leaf_offset) const {

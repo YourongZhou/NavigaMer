@@ -1494,7 +1494,8 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
                 node_id, cell, mbb_bits);
         if (std::abs(
                 static_cast<int64_t>(q) - center_dist) >
-            static_cast<int64_t>(child_radius) + tolerance) {
+            static_cast<int64_t>(child_radius) + tolerance +
+                SearchGraphView::CHILD_MBB_QUANTIZATION_ERROR) {
           prunable = true;
           break;
         }
@@ -2027,9 +2028,15 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_local_router_vi
           view.child_beacon_distance_unchecked(
               node_id, cell, mbb_bits);
       const int lo =
-          reconstructed_mbb_lo(center_dist, child_radius);
+          reconstructed_mbb_lo(
+              center_dist,
+              child_radius +
+                  SearchGraphView::CHILD_MBB_QUANTIZATION_ERROR);
       const int hi =
-          reconstructed_mbb_hi(center_dist, child_radius);
+          reconstructed_mbb_hi(
+              center_dist,
+              child_radius +
+                  SearchGraphView::CHILD_MBB_QUANTIZATION_ERROR);
       const int q = query_beacon_dists[dim];
       if (q < lo) {
         score += static_cast<double>(lo - q) * 1024.0;
@@ -2370,9 +2377,15 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_best_first_view
           view.child_beacon_distance_unchecked(
               node_id, cell, mbb_bits);
       const int lo =
-          reconstructed_mbb_lo(center_dist, child_radius);
+          reconstructed_mbb_lo(
+              center_dist,
+              child_radius +
+                  SearchGraphView::CHILD_MBB_QUANTIZATION_ERROR);
       const int hi =
-          reconstructed_mbb_hi(center_dist, child_radius);
+          reconstructed_mbb_hi(
+              center_dist,
+              child_radius +
+                  SearchGraphView::CHILD_MBB_QUANTIZATION_ERROR);
       const int q = query_beacon_dists[dim];
       if (q < lo) {
         lower_bound =
@@ -3321,7 +3334,8 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
         static_cast<int32_t>(tolerance),
         config_.simd_mode,
         &simd_stats,
-        mbb_bits);
+        mbb_bits,
+        SearchGraphView::CHILD_MBB_QUANTIZATION_SHIFT);
 
     stats.edge_access_count += child_count;
     stats.mbb_check_count += child_count;
@@ -3411,7 +3425,8 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
                 node_id, cell, mbb_bits);
         if (std::abs(
                 static_cast<int64_t>(q_b) - center_dist) >
-            static_cast<int64_t>(child_radius) + tolerance) {
+            static_cast<int64_t>(child_radius) + tolerance +
+                SearchGraphView::CHILD_MBB_QUANTIZATION_ERROR) {
           prunable = true;
           break;
         }

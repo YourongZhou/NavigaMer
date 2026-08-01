@@ -40,7 +40,8 @@ std::vector<uint32_t> filter_mbb_survivors(
     int32_t tolerance,
     SimdMode mode,
     MBBFilterSimdStats* stats = nullptr,
-    uint32_t packed_bits = 8);
+    uint32_t packed_bits = 8,
+    uint32_t quantization_shift = 0);
 
 std::vector<uint32_t> filter_leaf_beacon_survivors(
     const uint8_t* dist_by_dim,

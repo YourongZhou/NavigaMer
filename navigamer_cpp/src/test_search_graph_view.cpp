@@ -171,7 +171,8 @@ void assert_max_byte_distance_is_recall_safe() {
     for (size_t cell = 0; cell < cells; ++cell) {
       found_max_distance =
           found_max_distance ||
-          view.child_beacon_distance(node_id, cell) == 255;
+          view.child_beacon_distance(node_id, cell) >=
+              255 - navigamer::SearchGraphView::CHILD_MBB_QUANTIZATION_ERROR;
     }
   }
   assert(found_max_distance);
