@@ -32,13 +32,13 @@ namespace navigamer {
 namespace {
 
 constexpr std::array<char, 8> kShardMagic = {
-    'N', 'G', 'S', 'H', 'R', 'D', '0', '4'};
+    'N', 'G', 'S', 'H', 'R', 'D', '0', '5'};
 constexpr std::array<char, 8> kShardPackMagic = {
-    'N', 'G', 'P', 'A', 'C', 'K', '0', '1'};
+    'N', 'G', 'P', 'A', 'C', 'K', '0', '2'};
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '2'};
-constexpr uint32_t kShardFormatVersion = 4;
-constexpr uint32_t kShardPackFormatVersion = 1;
+constexpr uint32_t kShardFormatVersion = 5;
+constexpr uint32_t kShardPackFormatVersion = 2;
 constexpr uint32_t kRouterFormatVersion = 2;
 constexpr size_t kRouterHeaderBytes = 48;
 constexpr std::streamoff kRouterChecksumOffset = 40;
@@ -147,6 +147,15 @@ void hash_string(uint64_t* hash, const std::string& value) {
   hash_bytes(hash, value.data(), value.size());
 }
 
+void hash_build_manifest(
+    uint64_t* hash, const IndexBuildManifest& manifest) {
+  std::ostringstream encoded(std::ios::out | std::ios::binary);
+  write_index_build_manifest(encoded, manifest);
+  const std::string bytes = encoded.str();
+  hash_pod<uint64_t>(hash, bytes.size());
+  hash_bytes(hash, bytes.data(), bytes.size());
+}
+
 uint64_t manifest_checksum(
     const ShardedIndexManifest& manifest) {
   uint64_t hash = kFnvOffset;
@@ -160,7 +169,7 @@ uint64_t manifest_checksum(
   hash_pod<uint32_t>(&hash, manifest.router_window);
   hash_pod<uint64_t>(&hash, manifest.router_entry_count);
   hash_pod<uint64_t>(&hash, manifest.router_checksum);
-  hash_string(&hash, manifest.part_signature);
+  hash_build_manifest(&hash, manifest.part_manifest);
   hash_pod<uint64_t>(&hash, manifest.pack_paths.size());
   for (const auto& path : manifest.pack_paths) {
     hash_string(&hash, path);
@@ -388,13 +397,9 @@ bool load_reusable_shard(
     const ReferenceContig& expected_contig,
     size_t window_length,
     LoadedIndex* loaded) {
-  std::string reason;
-  if (!index_matches_manifest(
-          part_path.string(), expected_manifest, nullptr, &reason)) {
-    return false;
-  }
   try {
-    LoadedIndex candidate = load_index(part_path.string());
+    LoadedIndex candidate = load_index_payload(
+        part_path.string(), expected_manifest);
     if (!reusable_shard_matches(
             candidate, expected_manifest.signature, reference_id,
             reference_slice, expected_contig, window_length)) {
@@ -409,14 +414,13 @@ bool load_reusable_shard(
 
 void install_shard_atomically(
     const std::filesystem::path& part_path,
-    const BioGeometryIndexBuilder& builder,
-    const IndexBuildManifest& manifest) {
+    const BioGeometryIndexBuilder& builder) {
   const std::filesystem::path temporary =
       part_path.string() + ".tmp";
   std::error_code error;
   std::filesystem::remove(temporary, error);
   error.clear();
-  save_index(temporary.string(), builder, manifest);
+  save_index_payload(temporary.string(), builder);
   std::filesystem::rename(temporary, part_path, error);
   if (error) {
     std::filesystem::remove(temporary);
@@ -853,7 +857,12 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
     throw std::runtime_error(
         "sharded index has invalid window configuration");
   }
-  if (manifest.part_signature.empty() ||
+  if (manifest.part_manifest.format_version != 33 ||
+      manifest.part_manifest.signature.empty() ||
+      manifest.part_manifest.sequence_count != 0 ||
+      manifest.part_manifest.world_node_count != 0 ||
+      manifest.part_manifest.edge_count != 0 ||
+      manifest.part_manifest.leaf_link_count != 0 ||
       manifest.pack_paths.empty() || manifest.contig_ids.empty() ||
       manifest.shards.empty()) {
     throw std::runtime_error("sharded index contains no shards");
@@ -994,7 +1003,7 @@ void save_sharded_index_manifest(
     write_pod<uint32_t>(out, manifest.router_window);
     write_pod<uint64_t>(out, manifest.router_entry_count);
     write_pod<uint64_t>(out, manifest.router_checksum);
-    write_string(out, manifest.part_signature);
+    write_index_build_manifest(out, manifest.part_manifest);
     write_pod<uint64_t>(out, manifest.pack_paths.size());
     for (const auto& pack_path : manifest.pack_paths) {
       write_string(out, pack_path);
@@ -1062,8 +1071,7 @@ ShardedIndexManifest read_sharded_index_manifest(
       read_size(in, "router_entry_count");
   manifest.router_checksum =
       read_pod<uint64_t>(in, "router_checksum");
-  manifest.part_signature =
-      read_string(in, "part_signature");
+  manifest.part_manifest = read_index_build_manifest(in);
   const uint64_t pack_count =
       read_pod<uint64_t>(in, "pack_count");
   if (pack_count == 0 || pack_count > kMaxShardCount) {
@@ -1451,8 +1459,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
         builder.build_reference_windows(
             reference_id, std::move(slice), window_length, stride,
             {slice_contig});
-        install_shard_atomically(
-            part_path, builder, part_manifest);
+        install_shard_atomically(part_path, builder);
         sequence_count = builder.num_sequences();
         world_node_count = builder.num_world_nodes();
       }
@@ -1508,9 +1515,9 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
         ReferenceContig slice_contig{
             ref_id, 0, static_cast<uint32_t>(slice.size()),
             spec.source_begin};
-        LoadedIndex candidate = load_index_range(
+        LoadedIndex candidate = load_index_payload_range(
             pack_path.string(), entries[local_idx].offset,
-            entries[local_idx].size);
+            entries[local_idx].size, part_manifest);
         if (!reusable_shard_matches(
                 candidate, part_manifest.signature, reference_id,
                 slice, slice_contig, window_length)) {
@@ -1606,7 +1613,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   ShardedIndexManifest manifest;
   manifest.window_length = window_length;
   manifest.stride = stride;
-  manifest.part_signature = part_manifest.signature;
+  manifest.part_manifest = part_manifest;
   manifest.pack_paths = std::move(pack_paths);
   manifest.contig_ids = std::move(contig_ids);
   for (const auto& descriptor : descriptors) {
@@ -1701,14 +1708,15 @@ LoadedIndex load_sharded_index_part(
       descriptor.contig_id >= manifest.contig_ids.size()) {
     throw std::runtime_error("sharded index part has invalid interned ID");
   }
-  LoadedIndex loaded = load_index_range(
+  LoadedIndex loaded = load_index_payload_range(
       resolve_index_shard_path(
           manifest_path, manifest.pack_paths[descriptor.pack_id]),
       descriptor.file_offset, descriptor.file_size,
+      manifest.part_manifest,
       IndexLoadValidation::Structural);
   const auto& store = loaded.builder.sequence_store();
   if (!store.reference_backed ||
-      loaded.manifest.signature != manifest.part_signature ||
+      loaded.manifest.signature != manifest.part_manifest.signature ||
       store.fixed_sequence_length != manifest.window_length ||
       store.reference_contigs.size() != 1) {
     throw std::runtime_error(

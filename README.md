@@ -251,13 +251,15 @@ limit, while peak build memory is bounded by the number of concurrent parts.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
-Only one group of temporary shard files exists at a time. The final v4
-`.navshard` manifest stores each logical shard's pack ID and byte range plus a
-memory-mapped exact-minimizer router sidecar. Queries mmap only selected byte
-ranges, so packing removes millions of filesystem entries without coarsening
-the logical shards or increasing search work. Contig names and pack paths are
-interned once; each in-memory shard descriptor is a fixed 48-byte numeric
-record. The sidecar stores sorted
+Only one group of temporary shard files exists at a time. The final v5
+`.navshard` manifest stores the common construction manifest once, then each
+logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
+router sidecar. Pack entries contain only independently decodable graph
+payloads, rather than repeating the common manifest for every logical shard.
+Queries mmap only selected byte ranges, so packing removes millions of
+filesystem entries without coarsening the logical shards or increasing search
+work. Contig names and pack paths are interned once; each in-memory shard
+descriptor is a fixed 48-byte numeric record. The sidecar stores sorted
 32-bit minimizers plus shard IDs at exactly `ceil(log2(shard_count))` bits per
 entry. For a query at tolerance `d`, the router takes one seed of 32 to 64
 bases from each of `d + 1` disjoint query blocks and searches only shards

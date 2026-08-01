@@ -26,6 +26,8 @@ namespace navigamer {
 namespace {
 
 constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '5'};
+constexpr std::array<char, 8> kPayloadMagic = {
+    'N', 'G', 'P', 'A', 'Y', 'L', '0', '1'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 constexpr size_t kMappedArrayAlignment = 64;
 
@@ -299,6 +301,19 @@ void refresh_signature(IndexBuildManifest& manifest) {
   manifest.signature = hash_string(manifest_signature_payload(manifest));
 }
 
+void validate_manifest_signature(
+    const IndexBuildManifest& manifest) {
+  if (manifest.format_version != 33) {
+    throw std::runtime_error(
+        "unsupported NavigaMer index version; rebuild the array index");
+  }
+  IndexBuildManifest signature_check = manifest;
+  refresh_signature(signature_check);
+  if (signature_check.signature != manifest.signature) {
+    throw std::runtime_error("index manifest signature is inconsistent");
+  }
+}
+
 BuildRangeConfig build_config_from_manifest(const IndexBuildManifest& manifest) {
   BuildRangeConfig config;
   config.link_mode = parse_build_range_mode(manifest.link_mode);
@@ -409,6 +424,20 @@ IndexBuildManifest read_manifest(std::istream& in) {
 void write_magic(std::ostream& out) {
   out.write(kMagic.data(), static_cast<std::streamsize>(kMagic.size()));
   if (!out) throw std::runtime_error("failed to write index magic");
+}
+
+void write_payload_magic(std::ostream& out) {
+  out.write(kPayloadMagic.data(),
+            static_cast<std::streamsize>(kPayloadMagic.size()));
+  if (!out) throw std::runtime_error("failed to write index payload magic");
+}
+
+void read_payload_magic(std::istream& in) {
+  std::array<char, 8> magic{};
+  in.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+  if (!in || magic != kPayloadMagic) {
+    throw std::runtime_error("invalid NavigaMer index payload magic");
+  }
 }
 
 void read_magic(std::istream& in) {
@@ -1109,20 +1138,24 @@ IndexBuildManifest make_reference_window_index_manifest(
                              range_config);
 }
 
+void write_index_build_manifest(
+    std::ostream& out, const IndexBuildManifest& manifest) {
+  validate_manifest_signature(manifest);
+  write_manifest(out, manifest);
+}
+
+IndexBuildManifest read_index_build_manifest(std::istream& in) {
+  IndexBuildManifest manifest = read_manifest(in);
+  validate_manifest_signature(manifest);
+  return manifest;
+}
+
 IndexBuildManifest read_index_manifest(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 33) {
-    throw std::runtime_error(
-        "unsupported NavigaMer index version; rebuild the array index");
-  }
-  IndexBuildManifest signature_check = manifest;
-  refresh_signature(signature_check);
-  if (signature_check.signature != manifest.signature) {
-    throw std::runtime_error("index manifest signature is inconsistent");
-  }
+  validate_manifest_signature(manifest);
   return manifest;
 }
 
@@ -1176,6 +1209,24 @@ void save_index(const std::string& path,
   if (!out) throw std::runtime_error("failed to write index output: " + path);
 }
 
+void save_index_payload(
+    const std::string& path,
+    const BioGeometryIndexBuilder& builder) {
+  if (!builder.validate_search_graph_view()) {
+    throw std::runtime_error("cannot persist invalid NavigaMer index payload");
+  }
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    throw std::runtime_error("unable to open index payload output: " + path);
+  }
+  write_payload_magic(out);
+  write_search_graph_view(out, builder.search_graph_view());
+  out.close();
+  if (!out) {
+    throw std::runtime_error("failed to write index payload output: " + path);
+  }
+}
+
 LoadedIndex load_index_range(
     const std::string& path, uint64_t offset, uint64_t length,
     IndexLoadValidation validation) {
@@ -1199,15 +1250,7 @@ LoadedIndex load_index_range(
   if (!in) throw std::runtime_error("unable to seek to index range: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 33) {
-    throw std::runtime_error(
-        "unsupported NavigaMer index version; rebuild the array index");
-  }
-  IndexBuildManifest signature_check = manifest;
-  refresh_signature(signature_check);
-  if (signature_check.signature != manifest.signature) {
-    throw std::runtime_error("index manifest signature is inconsistent");
-  }
+  validate_manifest_signature(manifest);
 
   BuildRangeConfig range_config = build_config_from_manifest(manifest);
   BioGeometryIndexBuilder builder(
@@ -1243,6 +1286,79 @@ LoadedIndex load_index_range(
   }
 
   return {std::move(builder), std::move(manifest)};
+}
+
+LoadedIndex load_index_payload_range(
+    const std::string& path, uint64_t offset, uint64_t length,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation) {
+  if (length == 0 || offset % kMappedArrayAlignment != 0 ||
+      offset > static_cast<uint64_t>(
+                   std::numeric_limits<std::streamoff>::max()) ||
+      length > static_cast<uint64_t>(
+                   std::numeric_limits<std::streamoff>::max()) - offset) {
+    throw std::invalid_argument(
+        "embedded index payload range must be non-empty, aligned, and seekable");
+  }
+  validate_manifest_signature(shared_manifest);
+  const auto mapping = map_index_file(path, offset, length);
+#if defined(__unix__) || defined(__APPLE__)
+  if (!mapping) {
+    throw std::runtime_error("unable to map index payload range: " + path);
+  }
+#endif
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("unable to open index payload file: " + path);
+  }
+  in.seekg(static_cast<std::streamoff>(offset));
+  if (!in) {
+    throw std::runtime_error("unable to seek to index payload range: " + path);
+  }
+  read_payload_magic(in);
+
+  IndexBuildManifest manifest = shared_manifest;
+  BuildRangeConfig range_config = build_config_from_manifest(manifest);
+  BioGeometryIndexBuilder builder(
+      HierarchyConfig(manifest.primary_radii, manifest.auxiliary_radii),
+      range_config);
+  SearchGraphView view =
+      read_search_graph_view(in, mapping, validation);
+  manifest.sequence_count = view.sequences.size();
+  manifest.world_node_count = view.node_records.size();
+  manifest.edge_count = view.edge_count();
+  manifest.leaf_link_count = view.leaf_link_count();
+  IndexPersistenceAccess::reset_loaded_array_state(
+      builder, std::move(view), manifest);
+
+  const bool valid =
+      validation == IndexLoadValidation::Full
+          ? builder.validate_search_graph_view()
+          : validate_structural_layout(builder);
+  if (!valid) {
+    throw std::runtime_error("loaded NavigaMer index payload failed validation");
+  }
+  const std::streampos end_position = in.tellg();
+  if (end_position < std::streampos(0) ||
+      static_cast<uint64_t>(
+          static_cast<std::streamoff>(end_position)) >
+          offset + length) {
+    throw std::runtime_error("embedded index payload exceeds its declared range");
+  }
+  return {std::move(builder), std::move(manifest)};
+}
+
+LoadedIndex load_index_payload(
+    const std::string& path,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation) {
+  std::error_code error;
+  const uint64_t length = std::filesystem::file_size(path, error);
+  if (error || length == 0) {
+    throw std::runtime_error("unable to stat index payload file: " + path);
+  }
+  return load_index_payload_range(
+      path, 0, length, shared_manifest, validation);
 }
 
 LoadedIndex load_index(

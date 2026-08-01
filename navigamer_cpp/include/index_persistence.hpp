@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,12 @@ IndexBuildManifest make_reference_window_index_manifest(
 
 IndexBuildManifest read_index_manifest(const std::string& path);
 
+// Embed one validated build manifest in a container format. Sharded indexes
+// use this once at bundle scope instead of repeating it in every graph image.
+void write_index_build_manifest(
+    std::ostream& out, const IndexBuildManifest& manifest);
+IndexBuildManifest read_index_build_manifest(std::istream& in);
+
 bool index_matches_manifest(
     const std::string& path,
     const IndexBuildManifest& expected,
@@ -78,6 +85,12 @@ bool index_matches_manifest(
 void save_index(const std::string& path,
                 const BioGeometryIndexBuilder& builder,
                 const IndexBuildManifest& manifest);
+
+// Persist only the independently mmap-decodable graph payload. The shared
+// build manifest is supplied by the containing sharded index.
+void save_index_payload(
+    const std::string& path,
+    const BioGeometryIndexBuilder& builder);
 
 LoadedIndex load_index(
     const std::string& path,
@@ -90,6 +103,20 @@ LoadedIndex load_index_range(
     const std::string& path,
     uint64_t offset,
     uint64_t length,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
+
+LoadedIndex load_index_payload(
+    const std::string& path,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
+
+LoadedIndex load_index_payload_range(
+    const std::string& path,
+    uint64_t offset,
+    uint64_t length,
+    const IndexBuildManifest& shared_manifest,
     IndexLoadValidation validation =
         IndexLoadValidation::Full);
 

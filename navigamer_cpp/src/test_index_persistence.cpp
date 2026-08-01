@@ -177,6 +177,64 @@ void assert_loaded_search_matches_built() {
   std::remove(copied_path.c_str());
 }
 
+void assert_graph_payload_uses_shared_manifest() {
+  const std::string full_path =
+      "/tmp/navigamer_test_full_index.navidx";
+  const std::string payload_path =
+      "/tmp/navigamer_test_graph_payload.navpayload";
+  std::remove(full_path.c_str());
+  std::remove(payload_path.c_str());
+
+  navigamer::BuildRangeConfig build_config;
+  navigamer::HierarchyConfig hierarchy({20, 10, 3});
+  navigamer::BioGeometryIndexBuilder built(hierarchy, build_config);
+  built.build(make_sequences());
+  const auto manifest = navigamer::make_index_manifest(
+      "payload-ref", "payload-reads", hierarchy, build_config);
+
+  navigamer::save_index(full_path, built, manifest);
+  navigamer::save_index_payload(payload_path, built);
+  const auto file_size = [](const std::string& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    assert(in);
+    return static_cast<uint64_t>(in.tellg());
+  };
+  assert(file_size(payload_path) < file_size(full_path));
+
+  auto loaded = navigamer::load_index_payload(
+      payload_path, manifest);
+  assert(loaded.manifest.signature == manifest.signature);
+  assert(loaded.manifest.sequence_count == built.num_sequences());
+  assert(loaded.manifest.world_node_count == built.num_world_nodes());
+  assert(loaded.manifest.edge_count ==
+         built.search_graph_view().edge_count());
+  assert(loaded.manifest.leaf_link_count ==
+         built.search_graph_view().leaf_link_count());
+  assert(loaded.builder.validate_search_graph_view());
+
+  navigamer::BioGeometrySearchEngine built_search(built);
+  navigamer::BioGeometrySearchEngine loaded_search(loaded.builder);
+  const navigamer::BioSequence query(
+      "payload-query", "ACGTACGTACGTACGTACGT");
+  assert(sequence_ids(built_search.search_adaptive(query, 2).first) ==
+         sequence_ids(loaded_search.search_adaptive(query, 2).first));
+
+  auto invalid_manifest = manifest;
+  invalid_manifest.signature.front() =
+      invalid_manifest.signature.front() == '0' ? '1' : '0';
+  bool invalid_rejected = false;
+  try {
+    (void)navigamer::load_index_payload(
+        payload_path, invalid_manifest);
+  } catch (const std::runtime_error&) {
+    invalid_rejected = true;
+  }
+  assert(invalid_rejected);
+
+  std::remove(full_path.c_str());
+  std::remove(payload_path.c_str());
+}
+
 void assert_manifest_matching_detects_reusable_index() {
   const std::string path = "/tmp/navigamer_test_index_manifest.navidx";
   std::remove(path.c_str());
@@ -599,6 +657,7 @@ void assert_reference_position_encodings_are_exact() {
 
 int main() {
   assert_loaded_search_matches_built();
+  assert_graph_payload_uses_shared_manifest();
   assert_manifest_matching_detects_reusable_index();
   assert_reference_window_manifest_tracks_slicing_parameters();
   assert_reference_backed_index_round_trip();

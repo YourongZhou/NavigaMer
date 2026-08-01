@@ -159,9 +159,9 @@ default. `--progress-interval-seconds N` changes the interval; zero disables
 periodic heartbeats but retains phase start/finish reports. `build-scale` can
 persist a reference-window index with `--index <file>` when exactly one prefix
 length is requested. Multiple prefixes with one output index are rejected.
-`build-sharded` instead partitions window starts into independent logical v33
-parts, each capped by `--shard-windows`, and packs up to 1,024 part images into
-one `.navpack` container. Reference slices overlap only
+`build-sharded` instead partitions window starts into independently decodable
+logical graph payloads, each capped by `--shard-windows`, and packs up to 1,024
+payloads into one `.navpack` container. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
 contig. Valid completed packs are reused on restart, damaged packs are rebuilt
@@ -248,8 +248,10 @@ payloads store a minimum whole-byte forward base delta from `node_id + 1`
 immediately before their local child offsets, preserving cache locality while
 avoiding a fixed 32-bit base. Finalized arrays load directly. Older files must
 be rebuilt.
-A v4 `.navshard` bundle points to independently loadable v33 byte ranges in
-`.navpack` containers and, when it
+A v5 `.navshard` bundle stores the common v33 construction manifest once and
+points to independently loadable graph-payload byte ranges in `.navpack`
+containers. This removes the repeated manifest from every logical shard without
+changing its mapped graph arrays. When the bundle
 has multiple shards and windows of at least 32 bases, a memory-mapped
 `.route` sidecar. The router uses 16-mer minimizers from 32- to 64-base seeds
 in `d + 1` disjoint query blocks. Its keys are 32-bit arrays and the parallel

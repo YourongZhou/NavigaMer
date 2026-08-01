@@ -28,7 +28,7 @@ static_assert(sizeof(IndexShardDescriptor) <= 48,
               "shard descriptors must remain compact");
 
 struct ShardedIndexManifest {
-  uint32_t format_version = 4;
+  uint32_t format_version = 5;
   size_t window_length = 0;
   size_t stride = 0;
   size_t total_window_count = 0;
@@ -38,7 +38,7 @@ struct ShardedIndexManifest {
   uint32_t router_window = 0;
   size_t router_entry_count = 0;
   uint64_t router_checksum = 0;
-  std::string part_signature;
+  IndexBuildManifest part_manifest;
   std::vector<std::string> pack_paths;
   std::vector<std::string> contig_ids;
   std::vector<IndexShardDescriptor> shards;
