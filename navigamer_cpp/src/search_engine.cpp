@@ -1084,7 +1084,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
       node.beacon_storage() ==
               WorldNodeRecord::BeaconStorage::ImplicitCenter
           ? 0
-          : view.beacon_begins[node_id];
+          : view.beacon_begin(node_id);
   const LeafId center_id = view.center_sequence_id(node_id);
   switch (node.beacon_storage()) {
     case WorldNodeRecord::BeaconStorage::Delta8: {

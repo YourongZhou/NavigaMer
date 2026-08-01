@@ -1259,12 +1259,89 @@ struct SearchGraphView {
   FinalArray<uint8_t> child_beacon_dists;
   // Explicit beacons only exist above the finest layer. Those NodeIds form a
   // dense prefix, so this side array needs no per-entry node identifier.
-  FinalArray<uint32_t> beacon_begins;
+  // One shard-local fixed width keeps exact O(1) random access while avoiding
+  // a 32-bit offset for every non-finest node.
+  FinalArray<uint8_t> beacon_begins;
+  uint8_t beacon_begin_bits = 0;
   FinalArray<int8_t> beacon_deltas8;
   FinalArray<int16_t> beacon_deltas16;
   FinalArray<LeafId> beacon_ids32;
 
   FinalArray<uint8_t> leaf_beacon_dists;
+
+  void initialize_beacon_begins(
+      size_t non_finest_node_count, uint64_t maximum_begin) {
+    beacon_begin_bits = 0;
+    if (non_finest_node_count != 0) {
+      beacon_begin_bits = PackedWorldNodeLayout::bits_for_value(
+          maximum_begin);
+    }
+    const uint64_t bit_count =
+        static_cast<uint64_t>(non_finest_node_count) * beacon_begin_bits;
+    beacon_begins.assign(
+        static_cast<size_t>((bit_count + 7) / 8), uint8_t{0});
+  }
+
+  bool beacon_begins_valid(size_t non_finest_node_count) const {
+    if (non_finest_node_count == 0) {
+      return beacon_begin_bits == 0 && beacon_begins.empty();
+    }
+    if (beacon_begin_bits == 0 || beacon_begin_bits > 32) return false;
+    const uint64_t bit_count =
+        static_cast<uint64_t>(non_finest_node_count) * beacon_begin_bits;
+    return beacon_begins.size() ==
+           static_cast<size_t>((bit_count + 7) / 8);
+  }
+
+  void set_beacon_begin(NodeId node_id, uint32_t begin) {
+    if (beacon_begin_bits == 0 || beacon_begin_bits > 32) {
+      throw std::logic_error("beacon begin array is not initialized");
+    }
+    const uint64_t mask =
+        beacon_begin_bits == 32
+            ? std::numeric_limits<uint32_t>::max()
+            : (uint64_t{1} << beacon_begin_bits) - 1;
+    if (begin > mask) {
+      throw std::length_error("beacon begin exceeds packed width");
+    }
+    const size_t bit_offset =
+        static_cast<size_t>(node_id) * beacon_begin_bits;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    const size_t byte_count = (shift + beacon_begin_bits + 7) / 8;
+    uint64_t word = static_cast<uint64_t>(begin) << shift;
+    for (size_t byte = 0; byte < byte_count; ++byte) {
+      beacon_begins[byte_offset + byte] |=
+          static_cast<uint8_t>(word >> (byte * 8));
+    }
+  }
+
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((always_inline))
+#endif
+  inline uint32_t beacon_begin(NodeId node_id) const {
+    const uint32_t bits = beacon_begin_bits;
+    const size_t bit_offset = static_cast<size_t>(node_id) * bits;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    if (bits <= 25 && byte_offset + sizeof(uint32_t) <=
+                          beacon_begins.size()) {
+      uint32_t word = 0;
+      std::memcpy(&word, beacon_begins.data() + byte_offset, sizeof(word));
+      const uint32_t mask = (uint32_t{1} << bits) - 1;
+      return (word >> shift) & mask;
+    }
+    const size_t byte_count = (shift + bits + 7) / 8;
+    uint64_t word = 0;
+    for (size_t byte = 0; byte < byte_count; ++byte) {
+      word |= static_cast<uint64_t>(beacon_begins[byte_offset + byte])
+              << (byte * 8);
+    }
+    const uint64_t mask =
+        bits == 32 ? std::numeric_limits<uint32_t>::max()
+                   : (uint64_t{1} << bits) - 1;
+    return static_cast<uint32_t>((word >> shift) & mask);
+  }
 
   void initialize_center_sequence_ids(size_t sequence_count) {
     center_sequence_id_bits = 0;
@@ -1913,7 +1990,7 @@ struct SearchGraphView {
         node.beacon_storage() ==
                 WorldNodeRecord::BeaconStorage::ImplicitCenter
             ? 0
-            : beacon_begins[node_id];
+            : this->beacon_begin(node_id);
     switch (node.beacon_storage()) {
       case WorldNodeRecord::BeaconStorage::Delta8:
         return static_cast<LeafId>(

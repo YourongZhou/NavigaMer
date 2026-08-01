@@ -226,7 +226,7 @@ quality-audit time only.
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v34 binary persistence and manifest signatures |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v35 binary persistence and manifest signatures |
 | `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, exact-minimizer shard routing, bundle manifests, and validated loading |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
@@ -241,7 +241,7 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v34 bit-packs each node to the minimum whole-byte width supported by
+Format v35 bit-packs each node to the minimum whole-byte width supported by
 that shard's actual offset and count ranges (9 bytes per node in the 100k-window
 reference benchmark, with wider automatic fallbacks). Base-relative child
 payloads store a minimum whole-byte forward base delta from `node_id + 1`
@@ -253,7 +253,9 @@ each child's quantized pair only among states allowed by the triangle
 inequality. Decoding reproduces the same conservative bins exactly, so pruning
 and recall semantics are unchanged while infeasible states consume no code
 space.
-A v6 `.navshard` bundle stores the common v34 construction manifest once and
+Non-finest beacon offsets use the minimum shard-local bit width with exact
+constant-time decoding rather than one 32-bit value per node.
+A v7 `.navshard` bundle stores the common v35 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle

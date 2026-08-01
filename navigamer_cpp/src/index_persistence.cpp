@@ -25,7 +25,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '6'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '7'};
 constexpr std::array<char, 8> kPayloadMagic = {
     'N', 'G', 'P', 'A', 'Y', 'L', '0', '1'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 34) {
+  if (manifest.format_version != 35) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 34) {
+  if (manifest.format_version != 35) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -968,6 +968,7 @@ void write_search_graph_view(std::ostream& out,
   write_final_array(out, view.beacon_deltas8, "beacon_deltas8");
   write_final_array(out, view.beacon_deltas16, "beacon_deltas16");
   write_final_array(out, view.beacon_ids32, "beacon_ids32");
+  write_pod<uint8_t>(out, view.beacon_begin_bits);
   write_final_array(out, view.beacon_begins, "beacon_begins");
   write_final_array(
       out, view.child_beacon_dists, "child_beacon_dists");
@@ -1024,8 +1025,10 @@ SearchGraphView read_search_graph_view(
       read_final_array<int16_t>(in, mapping, "beacon_deltas16");
   view.beacon_ids32 =
       read_final_array<LeafId>(in, mapping, "beacon_ids32");
+  view.beacon_begin_bits =
+      read_pod<uint8_t>(in, "beacon_begin_bits");
   view.beacon_begins =
-      read_final_array<uint32_t>(in, mapping, "beacon_begins");
+      read_final_array<uint8_t>(in, mapping, "beacon_begins");
   view.child_beacon_dists =
       read_final_array<uint8_t>(in, mapping, "child_beacon_dists");
   view.leaf_beacon_dists =
@@ -1070,7 +1073,7 @@ bool validate_structural_layout(
   return expected_begin == view.node_records.size() &&
          !view.layer_begin.empty() &&
          view.child_base_ids_valid(view.layer_begin.back()) &&
-         view.beacon_begins.size() == view.layer_begin.back();
+         view.beacon_begins_valid(view.layer_begin.back());
 }
 
 }  // namespace
@@ -1193,7 +1196,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 34;
+  stored.format_version = 35;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

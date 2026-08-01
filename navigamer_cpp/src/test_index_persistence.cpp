@@ -95,6 +95,8 @@ void assert_loaded_search_matches_built() {
       built.search_graph_view().beacon_begins.begin(),
       built.search_graph_view().beacon_begins.end(),
       loaded.builder.search_graph_view().beacon_begins.begin()));
+  assert(loaded.builder.search_graph_view().beacon_begin_bits ==
+         built.search_graph_view().beacon_begin_bits);
 #if defined(__unix__) || defined(__APPLE__)
   const auto assert_mapped = [](const auto& array) {
     if (!array.empty()) {
@@ -419,7 +421,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 34);
+  assert(loaded.manifest.format_version == 35);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

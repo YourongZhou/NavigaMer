@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <string>
@@ -44,7 +45,7 @@ void assert_view_equivalent_to_original() {
          static_cast<size_t>(builder.num_primary_layers()));
   assert(view.layer_end.size() ==
          static_cast<size_t>(builder.num_primary_layers()));
-  assert(view.beacon_begins.size() == view.layer_begin.back());
+  assert(view.beacon_begins_valid(view.layer_begin.back()));
   for (size_t sequence_id = 0; sequence_id < view.sequences.size();
        ++sequence_id) {
     assert(view.sequences.records[sequence_id].sequence_id == sequence_id);
@@ -222,7 +223,10 @@ void assert_all_beacon_id_encodings_are_exact() {
   view.beacon_deltas8 = {-120};
   view.beacon_deltas16 = {30000};
   view.beacon_ids32 = {4000000000U};
-  view.beacon_begins = {0, 0, 0};
+  view.initialize_beacon_begins(3, 0);
+  view.set_beacon_begin(0, 0);
+  view.set_beacon_begin(1, 0);
+  view.set_beacon_begin(2, 0);
 
   view.set_center_sequence_id(0, 200);
   view.set_node_counts(
@@ -716,6 +720,27 @@ void assert_compact_node_layout_is_exact() {
   assert(widest.record_bytes == sizeof(navigamer::WorldNodeRecord));
 }
 
+void assert_all_beacon_begin_widths_are_exact() {
+  for (uint32_t maximum :
+       {uint32_t{0}, uint32_t{1}, uint32_t{255}, uint32_t{70000},
+        std::numeric_limits<uint32_t>::max()}) {
+    const std::array<uint32_t, 7> values = {
+        0, maximum, maximum / 2, maximum / 3,
+        maximum / 5, maximum / 7, maximum / 11};
+    navigamer::SearchGraphView view;
+    view.initialize_beacon_begins(values.size(), maximum);
+    assert(view.beacon_begins_valid(values.size()));
+    for (size_t idx = 0; idx < values.size(); ++idx) {
+      view.set_beacon_begin(
+          static_cast<navigamer::NodeId>(idx), values[idx]);
+    }
+    for (size_t idx = 0; idx < values.size(); ++idx) {
+      assert(view.beacon_begin(
+                 static_cast<navigamer::NodeId>(idx)) == values[idx]);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -732,6 +757,7 @@ int main() {
   assert_all_packed_child_widths_are_exact();
   assert_leaf_id_encodings_are_exact();
   assert_compact_node_layout_is_exact();
+  assert_all_beacon_begin_widths_are_exact();
   std::cout << "search graph view tests passed\n";
   return 0;
 }
