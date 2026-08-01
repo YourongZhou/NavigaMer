@@ -64,6 +64,7 @@ void assert_view_equivalent_to_original() {
                    static_cast<size_t>(link_count) * beacon_count <=
                view.leaf_beacon_dists.size());
       } else {
+        assert(beacon_count <= 10);
         if (view.child_ids_are_base_delta8(node_id)) {
           assert(record.child_begin() + sizeof(navigamer::NodeId) +
                      link_count <=

@@ -48,7 +48,9 @@ reference as raw bases in the memory-mapped index, so loading does not allocate
 or eagerly fault a full decoded reference into heap memory, and
 keeps long literal inputs in the manifest only as content fingerprints. It
 stores one child-center-to-beacon distance per MBB cell instead of separate
-lower and upper bounds. Each parent uses the exact minimum integer bit width
+lower and upper bounds. Non-finest parents use at most 10 deterministic
+beacons; reducing the sampling cap only relaxes pruning, so it cannot introduce
+false negatives. Each parent uses the exact minimum integer bit width
 required by its largest child MBB distance; nodes remain independently
 byte-addressable and no value is truncated. Search reconstructs the same
 interval from the child-layer radius; equivalently, a child survives exactly

@@ -353,8 +353,11 @@ every exact sequence-to-beacon edit distance fits in 8 bits. Format version 27
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
-at the exact minimum bit width required by each parent, with each node
-starting on a byte boundary for constant-time lookup. No distance is truncated.
+for at most 10 deterministic beacons per non-finest parent. Reducing the
+beacon cap only removes safe metric constraints and therefore cannot create a
+false negative. Values use the exact minimum bit width required by each parent,
+with each node starting on a byte boundary for constant-time lookup. No
+distance is truncated.
 The child-layer radius
 reconstructs the original lower and upper bounds during search. This is exactly
 equivalent to testing whether the two beacon distances differ by at most the
