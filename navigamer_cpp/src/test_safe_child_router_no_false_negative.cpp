@@ -155,7 +155,6 @@ int main() {
   for (uint32_t offset = 0; offset < view.child_count(parent); ++offset) {
     const auto child_id =
         view.child_id(parent, offset);
-    const auto& child = view.node_records[child_id];
     const auto child_layer_it = std::upper_bound(
         view.layer_end.begin(), view.layer_end.end(), child_id);
     assert(child_layer_it != view.layer_end.end());
@@ -164,7 +163,8 @@ int main() {
     const int tau =
         2 + builder.hierarchy_config().primary_radii.at(child_layer);
     const int dist = navigamer::compute_distance_bounded_with_mode(
-        queries[0].seq, view.sequences[child.center_sequence_id].seq, tau,
+        queries[0].seq,
+        view.sequences[view.center_sequence_id(child_id)].seq, tau,
         navigamer::DistanceMode::Myers);
     if (dist <= tau) {
       assert(candidate_set.count(std::to_string(child_id)) == 1);

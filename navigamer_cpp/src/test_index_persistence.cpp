@@ -71,6 +71,12 @@ void assert_loaded_search_matches_built() {
       built.search_graph_view().child_beacon_dists;
   const auto& loaded_mbb =
       loaded.builder.search_graph_view().child_beacon_dists;
+  assert(loaded.builder.search_graph_view().center_sequence_id_bits ==
+         built.search_graph_view().center_sequence_id_bits);
+  assert(std::equal(
+      built.search_graph_view().center_sequence_ids.begin(),
+      built.search_graph_view().center_sequence_ids.end(),
+      loaded.builder.search_graph_view().center_sequence_ids.begin()));
   assert(loaded_mbb.size() == built_mbb.size());
   assert(std::equal(
       built_mbb.begin(), built_mbb.end(), loaded_mbb.begin()));
@@ -92,6 +98,7 @@ void assert_loaded_search_matches_built() {
   };
   const auto& loaded_view = loaded.builder.search_graph_view();
   assert_mapped(loaded_view.node_records);
+  assert_mapped(loaded_view.center_sequence_ids);
   assert_mapped(loaded_view.node_count_overflows);
   assert_mapped(loaded_view.child_id_base_deltas8);
   assert_mapped(loaded_view.child_id_deltas16);
@@ -348,7 +355,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 30);
+  assert(loaded.manifest.format_version == 31);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

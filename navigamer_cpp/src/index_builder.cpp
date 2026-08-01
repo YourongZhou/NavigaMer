@@ -1890,6 +1890,20 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       view.sequences.size() != sequence_count_) {
     return false;
   }
+  uint32_t expected_center_bits = 0;
+  if (sequence_count_ != 0) {
+    expected_center_bits = 1;
+    for (size_t maximum = sequence_count_ - 1; maximum >>= 1;) {
+      ++expected_center_bits;
+    }
+  }
+  const uint64_t center_bit_count =
+      static_cast<uint64_t>(world_node_count_) * expected_center_bits;
+  if (view.center_sequence_id_bits != expected_center_bits ||
+      view.center_sequence_ids.size() !=
+          static_cast<size_t>((center_bit_count + 7) / 8)) {
+    return false;
+  }
   if (view.sequences.reference_backed) {
     const std::string_view reference =
         view.sequences.reference_view();
@@ -2040,7 +2054,7 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
           : view.layer_begin.back();
   for (NodeId node_id = 0; node_id < view.node_records.size(); ++node_id) {
     const auto& node = view.node_records[node_id];
-    if (node.center_sequence_id >= sequence_count_ ||
+    if (view.center_sequence_id(node_id) >= sequence_count_ ||
         (node.counts_overflow() &&
          node.inline_link_count_or_overflow_index() >=
              view.node_count_overflows.size())) {
@@ -2139,6 +2153,20 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       view.sequences.size() != sequence_count_ ||
       view.layer_begin.size() != static_cast<size_t>(num_primary_layers()) ||
       view.layer_end.size() != static_cast<size_t>(num_primary_layers())) {
+    return false;
+  }
+  uint32_t expected_center_bits = 0;
+  if (sequence_count_ != 0) {
+    expected_center_bits = 1;
+    for (size_t maximum = sequence_count_ - 1; maximum >>= 1;) {
+      ++expected_center_bits;
+    }
+  }
+  const uint64_t center_bit_count =
+      static_cast<uint64_t>(world_node_count_) * expected_center_bits;
+  if (view.center_sequence_id_bits != expected_center_bits ||
+      view.center_sequence_ids.size() !=
+          static_cast<size_t>((center_bit_count + 7) / 8)) {
     return false;
   }
   uint32_t expected_layer_begin = 0;
@@ -2274,7 +2302,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
     }
     const uint32_t link_count = view.link_count(node_id);
     const uint32_t beacon_count = view.beacon_count(node_id);
-    if (node.center_sequence_id >= sequence_count_) {
+    if (view.center_sequence_id(node_id) >= sequence_count_) {
       return false;
     }
     if (is_finest) {
@@ -4390,6 +4418,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   SearchGraphView view;
   view.sequences = std::move(search_graph_view_.sequences);
   view.node_records.assign(world_node_count_, WorldNodeRecord{});
+  view.initialize_center_sequence_ids(sequence_count_);
   view.layer_begin.assign(static_cast<size_t>(num_primary_layers()), 0);
   view.layer_end.assign(static_cast<size_t>(num_primary_layers()), 0);
   size_t total_child_base_deltas8_bytes = 0;
@@ -4573,7 +4602,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         throw std::runtime_error(
             "cannot build array index with invalid center sequence id");
       }
-      record.center_sequence_id = node.center_sequence_id;
+      view.set_center_sequence_id(node_id, node.center_sequence_id);
 
       uint32_t link_count = 0;
       if (!is_finest) {

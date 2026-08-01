@@ -74,13 +74,12 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
     const size_t layer = static_cast<size_t>(layer_idx);
     for (uint32_t parent_id = view.layer_begin[layer];
          parent_id < view.layer_end[layer]; ++parent_id) {
-      const auto& parent = view.node_records[parent_id];
       auto& children =
-          edges[view.sequences[parent.center_sequence_id].seq];
+          edges[view.sequences[view.center_sequence_id(parent_id)].seq];
       for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
-        const auto& child =
-            view.node_records[view.child_id(parent_id, offset)];
-        children.insert(view.sequences[child.center_sequence_id].seq);
+        const auto child_id = view.child_id(parent_id, offset);
+        children.insert(
+            view.sequences[view.center_sequence_id(child_id)].seq);
       }
     }
   }
@@ -94,8 +93,8 @@ LinkMap leaf_links(const navigamer::BioGeometryIndexBuilder& builder) {
       static_cast<size_t>(builder.finest_primary_layer_index());
   for (uint32_t world_id = view.layer_begin[layer];
        world_id < view.layer_end[layer]; ++world_id) {
-    const auto& world = view.node_records[world_id];
-    auto& leaves = links[view.sequences[world.center_sequence_id].seq];
+    auto& leaves =
+        links[view.sequences[view.center_sequence_id(world_id)].seq];
     for (uint32_t offset = 0; offset < view.leaf_count(world_id); ++offset) {
       leaves.insert(
           view.sequences[view.leaf_id(world_id, offset)].seq);
@@ -188,8 +187,7 @@ int main() {
 
   const auto& sliding_view = sliding_scan_builder.search_graph_view();
   assert(sliding_view.sequences[
-             sliding_view.node_records[sliding_view.layer_begin[0]]
-                 .center_sequence_id]
+             sliding_view.center_sequence_id(sliding_view.layer_begin[0])]
              .seq == sliding_sequences.front()->seq);
   assert(primary_edges(sliding_scan_builder) ==
          primary_edges(sliding_hybrid_builder));

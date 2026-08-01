@@ -72,13 +72,12 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
     const size_t layer = static_cast<size_t>(layer_idx);
     for (uint32_t parent_id = view.layer_begin[layer];
          parent_id < view.layer_end[layer]; ++parent_id) {
-      const auto& parent = view.node_records[parent_id];
       auto& children =
-          edges[view.sequences[parent.center_sequence_id].seq];
+          edges[view.sequences[view.center_sequence_id(parent_id)].seq];
       for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
-        const auto& child =
-            view.node_records[view.child_id(parent_id, offset)];
-        children.insert(view.sequences[child.center_sequence_id].seq);
+        const auto child_id = view.child_id(parent_id, offset);
+        children.insert(
+            view.sequences[view.center_sequence_id(child_id)].seq);
       }
     }
   }
@@ -94,15 +93,14 @@ OrderedLinkMap ordered_primary_edges(
     const size_t layer = static_cast<size_t>(layer_idx);
     for (uint32_t parent_id = view.layer_begin[layer];
          parent_id < view.layer_end[layer]; ++parent_id) {
-      const auto& parent = view.node_records[parent_id];
       std::string key =
           std::to_string(layer_idx) + ":" +
-          view.sequences[parent.center_sequence_id].seq;
+          view.sequences[view.center_sequence_id(parent_id)].seq;
       auto& children = edges[key];
       for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
-        const auto& child =
-            view.node_records[view.child_id(parent_id, offset)];
-        children.push_back(view.sequences[child.center_sequence_id].seq);
+        const auto child_id = view.child_id(parent_id, offset);
+        children.push_back(
+            view.sequences[view.center_sequence_id(child_id)].seq);
       }
     }
   }
@@ -116,8 +114,8 @@ LinkMap leaf_links(const navigamer::BioGeometryIndexBuilder& builder) {
       static_cast<size_t>(builder.finest_primary_layer_index());
   for (uint32_t world_id = view.layer_begin[layer];
        world_id < view.layer_end[layer]; ++world_id) {
-    const auto& world = view.node_records[world_id];
-    auto& leaves = links[view.sequences[world.center_sequence_id].seq];
+    auto& leaves =
+        links[view.sequences[view.center_sequence_id(world_id)].seq];
     for (uint32_t offset = 0; offset < view.leaf_count(world_id); ++offset) {
       leaves.insert(
           view.sequences[view.leaf_id(world_id, offset)].seq);
@@ -212,12 +210,12 @@ Phase3BuildResult build_and_collect_phase3(
     const size_t layer = static_cast<size_t>(layer_idx);
     for (uint32_t parent_id = view.layer_begin[layer];
          parent_id < view.layer_end[layer]; ++parent_id) {
-      const auto& parent = view.node_records[parent_id];
       const bool is_finest =
           layer_idx + 1 == builder.num_primary_layers();
       std::ostringstream row;
       row << layer_idx << ':'
-          << view.sequences[parent.center_sequence_id].seq << "|b=";
+          << view.sequences[view.center_sequence_id(parent_id)].seq
+          << "|b=";
       for (uint32_t offset = 0; offset < view.beacon_count(parent_id); ++offset) {
         row << view.sequences[
                    view.beacon_sequence_id(parent_id, offset)]
@@ -227,9 +225,9 @@ Phase3BuildResult build_and_collect_phase3(
       row << "|c=";
       if (!is_finest) {
         for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
-          const auto& child =
-              view.node_records[view.child_id(parent_id, offset)];
-          row << view.sequences[child.center_sequence_id].seq << ';';
+          const auto child_id = view.child_id(parent_id, offset);
+          row << view.sequences[view.center_sequence_id(child_id)].seq
+              << ';';
         }
       }
       row << "|m=";

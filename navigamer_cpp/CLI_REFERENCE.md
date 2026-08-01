@@ -233,7 +233,7 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 ### `build`
 
 Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
-provided, writes an array-format v30 binary index with a manifest signature,
+provided, writes an array-format v31 binary index with a manifest signature,
 build parameters, input fingerprints, sequence records, layer ranges,
 child/leaf/beacon ID arrays, MBB rows, and leaf-beacon distance rows. Older
 pointer-graph index formats are rejected and must be rebuilt.
@@ -291,7 +291,7 @@ assigned to exactly one part. Adjacent parts store only the reference overlap
 needed to materialize boundary windows, and every emitted coordinate remains
 relative to the original contig.
 
-Each part is an ordinary v30 `.navidx` file. A completed part is reused only
+Each part is an ordinary v31 `.navidx` file. A completed part is reused only
 after its input fingerprint, construction signature, reference slice, contig,
 and source coordinates validate. Damaged or incompatible parts are rebuilt,
 and newly completed parts are installed atomically. The final v3 `.navshard`

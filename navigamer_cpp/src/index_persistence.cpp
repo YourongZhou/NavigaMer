@@ -318,7 +318,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 30) {
+  if (manifest.format_version != 31) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -868,6 +868,10 @@ SequenceStore read_sequence_store(
 void write_search_graph_view(std::ostream& out,
                              const SearchGraphView& view) {
   write_sequence_store(out, view.sequences);
+  write_pod<uint8_t>(
+      out, view.center_sequence_id_bits);
+  write_final_array(
+      out, view.center_sequence_ids, "center_sequence_ids");
   write_final_array(out, view.node_records, "node_records");
   write_final_array(
       out, view.node_count_overflows, "node_count_overflows");
@@ -900,6 +904,11 @@ SearchGraphView read_search_graph_view(
   SearchGraphView view;
   view.sequences =
       read_sequence_store(in, mapping, validation);
+  view.center_sequence_id_bits =
+      read_pod<uint8_t>(in, "center_sequence_id_bits");
+  view.center_sequence_ids =
+      read_final_array<uint8_t>(
+          in, mapping, "center_sequence_ids");
   view.node_records = read_final_array<WorldNodeRecord>(
       in, mapping, "node_records");
   view.node_count_overflows =
@@ -943,6 +952,22 @@ bool validate_structural_layout(
       builder.hierarchy_config().primary_radii.size();
   if (view.layer_begin.size() != layer_count ||
       view.layer_end.size() != layer_count) {
+    return false;
+  }
+  uint32_t expected_center_bits = 0;
+  if (!view.sequences.empty()) {
+    expected_center_bits = 1;
+    for (size_t maximum = view.sequences.size() - 1;
+         maximum >>= 1;) {
+      ++expected_center_bits;
+    }
+  }
+  const uint64_t center_bit_count =
+      static_cast<uint64_t>(view.node_records.size()) *
+      expected_center_bits;
+  if (view.center_sequence_id_bits != expected_center_bits ||
+      view.center_sequence_ids.size() !=
+          static_cast<size_t>((center_bit_count + 7) / 8)) {
     return false;
   }
   uint32_t expected_begin = 0;
@@ -1029,7 +1054,7 @@ IndexBuildManifest read_index_manifest(const std::string& path) {
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 30) {
+  if (manifest.format_version != 31) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -1073,7 +1098,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 30;
+  stored.format_version = 31;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
@@ -1097,7 +1122,7 @@ LoadedIndex load_index(
   if (!in) throw std::runtime_error("unable to open index file: " + path);
   read_magic(in);
   IndexBuildManifest manifest = read_manifest(in);
-  if (manifest.format_version != 30) {
+  if (manifest.format_version != 31) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }

@@ -770,9 +770,9 @@ std::vector<std::string> unique_anchor_sequences(
 void append_node_anchors(const SearchGraphView& view, NodeId node_id,
                          std::vector<std::string>& anchors) {
   if (node_id >= view.node_records.size()) return;
-  const auto& node = view.node_records[node_id];
-  if (node.center_sequence_id < view.sequences.size()) {
-    anchors.emplace_back(view.sequences.sequence(node.center_sequence_id));
+  const LeafId center_id = view.center_sequence_id(node_id);
+  if (center_id < view.sequences.size()) {
+    anchors.emplace_back(view.sequences.sequence(center_id));
   }
   for (uint32_t offset = 0; offset < view.beacon_count(node_id); ++offset) {
     const LeafId beacon_id =

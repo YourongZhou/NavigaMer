@@ -34,7 +34,6 @@ std::vector<std::set<std::string>> edge_signature(
   const auto& view = builder.search_graph_view();
   for (navigamer::NodeId node_id = 0;
        node_id < view.node_records.size(); ++node_id) {
-    const auto& node = view.node_records[node_id];
     std::set<std::string> row;
     if (node_id >= view.layer_begin.back()) {
       for (uint32_t offset = 0; offset < view.leaf_count(node_id); ++offset) {
@@ -45,9 +44,8 @@ std::vector<std::set<std::string>> edge_signature(
       }
     } else {
       for (uint32_t offset = 0; offset < view.child_count(node_id); ++offset) {
-        const auto& child =
-            view.node_records[view.child_id(node_id, offset)];
-        row.insert(view.sequences[child.center_sequence_id].id);
+        const auto child_id = view.child_id(node_id, offset);
+        row.insert(view.sequences[view.center_sequence_id(child_id)].id);
       }
     }
     out.push_back(std::move(row));

@@ -583,8 +583,6 @@ struct WorldNodeRecord {
   static constexpr uint32_t PACKED_CHILD_BEGIN_MASK =
       (uint32_t{1} << PACKED_CHILD_BEGIN_BITS) - 1;
 
-  LeafId center_sequence_id = INVALID_LEAF_ID;
-
   // Non-finest nodes address byte base-deltas, per-parent bit-packed deltas,
   // 16-bit forward deltas, or absolute child IDs; finest nodes address
   // 8/16-bit leaf deltas or leaf IDs.
@@ -714,8 +712,8 @@ struct WorldNodeRecord {
                     (static_cast<uint32_t>(storage) << STORAGE_SHIFT);
   }
 };
-static_assert(sizeof(WorldNodeRecord) == 16,
-              "finalized world node must remain a compact 16 bytes");
+static_assert(sizeof(WorldNodeRecord) == 12,
+              "finalized world node must remain a compact 12 bytes");
 
 template <typename T>
 class BuildArrayView {
@@ -886,6 +884,11 @@ struct SearchGraphView {
   // Canonical array representation. NodeId and LeafId are positions in
   // node_records and sequences respectively.
   FinalArray<WorldNodeRecord> node_records;
+  // Fixed-width packed LeafIds use max(1, ceil(log2(sequence_count))) bits.
+  // Keeping centers separate shrinks every hot node record from 16 to 12
+  // bytes without changing center lookup complexity.
+  FinalArray<uint8_t> center_sequence_ids;
+  uint8_t center_sequence_id_bits = 0;
   FinalArray<NodeCountOverflowRecord> node_count_overflows;
   SequenceStore sequences;
   std::vector<uint32_t> layer_begin;
@@ -919,6 +922,34 @@ struct SearchGraphView {
 
   FinalArray<uint8_t> leaf_beacon_dists;
 
+  void initialize_center_sequence_ids(size_t sequence_count) {
+    center_sequence_id_bits = 0;
+    if (sequence_count != 0) {
+      center_sequence_id_bits = 1;
+      for (size_t maximum = sequence_count - 1; maximum >>= 1;) {
+        ++center_sequence_id_bits;
+      }
+    }
+    const uint64_t bit_count =
+        static_cast<uint64_t>(node_records.size()) *
+        center_sequence_id_bits;
+    center_sequence_ids.assign(
+        static_cast<size_t>((bit_count + 7) / 8), uint8_t{0});
+  }
+
+  void set_center_sequence_id(NodeId node_id, LeafId center_id) {
+    const uint32_t bits = center_sequence_id_bits;
+    const size_t bit_offset = static_cast<size_t>(node_id) * bits;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    const size_t byte_count = (shift + bits + 7) / 8;
+    uint64_t word = static_cast<uint64_t>(center_id) << shift;
+    for (size_t byte = 0; byte < byte_count; ++byte) {
+      center_sequence_ids[byte_offset + byte] |=
+          static_cast<uint8_t>(word >> (byte * 8));
+    }
+  }
+
   uint32_t link_count(NodeId node_id) const {
     const auto& node = node_records[node_id];
     if (!node.counts_overflow()) {
@@ -926,6 +957,32 @@ struct SearchGraphView {
     }
     return node_count_overflows[
         node.inline_link_count_or_overflow_index()].link_count;
+  }
+
+  LeafId center_sequence_id(NodeId node_id) const {
+    const uint32_t bits = center_sequence_id_bits;
+    const size_t bit_offset = static_cast<size_t>(node_id) * bits;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    if (bits <= 25 && byte_offset + sizeof(uint32_t) <=
+                          center_sequence_ids.size()) {
+      uint32_t word = 0;
+      std::memcpy(&word, center_sequence_ids.data() + byte_offset,
+                  sizeof(word));
+      const uint32_t mask = (uint32_t{1} << bits) - 1;
+      return static_cast<LeafId>((word >> shift) & mask);
+    }
+    const size_t byte_count = (shift + bits + 7) / 8;
+    uint64_t word = 0;
+    for (size_t byte = 0; byte < byte_count; ++byte) {
+      word |= static_cast<uint64_t>(
+                  center_sequence_ids[byte_offset + byte])
+              << (byte * 8);
+    }
+    const uint64_t mask =
+        bits == 32 ? std::numeric_limits<uint32_t>::max()
+                   : (uint64_t{1} << bits) - 1;
+    return static_cast<LeafId>((word >> shift) & mask);
   }
   uint32_t child_count(NodeId node_id) const {
     return link_count(node_id);
@@ -1307,17 +1364,18 @@ struct SearchGraphView {
             ? -static_cast<int64_t>((zigzag >> 1) + 1)
             : static_cast<int64_t>(zigzag >> 1);
     return static_cast<LeafId>(
-        static_cast<int64_t>(node.center_sequence_id) + delta);
+        static_cast<int64_t>(center_sequence_id(node_id)) + delta);
   }
 
   LeafId leaf_id(NodeId node_id, uint32_t leaf_offset) const {
     const auto& node = node_records[node_id];
+    const LeafId center = center_sequence_id(node_id);
     switch (node.link_storage()) {
       case WorldNodeRecord::LinkStorage::Delta8:
-        return node.center_sequence_id +
+        return center +
                leaf_id_deltas8[node.leaf_begin() + leaf_offset];
       case WorldNodeRecord::LinkStorage::Delta16:
-        return node.center_sequence_id +
+        return center +
                leaf_id_deltas16[node.leaf_begin() + leaf_offset];
       case WorldNodeRecord::LinkStorage::Absolute32:
         return leaf_ids[node.leaf_begin() + leaf_offset];
@@ -1330,6 +1388,7 @@ struct SearchGraphView {
   LeafId beacon_sequence_id(NodeId node_id,
                             uint32_t beacon_offset) const {
     const auto& node = node_records[node_id];
+    const LeafId center = center_sequence_id(node_id);
     const uint32_t beacon_begin =
         node.beacon_storage() ==
                 WorldNodeRecord::BeaconStorage::ImplicitCenter
@@ -1338,16 +1397,16 @@ struct SearchGraphView {
     switch (node.beacon_storage()) {
       case WorldNodeRecord::BeaconStorage::Delta8:
         return static_cast<LeafId>(
-            static_cast<int64_t>(node.center_sequence_id) +
+            static_cast<int64_t>(center) +
             beacon_deltas8[beacon_begin + beacon_offset]);
       case WorldNodeRecord::BeaconStorage::Delta16:
         return static_cast<LeafId>(
-            static_cast<int64_t>(node.center_sequence_id) +
+            static_cast<int64_t>(center) +
             beacon_deltas16[beacon_begin + beacon_offset]);
       case WorldNodeRecord::BeaconStorage::Absolute32:
         return beacon_ids32[beacon_begin + beacon_offset];
       case WorldNodeRecord::BeaconStorage::ImplicitCenter:
-        return node.center_sequence_id;
+        return center;
     }
     return INVALID_LEAF_ID;
   }

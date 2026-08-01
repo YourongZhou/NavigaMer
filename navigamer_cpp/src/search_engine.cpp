@@ -761,11 +761,11 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
           ? static_cast<NodeId>(view.node_records.size())
           : view.layer_begin.back();
   for (NodeId node_id = 0; node_id < view.node_records.size(); ++node_id) {
-    const auto& node = view.node_records[node_id];
-    if (node.center_sequence_id >= view.sequences.size()) continue;
+    const LeafId center_id = view.center_sequence_id(node_id);
+    if (center_id >= view.sequences.size()) continue;
     const std::string key = node_key(node_id);
     const std::string_view center =
-        view.sequences.sequence(node.center_sequence_id);
+        view.sequences.sequence(center_id);
     for (int q : q_values) {
       auto& signatures = world_qgram_signatures_by_q_[q];
       if (!signatures.count(key)) {
@@ -840,13 +840,14 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
             usable = false;
             break;
           }
-          const auto& child = view.node_records[child_id];
-          if (child.center_sequence_id >= view.sequences.size()) {
+          const LeafId child_center_id =
+              view.center_sequence_id(child_id);
+          if (child_center_id >= view.sequences.size()) {
             usable = false;
             break;
           }
           const std::string_view sequence =
-              view.sequences.sequence(child.center_sequence_id);
+              view.sequences.sequence(child_center_id);
           if (uniform_sequences) {
             uniform_sequence_data.push_back(sequence.data());
           } else {
@@ -926,15 +927,16 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
         usable = false;
         break;
       }
-      const auto& child = view.node_records[child_id];
-      if (child.center_sequence_id >= view.sequences.size()) {
+      const LeafId child_center_id =
+          view.center_sequence_id(child_id);
+      if (child_center_id >= view.sequences.size()) {
         usable = false;
         break;
       }
       parent_index.child_item_ids_by_node_id.emplace(
           node_key(child_id), child_idx);
       const std::string_view sequence =
-          view.sequences.sequence(child.center_sequence_id);
+          view.sequences.sequence(child_center_id);
       if (uniform_sequences) {
         uniform_sequence_data.push_back(sequence.data());
       } else {
@@ -1083,13 +1085,14 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
               WorldNodeRecord::BeaconStorage::ImplicitCenter
           ? 0
           : view.beacon_begins[node_id];
+  const LeafId center_id = view.center_sequence_id(node_id);
   switch (node.beacon_storage()) {
     case WorldNodeRecord::BeaconStorage::Delta8: {
       const int8_t* deltas =
           view.beacon_deltas8.data() + beacon_begin;
       for (uint32_t offset = 0; offset < beacon_count; ++offset) {
         measure_beacon(static_cast<LeafId>(
-            static_cast<int64_t>(node.center_sequence_id) +
+            static_cast<int64_t>(center_id) +
             deltas[offset]));
       }
       break;
@@ -1099,7 +1102,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
           view.beacon_deltas16.data() + beacon_begin;
       for (uint32_t offset = 0; offset < beacon_count; ++offset) {
         measure_beacon(static_cast<LeafId>(
-            static_cast<int64_t>(node.center_sequence_id) +
+            static_cast<int64_t>(center_id) +
             deltas[offset]));
       }
       break;
@@ -1113,7 +1116,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
       break;
     }
     case WorldNodeRecord::BeaconStorage::ImplicitCenter:
-      measure_beacon(node.center_sequence_id);
+      measure_beacon(center_id);
       break;
   }
   if (config_.path_reuse_enabled) {
@@ -1599,8 +1602,9 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
         stats.safe_child_router_fallback_count++;
         return {};
       }
-      const auto& child = view.node_records[child_id];
-      if (child.center_sequence_id >= view.sequences.size()) {
+      const LeafId child_center_id =
+          view.center_sequence_id(child_id);
+      if (child_center_id >= view.sequences.size()) {
         stats.children_actually_processed += child_count;
         stats.safe_child_router_fallback_count++;
         return {};
@@ -1609,8 +1613,8 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
       stats.safe_child_router_exact_verify_count++;
       const int dist = compute_indexed_query_distance(
           query_seq.seq,
-          view.sequences.sequence(child.center_sequence_id),
-          child.center_sequence_id, child_tau,
+          view.sequences.sequence(child_center_id),
+          child_center_id, child_tau,
           config_.distance_mode, false);
       if (dist <= child_tau && !in_candidate[child_idx]) {
         throw std::runtime_error(
@@ -2819,16 +2823,18 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     case WorldNodeRecord::LinkStorage::Delta8: {
       const int8_t* deltas =
           view.leaf_id_deltas8.data() + leaf_begin;
+      const LeafId center_id = view.center_sequence_id(node_id);
       verify_survivors([&](uint32_t offset) {
-        return node.center_sequence_id + deltas[offset];
+        return center_id + deltas[offset];
       });
       break;
     }
     case WorldNodeRecord::LinkStorage::Delta16: {
       const int16_t* deltas =
           view.leaf_id_deltas16.data() + leaf_begin;
+      const LeafId center_id = view.center_sequence_id(node_id);
       verify_survivors([&](uint32_t offset) {
-        return node.center_sequence_id + deltas[offset];
+        return center_id + deltas[offset];
       });
       break;
     }
@@ -3579,10 +3585,10 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
         if (node_id >= view.node_records.size()) {
           throw std::out_of_range("view node id is outside search graph view");
         }
-        const auto& node = view.node_records[node_id];
         const std::string key = node_key(node_id);
         if (key != cached_it->second) continue;
-        if (node.center_sequence_id >= view.sequences.size()) {
+        const LeafId center_id = view.center_sequence_id(node_id);
+        if (center_id >= view.sequences.size()) {
           throw std::runtime_error("array node center id is invalid");
         }
         stats.visited_check_count++;
@@ -3596,8 +3602,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
                                        &stats.center_distance_ms);
         bool cache_hit = false;
         const int dist = compute_center_distance_for_search(
-            query_seq, key, node.center_sequence_id,
-            view.sequences.sequence(node.center_sequence_id), tau,
+            query_seq, key, center_id,
+            view.sequences.sequence(center_id), tau,
             after_mbb_filter, &cache_hit);
         if (!cache_hit) {
           stats.center_exact_distance_call_count++;
@@ -3643,8 +3649,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
         prefetch_read(&view.node_records[next_id]);
       }
     }
-    const auto& node = view.node_records[node_id];
-    if (node.center_sequence_id >= view.sequences.size()) {
+    const LeafId center_id = view.center_sequence_id(node_id);
+    if (center_id >= view.sequences.size()) {
       throw std::runtime_error("array node center id is invalid");
     }
     std::string key;
@@ -3691,8 +3697,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
                                    &stats.center_distance_ms);
     bool cache_hit = false;
     int dist = compute_center_distance_for_search(
-        query_seq, key, node.center_sequence_id,
-        view.sequences.sequence(node.center_sequence_id), tau,
+        query_seq, key, center_id,
+        view.sequences.sequence(center_id), tau,
         after_mbb_filter, &cache_hit);
     if (!cache_hit) {
       stats.center_exact_distance_call_count++;
@@ -4050,13 +4056,13 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
       if (node_id >= view.node_records.size()) {
         throw std::out_of_range("greedy node id is outside array index");
       }
-      const auto& node = view.node_records[node_id];
-      if (node.center_sequence_id >= view.sequences.size()) {
+      const LeafId center_id = view.center_sequence_id(node_id);
+      if (center_id >= view.sequences.size()) {
         throw std::runtime_error("greedy node center id is invalid");
       }
       int dist = compute_distance(
           query_seq.seq,
-          view.sequences.sequence(node.center_sequence_id));
+          view.sequences.sequence(center_id));
       stats.dist_calc_count++;
       stats.world_access_count++;
       if (layer_id >= 0 && static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
@@ -4135,13 +4141,13 @@ void BioGeometrySearchEngine::traverse_exhaustive_view(
   }
   if (visited_nodes[node_id]) return;
   visited_nodes[node_id] = 1;
-  const auto& node = view.node_records[node_id];
-  if (node.center_sequence_id >= view.sequences.size()) {
+  const LeafId center_id = view.center_sequence_id(node_id);
+  if (center_id >= view.sequences.size()) {
     throw std::runtime_error("exhaustive node center id is invalid");
   }
   const int dist = compute_distance(
       query_seq.seq,
-      view.sequences.sequence(node.center_sequence_id));
+      view.sequences.sequence(center_id));
   stats.dist_calc_count++;
   stats.world_access_count++;
   if (current_layer >= 0 &&
