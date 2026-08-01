@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -521,126 +520,216 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
   const auto populate = [&](auto& postings, auto& unindexable_items) {
     using CompactIndex =
         typename std::decay_t<decltype(unindexable_items)>::value_type;
-    std::vector<uint64_t> item_codes;
-    std::vector<uint64_t> rolling_codes;
-    std::unordered_map<uint64_t, uint32_t> rolling_counts;
-    std::string_view previous_sequence;
-    bool has_previous_sequence = false;
-    size_t rolling_head = 0;
-    bool rolling_active = false;
-    size_t consecutive_one_base_shifts = 0;
-    const uint64_t mask =
-        seed_len >= 32
-            ? std::numeric_limits<uint64_t>::max()
-            : (uint64_t{1} << (2 * seed_len)) - 1;
+    const auto generate = [&](size_t item_limit,
+                              bool collect_unindexable,
+                              auto&& emit) {
+      std::vector<uint64_t> item_codes;
+      std::vector<uint64_t> rolling_codes;
+      std::unordered_map<uint64_t, uint32_t> rolling_counts;
+      std::string_view previous_sequence;
+      bool has_previous_sequence = false;
+      size_t rolling_head = 0;
+      bool rolling_active = false;
+      size_t consecutive_one_base_shifts = 0;
+      const uint64_t mask =
+          seed_len >= 32
+              ? std::numeric_limits<uint64_t>::max()
+              : (uint64_t{1} << (2 * seed_len)) - 1;
 
-    const auto initialize_rolling = [&](std::string_view sequence) {
-      const size_t code_count =
-          sequence.size() - static_cast<size_t>(seed_len) + 1;
-      rolling_codes.resize(code_count);
-      rolling_counts.clear();
-      rolling_counts.reserve(code_count);
-      uint64_t code = 0;
-      for (int offset = 0; offset < seed_len; ++offset) {
-        code = (code << 2) |
-               dna_base_bits(sequence[static_cast<size_t>(offset)]);
-      }
-      rolling_codes[0] = code;
-      rolling_counts[code]++;
-      for (size_t pos = 1; pos < code_count; ++pos) {
-        const size_t next = pos + static_cast<size_t>(seed_len) - 1;
-        code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
-        rolling_codes[pos] = code;
-        rolling_counts[code]++;
-      }
-      rolling_head = 0;
-      rolling_active = true;
-    };
-
-    for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
-      const auto sequence = item_sequence(item_idx);
-      const CompactIndex compact_idx =
-          static_cast<CompactIndex>(item_idx);
-      if (sequence.size() < static_cast<size_t>(seed_len)) {
-        has_previous_sequence = false;
-        rolling_active = false;
-        consecutive_one_base_shifts = 0;
-        continue;
-      }
-      if (seed_len > 32 || !is_acgt_sequence(sequence)) {
-        unindexable_items.push_back(compact_idx);
-        has_previous_sequence = false;
-        rolling_active = false;
-        consecutive_one_base_shifts = 0;
-        continue;
-      }
-      const bool shifted_one_base =
-          enable_shifted_window_postings_ && has_previous_sequence &&
-          previous_sequence.size() == sequence.size() &&
-          std::equal(previous_sequence.begin() + 1,
-                     previous_sequence.end(), sequence.begin());
-      consecutive_one_base_shifts =
-          shifted_one_base ? consecutive_one_base_shifts + 1 : 0;
-      if (shifted_one_base &&
-          (rolling_active ||
-           consecutive_one_base_shifts >=
-               kMinShiftRunForRollingPostings)) {
-        if (!rolling_active) initialize_rolling(previous_sequence);
-        const size_t code_count = rolling_codes.size();
-        const uint64_t outgoing = rolling_codes[rolling_head];
-        auto outgoing_count = rolling_counts.find(outgoing);
-        if (--outgoing_count->second == 0) {
-          rolling_counts.erase(outgoing_count);
+      const auto initialize_rolling = [&](std::string_view sequence) {
+        const size_t code_count =
+            sequence.size() - static_cast<size_t>(seed_len) + 1;
+        rolling_codes.resize(code_count);
+        rolling_counts.clear();
+        rolling_counts.reserve(code_count);
+        uint64_t code = 0;
+        for (int offset = 0; offset < seed_len; ++offset) {
+          code = (code << 2) |
+                 dna_base_bits(sequence[static_cast<size_t>(offset)]);
         }
-        const size_t previous_tail =
-            (rolling_head + code_count - 1) % code_count;
-        const uint64_t incoming =
-            ((rolling_codes[previous_tail] << 2) |
-             dna_base_bits(sequence.back())) &
-            mask;
-        rolling_head = (rolling_head + 1) % code_count;
-        const size_t new_tail =
-            (rolling_head + code_count - 1) % code_count;
-        rolling_codes[new_tail] = incoming;
-        rolling_counts[incoming]++;
-        for (const auto& entry : rolling_counts) {
-          postings[entry.first].push_back(compact_idx);
+        rolling_codes[0] = code;
+        rolling_counts[code]++;
+        for (size_t pos = 1; pos < code_count; ++pos) {
+          const size_t next =
+              pos + static_cast<size_t>(seed_len) - 1;
+          code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
+          rolling_codes[pos] = code;
+          rolling_counts[code]++;
+        }
+        rolling_head = 0;
+        rolling_active = true;
+      };
+
+      for (size_t item_idx = 0; item_idx < item_limit; ++item_idx) {
+        const auto sequence = item_sequence(item_idx);
+        const CompactIndex compact_idx =
+            static_cast<CompactIndex>(item_idx);
+        if (sequence.size() < static_cast<size_t>(seed_len)) {
+          has_previous_sequence = false;
+          rolling_active = false;
+          consecutive_one_base_shifts = 0;
+          continue;
+        }
+        if (seed_len > 32 || !is_acgt_sequence(sequence)) {
+          if (collect_unindexable) {
+            unindexable_items.push_back(compact_idx);
+          }
+          has_previous_sequence = false;
+          rolling_active = false;
+          consecutive_one_base_shifts = 0;
+          continue;
+        }
+        const bool shifted_one_base =
+            enable_shifted_window_postings_ && has_previous_sequence &&
+            previous_sequence.size() == sequence.size() &&
+            std::equal(previous_sequence.begin() + 1,
+                       previous_sequence.end(), sequence.begin());
+        consecutive_one_base_shifts =
+            shifted_one_base ? consecutive_one_base_shifts + 1 : 0;
+        if (shifted_one_base &&
+            (rolling_active ||
+             consecutive_one_base_shifts >=
+                 kMinShiftRunForRollingPostings)) {
+          if (!rolling_active) initialize_rolling(previous_sequence);
+          const size_t code_count = rolling_codes.size();
+          const uint64_t outgoing = rolling_codes[rolling_head];
+          auto outgoing_count = rolling_counts.find(outgoing);
+          if (--outgoing_count->second == 0) {
+            rolling_counts.erase(outgoing_count);
+          }
+          const size_t previous_tail =
+              (rolling_head + code_count - 1) % code_count;
+          const uint64_t incoming =
+              ((rolling_codes[previous_tail] << 2) |
+               dna_base_bits(sequence.back())) &
+              mask;
+          rolling_head = (rolling_head + 1) % code_count;
+          const size_t new_tail =
+              (rolling_head + code_count - 1) % code_count;
+          rolling_codes[new_tail] = incoming;
+          rolling_counts[incoming]++;
+          for (const auto& entry : rolling_counts) {
+            emit(entry.first, compact_idx);
+          }
+          previous_sequence = sequence;
+          has_previous_sequence = true;
+          continue;
+        }
+
+        item_codes.clear();
+        item_codes.reserve(
+            sequence.size() - static_cast<size_t>(seed_len) + 1);
+        const size_t last =
+            sequence.size() - static_cast<size_t>(seed_len);
+        uint64_t code = 0;
+        for (int offset = 0; offset < seed_len; ++offset) {
+          code = (code << 2) |
+                 dna_base_bits(sequence[static_cast<size_t>(offset)]);
+        }
+        item_codes.push_back(code);
+        for (size_t pos = 1; pos <= last; ++pos) {
+          const size_t next =
+              pos + static_cast<size_t>(seed_len) - 1;
+          code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
+          item_codes.push_back(code);
+        }
+        std::sort(item_codes.begin(), item_codes.end());
+        item_codes.erase(
+            std::unique(item_codes.begin(), item_codes.end()),
+            item_codes.end());
+        for (uint64_t item_code : item_codes) {
+          emit(item_code, compact_idx);
         }
         previous_sequence = sequence;
         has_previous_sequence = true;
-        continue;
+        rolling_active = false;
       }
+    };
 
-      item_codes.clear();
-      item_codes.reserve(
-          sequence.size() - static_cast<size_t>(seed_len) + 1);
-      const size_t last = sequence.size() - static_cast<size_t>(seed_len);
-      uint64_t code = 0;
-      for (int offset = 0; offset < seed_len; ++offset) {
-        code = (code << 2) |
-               dna_base_bits(sequence[static_cast<size_t>(offset)]);
+    const size_t sample_item_count = std::min<size_t>(item_count(), 256);
+    const size_t sample_prefix_item_count = sample_item_count / 2;
+    std::vector<uint64_t> sample_codes;
+    std::vector<uint64_t> sample_prefix_codes;
+    long double sample_prefix_possible_postings = 0.0L;
+    long double sample_possible_postings = 0.0L;
+    long double total_possible_postings = 0.0L;
+    for (size_t item_idx = 0; item_idx < item_count(); ++item_idx) {
+      const size_t length = item_sequence(item_idx).size();
+      if (length < static_cast<size_t>(seed_len)) continue;
+      const size_t possible =
+          length - static_cast<size_t>(seed_len) + 1;
+      total_possible_postings += static_cast<long double>(possible);
+      if (item_idx < sample_item_count) {
+        sample_possible_postings += static_cast<long double>(possible);
+        if (item_idx < sample_prefix_item_count) {
+          sample_prefix_possible_postings +=
+              static_cast<long double>(possible);
+        }
       }
-      item_codes.push_back(code);
-      for (size_t pos = 1; pos <= last; ++pos) {
-        const size_t next = pos + static_cast<size_t>(seed_len) - 1;
-        code = ((code << 2) | dna_base_bits(sequence[next])) & mask;
-        item_codes.push_back(code);
-      }
-      std::sort(item_codes.begin(), item_codes.end());
-      item_codes.erase(std::unique(item_codes.begin(), item_codes.end()),
-                       item_codes.end());
-      for (uint64_t item_code : item_codes) {
-        postings[item_code].push_back(compact_idx);
-      }
-      previous_sequence = sequence;
-      has_previous_sequence = true;
-      rolling_active = false;
     }
+    if (sample_possible_postings != 0.0L) {
+      generate(sample_item_count, false,
+               [&](uint64_t code, CompactIndex item_idx) {
+                 sample_codes.push_back(code);
+                 if (item_idx < sample_prefix_item_count) {
+                   sample_prefix_codes.push_back(code);
+                 }
+               });
+      std::sort(sample_codes.begin(), sample_codes.end());
+      sample_codes.erase(
+          std::unique(sample_codes.begin(), sample_codes.end()),
+          sample_codes.end());
+      std::sort(sample_prefix_codes.begin(), sample_prefix_codes.end());
+      sample_prefix_codes.erase(
+          std::unique(sample_prefix_codes.begin(),
+                      sample_prefix_codes.end()),
+          sample_prefix_codes.end());
+      const long double code_space =
+          seed_len >= 32
+              ? static_cast<long double>(
+                    std::numeric_limits<uint64_t>::max())
+              : static_cast<long double>(
+                    uint64_t{1} << (2 * seed_len));
+      const long double sample_tail_possible_postings =
+          sample_possible_postings - sample_prefix_possible_postings;
+      const long double remaining_possible_postings =
+          total_possible_postings - sample_possible_postings;
+      const long double sampled_new_code_count =
+          sample_codes.size() - sample_prefix_codes.size();
+      const long double extrapolated_code_count =
+          sample_tail_possible_postings == 0.0L
+              ? static_cast<long double>(sample_codes.size())
+              : static_cast<long double>(sample_codes.size()) +
+                    sampled_new_code_count *
+                        remaining_possible_postings /
+                        sample_tail_possible_postings;
+      const long double estimate = std::min(
+          {total_possible_postings, code_space,
+           extrapolated_code_count,
+           static_cast<long double>(
+               std::numeric_limits<size_t>::max())});
+      postings.reserve_unique_codes(
+          std::max(sample_codes.size(),
+                   static_cast<size_t>(std::ceil(estimate))));
+      std::vector<uint64_t>().swap(sample_codes);
+      std::vector<uint64_t>().swap(sample_prefix_codes);
+    }
+
+    generate(item_count(), true, [&](uint64_t code, CompactIndex) {
+      postings.count(code);
+    });
+    postings.finish_counting(
+        item_count() == 0
+            ? 0
+            : static_cast<uint32_t>(item_count() - 1));
+    generate(item_count(), false,
+             [&](uint64_t code, CompactIndex compact_idx) {
+      postings.append(code, compact_idx);
+    });
   };
 
   if (seed_index_uses_16bit_) {
     PostingLists16 postings;
-    postings.reserve(item_count());
     std::vector<uint16_t> unindexable_items;
     populate(postings, unindexable_items);
     postings16_by_seed_len_.emplace(seed_len, std::move(postings));
@@ -648,7 +737,6 @@ void ExactRangeJoinIndex::prepare_postings_for_seed_len(int seed_len) {
         seed_len, std::move(unindexable_items));
   } else {
     PostingLists postings;
-    postings.reserve(item_count());
     std::vector<uint32_t> unindexable_items;
     populate(postings, unindexable_items);
     postings_by_seed_len_.emplace(seed_len, std::move(postings));
@@ -1025,24 +1113,24 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
         }
       }
     } else if (postings16_ptr) {
-      PostingLists16::const_iterator posting;
+      PostingLists16::Range posting;
       {
         ScopedTimer timer(&result.range_posting_lookup_ms);
         posting = postings16_ptr->find(seed);
       }
-      if (posting != postings16_ptr->end()) {
+      if (posting) {
         ScopedTimer timer(&result.range_seed_union_ms);
-        if (!consume_indices(posting->second)) return result;
+        if (!consume_indices(posting)) return result;
       }
     } else {
-      PostingLists::const_iterator posting;
+      PostingLists::Range posting;
       {
         ScopedTimer timer(&result.range_posting_lookup_ms);
         posting = postings_ptr->find(seed);
       }
-      if (posting != postings_ptr->end()) {
+      if (posting) {
         ScopedTimer timer(&result.range_seed_union_ms);
-        if (!consume_indices(posting->second)) return result;
+        if (!consume_indices(posting)) return result;
       }
     }
   }

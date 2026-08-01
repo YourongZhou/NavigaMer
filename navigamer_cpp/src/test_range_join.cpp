@@ -314,6 +314,32 @@ void test_positional_postings_are_recall_safe() {
           std::vector<navigamer::RangeJoinItemId>{7}));
 }
 
+void test_compact_postings_support_extreme_codes_and_copy() {
+  std::vector<navigamer::RangeJoinItem> items = {
+      {0, std::string(32, 'A')},
+      {1, std::string(32, 'T')},
+      {2, "ACGTACGTACGTACGTACGTACGTACGTACGT"},
+  };
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 32;
+  config.max_seed_len = 32;
+  navigamer::ExactRangeJoinIndex index(config, true);
+  index.build(items);
+  index.prepare_seed_lengths({32});
+  navigamer::ExactRangeJoinIndex copied = index;
+
+  for (const auto& item : items) {
+    const auto original = index.query(item.sequence, 0);
+    const auto restored = copied.query(item.sequence, 0);
+    assert(original.candidate_item_ids ==
+           (std::vector<navigamer::RangeJoinItemId>{
+               static_cast<navigamer::RangeJoinItemId>(item.item_id)}));
+    assert(restored.candidate_item_ids == original.candidate_item_ids);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -329,6 +355,7 @@ int main() {
   test_external_views_preserve_sparse_item_ids();
   test_shifted_window_postings_match_standard_index();
   test_positional_postings_are_recall_safe();
+  test_compact_postings_support_extreme_codes_and_copy();
 
   std::mt19937 gen(42);
   std::vector<RangeJoinItem> items;

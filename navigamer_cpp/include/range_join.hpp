@@ -5,9 +5,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -108,9 +110,271 @@ class ExactRangeJoinIndex {
       RangeJoinQueryWorkspace* workspace) const;
 
  private:
-  using PostingLists16 =
-      std::unordered_map<uint64_t, std::vector<uint16_t>>;
-  using PostingLists = std::unordered_map<uint64_t, std::vector<uint32_t>>;
+  // Build-time seed postings use contiguous open-addressed slots and store
+  // each item index at the exact bit width required by this index.
+  template <typename Posting>
+  class CompactPostingLists {
+   public:
+    class Iterator {
+     public:
+      Iterator() = default;
+      Iterator(const uint8_t* data, uint64_t index, uint8_t bit_width)
+          : data_(data), index_(index), bit_width_(bit_width) {}
+
+      Posting operator*() const {
+        const uint64_t bit_offset = index_ * bit_width_;
+        const size_t byte_offset =
+            static_cast<size_t>(bit_offset >> 3);
+        const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+        uint64_t word = 0;
+        std::memcpy(&word, data_ + byte_offset, sizeof(word));
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
+    __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        word = __builtin_bswap64(word);
+#endif
+        const uint64_t mask =
+            bit_width_ == 32
+                ? std::numeric_limits<uint32_t>::max()
+                : (uint64_t{1} << bit_width_) - 1;
+        return static_cast<Posting>((word >> shift) & mask);
+      }
+      Iterator& operator++() {
+        ++index_;
+        return *this;
+      }
+      bool operator!=(const Iterator& other) const {
+        return index_ != other.index_;
+      }
+
+     private:
+      const uint8_t* data_ = nullptr;
+      uint64_t index_ = 0;
+      uint8_t bit_width_ = 0;
+    };
+
+    struct Range {
+      Iterator first;
+      Iterator last;
+      bool found = false;
+
+      Iterator begin() const { return first; }
+      Iterator end() const { return last; }
+      explicit operator bool() const { return found; }
+    };
+
+    void reserve_unique_codes(size_t expected_unique_codes) {
+      if (expected_unique_codes == 0 || !slots64_.empty() ||
+          !slots32_.empty()) {
+        return;
+      }
+      size_t capacity = 16;
+      while (expected_unique_codes > capacity - capacity / 8) {
+        if (capacity > std::numeric_limits<size_t>::max() / 2) {
+          throw std::length_error("range-join seed table is too large");
+        }
+        capacity *= 2;
+      }
+      rehash(slots32_, capacity);
+    }
+
+    void count(uint64_t code) {
+      if (!slots64_.empty()) {
+        count_in(slots64_, code);
+        ++posting_count_;
+        return;
+      }
+      Slot32* slot = find_or_insert(slots32_, code);
+      if (slot->count == std::numeric_limits<uint32_t>::max() ||
+          posting_count_ == std::numeric_limits<uint32_t>::max()) {
+        promote_to_64bit();
+        count_in(slots64_, code);
+      } else {
+        ++slot->count;
+      }
+      ++posting_count_;
+    }
+
+    void finish_counting(uint32_t maximum_posting) {
+      if (!slots64_.empty()) {
+        finish_slots(slots64_);
+      } else {
+        finish_slots(slots32_);
+      }
+      posting_bit_width_ = 1;
+      while ((maximum_posting >>= 1) != 0) ++posting_bit_width_;
+      if (posting_count_ >
+          (std::numeric_limits<size_t>::max() - 7) /
+              posting_bit_width_) {
+        throw std::length_error("range-join posting storage is too large");
+      }
+      const size_t byte_count = static_cast<size_t>(
+          (posting_count_ * posting_bit_width_ + 7) / 8);
+      packed_postings_.assign(
+          byte_count + sizeof(uint64_t) - 1, uint8_t{0});
+    }
+
+    void append(uint64_t code, Posting posting) {
+      if (!slots64_.empty()) {
+        auto* slot = find_existing(slots64_, code);
+        store_posting(--slot->begin, posting);
+      } else {
+        auto* slot = find_existing(slots32_, code);
+        store_posting(--slot->begin, posting);
+      }
+    }
+
+    Range find(uint64_t code) const {
+      if (!slots64_.empty()) return find_range(slots64_, code);
+      return find_range(slots32_, code);
+    }
+
+   private:
+    struct Slot32 {
+      uint64_t code = 0;
+      uint32_t begin = 0;
+      uint32_t count = 0;
+    };
+    struct Slot64 {
+      uint64_t code = 0;
+      uint64_t begin = 0;
+      uint64_t count = 0;
+    };
+    static_assert(sizeof(Slot32) == 16,
+                  "compact posting slot must remain 16 bytes");
+    static_assert(sizeof(Slot64) == 24,
+                  "wide posting slot must remain 24 bytes");
+
+    static uint64_t hash_code(uint64_t value) {
+      value += 0x9e3779b97f4a7c15ULL;
+      value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+      value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+      return value ^ (value >> 31);
+    }
+
+    template <typename Slot>
+    static size_t slot_index(const std::vector<Slot>& slots,
+                             uint64_t code) {
+      return static_cast<size_t>(hash_code(code)) & (slots.size() - 1);
+    }
+
+    template <typename Slot>
+    static Slot* find_existing(std::vector<Slot>& slots,
+                               uint64_t code) {
+      size_t idx = slot_index(slots, code);
+      while (slots[idx].count != 0 && slots[idx].code != code) {
+        idx = (idx + 1) & (slots.size() - 1);
+      }
+      return &slots[idx];
+    }
+
+    template <typename Slot>
+    static const Slot* find_existing(const std::vector<Slot>& slots,
+                                     uint64_t code) {
+      if (slots.empty()) return nullptr;
+      size_t idx = slot_index(slots, code);
+      while (slots[idx].count != 0 && slots[idx].code != code) {
+        idx = (idx + 1) & (slots.size() - 1);
+      }
+      return slots[idx].count == 0 ? nullptr : &slots[idx];
+    }
+
+    template <typename Slot>
+    void rehash(std::vector<Slot>& slots, size_t capacity) {
+      std::vector<Slot> replacement(capacity);
+      for (const auto& slot : slots) {
+        if (slot.count == 0) continue;
+        auto* destination = find_existing(replacement, slot.code);
+        *destination = slot;
+      }
+      slots.swap(replacement);
+    }
+
+    template <typename Slot>
+    Slot* find_or_insert(std::vector<Slot>& slots, uint64_t code) {
+      if (slots.empty()) rehash(slots, 16);
+      Slot* slot = find_existing(slots, code);
+      if (slot->count != 0) return slot;
+      if (unique_code_count_ + 1 >
+          slots.size() - slots.size() / 8) {
+        rehash(slots, slots.size() * 2);
+        slot = find_existing(slots, code);
+      }
+      slot->code = code;
+      ++unique_code_count_;
+      return slot;
+    }
+
+    template <typename Slot>
+    void count_in(std::vector<Slot>& slots, uint64_t code) {
+      auto* slot = find_or_insert(slots, code);
+      if (slot->count == std::numeric_limits<decltype(slot->count)>::max()) {
+        throw std::length_error("range-join posting list is too large");
+      }
+      ++slot->count;
+    }
+
+    void promote_to_64bit() {
+      slots64_.resize(slots32_.size());
+      for (const auto& slot : slots32_) {
+        if (slot.count == 0) continue;
+        auto* destination = find_existing(slots64_, slot.code);
+        destination->code = slot.code;
+        destination->count = slot.count;
+      }
+      std::vector<Slot32>().swap(slots32_);
+    }
+
+    template <typename Slot>
+    void finish_slots(std::vector<Slot>& slots) {
+      uint64_t posting_end = 0;
+      for (auto& slot : slots) {
+        if (slot.count == 0) continue;
+        posting_end += slot.count;
+        slot.begin = static_cast<decltype(slot.begin)>(posting_end);
+      }
+      if (posting_end != posting_count_ ||
+          posting_end > std::numeric_limits<size_t>::max()) {
+        throw std::length_error("range-join posting storage is too large");
+      }
+    }
+
+    template <typename Slot>
+    Range find_range(const std::vector<Slot>& slots,
+                     uint64_t code) const {
+      const auto* slot = find_existing(slots, code);
+      if (!slot) return {};
+      const uint64_t begin = slot->begin;
+      const uint64_t end = begin + slot->count;
+      return {
+          Iterator(packed_postings_.data(), begin, posting_bit_width_),
+          Iterator(packed_postings_.data(), end, posting_bit_width_),
+          true};
+    }
+
+    void store_posting(uint64_t index, Posting posting) {
+      const uint64_t bit_offset = index * posting_bit_width_;
+      const size_t byte_offset =
+          static_cast<size_t>(bit_offset >> 3);
+      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+      uint64_t value = static_cast<uint64_t>(posting) << shift;
+      const uint32_t byte_count =
+          (shift + posting_bit_width_ + 7) / 8;
+      for (uint32_t byte_idx = 0; byte_idx < byte_count; ++byte_idx) {
+        packed_postings_[byte_offset + byte_idx] |=
+            static_cast<uint8_t>(value >> (byte_idx * 8));
+      }
+    }
+
+    std::vector<Slot32> slots32_;
+    std::vector<Slot64> slots64_;
+    std::vector<uint8_t> packed_postings_;
+    uint64_t posting_count_ = 0;
+    size_t unique_code_count_ = 0;
+    uint8_t posting_bit_width_ = 1;
+  };
+
+  using PostingLists16 = CompactPostingLists<uint16_t>;
+  using PostingLists = CompactPostingLists<uint32_t>;
   using PositionalPostingLists =
       std::unordered_map<uint64_t, std::vector<uint32_t>>;
   using WidePositionalPostingLists =
