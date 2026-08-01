@@ -250,7 +250,7 @@ of part jobs and their internal worker teams never exceeds the OpenMP thread
 limit, while peak build memory is bounded by the number of concurrent parts.
 Completed shard files are content- and parameter-validated and reused after an
 interrupted build; new shards are installed atomically. The final
-`.navshard` manifest contains relative paths to ordinary v20 `.navidx` parts
+`.navshard` manifest contains relative paths to ordinary v30 `.navidx` parts
 and a memory-mapped exact-minimizer router sidecar. The sidecar stores sorted
 32-bit minimizers plus shard IDs at exactly `ceil(log2(shard_count))` bits per
 entry. For a query at tolerance `d`, the router takes one seed of 32 to 64

@@ -873,6 +873,10 @@ static_assert(sizeof(BuildNodeGeometry) == 32,
 struct SearchGraphView {
   static constexpr uint32_t COARSE_CHILD_MBB_BIN_WIDTH = 12;
   static constexpr uint32_t FINE_CHILD_MBB_BIN_WIDTH = 6;
+  // Child MBB values in [0, 10] use two exact base-11 digits per 7-bit code.
+  // Seven bits are otherwise unreachable for a <=255-base sequence with the
+  // fixed 6/12-wide child bins, so the node-local width is also the format tag.
+  static constexpr uint32_t PAIRED_BASE11_CHILD_MBB_BITS = 7;
 
   static constexpr uint32_t child_mbb_quantization_error(
       uint32_t bin_width) {
@@ -1137,11 +1141,15 @@ struct SearchGraphView {
                : COARSE_CHILD_MBB_BIN_WIDTH;
   }
   size_t child_mbb_byte_count(NodeId node_id) const {
+    const uint32_t bits = child_mbb_bits(node_id);
     const uint64_t cells =
-        static_cast<uint64_t>(child_count(node_id)) *
-        beacon_count(node_id);
+        bits == PAIRED_BASE11_CHILD_MBB_BITS
+            ? static_cast<uint64_t>(child_count(node_id)) *
+                  ((beacon_count(node_id) + 1) / 2)
+            : static_cast<uint64_t>(child_count(node_id)) *
+                  beacon_count(node_id);
     return static_cast<size_t>(
-        (cells * child_mbb_bits(node_id) + 7) / 8);
+        (cells * bits + 7) / 8);
   }
   bool child_mbb_range_valid(NodeId node_id) const {
     const auto& node = node_records[node_id];
@@ -1169,7 +1177,25 @@ struct SearchGraphView {
     const auto& node = node_records[node_id];
     const uint32_t begin = node.child_mbb_begin();
     uint8_t encoded = 0;
-    if (bits == 8) {
+    if (bits == PAIRED_BASE11_CHILD_MBB_BITS) {
+      const size_t children = child_count(node_id);
+      const size_t dimension = cell_offset / children;
+      const size_t child = cell_offset % children;
+      const size_t pairs_per_child = (beacon_count(node_id) + 1) / 2;
+      const size_t pair = child * pairs_per_child + dimension / 2;
+      const size_t bit_offset = pair * bits;
+      const size_t byte_offset = bit_offset >> 3;
+      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+      uint16_t word = child_beacon_dists[begin + byte_offset];
+      if (shift + bits > 8) {
+        word |= static_cast<uint16_t>(
+                    child_beacon_dists[begin + byte_offset + 1])
+                << 8;
+      }
+      const uint8_t code = static_cast<uint8_t>(
+          (word >> shift) & ((uint32_t{1} << bits) - 1));
+      encoded = dimension & 1 ? code / 11 : code % 11;
+    } else if (bits == 8) {
       encoded = child_beacon_dists[begin + cell_offset];
     } else {
       const size_t bit_offset = cell_offset * bits;

@@ -1,6 +1,7 @@
 #include "simd_mbb_filter.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <stdexcept>
 
@@ -14,6 +15,25 @@
 
 namespace navigamer {
 namespace {
+
+constexpr std::array<uint16_t, 121> paired_base11_midpoints(
+    uint32_t bin_width) {
+  std::array<uint16_t, 121> values{};
+  for (uint32_t code = 0; code < values.size(); ++code) {
+    const uint32_t first = code % 11;
+    const uint32_t second = code / 11;
+    const uint8_t first_midpoint = static_cast<uint8_t>(
+        first * bin_width + bin_width / 2);
+    const uint8_t second_midpoint = static_cast<uint8_t>(
+        second * bin_width + bin_width / 2);
+    values[code] = static_cast<uint16_t>(first_midpoint) |
+                   (static_cast<uint16_t>(second_midpoint) << 8);
+  }
+  return values;
+}
+
+constexpr auto kPairedBase11Midpoints6 = paired_base11_midpoints(6);
+constexpr auto kPairedBase11Midpoints12 = paired_base11_midpoints(12);
 
 void validate_inputs(const uint8_t* center_dist_by_dim,
                      size_t child_count,
@@ -115,6 +135,72 @@ std::vector<uint32_t> filter_packed_scalar(
       if (center_dist < query_lo || center_dist > query_hi) {
         ok = false;
         break;
+      }
+    }
+    if (ok) survivors.push_back(static_cast<uint32_t>(child_idx));
+  }
+  return survivors;
+}
+
+std::vector<uint32_t> filter_paired_base11_scalar(
+    const uint8_t* center_dist_by_child,
+    size_t child_count,
+    size_t dim,
+    const int* query_beacon_dists,
+    int32_t tolerance,
+    uint32_t bin_width,
+    MBBFilterSimdStats* stats) {
+  if (stats) stats->scalar_checks += child_count;
+  std::vector<uint32_t> survivors;
+  survivors.reserve(child_count);
+  if (dim > 10 || (bin_width != 6 && bin_width != 12)) {
+    throw std::invalid_argument("invalid paired base-11 MBB layout");
+  }
+  std::array<int64_t, 10> query_lo{};
+  std::array<int64_t, 10> query_hi{};
+  for (size_t dim_idx = 0; dim_idx < dim; ++dim_idx) {
+    query_lo[dim_idx] =
+        static_cast<int64_t>(query_beacon_dists[dim_idx]) - tolerance;
+    query_hi[dim_idx] =
+        static_cast<int64_t>(query_beacon_dists[dim_idx]) + tolerance;
+  }
+  const auto& midpoint_table =
+      bin_width == 6 ? kPairedBase11Midpoints6
+                     : kPairedBase11Midpoints12;
+  const size_t pairs_per_child = (dim + 1) / 2;
+  for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
+    bool ok = true;
+    const size_t pair_begin = child_idx * pairs_per_child;
+    for (size_t pair_dim = 0; pair_dim < pairs_per_child; ++pair_dim) {
+      const size_t pair = pair_begin + pair_dim;
+      const size_t bit_offset = pair * 7;
+      const size_t byte_offset = bit_offset >> 3;
+      const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+      uint16_t word = center_dist_by_child[byte_offset];
+      if (shift + 7 > 8) {
+        word |= static_cast<uint16_t>(
+                    center_dist_by_child[byte_offset + 1])
+                << 8;
+      }
+      const uint8_t code =
+          static_cast<uint8_t>((word >> shift) & 0x7f);
+      if (code >= midpoint_table.size()) {
+        throw std::runtime_error("invalid paired base-11 MBB code");
+      }
+      const size_t first_dim = pair_dim * 2;
+      const uint16_t midpoints = midpoint_table[code];
+      const uint8_t first = static_cast<uint8_t>(midpoints);
+      if (first < query_lo[first_dim] || first > query_hi[first_dim]) {
+        ok = false;
+        break;
+      }
+      if (first_dim + 1 < dim) {
+        const uint8_t second = static_cast<uint8_t>(midpoints >> 8);
+        if (second < query_lo[first_dim + 1] ||
+            second > query_hi[first_dim + 1]) {
+          ok = false;
+          break;
+        }
       }
     }
     if (ok) survivors.push_back(static_cast<uint32_t>(child_idx));
@@ -611,6 +697,14 @@ std::vector<uint32_t> filter_mbb_survivors(
           std::numeric_limits<int32_t>::max(),
           static_cast<int64_t>(child_radius) + tolerance +
               quantization_error));
+  if (packed_bits == 7 &&
+      (quantization_bin_width == 6 ||
+       quantization_bin_width == 12)) {
+    if (stats && mode != SimdMode::Scalar) ++stats->simd_fallbacks;
+    return filter_paired_base11_scalar(
+        center_dist_by_dim, child_count, dim, query_beacon_dists,
+        effective_tolerance, quantization_bin_width, stats);
+  }
   if (packed_bits != 8 || quantization_bin_width != 1) {
     if (stats && mode != SimdMode::Scalar) ++stats->simd_fallbacks;
     return filter_packed_scalar(

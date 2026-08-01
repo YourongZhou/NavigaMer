@@ -53,6 +53,27 @@ std::vector<uint8_t> pack_distances(
   return packed;
 }
 
+std::vector<uint8_t> pack_paired_base11(
+    const std::vector<uint8_t>& values,
+    size_t child_count,
+    size_t dim) {
+  const size_t pairs_per_child = (dim + 1) / 2;
+  std::vector<uint8_t> codes(child_count * pairs_per_child, 0);
+  for (size_t child = 0; child < child_count; ++child) {
+    for (size_t pair_dim = 0; pair_dim < pairs_per_child; ++pair_dim) {
+      const size_t first_dim = pair_dim * 2;
+      const uint8_t first = values[first_dim * child_count + child];
+      const uint8_t second =
+          first_dim + 1 < dim
+              ? values[(first_dim + 1) * child_count + child]
+              : 0;
+      codes[child * pairs_per_child + pair_dim] =
+          static_cast<uint8_t>(first + 11 * second);
+    }
+  }
+  return pack_distances(codes, 7);
+}
+
 void assert_random_equivalence() {
   std::mt19937 rng(20260616);
   std::uniform_int_distribution<int32_t> pick_center(20, 235);
@@ -194,6 +215,42 @@ void assert_quantized_filter_has_no_false_negatives() {
   }
 }
 
+void assert_paired_base11_equivalence() {
+  constexpr uint32_t bin_width = 6;
+  constexpr int32_t quantization_error = bin_width / 2;
+  std::mt19937 rng(20260802);
+  std::uniform_int_distribution<int> pick_encoded(0, 10);
+  std::uniform_int_distribution<int> pick_query(0, 80);
+  for (size_t dim : {size_t{2}, size_t{3}, size_t{10}}) {
+    for (size_t child_count : {size_t{1}, size_t{7}, size_t{44},
+                               size_t{257}}) {
+      std::vector<uint8_t> encoded(dim * child_count);
+      std::vector<uint8_t> midpoints(dim * child_count);
+      for (size_t idx = 0; idx < encoded.size(); ++idx) {
+        encoded[idx] = static_cast<uint8_t>(pick_encoded(rng));
+        midpoints[idx] = static_cast<uint8_t>(
+            encoded[idx] * bin_width + quantization_error);
+      }
+      const auto packed =
+          pack_paired_base11(encoded, child_count, dim);
+      std::vector<int> query(dim);
+      for (int& value : query) value = pick_query(rng);
+      for (int32_t tolerance : {0, 2, 9}) {
+        constexpr int32_t child_radius = 7;
+        const auto expected = reference_survivors(
+            midpoints, child_count, dim, query, child_radius,
+            tolerance + quantization_error);
+        navigamer::MBBFilterSimdStats stats;
+        const auto actual = navigamer::filter_mbb_survivors(
+            packed.data(), child_count, dim, query.data(), child_radius,
+            tolerance, navigamer::SimdMode::Auto, &stats, 7, bin_width);
+        assert(actual == expected);
+        assert(stats.scalar_checks == child_count);
+      }
+    }
+  }
+}
+
 void assert_mode_parsing() {
   assert(navigamer::parse_simd_mode("auto") == navigamer::SimdMode::Auto);
   assert(navigamer::parse_simd_mode("scalar") == navigamer::SimdMode::Scalar);
@@ -212,6 +269,7 @@ int main() {
   assert_random_equivalence();
   assert_packed_equivalence();
   assert_quantized_filter_has_no_false_negatives();
+  assert_paired_base11_equivalence();
   std::cout << "SIMD MBB filter tests passed\n";
   return 0;
 }
