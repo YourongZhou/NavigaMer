@@ -395,18 +395,6 @@ size_t minimizer_overlap_count(const std::vector<uint64_t>& lhs,
   return overlap;
 }
 
-const QGramSignature* lookup_qgram_signature(
-    const std::unordered_map<int, std::unordered_map<std::string, QGramSignature>>&
-        signatures_by_q,
-    int q,
-    const std::string& node_id) {
-  auto q_it = signatures_by_q.find(q);
-  if (q_it == signatures_by_q.end()) return nullptr;
-  auto sig_it = q_it->second.find(node_id);
-  if (sig_it == q_it->second.end()) return nullptr;
-  return &sig_it->second;
-}
-
 struct ActiveRouterHintQueryContext {
   bool enabled = false;
   const std::string* query_sequence = nullptr;
@@ -414,6 +402,7 @@ struct ActiveRouterHintQueryContext {
   const QGramSignature* shared_qgram_signature = nullptr;
   bool router_qgram_signature_ready = false;
   QGramSignature router_qgram_signature;
+  std::unordered_map<uint64_t, QGramSignature> world_qgram_signatures;
   bool router_minimizer_signature_ready = false;
   MinimizerSignature router_minimizer_signature;
 };
@@ -671,6 +660,32 @@ bool apply_cached_rank_order(const std::vector<Candidate>& candidates,
 
 }  // namespace
 
+const QGramSignature* BioGeometrySearchEngine::active_query_qgram_signature(
+    NodeId node_id, int q, SearchStats& stats) const {
+  if (q <= 0) return nullptr;
+  auto* context = active_router_hint_query_context(this);
+  if (!context) return nullptr;
+
+  const uint64_t cache_key =
+      (static_cast<uint64_t>(static_cast<uint32_t>(q)) << 32) | node_id;
+  auto [it, inserted] = context->world_qgram_signatures.try_emplace(cache_key);
+  if (!inserted) return &it->second;
+
+  const auto& view = index_.search_graph_view();
+  if (node_id >= view.node_records.size()) {
+    it->second.q = q;
+    return &it->second;
+  }
+  const LeafId center_id = view.center_sequence_id(node_id);
+  if (center_id >= view.sequences.size()) {
+    it->second.q = q;
+    return &it->second;
+  }
+  it->second = compute_qgram_signature(view.sequences.sequence(center_id), q);
+  stats.search_qgram_signature_build_count++;
+  return &it->second;
+}
+
 const char* mbb_filter_mode_name(MBBFilterMode mode) {
   return mode == MBBFilterMode::Scan ? "scan" : "rect";
 }
@@ -740,17 +755,7 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
   g_path_reuse_cache_by_engine.erase(this);
   g_active_path_reuse_context_by_engine.erase(this);
 
-  std::vector<int> q_values;
-  if (config_.search_qgram_prefilter && config_.search_qgram_q > 0) {
-    q_values.push_back(config_.search_qgram_q);
-  }
-  if (config_.router_hint_enabled && config_.router_hint_qgram_q > 0 &&
-      std::find(q_values.begin(), q_values.end(),
-                config_.router_hint_qgram_q) == q_values.end()) {
-    q_values.push_back(config_.router_hint_qgram_q);
-  }
-  if (q_values.empty() &&
-      !config_.router_hint_enabled &&
+  if (!config_.router_hint_enabled &&
       !config_.safe_child_router_enabled) {
     return;
   }
@@ -766,12 +771,6 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
     const std::string key = node_key(node_id);
     const std::string_view center =
         view.sequences.sequence(center_id);
-    for (int q : q_values) {
-      auto& signatures = world_qgram_signatures_by_q_[q];
-      if (!signatures.count(key)) {
-        signatures.emplace(key, compute_qgram_signature(center, q));
-      }
-    }
     if (config_.router_hint_enabled &&
         !world_minimizer_signatures_.count(key)) {
       auto signature = compute_minimizer_signature(
@@ -1833,9 +1832,8 @@ BioGeometrySearchEngine::rank_children_with_router_hints(
     }
 
     if (router_qgram_signature && router_qgram_signature->safe_for_pruning) {
-      const auto* candidate_signature = lookup_qgram_signature(
-          world_qgram_signatures_by_q_, config_.router_hint_qgram_q,
-          candidate->node_id);
+      const auto* candidate_signature = active_query_qgram_signature(
+          candidate->integer_id, config_.router_hint_qgram_q, stats);
       if (candidate_signature && candidate_signature->safe_for_pruning) {
         entry.qgram_distance = qgram_l1_distance(
             *router_qgram_signature, *candidate_signature);
@@ -2222,9 +2220,8 @@ BioGeometrySearchEngine::rank_child_ids_with_router_hints_view(
       stats.unsafe_hint_ignored_count++;
     }
     if (router_qgram_signature && router_qgram_signature->safe_for_pruning) {
-      const auto* candidate_signature = lookup_qgram_signature(
-          world_qgram_signatures_by_q_, config_.router_hint_qgram_q,
-          candidate_key);
+      const auto* candidate_signature = active_query_qgram_signature(
+          candidate_id, config_.router_hint_qgram_q, stats);
       if (candidate_signature && candidate_signature->safe_for_pruning) {
         entry.qgram_distance = qgram_l1_distance(
             *router_qgram_signature, *candidate_signature);
@@ -3056,8 +3053,8 @@ void BioGeometrySearchEngine::search_layer_adaptive(
       stats.center_distance_calls_after_mbb++;
       stats.center_distance_calls_before_qgram++;
       if (stats.search_qgram_prefilter_enabled) {
-        const auto* candidate_signature = lookup_qgram_signature(
-            world_qgram_signatures_by_q_, stats.search_qgram_q, node->node_id);
+        const auto* candidate_signature = active_query_qgram_signature(
+            node->integer_id, stats.search_qgram_q, stats);
         if (!query_qgram_signature ||
             !query_qgram_signature->safe_for_pruning ||
             !candidate_signature ||
@@ -3265,8 +3262,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_epoch(
       stats.center_distance_calls_after_mbb++;
       stats.center_distance_calls_before_qgram++;
       if (stats.search_qgram_prefilter_enabled) {
-        const auto* candidate_signature = lookup_qgram_signature(
-            world_qgram_signatures_by_q_, stats.search_qgram_q, node->node_id);
+        const auto* candidate_signature = active_query_qgram_signature(
+            node->integer_id, stats.search_qgram_q, stats);
         if (!query_qgram_signature ||
             !query_qgram_signature->safe_for_pruning ||
             !candidate_signature ||
@@ -3751,8 +3748,8 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
       stats.center_distance_calls_after_mbb++;
       stats.center_distance_calls_before_qgram++;
       if (stats.search_qgram_prefilter_enabled) {
-        const auto* candidate_signature = lookup_qgram_signature(
-            world_qgram_signatures_by_q_, stats.search_qgram_q, key);
+        const auto* candidate_signature = active_query_qgram_signature(
+            node_id, stats.search_qgram_q, stats);
         if (!query_qgram_signature ||
             !query_qgram_signature->safe_for_pruning ||
             !candidate_signature ||
@@ -3882,9 +3879,16 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
       }
     }
   }
+  stats.search_qgram_prefilter_enabled =
+      config_.search_qgram_prefilter && !stats.planner_disable_router_stack &&
+      config_.search_qgram_q > 0;
+  stats.search_qgram_q =
+      stats.search_qgram_prefilter_enabled ? config_.search_qgram_q : 0;
+  stats.search_qgram_signature_build_count = 0;
   ActiveRouterHintQueryContext router_hint_context;
   router_hint_context.enabled =
-      config_.router_hint_enabled && !stats.planner_disable_router_stack;
+      (config_.router_hint_enabled || stats.search_qgram_prefilter_enabled) &&
+      !stats.planner_disable_router_stack;
   router_hint_context.query_sequence = &query_seq.seq;
   ActivePathReuseContext reuse_context;
   reuse_context.enabled =
@@ -3988,18 +3992,6 @@ BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int toler
       reuse_context.next.exact_verified_hits = cached_hits;
       g_path_reuse_cache_by_engine[this] = std::move(reuse_context.next);
       return {cached_hits, stats};
-    }
-  }
-  stats.search_qgram_prefilter_enabled =
-      config_.search_qgram_prefilter && !stats.planner_disable_router_stack &&
-      config_.search_qgram_q > 0;
-  stats.search_qgram_q =
-      stats.search_qgram_prefilter_enabled ? config_.search_qgram_q : 0;
-  stats.search_qgram_signature_build_count = 0;
-  if (stats.search_qgram_prefilter_enabled) {
-    auto search_q_it = world_qgram_signatures_by_q_.find(stats.search_qgram_q);
-    if (search_q_it != world_qgram_signatures_by_q_.end()) {
-      stats.search_qgram_signature_build_count = search_q_it->second.size();
     }
   }
   std::unordered_set<LeafId> unique_results;

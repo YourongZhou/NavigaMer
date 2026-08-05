@@ -314,8 +314,6 @@ class BioGeometrySearchEngine {
 
   const BioGeometryIndexBuilder& index_;
   SearchConfig config_;
-  std::unordered_map<int, std::unordered_map<std::string, QGramSignature>>
-      world_qgram_signatures_by_q_;
   std::unordered_map<std::string, std::vector<uint64_t>>
       world_minimizer_signatures_;
   std::unordered_map<std::string, ParentRouterHintIndex>
@@ -323,6 +321,9 @@ class BioGeometrySearchEngine {
   std::unordered_map<std::string, ParentSafeChildRouterIndex>
       parent_safe_child_router_indexes_;
   double safe_child_router_build_ms_ = 0.0;
+
+  const QGramSignature* active_query_qgram_signature(
+      NodeId node_id, int q, SearchStats& stats) const;
 
   bool mbb_prunable_row(const std::vector<MBB>& row, const std::vector<int>& V_Q,
                         int tolerance) const;
