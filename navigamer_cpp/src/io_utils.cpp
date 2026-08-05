@@ -447,29 +447,44 @@ std::vector<std::shared_ptr<BioSequence>> load_reads(
   return reads;
 }
 
-void write_tsv(const std::string& output_path,
-               const std::vector<std::string>& columns,
-               const std::vector<std::vector<std::string>>& rows) {
-  std::ofstream out(output_path);
-  if (!out) {
+TsvWriter::TsvWriter(const std::string& output_path,
+                     const std::vector<std::string>& columns)
+    : out_(output_path) {
+  if (!out_) {
     throw std::runtime_error("unable to open TSV output: " + output_path);
   }
   for (size_t i = 0; i < columns.size(); ++i) {
-    if (i) out << '\t';
-    out << columns[i];
+    if (i) out_ << '\t';
+    out_ << columns[i];
   }
-  out << '\n';
-  for (const auto& row : rows) {
-    for (size_t i = 0; i < row.size(); ++i) {
-      if (i) out << '\t';
-      out << row[i];
-    }
-    out << '\n';
+  out_ << '\n';
+  if (!out_) {
+    throw std::runtime_error("failed to write TSV header: " + output_path);
   }
-  out.close();
-  if (!out) {
-    throw std::runtime_error("failed to write TSV output: " + output_path);
+}
+
+void TsvWriter::write_row(const std::vector<std::string>& row) {
+  for (size_t i = 0; i < row.size(); ++i) {
+    if (i) out_ << '\t';
+    out_ << row[i];
   }
+  out_ << '\n';
+  if (!out_) {
+    throw std::runtime_error("failed to write TSV row");
+  }
+}
+
+void TsvWriter::close() {
+  out_.close();
+  if (!out_) throw std::runtime_error("failed to finalize TSV output");
+}
+
+void write_tsv(const std::string& output_path,
+               const std::vector<std::string>& columns,
+               const std::vector<std::vector<std::string>>& rows) {
+  TsvWriter writer(output_path, columns);
+  for (const auto& row : rows) writer.write_row(row);
+  writer.close();
 }
 
 // Escape minimal JSON strings and format stored reference positions.

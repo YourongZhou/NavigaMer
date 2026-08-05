@@ -1736,7 +1736,15 @@ void run_query_index_batch(const std::string& index_path,
         "search_prefetch_enabled", "search_qgram_q", "result_count",
         "query_time_ms"};
 
-    std::vector<std::vector<std::string>> all_rows;
+    std::unique_ptr<TsvWriter> tsv_writer;
+    if (!out_tsv.empty()) {
+      tsv_writer = std::make_unique<TsvWriter>(out_tsv, columns);
+    }
+    size_t output_row_count = 0;
+    const auto emit_row = [&](const std::vector<std::string>& row) {
+      if (tsv_writer) tsv_writer->write_row(row);
+      ++output_row_count;
+    };
     std::vector<uint32_t> shard_to_loaded(
         shard_manifest.shards.size(), UINT32_MAX);
     for (const auto& shard_batch : shard_query_batches) {
@@ -1926,7 +1934,7 @@ void run_query_index_batch(const std::string& index_path,
           row.insert(
               row.end(), search_stats.begin(),
               search_stats.end());
-          all_rows.push_back(std::move(row));
+          emit_row(row);
         }
       }
       if (combined_hits.empty()) {
@@ -1944,7 +1952,7 @@ void run_query_index_batch(const std::string& index_path,
         row.insert(
             row.end(), search_stats.begin(),
             search_stats.end());
-        all_rows.push_back(std::move(row));
+        emit_row(row);
       }
       }
       for (uint32_t shard_id : shard_batch.shard_ids) {
@@ -1959,10 +1967,8 @@ void run_query_index_batch(const std::string& index_path,
               << shard_manifest.total_sequence_count
               << " world_nodes="
               << shard_manifest.total_world_node_count << "\n";
-    if (!out_tsv.empty()) {
-      write_tsv(out_tsv, columns, all_rows);
-    }
-    std::cerr << "Batch query rows: " << all_rows.size()
+    if (tsv_writer) tsv_writer->close();
+    std::cerr << "Batch query rows: " << output_row_count
               << " routed_queries=" << routed_queries
               << "/" << queries.size()
               << " searched_shards=" << searched_shards

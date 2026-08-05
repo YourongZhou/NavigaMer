@@ -54,6 +54,17 @@ std::vector<std::shared_ptr<BioSequence>> load_reads(
     const std::string& ref_id = "ref");
 
 // Write a TSV table with an explicit header.
+class TsvWriter {
+ public:
+  TsvWriter(const std::string& output_path,
+            const std::vector<std::string>& columns);
+  void write_row(const std::vector<std::string>& row);
+  void close();
+
+ private:
+  std::ofstream out_;
+};
+
 void write_tsv(const std::string& output_path,
                const std::vector<std::string>& columns,
                const std::vector<std::vector<std::string>>& rows);
