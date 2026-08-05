@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 37 stores the shared
+edit distance fits in one byte. Persisted format version 38 stores the shared
 reference as raw bases in the memory-mapped index, so loading does not allocate
 or eagerly fault a full decoded reference into heap memory, and
 keeps long literal inputs in the manifest only as content fingerprints. It
@@ -258,7 +258,7 @@ limit, while peak build memory is bounded by the number of concurrent parts.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
-Only one group of temporary shard files exists at a time. The final v9
+Only one group of temporary shard files exists at a time. The final v10
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph
@@ -267,8 +267,13 @@ Paired child-MBB coordinates are ranked only among quantized states permitted
 by their exact beacon-pair distance. This reconstructs the same conservative
 distance bins while using fewer than the former fixed seven bits whenever the
 triangle inequality excludes states.
-Non-finest beacon offsets use the minimum shard-local fixed width with exact
-constant-time decoding instead of one 32-bit value per node.
+Non-finest beacon payload begins are stored in four-node blocks: one absolute
+base plus three exact local deltas. This retains constant-time decoding while
+removing the former independent packed offset for every node. Explicit beacon
+IDs of every storage mode share one contiguous byte payload, so those begins
+are monotone and block-compressible. The packed-delta beacon-ID form uses the
+minimum shard-local bit width with exact constant-time decoding instead of one
+32-bit ID per beacon.
 Queries mmap only selected byte ranges, so packing removes millions of
 filesystem entries without coarsening the logical shards or increasing search
 work. Contig names and pack paths are interned once; each in-memory shard

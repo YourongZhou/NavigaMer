@@ -233,7 +233,7 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 ### `build`
 
 Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
-provided, writes an array-format v37 binary index with a manifest signature,
+provided, writes an array-format v38 binary index with a manifest signature,
 build parameters, input fingerprints, sequence records, layer ranges,
 child/leaf/beacon ID arrays, MBB rows, and leaf-beacon distance rows. Older
 pointer-graph index formats are rejected and must be rebuilt.
@@ -310,12 +310,12 @@ relative to the original contig.
 
 Each logical part is an independently mmap-decodable graph payload. Up to
 1,024 payloads are stored in one `.navpack` container with a checked
-offset/length directory. The common v37 construction manifest is stored once
+offset/length directory. The common v38 construction manifest is stored once
 at bundle scope instead of once per logical part. A completed pack is reused
 only after every selected payload's construction signature, reference slice,
 contig, and source coordinates validate. Damaged
 or incompatible packs are rebuilt one atomic group at a time; only that group's
-temporary part files exist during construction. The final v9 `.navshard`
+temporary part files exist during construction. The final v10 `.navshard`
 manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric

@@ -99,12 +99,12 @@ void assert_loaded_search_matches_built() {
     assert(built.search_graph_view().child_mbb_bits(node_id) ==
            loaded.builder.search_graph_view().child_mbb_bits(node_id));
   }
-  assert(std::equal(
-      built.search_graph_view().beacon_begins.begin(),
-      built.search_graph_view().beacon_begins.end(),
-      loaded.builder.search_graph_view().beacon_begins.begin()));
-  assert(loaded.builder.search_graph_view().beacon_begin_bits ==
-         built.search_graph_view().beacon_begin_bits);
+  assert(loaded.builder.search_graph_view().beacon_begin_blocks ==
+         built.search_graph_view().beacon_begin_blocks);
+  assert(loaded.builder.search_graph_view().beacon_begin_base_bits ==
+         built.search_graph_view().beacon_begin_base_bits);
+  assert(loaded.builder.search_graph_view().beacon_begin_delta_bits ==
+         built.search_graph_view().beacon_begin_delta_bits);
 #if defined(__unix__) || defined(__APPLE__)
   const auto assert_mapped = [](const auto& array) {
     if (!array.empty()) {
@@ -123,9 +123,8 @@ void assert_loaded_search_matches_built() {
   assert_mapped(loaded_view.leaf_id_deltas8);
   assert_mapped(loaded_view.leaf_id_deltas16);
   assert_mapped(loaded_view.leaf_ids);
-  assert_mapped(loaded_view.beacon_deltas8);
-  assert_mapped(loaded_view.beacon_ids32);
-  assert_mapped(loaded_view.beacon_begins);
+  assert_mapped(loaded_view.beacon_id_bytes);
+  assert_mapped(loaded_view.beacon_begin_blocks);
   assert_mapped(loaded_view.child_beacon_dists);
   assert_mapped(loaded_view.leaf_beacon_dists);
 #endif
@@ -429,7 +428,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 37);
+  assert(loaded.manifest.format_version == 38);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

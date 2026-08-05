@@ -231,7 +231,7 @@ quality-audit time only.
 | `include/phase2_distance_verifier.hpp`, `src/phase2_distance_verifier.cpp` | CPU batch exact verifier used by Phase2 rebinding |
 | `include/mbb_rect_index.hpp`, `src/mbb_rect_index.cpp` | Exact SoA rectangle lookup for parent-local child MBB filtering |
 | `include/index_builder.hpp`, `src/index_builder.cpp` | ID-array construction plus packing into `SequenceStore`, `WorldNodeRecord`, and flat relationship arrays |
-| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v37 binary persistence and manifest signatures |
+| `include/index_persistence.hpp`, `src/index_persistence.cpp` | Array-format v38 binary persistence and manifest signatures |
 | `include/sharded_index.hpp`, `src/sharded_index.cpp` | Lossless shard planning, resumable part construction, exact-minimizer shard routing, bundle manifests, and validated loading |
 | `include/candidate_verifier.hpp`, `src/candidate_verifier.cpp` | Exact edit-distance verifier and TP/FP/FN accounting for external seed candidate TSVs |
 | `include/search_engine.hpp`, `src/search_engine.cpp` | `search_adaptive`, `verify_leaf_candidates`, `search_greedy`, `search_exhaustive`, `search_brute_force` |
@@ -246,7 +246,7 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v37 bit-packs each node to the minimum whole-byte width supported by
+Format v38 bit-packs each node to the minimum whole-byte width supported by
 that shard's actual offset and count ranges (9 bytes per node in the 100k-window
 reference benchmark, with wider automatic fallbacks). Base-relative child
 payloads store a minimum whole-byte forward base delta from `node_id + 1`
@@ -262,13 +262,16 @@ each child's quantized pair only among states allowed by the triangle
 inequality. Decoding reproduces the same conservative bins exactly, so pruning
 and recall semantics are unchanged while infeasible states consume no code
 space.
-Non-finest beacon offsets use the minimum shard-local bit width with exact
-constant-time decoding rather than one 32-bit value per node.
+Non-finest beacon payload begins use four-node records: one exact absolute
+base plus three exact block-local deltas. The representation retains
+constant-time decoding while avoiding an independent offset for every node.
+All explicit beacon ID encodings share one contiguous byte payload, which
+makes those begins monotone and permits the block compression.
 Explicit beacon IDs use exact ZigZag deltas with one shard-wide 1..32-bit
 width chosen by evaluating every width. Direct signed bytes and absolute IDs
 remain available per node; choosing 16 bits can exactly match the former
 8/16/32-bit payload, so the optimizer never makes this array larger.
-A v9 `.navshard` bundle stores the common v37 construction manifest once and
+A v10 `.navshard` bundle stores the common v38 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
@@ -389,7 +392,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 37
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 38
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed

@@ -223,13 +223,12 @@ void assert_all_beacon_id_encodings_are_exact() {
   view.layer_end = {1, 2, 3, 4};
   view.initialize_center_sequence_ids({0, 0, 0, 0});
   view.beacon_delta_bits = 16;
-  view.beacon_deltas8 = {
-      -120, static_cast<int8_t>(0x60), static_cast<int8_t>(0xea)};
-  view.beacon_ids32 = {4000000000U};
-  view.initialize_beacon_begins(3, 0);
-  view.set_beacon_begin(0, 0);
-  view.set_beacon_begin(1, 1);
-  view.set_beacon_begin(2, 0);
+  view.beacon_id_bytes = {
+      0x88, 0x60, 0xea, 0x00, 0x28, 0x6b, 0xee};
+  view.initialize_beacon_begins(3, 3, 3);
+  view.set_beacon_begin(0, 0, 0);
+  view.set_beacon_begin(1, 1, 0);
+  view.set_beacon_begin(2, 3, 0);
 
   view.set_center_sequence_id(0, 0, 200);
   view.set_node_counts(
@@ -266,13 +265,13 @@ void assert_all_beacon_id_encodings_are_exact() {
     packed_view.beacon_delta_bits = static_cast<uint8_t>(bits);
     const uint32_t zigzag =
         bits == 32 ? UINT32_MAX : (uint32_t{1} << bits) - 1;
-    packed_view.beacon_deltas8.resize((bits + 7) / 8);
-    for (size_t byte = 0; byte < packed_view.beacon_deltas8.size(); ++byte) {
-      packed_view.beacon_deltas8[byte] =
-          static_cast<int8_t>(zigzag >> (byte * 8));
+    packed_view.beacon_id_bytes.resize((bits + 7) / 8);
+    for (size_t byte = 0; byte < packed_view.beacon_id_bytes.size(); ++byte) {
+      packed_view.beacon_id_bytes[byte] =
+          static_cast<uint8_t>(zigzag >> (byte * 8));
     }
-    packed_view.initialize_beacon_begins(1, 0);
-    packed_view.set_beacon_begin(0, 0);
+    packed_view.initialize_beacon_begins(1, 0, 0);
+    packed_view.set_beacon_begin(0, 0, 0);
     packed_view.set_node_counts(
         0, 0, 1,
         navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
@@ -762,14 +761,26 @@ void assert_all_beacon_begin_widths_are_exact() {
        {uint32_t{0}, uint32_t{1}, uint32_t{255}, uint32_t{70000},
         std::numeric_limits<uint32_t>::max()}) {
     const std::array<uint32_t, 7> values = {
-        0, maximum, maximum / 2, maximum / 3,
-        maximum / 5, maximum / 7, maximum / 11};
+        0, maximum / 6, maximum / 3, maximum / 2,
+        maximum / 2, (maximum / 2) + maximum / 8,
+        (maximum / 2) + maximum / 4};
+    uint32_t maximum_block_delta = 0;
+    for (size_t idx = 0; idx < values.size(); ++idx) {
+      const size_t block_begin =
+          idx - idx % navigamer::SearchGraphView::BEACON_BEGIN_BLOCK_SIZE;
+      maximum_block_delta = std::max(
+          maximum_block_delta, values[idx] - values[block_begin]);
+    }
     navigamer::SearchGraphView view;
-    view.initialize_beacon_begins(values.size(), maximum);
+    view.initialize_beacon_begins(
+        values.size(), maximum, maximum_block_delta);
     assert(view.beacon_begins_valid(values.size()));
     for (size_t idx = 0; idx < values.size(); ++idx) {
+      const size_t block_begin =
+          idx - idx % navigamer::SearchGraphView::BEACON_BEGIN_BLOCK_SIZE;
       view.set_beacon_begin(
-          static_cast<navigamer::NodeId>(idx), values[idx]);
+          static_cast<navigamer::NodeId>(idx), values[idx],
+          values[block_begin]);
     }
     for (size_t idx = 0; idx < values.size(); ++idx) {
       assert(view.beacon_begin(

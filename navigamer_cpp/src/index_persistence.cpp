@@ -25,7 +25,7 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '3', '9'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '4', '0'};
 constexpr std::array<char, 8> kPayloadMagic = {
     'N', 'G', 'P', 'A', 'Y', 'L', '0', '1'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 37) {
+  if (manifest.format_version != 38) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 37) {
+  if (manifest.format_version != 38) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -998,11 +998,12 @@ void write_search_graph_view(std::ostream& out,
   write_final_array(
       out, view.leaf_id_deltas16, "leaf_id_deltas16");
   write_final_array(out, view.leaf_ids, "leaf_ids");
-  write_final_array(out, view.beacon_deltas8, "beacon_deltas8");
-  write_final_array(out, view.beacon_ids32, "beacon_ids32");
+  write_final_array(out, view.beacon_id_bytes, "beacon_id_bytes");
   write_pod<uint8_t>(out, view.beacon_delta_bits);
-  write_pod<uint8_t>(out, view.beacon_begin_bits);
-  write_final_array(out, view.beacon_begins, "beacon_begins");
+  write_pod<uint8_t>(out, view.beacon_begin_base_bits);
+  write_pod<uint8_t>(out, view.beacon_begin_delta_bits);
+  write_final_array(
+      out, view.beacon_begin_blocks, "beacon_begin_blocks");
   write_final_array(
       out, view.child_beacon_dists, "child_beacon_dists");
   write_final_array(
@@ -1059,16 +1060,16 @@ SearchGraphView read_search_graph_view(
       read_final_array<int16_t>(in, mapping, "leaf_id_deltas16");
   view.leaf_ids =
       read_final_array<LeafId>(in, mapping, "leaf_ids");
-  view.beacon_deltas8 =
-      read_final_array<int8_t>(in, mapping, "beacon_deltas8");
-  view.beacon_ids32 =
-      read_final_array<LeafId>(in, mapping, "beacon_ids32");
+  view.beacon_id_bytes =
+      read_final_array<uint8_t>(in, mapping, "beacon_id_bytes");
   view.beacon_delta_bits =
       read_pod<uint8_t>(in, "beacon_delta_bits");
-  view.beacon_begin_bits =
-      read_pod<uint8_t>(in, "beacon_begin_bits");
-  view.beacon_begins =
-      read_final_array<uint8_t>(in, mapping, "beacon_begins");
+  view.beacon_begin_base_bits =
+      read_pod<uint8_t>(in, "beacon_begin_base_bits");
+  view.beacon_begin_delta_bits =
+      read_pod<uint8_t>(in, "beacon_begin_delta_bits");
+  view.beacon_begin_blocks =
+      read_final_array<uint8_t>(in, mapping, "beacon_begin_blocks");
   view.child_beacon_dists =
       read_final_array<uint8_t>(in, mapping, "child_beacon_dists");
   view.leaf_beacon_dists =
@@ -1225,7 +1226,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 37;
+  stored.format_version = 38;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
