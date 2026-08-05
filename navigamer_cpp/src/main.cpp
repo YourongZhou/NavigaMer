@@ -1643,10 +1643,8 @@ void run_query_index_batch(const std::string& index_path,
     query_routes.reserve(queries.size());
     std::vector<double> query_route_ms;
     query_route_ms.reserve(queries.size());
-    std::vector<uint8_t> required_shard_bits(
-        shard_manifest.shards.size(), uint8_t{0});
-    bool load_all_shards = false;
     size_t routed_queries = 0;
+    bool has_unrouted_query = false;
     for (const auto& query : queries) {
       const auto route_start =
           std::chrono::high_resolution_clock::now();
@@ -1657,68 +1655,71 @@ void run_query_index_batch(const std::string& index_path,
           std::chrono::duration<double, std::milli>(
               route_end - route_start)
               .count());
-      if (!route.enabled) {
-        load_all_shards = true;
-      } else {
+      if (route.enabled) {
         ++routed_queries;
-        for (uint32_t shard_id : route.shard_ids) {
-          required_shard_bits[shard_id] = 1;
-        }
+      } else {
+        has_unrouted_query = true;
       }
       query_routes.push_back(std::move(route));
     }
 
-    std::vector<uint32_t> loaded_shard_ids;
-    if (load_all_shards) {
-      loaded_shard_ids.resize(shard_manifest.shards.size());
-      std::iota(
-          loaded_shard_ids.begin(), loaded_shard_ids.end(),
-          uint32_t{0});
+    struct ShardQueryBatch {
+      std::vector<size_t> query_indices;
+      std::vector<uint32_t> shard_ids;
+    };
+    // A large random human-read batch can touch thousands of 10k-window
+    // shards. Keep only one bounded union resident while preserving input
+    // order and every exact router-selected shard for each query.
+    constexpr size_t kMaxResidentQueryShards = 64;
+    std::vector<ShardQueryBatch> shard_query_batches;
+    std::vector<uint8_t> batch_shard_bits(
+        shard_manifest.shards.size(), uint8_t{0});
+    ShardQueryBatch batch;
+    const auto flush_batch = [&]() {
+      if (batch.query_indices.empty()) return;
+      for (uint32_t shard_id : batch.shard_ids) {
+        batch_shard_bits[shard_id] = 0;
+      }
+      shard_query_batches.push_back(std::move(batch));
+      batch = ShardQueryBatch{};
+    };
+    if (has_unrouted_query) {
+      batch.query_indices.resize(queries.size());
+      std::iota(batch.query_indices.begin(), batch.query_indices.end(),
+                size_t{0});
+      batch.shard_ids.resize(shard_manifest.shards.size());
+      std::iota(batch.shard_ids.begin(), batch.shard_ids.end(),
+                uint32_t{0});
+      shard_query_batches.push_back(std::move(batch));
     } else {
-      for (size_t shard_id = 0;
-           shard_id < required_shard_bits.size(); ++shard_id) {
-        if (required_shard_bits[shard_id]) {
-          loaded_shard_ids.push_back(
-              static_cast<uint32_t>(shard_id));
+      for (size_t query_idx = 0; query_idx < query_routes.size();
+           ++query_idx) {
+        const auto& route = query_routes[query_idx];
+        size_t new_shard_count = 0;
+        for (uint32_t shard_id : route.shard_ids) {
+          if (!batch_shard_bits[shard_id]) ++new_shard_count;
         }
-      }
-    }
-    std::vector<uint32_t> shard_to_loaded(
-        shard_manifest.shards.size(), UINT32_MAX);
-    for (size_t loaded_idx = 0;
-         loaded_idx < loaded_shard_ids.size(); ++loaded_idx) {
-      shard_to_loaded[loaded_shard_ids[loaded_idx]] =
-          static_cast<uint32_t>(loaded_idx);
-    }
-    for (auto& route : query_routes) {
-      if (!route.enabled) continue;
-      for (uint32_t& shard_id : route.shard_ids) {
-        const uint32_t loaded_idx = shard_to_loaded[shard_id];
-        if (loaded_idx == UINT32_MAX) {
-          throw std::runtime_error(
-              "routed shard was not selected for loading");
+        if (!batch.query_indices.empty() &&
+            batch.shard_ids.size() + new_shard_count >
+                kMaxResidentQueryShards) {
+          flush_batch();
         }
-        shard_id = loaded_idx;
+        for (uint32_t shard_id : route.shard_ids) {
+          if (!batch_shard_bits[shard_id]) {
+            batch_shard_bits[shard_id] = 1;
+            batch.shard_ids.push_back(shard_id);
+          }
+        }
+        batch.query_indices.push_back(query_idx);
       }
+      flush_batch();
+    }
+    if (shard_query_batches.empty()) {
+      throw std::runtime_error("sharded query batch has no work");
     }
 
-    auto loaded_shards = load_sharded_index(
-        index_path, shard_manifest, loaded_shard_ids);
-    std::cerr << "Loaded sharded index: " << index_path
-              << " shards=" << loaded_shards.size()
-              << "/" << shard_manifest.shards.size()
-              << " sequences="
-              << shard_manifest.total_sequence_count
-              << " world_nodes="
-              << shard_manifest.total_world_node_count << "\n";
-
-    std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
-    engines.reserve(loaded_shards.size());
-    for (auto& shard : loaded_shards) {
-      engines.push_back(std::make_unique<BioGeometrySearchEngine>(
-          shard.builder, search_config));
-    }
     size_t searched_shards = 0;
+    size_t peak_loaded_shards = 0;
 
     const std::vector<std::string> columns = {
         "query_id", "hit_id", "distance", "ref_positions", "read_id",
@@ -1736,14 +1737,47 @@ void run_query_index_batch(const std::string& index_path,
         "query_time_ms"};
 
     std::vector<std::vector<std::string>> all_rows;
-    for (size_t query_idx = 0;
-         query_idx < queries.size(); ++query_idx) {
+    std::vector<uint32_t> shard_to_loaded(
+        shard_manifest.shards.size(), UINT32_MAX);
+    for (const auto& shard_batch : shard_query_batches) {
+      auto loaded_shards = load_sharded_index(
+          index_path, shard_manifest, shard_batch.shard_ids);
+      peak_loaded_shards = std::max(
+          peak_loaded_shards, loaded_shards.size());
+      for (size_t loaded_idx = 0;
+           loaded_idx < shard_batch.shard_ids.size(); ++loaded_idx) {
+        shard_to_loaded[shard_batch.shard_ids[loaded_idx]] =
+            static_cast<uint32_t>(loaded_idx);
+      }
+      std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
+      engines.reserve(loaded_shards.size());
+      for (auto& shard : loaded_shards) {
+        engines.push_back(std::make_unique<BioGeometrySearchEngine>(
+            shard.builder, search_config));
+      }
+      for (size_t query_idx : shard_batch.query_indices) {
       const auto& read = queries[query_idx];
       auto query_start =
           std::chrono::high_resolution_clock::now();
       const auto& route = query_routes[query_idx];
       const size_t active_shard_count =
           route.enabled ? route.shard_ids.size() : engines.size();
+      std::vector<uint32_t> active_engine_ids(active_shard_count);
+      if (route.enabled) {
+        for (size_t active_idx = 0; active_idx < active_shard_count;
+             ++active_idx) {
+          const uint32_t shard_id = route.shard_ids[active_idx];
+          const uint32_t loaded_idx = shard_to_loaded[shard_id];
+          if (loaded_idx == UINT32_MAX) {
+            throw std::runtime_error(
+                "routed shard was not selected for loading");
+          }
+          active_engine_ids[active_idx] = loaded_idx;
+        }
+      } else {
+        std::iota(active_engine_ids.begin(), active_engine_ids.end(),
+                  uint32_t{0});
+      }
       searched_shards += active_shard_count;
       std::vector<std::pair<SearchResult, SearchStats>>
           shard_results(active_shard_count);
@@ -1751,8 +1785,7 @@ void run_query_index_batch(const std::string& index_path,
 #pragma omp parallel for schedule(static) if(active_shard_count > 1)
       for (size_t active_idx = 0;
            active_idx < active_shard_count; ++active_idx) {
-        const size_t shard_idx =
-            route.enabled ? route.shard_ids[active_idx] : active_idx;
+        const size_t shard_idx = active_engine_ids[active_idx];
         try {
           shard_results[active_idx] =
               engines[shard_idx]->search_adaptive(
@@ -1810,8 +1843,7 @@ void run_query_index_batch(const std::string& index_path,
       std::unordered_map<std::string, size_t> hit_by_sequence;
       for (size_t active_idx = 0;
            active_idx < shard_results.size(); ++active_idx) {
-        const size_t shard_idx =
-            route.enabled ? route.shard_ids[active_idx] : active_idx;
+        const size_t shard_idx = active_engine_ids[active_idx];
         const auto& sequence_store =
             loaded_shards[shard_idx].builder.sequence_store();
         for (LeafId hit_id : shard_results[active_idx].first) {
@@ -1914,7 +1946,19 @@ void run_query_index_batch(const std::string& index_path,
             search_stats.end());
         all_rows.push_back(std::move(row));
       }
+      }
+      for (uint32_t shard_id : shard_batch.shard_ids) {
+        shard_to_loaded[shard_id] = UINT32_MAX;
+      }
     }
+    std::cerr << "Loaded sharded index: " << index_path
+              << " peak_shards=" << peak_loaded_shards
+              << "/" << shard_manifest.shards.size()
+              << " batches=" << shard_query_batches.size()
+              << " sequences="
+              << shard_manifest.total_sequence_count
+              << " world_nodes="
+              << shard_manifest.total_world_node_count << "\n";
     if (!out_tsv.empty()) {
       write_tsv(out_tsv, columns, all_rows);
     }
