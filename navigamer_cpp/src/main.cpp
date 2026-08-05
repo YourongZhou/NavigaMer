@@ -1275,14 +1275,18 @@ void run_full(const std::string& ref_input, const std::string& reads_input,
     }
   }
 
-  std::vector<std::vector<std::string>> all_rows;
-  for (auto& rows : per_read_rows)
-    for (auto& row : rows)
-      all_rows.push_back(std::move(row));
-
-  if (!out_tsv.empty())
-    write_tsv(out_tsv, columns, all_rows);
-  std::cerr << "Total rows: " << all_rows.size() << "\n";
+  size_t output_row_count = 0;
+  if (!out_tsv.empty()) {
+    TsvWriter writer(out_tsv, columns);
+    for (const auto& rows : per_read_rows) {
+      for (const auto& row : rows) writer.write_row(row);
+      output_row_count += rows.size();
+    }
+    writer.close();
+  } else {
+    for (const auto& rows : per_read_rows) output_row_count += rows.size();
+  }
+  std::cerr << "Total rows: " << output_row_count << "\n";
 }
 
 // Benchmark: reference windows -> index; query reads -> search; output hits + SearchStats
@@ -1563,13 +1567,17 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
     }
   }
 
-  std::vector<std::vector<std::string>> all_rows;
-  for (auto& rows : per_query_rows)
-    for (auto& row : rows)
-      all_rows.push_back(std::move(row));
-
-  if (!out_tsv.empty())
-    write_tsv(out_tsv, columns, all_rows);
+  size_t output_row_count = 0;
+  if (!out_tsv.empty()) {
+    TsvWriter writer(out_tsv, columns);
+    for (const auto& rows : per_query_rows) {
+      for (const auto& row : rows) writer.write_row(row);
+      output_row_count += rows.size();
+    }
+    writer.close();
+  } else {
+    for (const auto& rows : per_query_rows) output_row_count += rows.size();
+  }
   if (!summary_query_ms.empty()) {
     std::cerr << "Benchmark query summary:"
               << " mean_query_ms=" << format_double(average_values(summary_query_ms))
@@ -1600,7 +1608,7 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
               << " mean_result_count="
               << format_double(average_values(summary_result_count)) << "\n";
   }
-  std::cerr << "Benchmark rows: " << all_rows.size() << "\n";
+  std::cerr << "Benchmark rows: " << output_row_count << "\n";
 }
 
 void run_query_index_batch(const std::string& index_path,
