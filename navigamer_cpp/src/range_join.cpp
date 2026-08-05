@@ -1138,6 +1138,8 @@ RangeJoinQueryResult ExactRangeJoinIndex::pigeonhole_query(
   };
 
   RangeJoinQueryResult result;
+  result.candidate_item_ids.swap(workspace->candidate_item_ids);
+  result.candidate_item_ids.clear();
   result.mode_used = RangeCandidateMode::PigeonholeOnly;
   result.block_len = block_len;
   result.seed_len = seed_len;

@@ -3455,6 +3455,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
             }
           }
         }
+        workspace.candidate_item_ids.swap(candidates.candidate_item_ids);
         if (progress && child_idx % 256 == 255) progress->advance(256);
       }
       flush_verify_batch();
