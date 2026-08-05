@@ -821,9 +821,14 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
         parent_index.max_child_radius = child_radius;
         const bool uniform_sequences =
             view.sequences.fixed_sequence_length != 0;
+        const bool uniform_reference_sequences =
+            uniform_sequences && view.sequences.reference_backed;
         std::vector<RangeJoinItemView> items;
         std::vector<const char*> uniform_sequence_data;
-        if (uniform_sequences) {
+        std::vector<uint32_t> uniform_sequence_offsets;
+        if (uniform_reference_sequences) {
+          uniform_sequence_offsets.reserve(view.child_count(node_id));
+        } else if (uniform_sequences) {
           uniform_sequence_data.reserve(view.child_count(node_id));
         } else {
           items.reserve(view.child_count(node_id));
@@ -848,14 +853,19 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
           }
           const std::string_view sequence =
               view.sequences.sequence(child_center_id);
-          if (uniform_sequences) {
+          if (uniform_reference_sequences) {
+            uniform_sequence_offsets.push_back(static_cast<uint32_t>(
+                view.sequences.source_position(child_center_id)));
+          } else if (uniform_sequences) {
             uniform_sequence_data.push_back(sequence.data());
           } else {
             items.push_back({child_idx, sequence});
           }
         }
         if (!usable ||
-            (uniform_sequences
+            (uniform_reference_sequences
+                 ? uniform_sequence_offsets.empty()
+                 : uniform_sequences
                  ? uniform_sequence_data.empty()
                  : items.empty())) {
           continue;
@@ -863,7 +873,12 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
         ParentSafeChildRouterIndex::RadiusBucket bucket;
         bucket.radius = child_radius;
         bucket.range_index = ExactRangeJoinIndex(safe_child_config);
-        if (uniform_sequences) {
+        if (uniform_reference_sequences) {
+          const std::string_view reference = view.sequences.reference_view();
+          bucket.range_index.build_uniform_identity_offsets(
+              std::move(uniform_sequence_offsets), reference.data(),
+              reference.size(), view.sequences.fixed_sequence_length);
+        } else if (uniform_sequences) {
           bucket.range_index.build_uniform_identity_views(
               std::move(uniform_sequence_data),
               view.sequences.fixed_sequence_length);
@@ -908,9 +923,14 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
         ExactRangeJoinIndex(router_index_config), {}};
     const bool uniform_sequences =
         view.sequences.fixed_sequence_length != 0;
+    const bool uniform_reference_sequences =
+        uniform_sequences && view.sequences.reference_backed;
     std::vector<RangeJoinItemView> items;
     std::vector<const char*> uniform_sequence_data;
-    if (uniform_sequences) {
+    std::vector<uint32_t> uniform_sequence_offsets;
+    if (uniform_reference_sequences) {
+      uniform_sequence_offsets.reserve(view.child_count(node_id));
+    } else if (uniform_sequences) {
       uniform_sequence_data.reserve(view.child_count(node_id));
     } else {
       items.reserve(view.child_count(node_id));
@@ -937,17 +957,27 @@ BioGeometrySearchEngine::BioGeometrySearchEngine(
           node_key(child_id), child_idx);
       const std::string_view sequence =
           view.sequences.sequence(child_center_id);
-      if (uniform_sequences) {
+      if (uniform_reference_sequences) {
+        uniform_sequence_offsets.push_back(static_cast<uint32_t>(
+            view.sequences.source_position(child_center_id)));
+      } else if (uniform_sequences) {
         uniform_sequence_data.push_back(sequence.data());
       } else {
         items.push_back({child_idx, sequence});
       }
     }
-    const size_t item_count = uniform_sequences
-                                  ? uniform_sequence_data.size()
-                                  : items.size();
+    const size_t item_count = uniform_reference_sequences
+                                  ? uniform_sequence_offsets.size()
+                                  : uniform_sequences
+                                        ? uniform_sequence_data.size()
+                                        : items.size();
     if (!usable || item_count < 2) continue;
-    if (uniform_sequences) {
+    if (uniform_reference_sequences) {
+      const std::string_view reference = view.sequences.reference_view();
+      parent_index.range_index.build_uniform_identity_offsets(
+          std::move(uniform_sequence_offsets), reference.data(),
+          reference.size(), view.sequences.fixed_sequence_length);
+    } else if (uniform_sequences) {
       parent_index.range_index.build_uniform_identity_views(
           std::move(uniform_sequence_data),
           view.sequences.fixed_sequence_length);

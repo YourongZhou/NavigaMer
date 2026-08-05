@@ -3220,7 +3220,24 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
                        seed_lengths.end());
     {
       ScopedTimer timer(&stats_.phase2_index_build_ms);
-      if (search_graph_view_.sequences.fixed_sequence_length != 0) {
+      const bool uniform_reference_sequences =
+          search_graph_view_.sequences.reference_backed &&
+          search_graph_view_.sequences.fixed_sequence_length != 0;
+      if (uniform_reference_sequences) {
+        std::vector<uint32_t> parent_sequence_offsets;
+        parent_sequence_offsets.reserve(parents.size());
+        for (NodeId parent_id : parents) {
+          parent_sequence_offsets.push_back(static_cast<uint32_t>(
+              search_graph_view_.sequences.source_position(
+                  build_nodes_[parent_id].center_sequence_id)));
+        }
+        const std::string_view reference =
+            search_graph_view_.sequences.reference_view();
+        parent_index.build_uniform_identity_offsets(
+            std::move(parent_sequence_offsets), reference.data(),
+            reference.size(),
+            search_graph_view_.sequences.fixed_sequence_length);
+      } else if (search_graph_view_.sequences.fixed_sequence_length != 0) {
         std::vector<const char*> parent_sequence_data;
         parent_sequence_data.reserve(parent_sequences.size());
         for (std::string_view sequence : parent_sequences) {
