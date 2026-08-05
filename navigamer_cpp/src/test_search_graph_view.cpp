@@ -64,7 +64,7 @@ void assert_view_equivalent_to_original() {
         assert(view.leaf_mbb_bits(node_id) <= 8);
         assert(view.leaf_mbb_range_valid(node_id));
       } else {
-        assert(beacon_count <= 10);
+        assert(beacon_count <= 3);
         assert(view.child_mbb_bits(node_id) >= 1);
         assert(view.child_mbb_bits(node_id) <= 8);
         const uint32_t expected_bin_width =
