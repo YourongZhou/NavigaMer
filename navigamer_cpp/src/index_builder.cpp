@@ -3463,24 +3463,6 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
     phase_completed += children.size();
     if (progress) progress->set_completed(phase_completed);
 
-    const auto edge_less = [](const auto& left, const auto& right) {
-      return std::tie(left.parent_idx, left.child_idx) <
-             std::tie(right.parent_idx, right.child_idx);
-    };
-#pragma omp parallel for if(thread_count > 1) num_threads(thread_count)
-    for (int tid = 0; tid < thread_count; ++tid) {
-      auto& local_edges = thread_edges[static_cast<size_t>(tid)];
-      std::sort(local_edges.begin(), local_edges.end(), edge_less);
-      local_edges.erase(
-          std::unique(
-              local_edges.begin(), local_edges.end(),
-              [](const auto& left, const auto& right) {
-                return left.parent_idx == right.parent_idx &&
-                       left.child_idx == right.child_idx;
-              }),
-          local_edges.end());
-    }
-
     for (const auto& local : thread_stats) {
       merge_phase2_local_stats(stats_, local.stats);
       stats_.phase2_candidate_query_ms += local.candidate_query_worker_ms;
@@ -3493,51 +3475,23 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
 
     {
       ScopedTimer timer(&stats_.phase2_edge_insert_ms);
-      struct EdgeCursor {
-        Phase2EdgeTuple edge;
-        uint32_t thread_idx = 0;
-        size_t offset = 0;
-      };
-      const auto cursor_greater = [](const EdgeCursor& left,
-                                     const EdgeCursor& right) {
-        return std::tie(left.edge.parent_idx, left.edge.child_idx) >
-               std::tie(right.edge.parent_idx, right.edge.child_idx);
-      };
-      std::priority_queue<EdgeCursor, std::vector<EdgeCursor>,
-                          decltype(cursor_greater)>
-          pending(cursor_greater);
-      for (size_t thread_idx = 0;
-           thread_idx < thread_edges.size(); ++thread_idx) {
-        if (!thread_edges[thread_idx].empty()) {
-          pending.push(
-              {thread_edges[thread_idx][0],
-               static_cast<uint32_t>(thread_idx), 0});
+      std::vector<std::vector<uint32_t>> children_by_parent(parents.size());
+      for (auto& local_edges : thread_edges) {
+        for (const auto& edge : local_edges) {
+          children_by_parent[edge.parent_idx].push_back(edge.child_idx);
         }
+        std::vector<Phase2EdgeTuple>().swap(local_edges);
       }
-
-      Phase2EdgeTuple previous_edge;
-      bool have_previous_edge = false;
-      while (!pending.empty()) {
-        const EdgeCursor cursor = pending.top();
-        pending.pop();
-        if (!have_previous_edge ||
-            previous_edge.parent_idx != cursor.edge.parent_idx ||
-            previous_edge.child_idx != cursor.edge.child_idx) {
-          build_nodes_[parents[cursor.edge.parent_idx]]
-              .child_or_leaf_ids.push_back(
-                  children[cursor.edge.child_idx]);
-          previous_edge = cursor.edge;
-          have_previous_edge = true;
-        }
-
-        auto& local_edges =
-            thread_edges[static_cast<size_t>(cursor.thread_idx)];
-        const size_t next_offset = cursor.offset + 1;
-        if (next_offset < local_edges.size()) {
-          pending.push(
-              {local_edges[next_offset], cursor.thread_idx, next_offset});
-        } else {
-          std::vector<Phase2EdgeTuple>().swap(local_edges);
+      for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
+        auto& child_indices = children_by_parent[parent_idx];
+        std::sort(child_indices.begin(), child_indices.end());
+        child_indices.erase(
+            std::unique(child_indices.begin(), child_indices.end()),
+            child_indices.end());
+        auto& child_ids =
+            build_nodes_[parents[parent_idx]].child_or_leaf_ids;
+        for (uint32_t child_idx : child_indices) {
+          child_ids.push_back(children[child_idx]);
         }
       }
     }
