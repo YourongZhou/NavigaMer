@@ -165,8 +165,8 @@ payloads into one `.navpack` container. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
 contig. Valid completed packs are reused on restart, damaged packs are rebuilt
-as one atomic group, and only the current group's temporary parts exist during
-construction. The automatic policy keeps one part
+as one atomic group, and payloads are written directly into that group's
+temporary pack without per-shard temporary files. The automatic policy keeps one part
 below 16 OpenMP threads; on high-core systems it builds at most four parts
 concurrently and divides the thread budget among their internal parallel
 phases. Use `--shard-build-jobs N` to cap concurrent builders and their
@@ -271,7 +271,7 @@ Explicit beacon IDs use exact ZigZag deltas with one shard-wide 1..32-bit
 width chosen by evaluating every width. Direct signed bytes and absolute IDs
 remain available per node; choosing 16 bits can exactly match the former
 8/16/32-bit payload, so the optimizer never makes this array larger.
-A v10 `.navshard` bundle stores the common v38 construction manifest once and
+A v11 `.navshard` bundle stores the common v38 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle

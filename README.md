@@ -258,7 +258,8 @@ limit, while peak build memory is bounded by the number of concurrent parts.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
-Only one group of temporary shard files exists at a time. The final v10
+During a rebuild only the current group's atomic temporary pack exists; shard
+payloads are written directly into it, without per-shard temporary files. The final v11
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph
