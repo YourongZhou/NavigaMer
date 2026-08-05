@@ -2006,7 +2006,15 @@ void run_query_index_batch(const std::string& index_path,
       "search_prefetch_enabled", "search_qgram_q", "result_count",
       "query_time_ms"};
 
-  std::vector<std::vector<std::string>> all_rows;
+  std::unique_ptr<TsvWriter> tsv_writer;
+  if (!out_tsv.empty()) {
+    tsv_writer = std::make_unique<TsvWriter>(out_tsv, columns);
+  }
+  size_t output_row_count = 0;
+  const auto emit_row = [&](const std::vector<std::string>& row) {
+    if (tsv_writer) tsv_writer->write_row(row);
+    ++output_row_count;
+  };
   std::vector<SearchStats> per_query_stats(queries.size());
   const auto& sequence_store = loaded.builder.sequence_store();
   for (size_t qi = 0; qi < queries.size(); ++qi) {
@@ -2044,7 +2052,7 @@ void run_query_index_batch(const std::string& index_path,
           std::to_string(st.candidate_count_for_prune),
           std::to_string(st.beacon_prune_count)};
       row.insert(row.end(), search_stats.begin(), search_stats.end());
-      all_rows.push_back(std::move(row));
+      emit_row(row);
     } else {
       for (LeafId hit_id : res) {
         const std::string_view hit_sequence =
@@ -2090,14 +2098,14 @@ void run_query_index_batch(const std::string& index_path,
               std::to_string(st.candidate_count_for_prune),
               std::to_string(st.beacon_prune_count)};
           row.insert(row.end(), search_stats.begin(), search_stats.end());
-          all_rows.push_back(std::move(row));
+          emit_row(row);
         }
       }
     }
     per_query_stats[qi] = std::move(st);
   }
 
-  if (!out_tsv.empty()) write_tsv(out_tsv, columns, all_rows);
+  if (tsv_writer) tsv_writer->close();
   if (!path_trace_tsv.empty()) {
     const std::vector<std::string> trace_columns = {
         "query_id", "query_ordinal", "world_visit_count", "leaf_visit_count",
@@ -2136,7 +2144,7 @@ void run_query_index_batch(const std::string& index_path,
     }
     write_tsv(path_trace_tsv, trace_columns, trace_rows);
   }
-  std::cerr << "Batch query rows: " << all_rows.size() << "\n";
+  std::cerr << "Batch query rows: " << output_row_count << "\n";
 }
 
 void write_tsv_with_header_even_if_empty(
