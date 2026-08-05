@@ -150,7 +150,7 @@ cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
 ./navigamer build --ref ref --reads ACGTACGTACGTACGT --index /tmp/navigamer.navidx
 ./navigamer query-index --index /tmp/navigamer.navidx --query ACGTACGTACGTACGT --tolerance 2
-./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 100000 --shard-build-jobs 16 --index /tmp/human.navshard
+./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000 --index /tmp/human.navshard
 ./navigamer query-index-batch --index /tmp/human.navshard --reads reads.fastq --tolerance 2 --out /tmp/hits.tsv
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
@@ -290,14 +290,15 @@ batch, search those parts in parallel, and merge identical sequences and all
 of their occurrences before reporting results. A fallback query loads every
 shard to preserve recall.
 
-For human-scale stride-1 builds, start with `--shard-windows 100000` and tune
+For human-scale stride-1 builds, start with `--shard-windows 10000` and tune
 from measurements. Logical shards are cheap because 1,024 share one pack file.
 Large logical shards widen packed offsets and amplify the high-tolerance
-Phase-2 join; they also make every routed query traverse a larger graph. On the
-a 20 kb chr1 slice, 1k-window shards preserved the identical hit set while
-using 3.1% less bundle space and 3.6x less batch-query wall time than 10k-window
-shards. This controlled comparison is a scaling diagnostic, not a universal
-constant, so production data should still benchmark nearby shard sizes.
+Phase-2 join; they also make every routed query traverse a larger graph. In a
+1 Mb stride-1 build, 10k-window shards preserved the identical hit set while
+cutting peak build memory from 280 MB to 93 MB and batch-query wall time from
+11.2 s to 1.5 s relative to 100k-window shards. This controlled comparison is
+a scaling diagnostic, not a universal constant, so production data should still
+benchmark nearby shard sizes.
 Router construction writes each completed shard's sorted 32-bit minimizer list
 contiguously to a temporary spool, then memory-maps and k-way merges the lists
 directly into the sidecar. There is no per-shard page padding: the spool is
