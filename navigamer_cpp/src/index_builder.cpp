@@ -3636,6 +3636,8 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
           uint8_t{0});
       std::vector<uint8_t> raw_distances;
       std::vector<uint8_t> beacon_pair_distances;
+      std::array<PreparedEdlibDnaPattern, kMaxBuildBeaconsPerNode>
+          prepared_beacons;
 
 #pragma omp single
       actual_threads = omp_get_num_threads();
@@ -3705,6 +3707,13 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
             beacon_pair_distances[pair_idx] = static_cast<uint8_t>(
                 build_distance(first, second, range_config_.distance_mode));
           }
+          if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
+            for (size_t dim = 0; dim < beacon_count; ++dim) {
+              prepared_beacons[dim] = prepare_edlib_dna_pattern(
+                  search_graph_view_.sequences.sequence(
+                      geometry.beacon_ids[dim]));
+            }
+          }
           raw_distances.assign(mbb_cell_count, 0);
           for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
             const auto& child =
@@ -3712,19 +3721,13 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
             const auto& child_sequence =
                 search_graph_view_.sequences.sequence(
                     child.center_sequence_id);
-            PreparedEdlibDnaPattern prepared_child;
-            const PreparedEdlibDnaPattern* prepared_child_ptr = nullptr;
-            if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
-              prepared_child = prepare_edlib_dna_pattern(child_sequence);
-              prepared_child_ptr = &prepared_child;
-            }
             for (size_t dim = 0; dim < beacon_count; ++dim) {
               const LeafId beacon_id = geometry.beacon_ids[dim];
               const auto& beacon =
                   search_graph_view_.sequences.sequence(beacon_id);
-              int dist = prepared_child_ptr
+              int dist = range_config_.distance_mode == BuildDistanceMode::Edlib
                              ? compute_distance_edlib_prepared(
-                                   *prepared_child_ptr, beacon)
+                                   prepared_beacons[dim], child_sequence)
                              : build_distance(
                                    child_sequence, beacon,
                                    range_config_.distance_mode);
