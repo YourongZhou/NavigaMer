@@ -1855,8 +1855,14 @@ void run_query_index_batch(const std::string& index_path,
             stats.path_uncovered_step_count;
       }
 
+      size_t raw_hit_count = 0;
+      for (const auto& shard_result : shard_results) {
+        raw_hit_count += shard_result.first.size();
+      }
       std::vector<BioSequence> combined_hits;
+      combined_hits.reserve(raw_hit_count);
       std::unordered_map<std::string_view, size_t> hit_by_sequence;
+      hit_by_sequence.reserve(raw_hit_count);
       for (size_t active_idx = 0;
            active_idx < shard_results.size(); ++active_idx) {
         const size_t shard_idx = active_engine_ids[active_idx];
