@@ -3258,8 +3258,8 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
       parent_index.prepare_seed_lengths(seed_lengths);
     }
 
-    std::vector<QGramSignature> parent_qgram_signatures;
-    std::vector<QGramSignature> child_qgram_signatures;
+    std::vector<Phase4QGramSignature> parent_qgram_signatures;
+    std::vector<Phase4QGramSignature> child_qgram_signatures;
     if (range_config_.phase2_qgram_postfilter) {
       const int q = range_config_.range_join.qgram_q;
       parent_qgram_signatures.resize(parents.size());
@@ -3267,7 +3267,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
       for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
         const auto& parent = build_nodes_[parents[parent_idx]];
         parent_qgram_signatures[parent_idx] =
-            compute_qgram_signature(
+            phase4_qgram_signature(
                 search_graph_view_.sequences.sequence(
                     parent.center_sequence_id),
                 q);
@@ -3275,7 +3275,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
       for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
         const auto& child = build_nodes_[children[child_idx]];
         child_qgram_signatures[child_idx] =
-            compute_qgram_signature(
+            phase4_qgram_signature(
                 search_graph_view_.sequences.sequence(
                     child.center_sequence_id),
                 q);
@@ -3371,7 +3371,7 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
             continue;
           }
           if (range_config_.phase2_qgram_postfilter &&
-              qgram_can_prune_edit_distance(
+              phase4_qgram_can_prune_edit_distance(
                   child_qgram_signatures[child_idx],
                   parent_qgram_signatures[parent_idx],
                   link_tolerance)) {
