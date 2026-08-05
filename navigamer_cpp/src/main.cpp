@@ -1856,7 +1856,7 @@ void run_query_index_batch(const std::string& index_path,
       }
 
       std::vector<BioSequence> combined_hits;
-      std::unordered_map<std::string, size_t> hit_by_sequence;
+      std::unordered_map<std::string_view, size_t> hit_by_sequence;
       for (size_t active_idx = 0;
            active_idx < shard_results.size(); ++active_idx) {
         const size_t shard_idx = active_engine_ids[active_idx];
@@ -1866,7 +1866,7 @@ void run_query_index_batch(const std::string& index_path,
           const std::string_view hit_sequence =
               sequence_store.sequence(hit_id);
           auto inserted = hit_by_sequence.emplace(
-              std::string(hit_sequence), combined_hits.size());
+              hit_sequence, combined_hits.size());
           if (inserted.second) {
             combined_hits.push_back(
                 sequence_store.materialize(hit_id));
