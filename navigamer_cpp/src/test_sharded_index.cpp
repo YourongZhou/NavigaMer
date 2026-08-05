@@ -284,7 +284,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(reloaded_manifest.window_length == window);
-  assert(reloaded_manifest.format_version == 10);
+  assert(reloaded_manifest.format_version == 11);
   assert(reloaded_manifest.stride == stride);
   assert(reloaded_manifest.shards.size() ==
          manifest.shards.size());
@@ -419,13 +419,13 @@ void test_seed_router_no_false_negatives() {
   assert(manifest.router_k == 16);
   assert(manifest.router_window == 32);
   assert(manifest.router_entry_count > 0);
-  const size_t expected_router_bytes =
+  const size_t raw_router_bytes =
       48 + manifest.router_entry_count * sizeof(uint32_t) +
       (manifest.router_entry_count * 3 + 7) / 8;
-  assert(std::filesystem::file_size(
-             bundle.string() + ".route") ==
-         expected_router_bytes);
-  assert(expected_router_bytes <
+  const size_t compact_router_bytes = static_cast<size_t>(
+      std::filesystem::file_size(bundle.string() + ".route"));
+  assert(compact_router_bytes < raw_router_bytes);
+  assert(compact_router_bytes <
          40 + manifest.router_entry_count * sizeof(uint64_t));
   const auto rebuilt_manifest =
       navigamer::build_sharded_reference_index(
@@ -486,8 +486,18 @@ void test_seed_router_no_false_negatives() {
       bundle.string(), rebuilt_manifest);
   assert(router.enabled());
   assert(router.shard_id_bits == 3);
-  assert(router.minimizer_codes.is_mapped());
+  assert(router.minimizer_code_bases.is_mapped());
+  assert(router.minimizer_code_widths.is_mapped());
+  assert(router.minimizer_code_group_offsets.is_mapped());
+  assert(router.packed_minimizer_code_deltas.is_mapped());
   assert(router.packed_shard_ids.is_mapped());
+  assert(router.minimizer_code_count() ==
+         rebuilt_manifest.router_entry_count);
+  for (size_t code_idx = 1;
+       code_idx < router.minimizer_code_count(); ++code_idx) {
+    assert(router.minimizer_code_at(code_idx - 1) <=
+           router.minimizer_code_at(code_idx));
+  }
   const auto shards = navigamer::load_sharded_index(
       bundle.string(), rebuilt_manifest);
   const auto subset = navigamer::load_sharded_index(

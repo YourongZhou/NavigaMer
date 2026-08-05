@@ -28,7 +28,7 @@ static_assert(sizeof(IndexShardDescriptor) <= 48,
               "shard descriptors must remain compact");
 
 struct ShardedIndexManifest {
-  uint32_t format_version = 10;
+  uint32_t format_version = 11;
   size_t window_length = 0;
   size_t stride = 0;
   size_t total_window_count = 0;
@@ -49,22 +49,42 @@ struct ShardRouteSelection {
   std::vector<uint32_t> shard_ids;
 };
 
-// Sorted minimizer codes and bit-packed parallel shard IDs are memory-mapped
-// from the router sidecar. Exact query blocks provide a no-false-negative
-// necessary condition; unsupported queries conservatively disable routing.
+// Sorted minimizer codes are stored as exact delta-coded blocks and shard IDs
+// as a bit-packed parallel array. Both are memory-mapped from the router
+// sidecar. Exact query blocks provide a no-false-negative necessary
+// condition; unsupported queries conservatively disable routing.
 struct ShardedSeedRouter {
   uint32_t k = 0;
   uint32_t window = 0;
   uint32_t shard_count = 0;
   uint32_t shard_id_bits = 0;
+  uint32_t code_block_size = 0;
+  size_t code_entry_count = 0;
+  FinalArray<uint32_t> minimizer_code_bases;
+  FinalArray<uint8_t> minimizer_code_widths;
+  FinalArray<uint64_t> minimizer_code_group_offsets;
+  FinalArray<uint8_t> packed_minimizer_code_deltas;
+  // Retained only for direct in-memory test fixtures. Persisted routers use
+  // the compact block arrays above and never materialize this array.
   FinalArray<uint32_t> minimizer_codes;
   FinalArray<uint8_t> packed_shard_ids;
 
   bool enabled() const {
+    const bool has_raw_codes = !minimizer_codes.empty();
+    const bool has_compact_codes =
+        code_entry_count != 0 && code_block_size != 0 &&
+        !minimizer_code_bases.empty() &&
+        !minimizer_code_widths.empty() &&
+        !minimizer_code_group_offsets.empty();
     return k != 0 && window >= k && shard_count != 0 &&
-           shard_id_bits != 0 && !minimizer_codes.empty() &&
+           shard_id_bits != 0 &&
+           (has_raw_codes || has_compact_codes) &&
            !packed_shard_ids.empty();
   }
+  size_t minimizer_code_count() const;
+  uint32_t minimizer_code_at(size_t entry_index) const;
+  size_t lower_bound_minimizer_code(uint32_t code) const;
+  size_t upper_bound_minimizer_code(uint32_t code) const;
   ShardRouteSelection select(
       std::string_view query, int tolerance) const;
 };

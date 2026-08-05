@@ -36,14 +36,17 @@ constexpr std::array<char, 8> kShardMagic = {
 constexpr std::array<char, 8> kShardPackMagic = {
     'N', 'G', 'P', 'A', 'C', 'K', '0', '7'};
 constexpr std::array<char, 8> kRouterMagic = {
-    'N', 'G', 'R', 'O', 'U', 'T', '0', '2'};
-constexpr uint32_t kShardFormatVersion = 10;
+    'N', 'G', 'R', 'O', 'U', 'T', '0', '3'};
+constexpr uint32_t kShardFormatVersion = 11;
 constexpr uint32_t kShardPackFormatVersion = 7;
-constexpr uint32_t kRouterFormatVersion = 2;
-constexpr size_t kRouterHeaderBytes = 48;
-constexpr std::streamoff kRouterChecksumOffset = 40;
+constexpr uint32_t kRouterFormatVersion = 3;
+constexpr size_t kRouterHeaderBytes = 80;
+constexpr std::streamoff kRouterCodePayloadSizeOffset = 60;
+constexpr std::streamoff kRouterChecksumOffset = 68;
 constexpr uint32_t kRouterK = 16;
 constexpr uint32_t kRouterWindow = 32;
+constexpr uint32_t kRouterCodeBlockSize = 16;
+constexpr uint32_t kRouterCodeBlocksPerGroup = 4;
 constexpr uint64_t kMaxShardCount =
     std::numeric_limits<uint32_t>::max();
 constexpr uint64_t kMaxStringLength = uint64_t{1} << 30;
@@ -220,6 +223,76 @@ size_t packed_shard_byte_count(
   return (entry_count * shard_id_bits + 7) / 8;
 }
 
+size_t checked_router_add(size_t left, size_t right) {
+  if (right > std::numeric_limits<size_t>::max() - left) {
+    throw std::runtime_error("shard router size overflow");
+  }
+  return left + right;
+}
+
+size_t checked_router_multiply(size_t left, size_t right) {
+  if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
+    throw std::runtime_error("shard router size overflow");
+  }
+  return left * right;
+}
+
+size_t align_router_size(size_t value, size_t alignment) {
+  const size_t mask = alignment - 1;
+  if (value > std::numeric_limits<size_t>::max() - mask) {
+    throw std::runtime_error("shard router size overflow");
+  }
+  return (value + mask) & ~mask;
+}
+
+struct RouterStorageLayout {
+  size_t code_block_count = 0;
+  size_t code_group_count = 0;
+  size_t bases_begin = 0;
+  size_t widths_begin = 0;
+  size_t group_offsets_begin = 0;
+  size_t payload_begin = 0;
+  size_t shard_ids_begin = 0;
+  size_t total_size = 0;
+};
+
+RouterStorageLayout router_storage_layout(
+    size_t entry_count, uint64_t payload_size,
+    size_t packed_shard_ids_size) {
+  if (entry_count == 0 ||
+      payload_size > std::numeric_limits<size_t>::max()) {
+    throw std::runtime_error("shard router size overflow");
+  }
+  RouterStorageLayout layout;
+  layout.code_block_count =
+      (entry_count + kRouterCodeBlockSize - 1) / kRouterCodeBlockSize;
+  layout.code_group_count =
+      (layout.code_block_count + kRouterCodeBlocksPerGroup - 1) /
+      kRouterCodeBlocksPerGroup;
+  layout.bases_begin = kRouterHeaderBytes;
+  layout.widths_begin = checked_router_add(
+      layout.bases_begin,
+      checked_router_multiply(layout.code_block_count, sizeof(uint32_t)));
+  layout.group_offsets_begin = align_router_size(
+      checked_router_add(layout.widths_begin, layout.code_block_count),
+      alignof(uint64_t));
+  layout.payload_begin = checked_router_add(
+      layout.group_offsets_begin,
+      checked_router_multiply(
+          layout.code_group_count, sizeof(uint64_t)));
+  layout.shard_ids_begin = checked_router_add(
+      layout.payload_begin, static_cast<size_t>(payload_size));
+  layout.total_size = checked_router_add(
+      layout.shard_ids_begin, packed_shard_ids_size);
+  return layout;
+}
+
+uint8_t minimizer_delta_width(uint32_t delta) {
+  uint8_t width = 1;
+  while (delta >>= 1) ++width;
+  return width;
+}
+
 uint64_t begin_router_checksum(
     uint32_t k, uint32_t window, uint32_t shard_count,
     uint32_t shard_id_bits, size_t entry_count) {
@@ -230,19 +303,6 @@ uint64_t begin_router_checksum(
   hash_pod<uint32_t>(&hash, shard_count);
   hash_pod<uint32_t>(&hash, shard_id_bits);
   hash_pod<uint64_t>(&hash, entry_count);
-  return hash;
-}
-
-[[maybe_unused]] uint64_t router_storage_checksum(
-    uint32_t k, uint32_t window, uint32_t shard_count,
-    uint32_t shard_id_bits, size_t entry_count,
-    const uint32_t* minimizer_codes,
-    const uint8_t* packed_shard_ids, size_t packed_size) {
-  uint64_t hash = begin_router_checksum(
-      k, window, shard_count, shard_id_bits, entry_count);
-  hash_bytes(
-      &hash, minimizer_codes, entry_count * sizeof(uint32_t));
-  hash_bytes(&hash, packed_shard_ids, packed_size);
   return hash;
 }
 
@@ -572,6 +632,8 @@ uint64_t save_router_sidecar(
       required_shard_id_bits(shard_count);
   const size_t packed_size =
       packed_shard_byte_count(data.entry_count, shard_id_bits);
+  const RouterStorageLayout layout = router_storage_layout(
+      data.entry_count, 0, packed_size);
   uint64_t checksum = begin_router_checksum(
       k, window, shard_count, shard_id_bits, data.entry_count);
   try {
@@ -648,9 +710,23 @@ uint64_t save_router_sidecar(
     write_pod<uint32_t>(out, window);
     write_pod<uint32_t>(out, shard_count);
     write_pod<uint32_t>(out, shard_id_bits);
+    write_pod<uint32_t>(out, kRouterCodeBlockSize);
     write_pod<uint32_t>(out, 0);
     write_pod<uint64_t>(out, data.entry_count);
+    write_pod<uint64_t>(out, layout.code_block_count);
+    write_pod<uint64_t>(out, layout.code_group_count);
     write_pod<uint64_t>(out, 0);
+    write_pod<uint64_t>(out, 0);
+    write_pod<uint32_t>(out, 0);
+    if (layout.payload_begin == 0) {
+      throw std::runtime_error("invalid shard router layout");
+    }
+    out.seekp(static_cast<std::streamoff>(layout.payload_begin - 1),
+              std::ios::beg);
+    out.put('\0');
+    if (!out) {
+      throw std::runtime_error("failed to reserve shard router metadata");
+    }
 
     struct Cursor {
       uint32_t code = 0;
@@ -671,18 +747,65 @@ uint64_t save_router_sidecar(
       }
     }
 
-    std::vector<uint32_t> code_buffer(
-        std::min<size_t>(16384, data.entry_count));
-    size_t code_buffered = 0;
-    const auto flush_codes = [&]() {
-      if (code_buffered == 0) return;
-      const size_t byte_count =
-          code_buffered * sizeof(uint32_t);
+    std::vector<uint32_t> code_bases;
+    std::vector<uint8_t> code_widths;
+    std::vector<uint64_t> code_group_offsets;
+    code_bases.reserve(layout.code_block_count);
+    code_widths.reserve(layout.code_block_count);
+    code_group_offsets.reserve(layout.code_group_count);
+    std::vector<uint8_t> code_payload_buffer(65536);
+    size_t code_payload_buffered = 0;
+    size_t code_payload_written = 0;
+    const auto flush_code_payload = [&]() {
+      if (code_payload_buffered == 0) return;
       out.write(
-          reinterpret_cast<const char*>(code_buffer.data()),
-          static_cast<std::streamsize>(byte_count));
-      hash_bytes(&checksum, code_buffer.data(), byte_count);
-      code_buffered = 0;
+          reinterpret_cast<const char*>(code_payload_buffer.data()),
+          static_cast<std::streamsize>(code_payload_buffered));
+      if (!out) {
+        throw std::runtime_error("failed to write shard router code payload");
+      }
+      hash_bytes(&checksum, code_payload_buffer.data(),
+                 code_payload_buffered);
+      code_payload_written = checked_router_add(
+          code_payload_written, code_payload_buffered);
+      code_payload_buffered = 0;
+    };
+    const auto emit_code_payload_byte = [&](uint8_t byte) {
+      code_payload_buffer[code_payload_buffered++] = byte;
+      if (code_payload_buffered == code_payload_buffer.size()) {
+        flush_code_payload();
+      }
+    };
+    std::array<uint32_t, kRouterCodeBlockSize> code_block{};
+    size_t code_block_size = 0;
+    const auto flush_code_block = [&]() {
+      if (code_block_size == 0) return;
+      const uint32_t base = code_block[0];
+      const uint8_t width = minimizer_delta_width(
+          code_block[code_block_size - 1] - base);
+      if (code_bases.size() % kRouterCodeBlocksPerGroup == 0) {
+        code_group_offsets.push_back(static_cast<uint64_t>(
+            checked_router_add(code_payload_written,
+                               code_payload_buffered)));
+      }
+      code_bases.push_back(base);
+      code_widths.push_back(width);
+      uint64_t pending_bits = 0;
+      uint32_t pending_bit_count = 0;
+      for (size_t idx = 1; idx < code_block_size; ++idx) {
+        const uint32_t delta = code_block[idx] - base;
+        pending_bits |= static_cast<uint64_t>(delta) << pending_bit_count;
+        pending_bit_count += width;
+        while (pending_bit_count >= 8) {
+          emit_code_payload_byte(static_cast<uint8_t>(pending_bits));
+          pending_bits >>= 8;
+          pending_bit_count -= 8;
+        }
+      }
+      if (pending_bit_count != 0) {
+        emit_code_payload_byte(static_cast<uint8_t>(pending_bits));
+      }
+      code_block_size = 0;
     };
     std::vector<uint8_t> shard_buffer(
         std::min<size_t>(65536, packed_size));
@@ -706,8 +829,8 @@ uint64_t save_router_sidecar(
     while (!queue.empty()) {
       const Cursor cursor = queue.top();
       queue.pop();
-      code_buffer[code_buffered++] = cursor.code;
-      if (code_buffered == code_buffer.size()) flush_codes();
+      code_block[code_block_size++] = cursor.code;
+      if (code_block_size == code_block.size()) flush_code_block();
 
       pending_shard_bits |=
           static_cast<uint64_t>(cursor.shard_id) << pending_bit_count;
@@ -726,7 +849,8 @@ uint64_t save_router_sidecar(
             cursor.shard_id, next_offset});
       }
     }
-    flush_codes();
+    flush_code_block();
+    flush_code_payload();
     if (pending_bit_count != 0) {
       emit_packed_byte(static_cast<uint8_t>(pending_shard_bits));
     }
@@ -737,10 +861,47 @@ uint64_t save_router_sidecar(
       throw std::runtime_error("failed to pack shard router IDs");
     }
 
+    if (code_bases.size() != layout.code_block_count ||
+        code_widths.size() != layout.code_block_count ||
+        code_group_offsets.size() != layout.code_group_count) {
+      throw std::runtime_error("invalid compressed shard router code count");
+    }
+    const RouterStorageLayout finalized_layout = router_storage_layout(
+        data.entry_count, code_payload_written, packed_size);
+    if (finalized_layout.code_block_count != layout.code_block_count ||
+        finalized_layout.code_group_count != layout.code_group_count ||
+        finalized_layout.payload_begin != layout.payload_begin) {
+      throw std::runtime_error("invalid finalized shard router layout");
+    }
+    out.seekp(static_cast<std::streamoff>(layout.bases_begin),
+              std::ios::beg);
+    out.write(reinterpret_cast<const char*>(code_bases.data()),
+              static_cast<std::streamsize>(
+                  code_bases.size() * sizeof(code_bases[0])));
+    if (!out) throw std::runtime_error("failed to write shard router bases");
+    hash_bytes(&checksum, code_bases.data(),
+               code_bases.size() * sizeof(code_bases[0]));
+    out.write(reinterpret_cast<const char*>(code_widths.data()),
+              static_cast<std::streamsize>(code_widths.size()));
+    if (!out) throw std::runtime_error("failed to write shard router widths");
+    hash_bytes(&checksum, code_widths.data(), code_widths.size());
+    out.seekp(static_cast<std::streamoff>(layout.group_offsets_begin),
+              std::ios::beg);
+    out.write(reinterpret_cast<const char*>(code_group_offsets.data()),
+              static_cast<std::streamsize>(
+                  code_group_offsets.size() * sizeof(code_group_offsets[0])));
+    if (!out) {
+      throw std::runtime_error("failed to write shard router group offsets");
+    }
+    hash_bytes(&checksum, code_group_offsets.data(),
+               code_group_offsets.size() * sizeof(code_group_offsets[0]));
+
     std::ifstream packed_in(packed_temporary, std::ios::binary);
     if (!packed_in) {
       throw std::runtime_error("unable to reopen packed shard router IDs");
     }
+    out.seekp(static_cast<std::streamoff>(finalized_layout.shard_ids_begin),
+              std::ios::beg);
     size_t packed_copied = 0;
     while (packed_in) {
       packed_in.read(
@@ -762,6 +923,8 @@ uint64_t save_router_sidecar(
     if (checksum == 0) {
       throw std::runtime_error("invalid zero shard router checksum");
     }
+    out.seekp(kRouterCodePayloadSizeOffset, std::ios::beg);
+    write_pod<uint64_t>(out, code_payload_written);
     out.seekp(kRouterChecksumOffset, std::ios::beg);
     write_pod<uint64_t>(out, checksum);
     out.close();
@@ -1150,19 +1313,6 @@ ShardedSeedRouter load_sharded_seed_router(
           static_cast<uint32_t>(manifest.shards.size()));
   const size_t packed_size = packed_shard_byte_count(
       manifest.router_entry_count, expected_shard_id_bits);
-  if (packed_size >
-          std::numeric_limits<size_t>::max() -
-              kRouterHeaderBytes ||
-      manifest.router_entry_count >
-      (std::numeric_limits<size_t>::max() -
-       kRouterHeaderBytes - packed_size) /
-          sizeof(uint32_t)) {
-    throw std::runtime_error("shard router size overflow");
-  }
-  const size_t expected_size =
-      kRouterHeaderBytes +
-      manifest.router_entry_count * sizeof(uint32_t) +
-      packed_size;
   const auto path = router_output_path(manifest_path);
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -1172,21 +1322,24 @@ ShardedSeedRouter load_sharded_seed_router(
   }
   struct stat status {};
   if (fstat(fd, &status) != 0 || status.st_size < 0 ||
-      static_cast<uint64_t>(status.st_size) != expected_size) {
+      static_cast<uint64_t>(status.st_size) < kRouterHeaderBytes ||
+      static_cast<uint64_t>(status.st_size) >
+          std::numeric_limits<size_t>::max()) {
     close(fd);
     throw std::runtime_error("invalid shard router sidecar size");
   }
+  const size_t mapped_size = static_cast<size_t>(status.st_size);
   void* address = mmap(
-      nullptr, expected_size, PROT_READ, MAP_PRIVATE, fd, 0);
+      nullptr, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
   close(fd);
   if (address == MAP_FAILED) {
     throw std::runtime_error("unable to map shard router sidecar");
   }
 #if defined(MADV_RANDOM)
-  (void)madvise(address, expected_size, MADV_RANDOM);
+  (void)madvise(address, mapped_size, MADV_RANDOM);
 #endif
   auto mapping = std::make_shared<MappedRouterFile>(
-      address, expected_size);
+      address, mapped_size);
   const uint8_t* bytes = mapping->data();
   const auto read_field = [&bytes](auto* value) {
     std::memcpy(value, bytes, sizeof(*value));
@@ -1198,25 +1351,46 @@ ShardedSeedRouter load_sharded_seed_router(
   uint32_t stored_window = 0;
   uint32_t stored_shard_count = 0;
   uint32_t stored_shard_id_bits = 0;
+  uint32_t stored_code_block_size = 0;
   uint32_t reserved = 0;
   uint64_t stored_entry_count = 0;
+  uint64_t stored_code_block_count = 0;
+  uint64_t stored_code_group_count = 0;
+  uint64_t stored_code_payload_size = 0;
   uint64_t stored_checksum = 0;
+  uint32_t reserved_tail = 0;
   read_field(&magic);
   read_field(&version);
   read_field(&stored_k);
   read_field(&stored_window);
   read_field(&stored_shard_count);
   read_field(&stored_shard_id_bits);
+  read_field(&stored_code_block_size);
   read_field(&reserved);
   read_field(&stored_entry_count);
+  read_field(&stored_code_block_count);
+  read_field(&stored_code_group_count);
+  read_field(&stored_code_payload_size);
   read_field(&stored_checksum);
+  read_field(&reserved_tail);
+  if (stored_entry_count > std::numeric_limits<size_t>::max()) {
+    throw std::runtime_error("shard router entry count overflow");
+  }
+  const RouterStorageLayout layout = router_storage_layout(
+      static_cast<size_t>(stored_entry_count), stored_code_payload_size,
+      packed_size);
   if (magic != kRouterMagic || version != kRouterFormatVersion ||
       stored_k != manifest.router_k ||
       stored_window != manifest.router_window ||
       stored_shard_count != manifest.shards.size() ||
       stored_shard_id_bits != expected_shard_id_bits ||
+      stored_code_block_size != kRouterCodeBlockSize ||
       reserved != 0 ||
+      reserved_tail != 0 ||
       stored_entry_count != manifest.router_entry_count ||
+      stored_code_block_count != layout.code_block_count ||
+      stored_code_group_count != layout.code_group_count ||
+      layout.total_size != mapped_size ||
       stored_checksum != manifest.router_checksum) {
     throw std::runtime_error("shard router metadata mismatch");
   }
@@ -1224,12 +1398,24 @@ ShardedSeedRouter load_sharded_seed_router(
   router.window = stored_window;
   router.shard_count = stored_shard_count;
   router.shard_id_bits = stored_shard_id_bits;
-  router.minimizer_codes.set_mapped(
-      mapping, reinterpret_cast<const uint32_t*>(bytes),
-      manifest.router_entry_count);
-  bytes += manifest.router_entry_count * sizeof(uint32_t);
+  router.code_block_size = stored_code_block_size;
+  router.code_entry_count = static_cast<size_t>(stored_entry_count);
+  router.minimizer_code_bases.set_mapped(
+      mapping, reinterpret_cast<const uint32_t*>(
+          mapping->data() + layout.bases_begin),
+      layout.code_block_count);
+  router.minimizer_code_widths.set_mapped(
+      mapping, mapping->data() + layout.widths_begin,
+      layout.code_block_count);
+  router.minimizer_code_group_offsets.set_mapped(
+      mapping, reinterpret_cast<const uint64_t*>(
+          mapping->data() + layout.group_offsets_begin),
+      layout.code_group_count);
+  router.packed_minimizer_code_deltas.set_mapped(
+      mapping, mapping->data() + layout.payload_begin,
+      static_cast<size_t>(stored_code_payload_size));
   router.packed_shard_ids.set_mapped(
-      mapping, bytes, packed_size);
+      mapping, mapping->data() + layout.shard_ids_begin, packed_size);
 #else
   std::ifstream in(path, std::ios::binary);
   if (!in) {
@@ -1245,42 +1431,88 @@ ShardedSeedRouter load_sharded_seed_router(
       read_pod<uint32_t>(in, "router.shard_count");
   const uint32_t stored_shard_id_bits =
       read_pod<uint32_t>(in, "router.shard_id_bits");
+  const uint32_t stored_code_block_size =
+      read_pod<uint32_t>(in, "router.code_block_size");
   const uint32_t reserved =
       read_pod<uint32_t>(in, "router.reserved");
   const size_t stored_entry_count =
       read_size(in, "router.entry_count");
+  const size_t stored_code_block_count =
+      read_size(in, "router.code_block_count");
+  const size_t stored_code_group_count =
+      read_size(in, "router.code_group_count");
+  const uint64_t stored_code_payload_size =
+      read_pod<uint64_t>(in, "router.code_payload_size");
   const uint64_t stored_checksum =
       read_pod<uint64_t>(in, "router.checksum");
+  const uint32_t reserved_tail =
+      read_pod<uint32_t>(in, "router.reserved_tail");
+  const RouterStorageLayout layout = router_storage_layout(
+      stored_entry_count, stored_code_payload_size, packed_size);
   if (magic != kRouterMagic || version != kRouterFormatVersion ||
       stored_k != manifest.router_k ||
       stored_window != manifest.router_window ||
       stored_shard_count != manifest.shards.size() ||
       stored_shard_id_bits != expected_shard_id_bits ||
+      stored_code_block_size != kRouterCodeBlockSize ||
       reserved != 0 ||
+      reserved_tail != 0 ||
       stored_entry_count != manifest.router_entry_count ||
+      stored_code_block_count != layout.code_block_count ||
+      stored_code_group_count != layout.code_group_count ||
       stored_checksum != manifest.router_checksum) {
     throw std::runtime_error("shard router metadata mismatch");
   }
-  std::vector<uint32_t> minimizer_codes(stored_entry_count);
+  std::vector<uint32_t> code_bases(layout.code_block_count);
+  std::vector<uint8_t> code_widths(layout.code_block_count);
+  std::vector<uint64_t> code_group_offsets(layout.code_group_count);
+  std::vector<uint8_t> packed_minimizer_code_deltas(
+      static_cast<size_t>(stored_code_payload_size));
   std::vector<uint8_t> packed_shard_ids(packed_size);
-  in.read(reinterpret_cast<char*>(minimizer_codes.data()),
+  in.read(reinterpret_cast<char*>(code_bases.data()),
           static_cast<std::streamsize>(
-              minimizer_codes.size() * sizeof(uint32_t)));
+              code_bases.size() * sizeof(uint32_t)));
+  in.read(reinterpret_cast<char*>(code_widths.data()),
+          static_cast<std::streamsize>(code_widths.size()));
+  const size_t descriptor_end =
+      layout.widths_begin + code_widths.size();
+  in.ignore(static_cast<std::streamsize>(
+      layout.group_offsets_begin - descriptor_end));
+  in.read(reinterpret_cast<char*>(code_group_offsets.data()),
+          static_cast<std::streamsize>(
+              code_group_offsets.size() * sizeof(uint64_t)));
+  in.read(reinterpret_cast<char*>(packed_minimizer_code_deltas.data()),
+          static_cast<std::streamsize>(
+              packed_minimizer_code_deltas.size()));
   in.read(reinterpret_cast<char*>(packed_shard_ids.data()),
           static_cast<std::streamsize>(packed_shard_ids.size()));
+  uint64_t checksum = begin_router_checksum(
+      stored_k, stored_window, stored_shard_count,
+      stored_shard_id_bits, stored_entry_count);
+  hash_bytes(&checksum, packed_minimizer_code_deltas.data(),
+             packed_minimizer_code_deltas.size());
+  hash_bytes(&checksum, code_bases.data(),
+             code_bases.size() * sizeof(uint32_t));
+  hash_bytes(&checksum, code_widths.data(), code_widths.size());
+  hash_bytes(&checksum, code_group_offsets.data(),
+             code_group_offsets.size() * sizeof(uint64_t));
+  hash_bytes(&checksum, packed_shard_ids.data(), packed_shard_ids.size());
   if (!in || in.peek() != std::char_traits<char>::eof() ||
-      router_storage_checksum(
-          stored_k, stored_window, stored_shard_count,
-          stored_shard_id_bits, stored_entry_count,
-          minimizer_codes.data(), packed_shard_ids.data(),
-          packed_shard_ids.size()) != stored_checksum) {
+      checksum != stored_checksum) {
     throw std::runtime_error("invalid shard router contents");
   }
   router.k = stored_k;
   router.window = stored_window;
   router.shard_count = stored_shard_count;
   router.shard_id_bits = stored_shard_id_bits;
-  router.minimizer_codes.set_owned(std::move(minimizer_codes));
+  router.code_block_size = stored_code_block_size;
+  router.code_entry_count = stored_entry_count;
+  router.minimizer_code_bases.set_owned(std::move(code_bases));
+  router.minimizer_code_widths.set_owned(std::move(code_widths));
+  router.minimizer_code_group_offsets.set_owned(
+      std::move(code_group_offsets));
+  router.packed_minimizer_code_deltas.set_owned(
+      std::move(packed_minimizer_code_deltas));
   router.packed_shard_ids.set_owned(std::move(packed_shard_ids));
 #endif
   return router;
