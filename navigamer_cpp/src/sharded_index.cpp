@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -12,6 +13,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <omp.h>
 #include <queue>
@@ -472,23 +474,6 @@ bool load_reusable_shard(
   }
 }
 
-void install_shard_atomically(
-    const std::filesystem::path& part_path,
-    const BioGeometryIndexBuilder& builder) {
-  const std::filesystem::path temporary =
-      part_path.string() + ".tmp";
-  std::error_code error;
-  std::filesystem::remove(temporary, error);
-  error.clear();
-  save_index_payload(temporary.string(), builder);
-  std::filesystem::rename(temporary, part_path, error);
-  if (error) {
-    std::filesystem::remove(temporary);
-    throw std::runtime_error(
-        "unable to install index shard: " + error.message());
-  }
-}
-
 struct ShardPackEntry {
   uint64_t offset = 0;
   uint64_t size = 0;
@@ -539,79 +524,6 @@ std::vector<ShardPackEntry> read_shard_pack_directory(
   }
   if (entries.back().offset + entries.back().size != file_size) {
     throw std::runtime_error("shard pack has truncated or trailing data");
-  }
-  return entries;
-}
-
-std::vector<ShardPackEntry> install_shard_pack_atomically(
-    const std::filesystem::path& pack_path,
-    const std::vector<std::filesystem::path>& part_paths) {
-  if (part_paths.empty() || part_paths.size() > kShardsPerPack) {
-    throw std::invalid_argument("invalid number of shards in pack");
-  }
-  std::vector<ShardPackEntry> entries(part_paths.size());
-  uint64_t offset = align_shard_pack_offset(
-      16 + static_cast<uint64_t>(part_paths.size()) * 16);
-  for (size_t idx = 0; idx < part_paths.size(); ++idx) {
-    std::error_code error;
-    const uint64_t size =
-        std::filesystem::file_size(part_paths[idx], error);
-    if (error || size == 0 ||
-        size > std::numeric_limits<uint64_t>::max() - offset) {
-      throw std::runtime_error("invalid temporary shard file");
-    }
-    entries[idx] = {offset, size};
-    offset = align_shard_pack_offset(offset + size);
-  }
-
-  const std::filesystem::path temporary = pack_path.string() + ".tmp";
-  std::error_code ignored;
-  std::filesystem::remove(temporary, ignored);
-  try {
-    std::ofstream out(temporary, std::ios::binary);
-    if (!out) throw std::runtime_error("unable to create shard pack");
-    out.write(kShardPackMagic.data(),
-              static_cast<std::streamsize>(kShardPackMagic.size()));
-    write_pod<uint32_t>(out, kShardPackFormatVersion);
-    write_pod<uint32_t>(
-        out, static_cast<uint32_t>(entries.size()));
-    for (const auto& entry : entries) {
-      write_pod<uint64_t>(out, entry.offset);
-      write_pod<uint64_t>(out, entry.size);
-    }
-    static constexpr std::array<char, kShardPackAlignment> zeros{};
-    std::array<char, 1 << 20> buffer{};
-    for (size_t idx = 0; idx < part_paths.size(); ++idx) {
-      const uint64_t position = static_cast<uint64_t>(out.tellp());
-      if (position > entries[idx].offset) {
-        throw std::runtime_error("shard pack directory overlap");
-      }
-      const size_t padding =
-          static_cast<size_t>(entries[idx].offset - position);
-      out.write(zeros.data(), static_cast<std::streamsize>(padding));
-      std::ifstream part(part_paths[idx], std::ios::binary);
-      if (!part) throw std::runtime_error("unable to read temporary shard");
-      while (part) {
-        part.read(buffer.data(),
-                  static_cast<std::streamsize>(buffer.size()));
-        const std::streamsize count = part.gcount();
-        if (count > 0) out.write(buffer.data(), count);
-      }
-      if (!part.eof() || !out) {
-        throw std::runtime_error("failed to copy temporary shard");
-      }
-    }
-    out.close();
-    if (!out) throw std::runtime_error("failed to finalize shard pack");
-    std::error_code error;
-    std::filesystem::rename(temporary, pack_path, error);
-    if (error) {
-      throw std::runtime_error(
-          "unable to install shard pack: " + error.message());
-    }
-  } catch (...) {
-    std::filesystem::remove(temporary, ignored);
-    throw;
   }
   return entries;
 }
@@ -1654,6 +1566,11 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
 
   std::vector<IndexShardDescriptor> descriptors(specs.size());
   const auto build_one = [&](size_t spec_idx,
+                             const std::function<void(
+                                 size_t,
+                                 const BioGeometryIndexBuilder&)>&
+                                 write_payload,
+                             const std::function<void()>& signal_failure,
                              std::exception_ptr* error) {
     try {
       const auto& spec = specs[spec_idx];
@@ -1682,6 +1599,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
       if (reused) {
         sequence_count = reusable.builder.num_sequences();
         world_node_count = reusable.builder.num_world_nodes();
+        write_payload(spec_idx, reusable.builder);
       } else {
         BuildRangeConfig shard_range_config = range_config;
         if (job_count > 1) {
@@ -1691,9 +1609,9 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
         builder.build_reference_windows(
             reference_id, std::move(slice), window_length, stride,
             {slice_contig});
-        install_shard_atomically(part_path, builder);
         sequence_count = builder.num_sequences();
         world_node_count = builder.num_world_nodes();
+        write_payload(spec_idx, builder);
       }
       if (sequence_count > std::numeric_limits<uint32_t>::max() ||
           world_node_count > std::numeric_limits<uint32_t>::max()) {
@@ -1711,6 +1629,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
           static_cast<uint32_t>(world_node_count);
     } catch (...) {
       *error = std::current_exception();
+      signal_failure();
     }
   };
 
@@ -1779,45 +1698,116 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     }
 
     if (!reused_pack) {
-      std::vector<std::exception_ptr> errors(group_end - group_begin);
-      if (job_count == 1) {
-        for (size_t spec_idx = group_begin; spec_idx < group_end;
-             ++spec_idx) {
-          build_one(spec_idx, &errors[spec_idx - group_begin]);
-        }
-      } else {
-        const int previous_active_levels = omp_get_max_active_levels();
-        omp_set_max_active_levels(std::max(2, previous_active_levels));
-#pragma omp parallel num_threads(job_count)
-        {
-          // Bound concurrent shards times each nested team by the original
-          // OpenMP thread budget.
-          const int previous_nested_threads = omp_get_max_threads();
-          omp_set_num_threads(threads_per_job);
-#pragma omp for schedule(dynamic, 1)
-          for (size_t spec_idx = group_begin;
-               spec_idx < group_end; ++spec_idx) {
-            build_one(spec_idx, &errors[spec_idx - group_begin]);
-          }
-          omp_set_num_threads(previous_nested_threads);
-        }
-        omp_set_max_active_levels(previous_active_levels);
-      }
-      for (size_t spec_idx = group_begin; spec_idx < group_end;
-           ++spec_idx) {
-        if (errors[spec_idx - group_begin]) {
-          std::rethrow_exception(errors[spec_idx - group_begin]);
-        }
-      }
+      const std::filesystem::path temporary = pack_path.string() + ".tmp";
+      std::error_code ignored;
+      std::filesystem::remove(temporary, ignored);
+      std::ofstream out(temporary, std::ios::binary);
+      if (!out) throw std::runtime_error("unable to create shard pack");
 
-      std::vector<std::filesystem::path> part_paths;
-      part_paths.reserve(group_end - group_begin);
-      for (size_t spec_idx = group_begin; spec_idx < group_end;
-           ++spec_idx) {
-        part_paths.push_back(shard_output_path(bundle, spec_idx));
+      const size_t part_count = group_end - group_begin;
+      std::vector<ShardPackEntry> entries(part_count);
+      out.write(kShardPackMagic.data(),
+                static_cast<std::streamsize>(kShardPackMagic.size()));
+      write_pod<uint32_t>(out, kShardPackFormatVersion);
+      write_pod<uint32_t>(out, static_cast<uint32_t>(part_count));
+      for (size_t local_idx = 0; local_idx < part_count; ++local_idx) {
+        write_pod<uint64_t>(out, 0);
+        write_pod<uint64_t>(out, 0);
       }
-      const auto entries =
-          install_shard_pack_atomically(pack_path, part_paths);
+      const uint64_t payload_begin = align_shard_pack_offset(
+          16 + static_cast<uint64_t>(part_count) * 16);
+      out.seekp(static_cast<std::streamoff>(payload_begin));
+      if (!out) throw std::runtime_error("unable to reserve shard pack directory");
+
+      std::mutex pack_write_mutex;
+      std::condition_variable pack_write_ready;
+      bool pack_build_failed = false;
+      size_t next_payload_spec = group_begin;
+      const auto signal_failure = [&]() {
+        {
+          std::lock_guard<std::mutex> lock(pack_write_mutex);
+          pack_build_failed = true;
+        }
+        pack_write_ready.notify_all();
+      };
+      const auto write_payload = [&](size_t spec_idx,
+                                     const BioGeometryIndexBuilder& builder) {
+        const size_t local_idx = spec_idx - group_begin;
+        std::unique_lock<std::mutex> lock(pack_write_mutex);
+        pack_write_ready.wait(lock, [&]() {
+          return pack_build_failed || spec_idx == next_payload_spec;
+        });
+        if (pack_build_failed) {
+          throw std::runtime_error("shard pack build was cancelled");
+        }
+        const std::streampos position = out.tellp();
+        if (position < 0) {
+          throw std::runtime_error("unable to determine shard pack offset");
+        }
+        const uint64_t offset = align_shard_pack_offset(
+            static_cast<uint64_t>(position));
+        out.seekp(static_cast<std::streamoff>(offset));
+        write_index_payload(out, builder);
+        const std::streampos end = out.tellp();
+        if (end < 0 || static_cast<uint64_t>(end) <= offset) {
+          throw std::runtime_error("failed to append shard payload");
+        }
+        entries[local_idx] = {
+            offset, static_cast<uint64_t>(end) - offset};
+        ++next_payload_spec;
+        lock.unlock();
+        pack_write_ready.notify_all();
+      };
+
+      try {
+        std::vector<std::exception_ptr> errors(part_count);
+        if (job_count == 1) {
+          for (size_t spec_idx = group_begin; spec_idx < group_end;
+               ++spec_idx) {
+            build_one(spec_idx, write_payload, signal_failure,
+                      &errors[spec_idx - group_begin]);
+          }
+        } else {
+          const int previous_active_levels = omp_get_max_active_levels();
+          omp_set_max_active_levels(std::max(2, previous_active_levels));
+#pragma omp parallel num_threads(job_count)
+          {
+            // Bound concurrent shards times each nested team by the original
+            // OpenMP thread budget.
+            const int previous_nested_threads = omp_get_max_threads();
+            omp_set_num_threads(threads_per_job);
+#pragma omp for schedule(dynamic, 1)
+            for (size_t spec_idx = group_begin;
+                 spec_idx < group_end; ++spec_idx) {
+              build_one(spec_idx, write_payload, signal_failure,
+                        &errors[spec_idx - group_begin]);
+            }
+            omp_set_num_threads(previous_nested_threads);
+          }
+          omp_set_max_active_levels(previous_active_levels);
+        }
+        for (const auto& error : errors) {
+          if (error) std::rethrow_exception(error);
+        }
+
+        out.seekp(static_cast<std::streamoff>(16));
+        for (const auto& entry : entries) {
+          write_pod<uint64_t>(out, entry.offset);
+          write_pod<uint64_t>(out, entry.size);
+        }
+        out.close();
+        if (!out) throw std::runtime_error("failed to finalize shard pack");
+        std::error_code error;
+        std::filesystem::rename(temporary, pack_path, error);
+        if (error) {
+          throw std::runtime_error(
+              "unable to install shard pack: " + error.message());
+        }
+      } catch (...) {
+        out.close();
+        std::filesystem::remove(temporary, ignored);
+        throw;
+      }
       for (size_t local_idx = 0; local_idx < entries.size(); ++local_idx) {
         auto& descriptor = descriptors[group_begin + local_idx];
         descriptor.pack_id = static_cast<uint32_t>(pack_idx);

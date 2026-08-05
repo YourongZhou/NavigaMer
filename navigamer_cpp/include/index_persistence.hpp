@@ -88,6 +88,8 @@ void save_index(const std::string& path,
 
 // Persist only the independently mmap-decodable graph payload. The shared
 // build manifest is supplied by the containing sharded index.
+void write_index_payload(
+    std::ostream& out, const BioGeometryIndexBuilder& builder);
 void save_index_payload(
     const std::string& path,
     const BioGeometryIndexBuilder& builder);

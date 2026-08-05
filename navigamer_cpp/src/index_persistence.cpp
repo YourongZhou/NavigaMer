@@ -1242,18 +1242,23 @@ void save_index(const std::string& path,
   if (!out) throw std::runtime_error("failed to write index output: " + path);
 }
 
-void save_index_payload(
-    const std::string& path,
-    const BioGeometryIndexBuilder& builder) {
+void write_index_payload(
+    std::ostream& out, const BioGeometryIndexBuilder& builder) {
   if (!builder.validate_search_graph_view()) {
     throw std::runtime_error("cannot persist invalid NavigaMer index payload");
   }
+  write_payload_magic(out);
+  write_search_graph_view(out, builder.search_graph_view());
+}
+
+void save_index_payload(
+    const std::string& path,
+    const BioGeometryIndexBuilder& builder) {
   std::ofstream out(path, std::ios::binary);
   if (!out) {
     throw std::runtime_error("unable to open index payload output: " + path);
   }
-  write_payload_magic(out);
-  write_search_graph_view(out, builder.search_graph_view());
+  write_index_payload(out, builder);
   out.close();
   if (!out) {
     throw std::runtime_error("failed to write index payload output: " + path);
