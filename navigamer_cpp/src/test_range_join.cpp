@@ -342,9 +342,13 @@ void test_shared_reference_positional_postings_match_per_item_index() {
   navigamer::ExactRangeJoinIndex per_item(config, true, false, true);
   navigamer::ExactRangeJoinIndex shared_reference(
       config, true, false, true);
+  navigamer::ExactRangeJoinIndex offset_reference(
+      config, true, false, true);
   per_item.build_views(std::move(item_views));
   shared_reference.build_uniform_identity_views(
       std::move(sequence_data), sequence_length);
+  offset_reference.build_uniform_identity_offsets(
+      starts, reference.data(), reference.size(), sequence_length);
 
   for (int tau : {0, 1, 2, 5, 9}) {
     for (size_t query_idx : {size_t{1}, size_t{5}, size_t{8}}) {
@@ -354,7 +358,9 @@ void test_shared_reference_positional_postings_match_per_item_index() {
           tau, gen);
       const auto expected = per_item.query(query, tau);
       const auto actual = shared_reference.query(query, tau);
+      const auto offset_actual = offset_reference.query(query, tau);
       assert(actual.candidate_item_ids == expected.candidate_item_ids);
+      assert(offset_actual.candidate_item_ids == expected.candidate_item_ids);
     }
   }
 }

@@ -1577,4 +1577,31 @@ void ExactRangeJoinIndex::build_uniform_identity_views(
   reset_after_items_changed();
 }
 
+void ExactRangeJoinIndex::build_uniform_identity_offsets(
+    std::vector<uint32_t> sequence_offsets, const char* reference_base,
+    size_t reference_span, size_t sequence_length) {
+  if (sequence_offsets.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    throw std::length_error("range-join index exceeds 32-bit item capacity");
+  }
+  if (!sequence_offsets.empty() && !reference_base) {
+    throw std::invalid_argument("range-join reference pointer is null");
+  }
+  for (uint32_t offset : sequence_offsets) {
+    if (offset > reference_span ||
+        sequence_length > reference_span - offset) {
+      throw std::invalid_argument(
+          "range-join sequence offset lies outside reference span");
+    }
+  }
+  owned_items_.clear();
+  owned_items_.shrink_to_fit();
+  item_storage_ = std::move(sequence_offsets);
+  item_storage_aux_ = reinterpret_cast<uintptr_t>(reference_base);
+  max_item_sequence_length_ = sequence_length;
+  external_item_ids_.clear();
+  external_item_ids_.shrink_to_fit();
+  reset_after_items_changed();
+}
+
 }  // namespace navigamer

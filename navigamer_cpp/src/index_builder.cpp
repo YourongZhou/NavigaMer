@@ -3926,13 +3926,13 @@ void BioGeometryIndexBuilder::attach_leaves(
 
     if (actual_direction == LeafAttachDirection::SeqToWorld) {
       std::vector<RangeJoinItemView> item_views;
-      std::vector<const char*> uniform_sequence_data;
+      std::vector<uint32_t> uniform_sequence_offsets;
       if (sequences.fixed_sequence_length != 0) {
-        uniform_sequence_data.reserve(finest_layer.size());
+        uniform_sequence_offsets.reserve(finest_layer.size());
         for (NodeId node_id : finest_layer) {
           const auto& world = build_nodes_[node_id];
-          uniform_sequence_data.push_back(
-              sequences.sequence(world.center_sequence_id).data());
+          uniform_sequence_offsets.push_back(static_cast<uint32_t>(
+              sequences.source_position(world.center_sequence_id)));
         }
       } else {
         item_views.reserve(finest_layer.size());
@@ -3951,8 +3951,10 @@ void BioGeometryIndexBuilder::attach_leaves(
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         if (sequences.fixed_sequence_length != 0) {
-          world_index.build_uniform_identity_views(
-              std::move(uniform_sequence_data),
+          const std::string_view reference = sequences.reference_view();
+          world_index.build_uniform_identity_offsets(
+              std::move(uniform_sequence_offsets), reference.data(),
+              reference.size(),
               sequences.fixed_sequence_length);
         } else {
           world_index.build_views(std::move(item_views));
@@ -4024,12 +4026,12 @@ void BioGeometryIndexBuilder::attach_leaves(
       }
     } else {
       std::vector<RangeJoinItemView> item_views;
-      std::vector<const char*> uniform_sequence_data;
+      std::vector<uint32_t> uniform_sequence_offsets;
       if (sequences.fixed_sequence_length != 0) {
-        uniform_sequence_data.reserve(sequences.size());
+        uniform_sequence_offsets.reserve(sequences.size());
         for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
-          uniform_sequence_data.push_back(
-              sequences.sequence(static_cast<LeafId>(seq_idx)).data());
+          uniform_sequence_offsets.push_back(static_cast<uint32_t>(
+              sequences.source_position(static_cast<LeafId>(seq_idx))));
         }
       } else {
         item_views.reserve(sequences.size());
@@ -4044,8 +4046,10 @@ void BioGeometryIndexBuilder::attach_leaves(
       {
         ScopedTimer timer(&stats_.leaf_index_build_ms);
         if (sequences.fixed_sequence_length != 0) {
-          sequence_index.build_uniform_identity_views(
-              std::move(uniform_sequence_data),
+          const std::string_view reference = sequences.reference_view();
+          sequence_index.build_uniform_identity_offsets(
+              std::move(uniform_sequence_offsets), reference.data(),
+              reference.size(),
               sequences.fixed_sequence_length);
         } else {
           sequence_index.build_views(std::move(item_views));

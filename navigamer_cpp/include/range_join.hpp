@@ -102,6 +102,12 @@ class ExactRangeJoinIndex {
   // Every pointer must refer into the same stable backing allocation.
   void build_uniform_identity_views(
       std::vector<const char*> sequence_data, size_t sequence_length);
+  // Like build_uniform_identity_views(), but consumes reference-relative
+  // offsets directly. This avoids a temporary pointer array when the caller
+  // already has 32-bit reference coordinates.
+  void build_uniform_identity_offsets(
+      std::vector<uint32_t> sequence_offsets, const char* reference_base,
+      size_t reference_span, size_t sequence_length);
   void prepare_qgram();
   void prepare_seed_lengths(const std::vector<int>& seed_lengths);
   RangeJoinQueryResult query(std::string_view query_sequence, int tau);
