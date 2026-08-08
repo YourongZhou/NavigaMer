@@ -445,11 +445,8 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
     mv[block] = zero;
   }
 
-  std::array<int, 4> scores = {
-      static_cast<int>(pattern_length),
-      static_cast<int>(pattern_length),
-      static_cast<int>(pattern_length),
-      static_cast<int>(pattern_length)};
+  __m256i scores = _mm256_set1_epi64x(
+      static_cast<long long>(pattern_length));
   const size_t last_block = block_count - 1;
   const __m256i top_bit = _mm256_set1_epi64x(
       static_cast<long long>(
@@ -500,18 +497,14 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
           _mm256_and_si256(pv[block], xh), masks[block]);
     }
 
-    const int ph_zero = _mm256_movemask_pd(_mm256_castsi256_pd(
-        _mm256_cmpeq_epi64(
-            _mm256_and_si256(ph[last_block], top_bit), zero)));
-    const int mh_zero = _mm256_movemask_pd(_mm256_castsi256_pd(
-        _mm256_cmpeq_epi64(
-            _mm256_and_si256(mh[last_block], top_bit), zero)));
-    const int ph_bits = (~ph_zero) & 0x0f;
-    const int mh_bits = (~mh_zero) & 0x0f;
-    for (size_t lane = 0; lane < 4; ++lane) {
-      scores[lane] += (ph_bits >> lane) & 1;
-      scores[lane] -= (mh_bits >> lane) & 1;
-    }
+    const __m256i ph_zero = _mm256_cmpeq_epi64(
+        _mm256_and_si256(ph[last_block], top_bit), zero);
+    const __m256i mh_zero = _mm256_cmpeq_epi64(
+        _mm256_and_si256(mh[last_block], top_bit), zero);
+    scores = _mm256_add_epi64(
+        scores, _mm256_andnot_si256(ph_zero, one));
+    scores = _mm256_sub_epi64(
+        scores, _mm256_andnot_si256(mh_zero, one));
 
     __m256i ph_carry = one;
     __m256i mh_carry = zero;
@@ -549,24 +542,25 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
     // Check only periodically to keep the accepted/near-candidate hot path
     // cheap, and stop only when every SIMD lane is provably outside tau.
     if ((text_idx & 1U) == 1U) {
-      const int remaining =
-          static_cast<int>(text_length - text_idx - 1);
-      bool all_rejected = true;
-      for (int score : scores) {
-        if (score - remaining <= tau) {
-          all_rejected = false;
-          break;
-        }
-      }
-      if (all_rejected) {
+      const __m256i remaining = _mm256_set1_epi64x(
+          static_cast<long long>(text_length - text_idx - 1));
+      const __m256i threshold = _mm256_set1_epi64x(tau);
+      const __m256i rejected = _mm256_cmpgt_epi64(
+          _mm256_sub_epi64(scores, remaining), threshold);
+      if (_mm256_movemask_pd(_mm256_castsi256_pd(rejected)) == 0x0f) {
         distances.fill(tau + 1);
         return true;
       }
     }
   }
 
+  alignas(32) std::array<int64_t, 4> score_lanes{};
+  _mm256_store_si256(
+      reinterpret_cast<__m256i*>(score_lanes.data()), scores);
   for (size_t lane = 0; lane < 4; ++lane) {
-    distances[lane] = scores[lane] <= tau ? scores[lane] : tau + 1;
+    distances[lane] = score_lanes[lane] <= tau
+                          ? static_cast<int>(score_lanes[lane])
+                          : tau + 1;
   }
   return true;
 }
