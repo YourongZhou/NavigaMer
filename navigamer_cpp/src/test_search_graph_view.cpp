@@ -781,9 +781,10 @@ void assert_compact_node_layout_is_exact() {
 
   const auto implicit_leaf_layout =
       navigamer::PackedWorldNodeLayout::compact(
-          100, 0, 10, true, true, 3);
+          100, 0, 10, true, true, 3, true);
   assert(implicit_leaf_layout.mbb_begin_bits == 0);
-  assert(implicit_leaf_layout.has_implicit_leaf_packed_fields());
+  assert(implicit_leaf_layout.has_implicit_packed_link_fields());
+  assert(implicit_leaf_layout.has_implicit_center_beacon_storage());
   assert(implicit_leaf_layout.record_bytes == 3);
   assert(implicit_leaf_layout.valid());
   navigamer::PackedWorldNodeArray implicit_leaf_records;
@@ -806,6 +807,31 @@ void assert_compact_node_layout_is_exact() {
          navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
   assert(implicit_leaf.leaf_mbb_begin() == 0);
   assert(implicit_leaf.leaf_mbb_bits() == 3);
+
+  const auto implicit_child_layout =
+      navigamer::PackedWorldNodeLayout::compact(
+          0, 300, 20, false, true,
+          navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS);
+  assert(implicit_child_layout.record_bytes == 3);
+  assert(implicit_child_layout.has_implicit_packed_link_fields());
+  assert(!implicit_child_layout.has_implicit_center_beacon_storage());
+  navigamer::PackedWorldNodeArray implicit_child_records;
+  implicit_child_records.initialize(1, implicit_child_layout);
+  auto implicit_child = implicit_child_records[0];
+  implicit_child.set_packed_child_layout(
+      0, navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS);
+  implicit_child.set_link_storage(
+      navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+  implicit_child.set_inline_counts(
+      20, 2,
+      navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
+  implicit_child.set_child_mbb_layout(300, 3);
+  assert(implicit_child.packed_child_bits() ==
+         navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS);
+  assert(implicit_child.link_storage() ==
+         navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+  assert(implicit_child.beacon_storage() ==
+         navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
 }
 
 void assert_child_and_leaf_node_layouts_are_independent() {

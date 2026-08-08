@@ -2300,12 +2300,21 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       return false;
     }
   }
-  if (view.node_records.child_layout().mbb_begin_bits == 0 ||
+  const auto& child_layout = view.node_records.child_layout();
+  const auto& leaf_layout = view.node_records.leaf_layout();
+  if (child_layout.mbb_begin_bits == 0 ||
       view.implicit_leaf_mbb_offsets !=
-          (view.node_records.leaf_layout().mbb_begin_bits == 0)) {
+          (leaf_layout.mbb_begin_bits == 0) ||
+      child_layout.has_implicit_packed_link_fields() !=
+          view.implicit_contiguous_child_ranges ||
+      (child_layout.has_implicit_packed_link_fields() &&
+       child_layout.implicit_packed_link_bits !=
+           SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS) ||
+      leaf_layout.has_implicit_packed_link_fields() !=
+          leaf_layout.has_implicit_center_beacon_storage()) {
     return false;
   }
-  if (view.node_records.leaf_layout().has_implicit_leaf_packed_fields() &&
+  if (leaf_layout.has_implicit_packed_link_fields() &&
       !view.implicit_leaf_mbb_offsets) {
     return false;
   }
@@ -5002,12 +5011,15 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   const PackedWorldNodeLayout child_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_child_link_begin, maximum_child_mbb_begin,
-          maximum_child_count_field);
+          maximum_child_count_field, false,
+          implicit_contiguous_child_ranges,
+          SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS);
   const PackedWorldNodeLayout leaf_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_leaf_link_begin, maximum_leaf_mbb_begin,
           maximum_leaf_count_field, implicit_leaf_mbb_offsets,
-          implicit_leaf_packed_fields, implicit_leaf_packed_bits);
+          implicit_leaf_packed_fields, implicit_leaf_packed_bits,
+          implicit_leaf_packed_fields);
   view.node_records.initialize(
       world_node_count_, child_node_layout, leaf_node_layout,
       finest_node_begin);
@@ -5177,8 +5189,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             finalization_plan, kPlanLeafStorageShift);
         const uint8_t leaf_packed_bits =
             view.node_records.leaf_layout()
-                    .has_implicit_leaf_packed_fields()
-                ? view.node_records.leaf_layout().implicit_leaf_packed_bits
+                    .has_implicit_packed_link_fields()
+                ? view.node_records.leaf_layout().implicit_packed_link_bits
                 : plan_bits(finalization_plan, kPlanLeafPackedBitsShift,
                             kPlanFourBitMask);
         record.set_link_storage(link_storage);
