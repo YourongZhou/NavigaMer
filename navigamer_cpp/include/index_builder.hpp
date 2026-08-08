@@ -1464,7 +1464,7 @@ struct SearchGraphView {
   // Center IDs increase within each layer. Every aligned 16-node block stores
   // one absolute base plus fixed-width exact deltas; layer-local widths keep
   // random access O(1) without paying the shard-wide LeafId width per node.
-  static constexpr size_t CENTER_ID_BLOCK_SIZE = 16;
+  static constexpr size_t CENTER_ID_BLOCK_SIZE = 8;
   bool center_id_block_bases_16bit = false;
   FinalArray<uint16_t> center_id_block_bases16;
   FinalArray<LeafId> center_id_block_bases;
