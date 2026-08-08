@@ -2765,6 +2765,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
         prefetch_read(view.leaf_ids.data() + leaf_begin + leaf_offset);
         break;
       case WorldNodeRecord::LinkStorage::PackedDelta: {
+        if (view.implicit_consecutive_leaf_ids) break;
         const size_t byte_offset =
             static_cast<size_t>(leaf_offset) *
             node.packed_leaf_bits() >> 3;

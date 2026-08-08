@@ -394,7 +394,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 54
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 55
 stores an all-ACGT shared reference in 2-bit form and restores one contiguous
 byte view per loaded shard, so edit-distance query kernels retain direct
 character access; references containing other IUPAC characters are kept
@@ -404,6 +404,9 @@ irregular stream retains the existing exact block encoding. It keeps
 leaf MBB distances as one base-3 byte per world whenever the shard-wide exact
 alphabet has at most three values and every world has at most five leaves;
 otherwise it retains the normal exact bit packing. It keeps
+leaf IDs implicit whenever every leaf list is an exact center-relative
+consecutive interval, including endpoint clipping; the shard-wide interval
+radius reconstructs every ID without a leaf-ID payload. It keeps
 long literal inputs only as manifest fingerprints, and omits redundant
 child-payload offsets when a shard's child ranges are fully contiguous. It
 also interns byte-identical child MBB distance blocks.

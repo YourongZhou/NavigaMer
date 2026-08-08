@@ -947,6 +947,43 @@ void assert_implicit_leaf_link_begins_are_exact() {
   }
 }
 
+void assert_implicit_consecutive_leaf_ids_are_exact() {
+  const auto layout = navigamer::PackedWorldNodeLayout::compact(
+      0, 0, 5, false, true, 3, true, false, true);
+  assert(!layout.has_implicit_link_begin());
+  assert(layout.has_implicit_packed_link_fields());
+
+  navigamer::SearchGraphView view;
+  view.node_records.initialize(2, layout, layout, 0);
+  view.layer_begin = {0};
+  view.layer_end = {2};
+  view.initialize_center_sequence_ids({4}, 9);
+  view.implicit_consecutive_leaf_ids = true;
+  view.implicit_consecutive_leaf_radius = 2;
+  for (uint32_t node_id = 0; node_id < 2; ++node_id) {
+    const auto center = node_id == 0 ? 0U : 9U;
+    auto node = view.node_records[node_id];
+    view.set_center_sequence_id(node_id, 0, center);
+    node.set_packed_leaf_layout(0, 3);
+    node.set_link_storage(
+        navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    node.set_inline_counts(
+        3, 1, navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+    node.set_leaf_mbb_layout(0, 1);
+  }
+  assert(view.leaf_id_deltas8.empty());
+  assert(view.leaf_link_begin_blocks.empty());
+  assert(view.leaf_link_begins_valid());
+  assert(view.packed_leaf_byte_count(0) == 0);
+  assert(view.packed_leaf_byte_count(1) == 0);
+  assert(view.leaf_id(0, 0) == 0);
+  assert(view.leaf_id(0, 1) == 1);
+  assert(view.leaf_id(0, 2) == 2);
+  assert(view.leaf_id(1, 0) == 7);
+  assert(view.leaf_id(1, 1) == 8);
+  assert(view.leaf_id(1, 2) == 9);
+}
+
 void assert_child_and_leaf_node_layouts_are_independent() {
   const auto child_layout = navigamer::PackedWorldNodeLayout::compact(
       1094080, 3657858, 1501);
@@ -1024,6 +1061,7 @@ int main() {
   assert_leaf_id_encodings_are_exact();
   assert_compact_node_layout_is_exact();
   assert_implicit_leaf_link_begins_are_exact();
+  assert_implicit_consecutive_leaf_ids_are_exact();
   assert_child_and_leaf_node_layouts_are_independent();
   assert_all_beacon_begin_widths_are_exact();
   std::cout << "search graph view tests passed\n";

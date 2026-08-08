@@ -1511,6 +1511,13 @@ struct SearchGraphView {
   static constexpr uint8_t LEAF_LINK_BEGIN_BLOCK_SIZE = 8;
   FinalArray<uint32_t> leaf_link_begin_blocks;
 
+  // If every finest world's leaf IDs are one exact center-relative consecutive
+  // interval, the interval start is reconstructed from this shard-wide radius
+  // and no per-leaf ID payload is stored.  The builder enables this only after
+  // checking every leaf list, including clipped intervals at both endpoints.
+  bool implicit_consecutive_leaf_ids = false;
+  LeafId implicit_consecutive_leaf_radius = 0;
+
   // Each child-center-to-beacon distance d is stored as floor(d / 12) above
   // the last non-finest layer and floor(d / 6) in that final child-world
   // transition. Search decodes the bin midpoint and widens every pruning
@@ -2534,6 +2541,7 @@ struct SearchGraphView {
   size_t packed_leaf_byte_count(
       const PackedWorldNodeRecordRef& node,
       uint32_t leaf_count_value) const {
+    if (implicit_consecutive_leaf_ids) return 0;
     const uint64_t bit_count =
         static_cast<uint64_t>(leaf_count_value) *
         node.packed_leaf_bits();
@@ -2555,6 +2563,16 @@ struct SearchGraphView {
   inline LeafId packed_leaf_id(
       NodeId node_id, const PackedWorldNodeRecordRef& node, LeafId center,
       uint32_t leaf_offset) const {
+    if (implicit_consecutive_leaf_ids) {
+      if (leaf_offset >= link_count(node)) {
+        throw std::out_of_range("implicit consecutive leaf offset is invalid");
+      }
+      const LeafId begin =
+          center > implicit_consecutive_leaf_radius
+              ? center - implicit_consecutive_leaf_radius
+              : 0;
+      return begin + leaf_offset;
+    }
     const uint32_t bits = node.packed_leaf_bits();
     const uint8_t* data =
         reinterpret_cast<const uint8_t*>(leaf_id_deltas8.data()) +
@@ -2840,6 +2858,8 @@ class BioGeometryIndexBuilder {
   std::vector<uint8_t> build_geometry_mbb_bits_;
   bool dense_leaf_mbb_ternary_ = false;
   std::array<uint8_t, 3> dense_leaf_mbb_values_{};
+  bool implicit_consecutive_leaf_ids_ = false;
+  LeafId implicit_consecutive_leaf_radius_ = 0;
   std::vector<std::vector<NodeId>> extended_layers_;
   std::vector<std::vector<NodeId>> primary_layers_;
 

@@ -2417,6 +2417,20 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       return false;
     }
     if (is_finest) {
+      if (view.implicit_consecutive_leaf_ids) {
+        if (node.link_storage() !=
+            WorldNodeRecord::LinkStorage::PackedDelta) {
+          return false;
+        }
+        const LeafId begin =
+            center_id > view.implicit_consecutive_leaf_radius
+                ? center_id - view.implicit_consecutive_leaf_radius
+                : 0;
+        const uint64_t end = std::min<uint64_t>(
+            sequence_count_, static_cast<uint64_t>(center_id) +
+                                 view.implicit_consecutive_leaf_radius + 1);
+        if (link_count != end - begin) return false;
+      }
       size_t* expected_leaf_begin = nullptr;
       switch (node.link_storage()) {
         case WorldNodeRecord::LinkStorage::Delta8:
@@ -4388,6 +4402,50 @@ void BioGeometryIndexBuilder::attach_leaves(
   }
   dense_leaf_mbb_ternary_ = dense_leaf_mbb_ternary;
   dense_leaf_mbb_values_ = dense_leaf_mbb_values;
+  implicit_consecutive_leaf_ids_ = false;
+  implicit_consecutive_leaf_radius_ = 0;
+  if (!finest_layer.empty() && sequence_count_ != 0) {
+    size_t maximum_leaf_count = 0;
+    for (NodeId node_id : finest_layer) {
+      maximum_leaf_count = std::max(
+          maximum_leaf_count, build_nodes_[node_id].child_or_leaf_ids.size());
+    }
+    if (maximum_leaf_count != 0 && (maximum_leaf_count & 1U) != 0 &&
+        static_cast<uint64_t>(maximum_leaf_count) <=
+            static_cast<uint64_t>(std::numeric_limits<LeafId>::max()) * 2 +
+                1) {
+      const LeafId radius = static_cast<LeafId>(
+          (maximum_leaf_count - 1) / 2);
+      bool exact_consecutive_intervals = true;
+      for (NodeId node_id : finest_layer) {
+        const auto& node = build_nodes_[node_id];
+        const LeafId begin =
+            node.center_sequence_id > radius
+                ? node.center_sequence_id - radius
+                : 0;
+        const uint64_t end = std::min<uint64_t>(
+            sequence_count_, static_cast<uint64_t>(node.center_sequence_id) +
+                                 radius + 1);
+        if (node.child_or_leaf_ids.size() != end - begin) {
+          exact_consecutive_intervals = false;
+          break;
+        }
+        for (size_t leaf_offset = 0;
+             leaf_offset < node.child_or_leaf_ids.size(); ++leaf_offset) {
+          if (node.child_or_leaf_ids[leaf_offset] !=
+              static_cast<LeafId>(begin + leaf_offset)) {
+            exact_consecutive_intervals = false;
+            break;
+          }
+        }
+        if (!exact_consecutive_intervals) break;
+      }
+      if (exact_consecutive_intervals) {
+        implicit_consecutive_leaf_ids_ = true;
+        implicit_consecutive_leaf_radius_ = radius;
+      }
+    }
+  }
   stats_.leaf_attachments_added = total_links;
   double avg_links =
       finest_layer.empty() ? 0.0 : static_cast<double>(total_links) / finest_layer.size();
@@ -4782,7 +4840,10 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           implicit_leaf_packed_bits, choice.packed_bits);
     }
   }
-  bool matching_leaf_payload_starts = implicit_leaf_packed_fields;
+  const bool implicit_consecutive_leaf_ids =
+      implicit_consecutive_leaf_ids_ && implicit_leaf_packed_fields;
+  bool matching_leaf_payload_starts =
+      implicit_leaf_packed_fields && !implicit_consecutive_leaf_ids;
   if (matching_leaf_payload_starts) {
     size_t leaf_id_begin = 0;
     size_t leaf_mbb_begin = 0;
@@ -4815,6 +4876,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   SearchGraphView view;
   view.beacon_delta_bits = packed_beacon_delta_bits;
   view.implicit_contiguous_child_ranges = implicit_contiguous_child_ranges;
+  view.implicit_consecutive_leaf_ids = implicit_consecutive_leaf_ids;
+  view.implicit_consecutive_leaf_radius = implicit_consecutive_leaf_radius_;
   view.dense_leaf_mbb_ternary = dense_leaf_mbb_ternary_;
   view.dense_leaf_mbb_values = dense_leaf_mbb_values_;
   view.sequences = std::move(search_graph_view_.sequences);
@@ -4953,7 +5016,12 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         set_plan_bits(
             plan, kPlanLeafPackedBitsShift, kPlanFourBitMask,
             packed_bits == 0 ? 1 : packed_bits);
-        if (storage == WorldNodeRecord::LinkStorage::Delta8) {
+        if (implicit_consecutive_leaf_ids) {
+          if (storage != WorldNodeRecord::LinkStorage::PackedDelta) {
+            throw std::runtime_error(
+                "implicit consecutive leaf IDs require packed leaf storage");
+          }
+        } else if (storage == WorldNodeRecord::LinkStorage::Delta8) {
           maximum_leaf_link_begin = std::max<uint64_t>(
               maximum_leaf_link_begin, total_leaf_deltas8);
           total_leaf_deltas8 += node.child_or_leaf_ids.size();
@@ -5188,7 +5256,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       dense_leaf_mbb_ternary_ || matching_leaf_payload_starts;
   size_t expected_leaf_id_begin = 0;
   size_t expected_leaf_mbb_begin = 0;
-  if (!implicit_leaf_mbb_offsets) {
+  if (!implicit_leaf_mbb_offsets && !implicit_consecutive_leaf_ids) {
     implicit_leaf_mbb_offsets =
         !primary_layers_.empty() && !primary_layers_.back().empty();
     for (NodeId node_id : primary_layers_.back()) {
@@ -5211,7 +5279,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   if (implicit_leaf_mbb_offsets) {
     maximum_leaf_mbb_begin = 0;
   }
-  const bool implicit_leaf_link_begins = implicit_leaf_packed_fields;
+  const bool implicit_leaf_link_begins =
+      implicit_leaf_packed_fields && !implicit_consecutive_leaf_ids;
   view.interned_child_mbb_payloads = interned_child_mbb_payloads;
   view.implicit_leaf_mbb_offsets = implicit_leaf_mbb_offsets;
   const PackedWorldNodeLayout child_node_layout =
@@ -5419,14 +5488,16 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           record.set_packed_leaf_layout(
               implicit_leaf_link_begins ? 0 : leaf_begin,
               leaf_packed_bits);
-          const size_t byte_count = static_cast<size_t>(
-              (static_cast<uint64_t>(
-                   node.child_or_leaf_ids.size()) *
-                   leaf_packed_bits +
-               7) /
-              8);
-          view.leaf_id_deltas8.resize(
-              view.leaf_id_deltas8.size() + byte_count);
+          if (!view.implicit_consecutive_leaf_ids) {
+            const size_t byte_count = static_cast<size_t>(
+                (static_cast<uint64_t>(
+                     node.child_or_leaf_ids.size()) *
+                     leaf_packed_bits +
+                 7) /
+                8);
+            view.leaf_id_deltas8.resize(
+                view.leaf_id_deltas8.size() + byte_count);
+          }
         } else if (link_storage == WorldNodeRecord::LinkStorage::Delta8) {
           record.set_link_begin_value(to_u32(
               view.leaf_id_deltas8.size(), "leaf_id_deltas8"));
@@ -5458,6 +5529,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           } else if (
               link_storage ==
               WorldNodeRecord::LinkStorage::PackedDelta) {
+            if (view.implicit_consecutive_leaf_ids) continue;
             const uint32_t bits = leaf_packed_bits;
             const uint64_t zigzag64 =
                 delta >= 0
@@ -5964,6 +6036,8 @@ void BioGeometryIndexBuilder::build_impl(
   build_geometry_mbb_bits_.clear();
   dense_leaf_mbb_ternary_ = false;
   dense_leaf_mbb_values_.fill(0);
+  implicit_consecutive_leaf_ids_ = false;
+  implicit_consecutive_leaf_radius_ = 0;
   primary_layers_.assign(static_cast<size_t>(num_primary_layers()),
                          std::vector<NodeId>());
   extended_layers_.clear();
