@@ -2797,15 +2797,22 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
       prefetch_read(view.leaf_beacon_dists.data() + offset);
       if (leaf_count != 0) prefetch_leaf_code(0);
     }
-    survivor_offsets = filter_leaf_beacon_survivors(
-        view.leaf_beacon_dists.data() + offset,
-        leaf_count,
-        beacon_count,
-        V_Q.data(),
-        static_cast<int32_t>(tolerance),
-        config_.simd_mode,
-        &simd_stats,
-        view.leaf_mbb_bits(node_id, node));
+    if (view.dense_leaf_mbb_ternary) {
+      survivor_offsets = filter_dense_leaf_ternary_survivors(
+          view.leaf_beacon_dists[offset], leaf_count, V_Q.front(),
+          static_cast<int32_t>(tolerance), view.dense_leaf_mbb_values,
+          &simd_stats);
+    } else {
+      survivor_offsets = filter_leaf_beacon_survivors(
+          view.leaf_beacon_dists.data() + offset,
+          leaf_count,
+          beacon_count,
+          V_Q.data(),
+          static_cast<int32_t>(tolerance),
+          config_.simd_mode,
+          &simd_stats,
+          view.leaf_mbb_bits(node_id, node));
+    }
 
     stats.node_access_count += leaf_count;
     stats.leaf_beacon_check_count += leaf_count;

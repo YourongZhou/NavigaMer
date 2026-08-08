@@ -434,6 +434,46 @@ void assert_leaf_mbb_layout_and_values_are_exact() {
   }
 }
 
+void assert_dense_leaf_ternary_mbb_is_exact() {
+  navigamer::SearchGraphView view;
+  view.node_records.resize(2);
+  view.layer_begin = {0};
+  view.layer_end = {2};
+  view.dense_leaf_mbb_ternary = true;
+  view.dense_leaf_mbb_values = {0, 2, 4};
+  view.set_node_counts(
+      0, 5, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  view.set_node_counts(
+      1, 3, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  view.node_records[0].set_leaf_mbb_layout(0, 1);
+  view.node_records[1].set_leaf_mbb_layout(0, 1);
+  // Codes [0,1,2,1,0] and [2,0,1], least-significant code first.
+  view.leaf_beacon_dists = {48, 11};
+
+  assert(view.leaf_mbb_begin(0) == 0);
+  assert(view.leaf_mbb_begin(1) == 1);
+  assert(view.leaf_mbb_byte_count(0) == 1);
+  assert(view.leaf_mbb_byte_count(1) == 1);
+  assert(view.leaf_mbb_range_valid(0));
+  assert(view.leaf_mbb_range_valid(1));
+  const std::array<uint8_t, 5> expected_first = {0, 2, 4, 2, 0};
+  for (size_t idx = 0; idx < expected_first.size(); ++idx) {
+    assert(view.leaf_beacon_distance(0, idx) == expected_first[idx]);
+  }
+  const std::array<uint8_t, 3> expected_second = {4, 0, 2};
+  for (size_t idx = 0; idx < expected_second.size(); ++idx) {
+    assert(view.leaf_beacon_distance(1, idx) == expected_second[idx]);
+  }
+  navigamer::LeafBeaconFilterSimdStats stats;
+  const auto survivors = navigamer::filter_dense_leaf_ternary_survivors(
+      view.leaf_beacon_dists[0], 5, 2, 0,
+      view.dense_leaf_mbb_values, &stats);
+  assert((survivors == std::vector<uint32_t>{1, 3}));
+  assert(stats.scalar_checks == 5);
+}
+
 void assert_child_id_encodings_are_exact() {
   navigamer::SearchGraphView view;
   view.node_records.resize(4);
@@ -977,6 +1017,7 @@ int main() {
   assert_node_count_overflow_is_exact();
   assert_child_mbb_layout_is_exact();
   assert_leaf_mbb_layout_and_values_are_exact();
+  assert_dense_leaf_ternary_mbb_is_exact();
   assert_child_id_encodings_are_exact();
   assert_all_child_base_widths_are_exact();
   assert_all_packed_child_widths_are_exact();

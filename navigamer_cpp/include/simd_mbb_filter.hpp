@@ -1,6 +1,7 @@
 #ifndef NAVIGAMER_SIMD_MBB_FILTER_HPP
 #define NAVIGAMER_SIMD_MBB_FILTER_HPP
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -64,6 +65,14 @@ std::vector<uint32_t> filter_leaf_beacon_survivors(
     SimdMode mode,
     LeafBeaconFilterSimdStats* stats = nullptr,
     uint32_t packed_bits = 8);
+
+std::vector<uint32_t> filter_dense_leaf_ternary_survivors(
+    uint8_t packed_distances,
+    size_t leaf_count,
+    int query_beacon_distance,
+    int32_t tolerance,
+    const std::array<uint8_t, 3>& distance_values,
+    LeafBeaconFilterSimdStats* stats = nullptr);
 
 }  // namespace navigamer
 

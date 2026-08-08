@@ -7,6 +7,7 @@
 #include "phase2_distance_verifier.hpp"
 #include "simd_mbb_filter.hpp"
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
@@ -1539,6 +1540,11 @@ struct SearchGraphView {
   // node record then omits the redundant MBB offset.  The builder enables
   // this only after checking every finest-layer node.
   bool implicit_leaf_mbb_offsets = false;
+  // When every leaf world has at most five links and every exact leaf-to-center
+  // distance belongs to one shard-wide three-value alphabet, one base-3 byte
+  // per leaf world replaces the individually padded bit streams.
+  bool dense_leaf_mbb_ternary = false;
+  std::array<uint8_t, 3> dense_leaf_mbb_values{};
   FinalArray<uint8_t> leaf_beacon_dists;
 
   void initialize_leaf_link_begin_blocks(size_t finest_node_count) {
@@ -2431,6 +2437,12 @@ struct SearchGraphView {
   size_t leaf_mbb_byte_count(
       NodeId node_id, const PackedWorldNodeRecordRef& node,
       uint32_t leaf_count_value, uint32_t beacon_count_value) const {
+    if (dense_leaf_mbb_ternary) {
+      if (beacon_count_value != 1 || leaf_count_value > 5) {
+        throw std::runtime_error("dense ternary leaf MBB shape is invalid");
+      }
+      return 1;
+    }
     const uint64_t cells =
         static_cast<uint64_t>(leaf_count_value) * beacon_count_value;
     return static_cast<size_t>(
@@ -2443,6 +2455,13 @@ struct SearchGraphView {
   }
   uint32_t leaf_mbb_begin(
       NodeId node_id, const PackedWorldNodeRecordRef& node) const {
+    if (dense_leaf_mbb_ternary) {
+      if (layer_begin.empty() || node_id < layer_begin.back() ||
+          node_id >= node_records.size()) {
+        throw std::runtime_error("dense ternary leaf MBB node is missing");
+      }
+      return node_id - layer_begin.back();
+    }
     if (implicit_leaf_mbb_offsets) {
       if (layer_begin.empty() || node_id < layer_begin.back() ||
           node_id >= node_records.size()) {
@@ -2484,6 +2503,18 @@ struct SearchGraphView {
   uint8_t leaf_beacon_distance_unchecked(
       NodeId node_id, size_t cell_offset, uint32_t bits) const {
     const uint32_t begin = leaf_mbb_begin(node_id);
+    if (dense_leaf_mbb_ternary) {
+      const uint32_t leaf_count_value = leaf_count(node_id);
+      if (cell_offset >= leaf_count_value) {
+        throw std::out_of_range("dense ternary leaf MBB cell is invalid");
+      }
+      uint8_t packed = leaf_beacon_dists[begin];
+      for (size_t index = 0; index < cell_offset; ++index) {
+        packed = static_cast<uint8_t>(packed / 3);
+      }
+      const uint8_t code = static_cast<uint8_t>(packed % 3);
+      return dense_leaf_mbb_values[code];
+    }
     if (bits == 8) {
       return leaf_beacon_dists[begin + cell_offset];
     }
@@ -2807,6 +2838,8 @@ class BioGeometryIndexBuilder {
   std::vector<BuildWorldNodeRecord> build_nodes_;
   std::vector<BuildNodeGeometry> build_node_geometry_;
   std::vector<uint8_t> build_geometry_mbb_bits_;
+  bool dense_leaf_mbb_ternary_ = false;
+  std::array<uint8_t, 3> dense_leaf_mbb_values_{};
   std::vector<std::vector<NodeId>> extended_layers_;
   std::vector<std::vector<NodeId>> primary_layers_;
 

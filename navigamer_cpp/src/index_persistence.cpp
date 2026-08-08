@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 53) {
+  if (manifest.format_version != 54) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 53) {
+  if (manifest.format_version != 54) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -1111,6 +1111,10 @@ void write_search_graph_view(std::ostream& out,
       out, view.child_beacon_dists, "child_beacon_dists");
   write_bool(out, view.interned_child_mbb_payloads);
   write_bool(out, view.implicit_leaf_mbb_offsets);
+  write_bool(out, view.dense_leaf_mbb_ternary);
+  for (uint8_t value : view.dense_leaf_mbb_values) {
+    write_pod<uint8_t>(out, value);
+  }
   write_final_array(
       out, view.leaf_beacon_dists, "leaf_beacon_dists");
 }
@@ -1201,6 +1205,11 @@ SearchGraphView read_search_graph_view(
       read_bool(in, "interned_child_mbb_payloads");
   view.implicit_leaf_mbb_offsets =
       read_bool(in, "implicit_leaf_mbb_offsets");
+  view.dense_leaf_mbb_ternary =
+      read_bool(in, "dense_leaf_mbb_ternary");
+  for (uint8_t& value : view.dense_leaf_mbb_values) {
+    value = read_pod<uint8_t>(in, "dense_leaf_mbb_value");
+  }
   view.leaf_beacon_dists =
       read_final_array<uint8_t>(in, mapping, "leaf_beacon_dists");
   return view;
@@ -1358,7 +1367,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 53;
+  stored.format_version = 54;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

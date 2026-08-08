@@ -900,4 +900,44 @@ std::vector<uint32_t> filter_leaf_beacon_survivors(
                             tolerance, stats);
 }
 
+std::vector<uint32_t> filter_dense_leaf_ternary_survivors(
+    uint8_t packed_distances,
+    size_t leaf_count,
+    int query_beacon_distance,
+    int32_t tolerance,
+    const std::array<uint8_t, 3>& distance_values,
+    LeafBeaconFilterSimdStats* stats) {
+  if (leaf_count > 5) {
+    throw std::invalid_argument("dense ternary leaf MBB has too many leaves");
+  }
+  if (stats) stats->scalar_checks += leaf_count;
+  std::vector<uint32_t> survivors;
+  survivors.reserve(leaf_count);
+  const int64_t lower =
+      static_cast<int64_t>(query_beacon_distance) - tolerance;
+  const int64_t upper =
+      static_cast<int64_t>(query_beacon_distance) + tolerance;
+  static const std::array<uint64_t, 256> decoded_codes = [] {
+    std::array<uint64_t, 256> values{};
+    for (size_t packed = 0; packed < values.size(); ++packed) {
+      uint8_t remaining = static_cast<uint8_t>(packed);
+      for (size_t leaf_idx = 0; leaf_idx < 5; ++leaf_idx) {
+        values[packed] |= static_cast<uint64_t>(remaining % 3)
+                          << (leaf_idx * 8);
+        remaining = static_cast<uint8_t>(remaining / 3);
+      }
+    }
+    return values;
+  }();
+  const uint64_t codes = decoded_codes[packed_distances];
+  for (size_t leaf_idx = 0; leaf_idx < leaf_count; ++leaf_idx) {
+    const uint8_t code = static_cast<uint8_t>(codes >> (leaf_idx * 8));
+    const uint8_t distance = distance_values[code];
+    if (distance >= lower && distance <= upper) {
+      survivors.push_back(static_cast<uint32_t>(leaf_idx));
+    }
+  }
+  return survivors;
+}
+
 }  // namespace navigamer
