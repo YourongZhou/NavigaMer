@@ -251,12 +251,11 @@ uint64_t valid_block_mask(size_t block, size_t pattern_length) {
   return (uint64_t{1} << tail_bits) - 1;
 }
 
-PreparedMyersPattern prepare_myers_pattern_impl(
-    std::string_view pattern) {
-  PreparedMyersPattern prepared;
-  prepared.pattern.assign(pattern.data(), pattern.size());
+template <typename PreparedPattern>
+void prepare_myers_pattern_bits(
+    std::string_view pattern, PreparedPattern& prepared) {
   const size_t m = pattern.size();
-  if (m > kMyersMaxPatternBits) return prepared;
+  if (m > kMyersMaxPatternBits) return;
   prepared.block_count = (m + 63) / 64;
   for (size_t block = 0; block < prepared.block_count; ++block) {
     prepared.masks[block] = valid_block_mask(block, m);
@@ -265,11 +264,18 @@ PreparedMyersPattern prepare_myers_pattern_impl(
     const size_t block = i / 64;
     const size_t bit = i % 64;
     const int base = dna_base_index(pattern[i]);
-    if (base < 0) return prepared;
+    if (base < 0) return;
     prepared.peq[block][static_cast<size_t>(base)] |=
         (uint64_t{1} << bit);
   }
   prepared.supported = true;
+}
+
+PreparedMyersPattern prepare_myers_pattern_impl(
+    std::string_view pattern) {
+  PreparedMyersPattern prepared;
+  prepared.pattern.assign(pattern.data(), pattern.size());
+  prepare_myers_pattern_bits(pattern, prepared);
   return prepared;
 }
 
@@ -394,6 +400,14 @@ PreparedMyersPattern prepare_myers_pattern(std::string_view pattern) {
   return prepare_myers_pattern_impl(pattern);
 }
 
+PreparedMyersDnaPattern prepare_myers_dna_pattern(
+    std::string_view pattern) {
+  PreparedMyersDnaPattern prepared;
+  prepared.pattern_length = pattern.size();
+  prepare_myers_pattern_bits(pattern, prepared);
+  return prepared;
+}
+
 int compute_distance_bounded_myers_prepared(
     const PreparedMyersPattern& pattern,
     std::string_view text,
@@ -420,11 +434,11 @@ int compute_distance_bounded_myers_prepared(
 #if NAVIGAMER_HAS_MYERS_BATCH4_AVX2
 __attribute__((target("avx2")))
 bool compute_distance_bounded_myers_prepared_batch4_avx2(
-    const PreparedMyersPattern& pattern,
+    const PreparedMyersDnaPattern& pattern,
     const std::array<std::string_view, 4>& texts,
     int tau,
     std::array<int, 4>& distances) {
-  const size_t pattern_length = pattern.pattern.size();
+  const size_t pattern_length = pattern.pattern_length;
   const size_t block_count = pattern.block_count;
   const size_t text_length = texts[0].size();
   const __m256i zero = _mm256_setzero_si256();
@@ -579,7 +593,7 @@ bool myers_batch4_avx2_runtime_supported() {
 }
 
 bool compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
-    const PreparedMyersPattern& pattern,
+    const PreparedMyersDnaPattern& pattern,
     const std::array<std::string_view, 4>& texts,
     int tau,
     std::array<int, 4>& distances) {
@@ -588,12 +602,12 @@ bool compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
         "edit-distance threshold must be non-negative");
   }
   if (!myers_batch4_avx2_runtime_supported() ||
-      !pattern.supported || pattern.pattern.empty() ||
+      !pattern.supported || pattern.pattern_length == 0 ||
       pattern.block_count == 0 || pattern.block_count > 4) {
     return false;
   }
   const size_t text_length = texts[0].size();
-  if (text_length != pattern.pattern.size()) return false;
+  if (text_length != pattern.pattern_length) return false;
   for (size_t lane = 1; lane < 4; ++lane) {
     if (texts[lane].size() != text_length) return false;
   }

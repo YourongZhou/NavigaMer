@@ -139,7 +139,7 @@ void test_batch4_avx2_matches_scalar() {
   for (size_t length : {65U, 100U, 150U, 250U}) {
     for (int trial = 0; trial < 32; ++trial) {
       const std::string pattern = random_dna(length, gen);
-      const auto prepared = navigamer::prepare_myers_pattern(pattern);
+      const auto prepared = navigamer::prepare_myers_dna_pattern(pattern);
       std::array<std::string, 4> owned_texts = {
           random_dna(length, gen), random_dna(length, gen),
           random_dna(length, gen), random_dna(length, gen)};

@@ -721,7 +721,7 @@ Phase1CoverScanResult find_best_phase1_cover_impl(
     const Phase1BaseCountSignature& query_signature,
     Phase1DistanceCache* distance_cache,
     const PreparedEdlibDnaPattern* prepared_query,
-    const PreparedMyersPattern* prepared_batch_query,
+    const PreparedMyersDnaPattern* prepared_batch_query,
     std::string_view sequence,
     int radius,
     BuildDistanceMode distance_mode,
@@ -911,7 +911,7 @@ Phase1CoverScanResult find_best_phase1_cover(
     const Phase1BaseCountSignature& query_signature,
     Phase1DistanceCache* distance_cache,
     const PreparedEdlibDnaPattern* prepared_query,
-    const PreparedMyersPattern* prepared_batch_query,
+    const PreparedMyersDnaPattern* prepared_batch_query,
     std::string_view sequence,
     int radius,
     BuildDistanceMode distance_mode,
@@ -933,7 +933,7 @@ Phase1CoverScanResult find_best_phase1_cover_by_indices(
     const Phase1BaseCountSignature& query_signature,
     Phase1DistanceCache* distance_cache,
     const PreparedEdlibDnaPattern* prepared_query,
-    const PreparedMyersPattern* prepared_batch_query,
+    const PreparedMyersDnaPattern* prepared_batch_query,
     const std::vector<size_t>& candidate_indices,
     std::string_view sequence,
     int radius,
@@ -2851,14 +2851,14 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
     distance_cache.begin_query();
     PreparedEdlibDnaPattern prepared_query;
     const PreparedEdlibDnaPattern* prepared_query_ptr = nullptr;
-    PreparedMyersPattern prepared_batch_query;
-    const PreparedMyersPattern* prepared_batch_query_ptr = nullptr;
+    PreparedMyersDnaPattern prepared_batch_query;
+    const PreparedMyersDnaPattern* prepared_batch_query_ptr = nullptr;
     if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
       prepared_query = prepare_edlib_dna_pattern(sequence);
       prepared_query_ptr = &prepared_query;
       if (search_graph_view_.sequences.reference_backed &&
           myers_batch4_avx2_runtime_supported()) {
-        prepared_batch_query = prepare_myers_pattern(sequence);
+        prepared_batch_query = prepare_myers_dna_pattern(sequence);
         if (prepared_batch_query.supported) {
           prepared_batch_query_ptr = &prepared_batch_query;
         }
@@ -3390,10 +3390,10 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
               search_graph_view_.sequences.reference_backed &&
               candidates.candidate_item_ids.size() >= 4 &&
               myers_batch4_avx2_runtime_supported();
-          PreparedMyersPattern prepared_batch_pattern;
+          PreparedMyersDnaPattern prepared_batch_pattern;
           if (use_batch4) {
             prepared_batch_pattern =
-                prepare_myers_pattern(child_sequence);
+                prepare_myers_dna_pattern(child_sequence);
           }
           size_t candidate_idx = 0;
           for (; use_batch4 &&
@@ -3635,7 +3635,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
       std::vector<uint8_t> beacon_pair_distances;
       std::array<PreparedEdlibDnaPattern, kMaxBuildBeaconsPerNode>
           prepared_beacons;
-      std::array<PreparedMyersPattern, kMaxBuildBeaconsPerNode>
+      std::array<PreparedMyersDnaPattern, kMaxBuildBeaconsPerNode>
           prepared_myers_beacons;
 
 #pragma omp single
@@ -3716,7 +3716,7 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
                   child_count >= 4 && beacon.size() <= 255 &&
                   myers_batch4_avx2_runtime_supported()) {
                 prepared_myers_beacons[dim] =
-                    prepare_myers_pattern(beacon);
+                    prepare_myers_dna_pattern(beacon);
               }
             }
           }
