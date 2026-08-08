@@ -167,9 +167,10 @@ exactly one part and output coordinates remain relative to the original
 contig. Valid completed packs are reused on restart, damaged packs are rebuilt
 as one atomic group, and payloads are written directly into that group's
 temporary pack without per-shard temporary files. The automatic policy keeps one part
-below 8 OpenMP threads, builds two parts at 8--15 threads, and builds at most
-four parts on higher-core systems; it divides the thread budget among their
-internal parallel phases. Use `--shard-build-jobs N` to cap concurrent builders and their
+below 8 OpenMP threads, builds two parts at 8--15 threads, and for the default
+small (at most 16,384-window) parts builds up to 16 parts with at least four
+threads each; larger parts stay capped at four concurrent builders. Use
+`--shard-build-jobs N` to cap concurrent builders and their
 aggregate memory; nested teams remain inside the original OpenMP thread
 budget.
 For a human stride-1 build, `--shard-windows 10000` is the recommended

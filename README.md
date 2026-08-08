@@ -252,9 +252,10 @@ For references that exceed one index's 32-bit array limits,
 shards retain only the reference overlap required to materialize their last
 windows, so neither windows nor original contig coordinates are lost.
 Independent parts build concurrently. The automatic policy uses one part
-below 8 OpenMP threads, two parts at 8--15 threads, and at most four parts
-thereafter; it divides the thread budget among their internal parallel phases.
-`--shard-build-jobs N` sets an explicit concurrency limit. The product
+below 8 OpenMP threads, two parts at 8--15 threads, and for default small
+(at most 16,384-window) parts up to 16 concurrent builders with at least four
+threads each; larger parts remain capped at four builders to contain peak
+memory. `--shard-build-jobs N` sets an explicit concurrency limit. The product
 of part jobs and their internal worker teams never exceeds the OpenMP thread
 limit, while peak build memory is bounded by the number of concurrent parts.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.

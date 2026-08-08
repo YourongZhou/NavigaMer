@@ -1536,19 +1536,25 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
 
   const size_t available_threads = static_cast<size_t>(
       std::max(1, omp_get_max_threads()));
-  // A few concurrently built parts expose the mostly serial sketch phase
-  // without taking one full build peak per hardware thread. Two jobs already
-  // improve the common 8-thread case while retaining four threads for each
-  // part's parallel rebinding/attachment phases.
+  // Small (the default 10k-window) parts spend much of their time in the
+  // serial sketch and finalization phases. More independent parts therefore
+  // use a fixed OpenMP budget more efficiently than a few wide teams. Keep
+  // larger parts conservative so their peak working sets do not multiply.
+  const bool small_shards = max_shard_windows <= 16384;
   const size_t automatic_jobs =
       available_threads < 8
           ? 1
           : available_threads < 16
                 ? 2
-                : std::max<size_t>(
-                      2, std::min<size_t>(
-                             4, static_cast<size_t>(std::sqrt(
-                                    static_cast<double>(available_threads)))));
+                : small_shards
+                      ? std::max<size_t>(
+                            2, std::min<size_t>(
+                                   16, available_threads / 4))
+                      : std::max<size_t>(
+                            2, std::min<size_t>(
+                                   4, static_cast<size_t>(std::sqrt(
+                                          static_cast<double>(
+                                              available_threads)))));
   const size_t requested_jobs =
       build_jobs == 0 ? automatic_jobs : build_jobs;
   const size_t job_count_size = std::min(
