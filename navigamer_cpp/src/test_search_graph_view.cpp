@@ -867,27 +867,28 @@ void assert_all_beacon_begin_widths_are_exact() {
         0, maximum / 6, maximum / 3, maximum / 2,
         maximum / 2, (maximum / 2) + maximum / 8,
         (maximum / 2) + maximum / 4};
-    uint32_t maximum_block_delta = 0;
-    for (size_t idx = 0; idx < values.size(); ++idx) {
-      const size_t block_begin =
-          idx - idx % navigamer::SearchGraphView::BEACON_BEGIN_BLOCK_SIZE;
-      maximum_block_delta = std::max(
-          maximum_block_delta, values[idx] - values[block_begin]);
-    }
-    navigamer::SearchGraphView view;
-    view.initialize_beacon_begins(
-        values.size(), maximum, maximum_block_delta);
-    assert(view.beacon_begins_valid(values.size()));
-    for (size_t idx = 0; idx < values.size(); ++idx) {
-      const size_t block_begin =
-          idx - idx % navigamer::SearchGraphView::BEACON_BEGIN_BLOCK_SIZE;
-      view.set_beacon_begin(
-          static_cast<navigamer::NodeId>(idx), values[idx],
-          values[block_begin]);
-    }
-    for (size_t idx = 0; idx < values.size(); ++idx) {
-      assert(view.beacon_begin(
-                 static_cast<navigamer::NodeId>(idx)) == values[idx]);
+    for (uint8_t block_size : {uint8_t{2}, uint8_t{4}, uint8_t{8},
+                               uint8_t{16}, uint8_t{32}}) {
+      uint32_t maximum_block_delta = 0;
+      for (size_t idx = 0; idx < values.size(); ++idx) {
+        const size_t block_begin = idx - idx % block_size;
+        maximum_block_delta = std::max(
+            maximum_block_delta, values[idx] - values[block_begin]);
+      }
+      navigamer::SearchGraphView view;
+      view.initialize_beacon_begins(
+          values.size(), maximum, maximum_block_delta, block_size);
+      assert(view.beacon_begins_valid(values.size()));
+      for (size_t idx = 0; idx < values.size(); ++idx) {
+        const size_t block_begin = idx - idx % block_size;
+        view.set_beacon_begin(
+            static_cast<navigamer::NodeId>(idx), values[idx],
+            values[block_begin]);
+      }
+      for (size_t idx = 0; idx < values.size(); ++idx) {
+        assert(view.beacon_begin(
+                   static_cast<navigamer::NodeId>(idx)) == values[idx]);
+      }
     }
   }
 }

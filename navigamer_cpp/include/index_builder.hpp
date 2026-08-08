@@ -1449,8 +1449,11 @@ struct SearchGraphView {
   // dense prefix, so this side array needs no per-entry node identifier.
   // One shard-local fixed width keeps exact O(1) random access while avoiding
   // a 32-bit offset for every non-finest node.
-  static constexpr size_t BEACON_BEGIN_BLOCK_SIZE = 4;
+  static constexpr uint8_t DEFAULT_BEACON_BEGIN_BLOCK_SIZE = 4;
+  static constexpr size_t BEACON_BEGIN_BLOCK_SIZE =
+      DEFAULT_BEACON_BEGIN_BLOCK_SIZE;
   FinalArray<uint8_t> beacon_begin_blocks;
+  uint8_t beacon_begin_block_size = DEFAULT_BEACON_BEGIN_BLOCK_SIZE;
   uint8_t beacon_begin_base_bits = 0;
   uint8_t beacon_begin_delta_bits = 0;
   uint8_t beacon_delta_bits = 16;
@@ -1469,7 +1472,13 @@ struct SearchGraphView {
 
   void initialize_beacon_begins(
       size_t non_finest_node_count, uint64_t maximum_begin,
-      uint64_t maximum_block_delta) {
+      uint64_t maximum_block_delta,
+      uint8_t block_size = DEFAULT_BEACON_BEGIN_BLOCK_SIZE) {
+    if (block_size < 2 || block_size > 32 ||
+        (block_size & (block_size - 1)) != 0) {
+      throw std::invalid_argument("invalid beacon begin block size");
+    }
+    beacon_begin_block_size = block_size;
     beacon_begin_base_bits = 0;
     beacon_begin_delta_bits = 0;
     if (non_finest_node_count == 0) {
@@ -1481,11 +1490,11 @@ struct SearchGraphView {
     beacon_begin_delta_bits =
         PackedWorldNodeLayout::bits_for_value(maximum_block_delta);
     const size_t block_count =
-        (non_finest_node_count + BEACON_BEGIN_BLOCK_SIZE - 1) /
-        BEACON_BEGIN_BLOCK_SIZE;
+        (non_finest_node_count + beacon_begin_block_size - 1) /
+        beacon_begin_block_size;
     const size_t record_bits =
         beacon_begin_base_bits +
-        (BEACON_BEGIN_BLOCK_SIZE - 1) * beacon_begin_delta_bits;
+        (beacon_begin_block_size - 1) * beacon_begin_delta_bits;
     const size_t record_bytes = (record_bits + 7) / 8;
     if (record_bytes == 0 ||
         block_count > std::numeric_limits<size_t>::max() / record_bytes) {
@@ -1496,20 +1505,27 @@ struct SearchGraphView {
 
   bool beacon_begins_valid(size_t non_finest_node_count) const {
     if (non_finest_node_count == 0) {
-      return beacon_begin_base_bits == 0 &&
+      return beacon_begin_block_size >= 2 &&
+             beacon_begin_block_size <= 32 &&
+             (beacon_begin_block_size &
+              (beacon_begin_block_size - 1)) == 0 &&
+             beacon_begin_base_bits == 0 &&
              beacon_begin_delta_bits == 0 &&
              beacon_begin_blocks.empty();
     }
-    if (beacon_begin_base_bits == 0 || beacon_begin_base_bits > 32 ||
+    if (beacon_begin_block_size < 2 || beacon_begin_block_size > 32 ||
+        (beacon_begin_block_size &
+         (beacon_begin_block_size - 1)) != 0 ||
+        beacon_begin_base_bits == 0 || beacon_begin_base_bits > 32 ||
         beacon_begin_delta_bits == 0 || beacon_begin_delta_bits > 32) {
       return false;
     }
     const size_t block_count =
-        (non_finest_node_count + BEACON_BEGIN_BLOCK_SIZE - 1) /
-        BEACON_BEGIN_BLOCK_SIZE;
+        (non_finest_node_count + beacon_begin_block_size - 1) /
+        beacon_begin_block_size;
     const size_t record_bits =
         beacon_begin_base_bits +
-        (BEACON_BEGIN_BLOCK_SIZE - 1) * beacon_begin_delta_bits;
+        (beacon_begin_block_size - 1) * beacon_begin_delta_bits;
     const size_t record_bytes = (record_bits + 7) / 8;
     return record_bytes != 0 &&
            block_count <= std::numeric_limits<size_t>::max() / record_bytes &&
@@ -1537,11 +1553,11 @@ struct SearchGraphView {
     }
     const size_t record_bits =
         beacon_begin_base_bits +
-        (BEACON_BEGIN_BLOCK_SIZE - 1) * beacon_begin_delta_bits;
+        (beacon_begin_block_size - 1) * beacon_begin_delta_bits;
     const size_t record_bytes = (record_bits + 7) / 8;
     const size_t byte_offset =
-        (node_id / BEACON_BEGIN_BLOCK_SIZE) * record_bytes;
-    const size_t in_block = node_id % BEACON_BEGIN_BLOCK_SIZE;
+        (node_id / beacon_begin_block_size) * record_bytes;
+    const size_t in_block = node_id % beacon_begin_block_size;
     const uint32_t shift =
         in_block == 0
             ? 0
@@ -1570,33 +1586,32 @@ struct SearchGraphView {
   inline uint32_t beacon_begin(NodeId node_id) const {
     const size_t record_bits =
         beacon_begin_base_bits +
-        (BEACON_BEGIN_BLOCK_SIZE - 1) * beacon_begin_delta_bits;
+        (beacon_begin_block_size - 1) * beacon_begin_delta_bits;
     const size_t record_bytes = (record_bits + 7) / 8;
     const size_t byte_offset =
-        (node_id / BEACON_BEGIN_BLOCK_SIZE) * record_bytes;
-    const size_t in_block = node_id % BEACON_BEGIN_BLOCK_SIZE;
+        (node_id / beacon_begin_block_size) * record_bytes;
+    const size_t in_block = node_id % beacon_begin_block_size;
     const uint32_t shift = in_block == 0 ? 0 :
         beacon_begin_base_bits +
         (in_block - 1) * beacon_begin_delta_bits;
     const uint32_t bits =
         in_block == 0 ? beacon_begin_base_bits : beacon_begin_delta_bits;
 
-    // The human-scale layout measured for this index is a four-byte record.
-    // Keep that path as one aligned-size load; the generic reader below makes
-    // the exact representation valid for unusually wide records as well.
-    if (record_bytes == sizeof(uint32_t)) {
-      uint32_t word = 0;
+    // Candidate block sizes are selected so common layouts remain at most one
+    // machine-word load; wider records retain the exact generic reader below.
+    if (record_bytes <= sizeof(uint64_t)) {
+      uint64_t word = 0;
       std::memcpy(
-          &word, beacon_begin_blocks.data() + byte_offset, sizeof(word));
-      const uint32_t mask = bits == 32
+          &word, beacon_begin_blocks.data() + byte_offset, record_bytes);
+      const uint64_t mask = bits == 32
           ? std::numeric_limits<uint32_t>::max()
-          : (uint32_t{1} << bits) - 1;
-      const uint32_t value = (word >> shift) & mask;
+          : (uint64_t{1} << bits) - 1;
+      const uint32_t value = static_cast<uint32_t>((word >> shift) & mask);
       if (in_block == 0) return value;
-      const uint32_t base_mask = beacon_begin_base_bits == 32
+      const uint64_t base_mask = beacon_begin_base_bits == 32
           ? std::numeric_limits<uint32_t>::max()
-          : (uint32_t{1} << beacon_begin_base_bits) - 1;
-      return (word & base_mask) + value;
+          : (uint64_t{1} << beacon_begin_base_bits) - 1;
+      return static_cast<uint32_t>(word & base_mask) + value;
     }
 
     const auto read_field = [&](uint32_t field_shift, uint32_t field_bits) {

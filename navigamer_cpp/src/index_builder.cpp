@@ -4913,6 +4913,62 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             : PackedWorldNodeLayout::bits_for_value(maximum_block_delta);
   }
 
+  uint8_t beacon_begin_block_size =
+      SearchGraphView::DEFAULT_BEACON_BEGIN_BLOCK_SIZE;
+  size_t minimum_beacon_begin_bytes = std::numeric_limits<size_t>::max();
+  for (uint8_t candidate_block_size : {uint8_t{2}, uint8_t{4},
+                                       uint8_t{8}, uint8_t{16},
+                                       uint8_t{32}}) {
+    size_t payload_bytes = 0;
+    uint64_t maximum_begin = 0;
+    uint64_t maximum_delta = 0;
+    uint64_t block_base = 0;
+    for (size_t layer_idx = 0;
+         layer_idx + 1 < primary_layers_.size(); ++layer_idx) {
+      for (NodeId node_id : primary_layers_[layer_idx]) {
+        const auto& node = build_nodes_[node_id];
+        const auto& geometry =
+            build_node_geometry_[node.geometry_index];
+        if (node_id % candidate_block_size == 0) {
+          block_base = payload_bytes;
+        }
+        maximum_begin = std::max<uint64_t>(maximum_begin, payload_bytes);
+        maximum_delta = std::max<uint64_t>(
+            maximum_delta, payload_bytes - block_base);
+        const auto storage = beacon_storage_for(
+            node.center_sequence_id, geometry.beacon_ids);
+        if (storage == WorldNodeRecord::BeaconStorage::Delta8) {
+          payload_bytes += geometry.beacon_ids.size();
+        } else if (storage == WorldNodeRecord::BeaconStorage::PackedDelta) {
+          payload_bytes += static_cast<size_t>(
+              (static_cast<uint64_t>(geometry.beacon_ids.size()) *
+                   packed_beacon_delta_bits +
+               7) /
+              8);
+        } else {
+          payload_bytes += geometry.beacon_ids.size() * sizeof(LeafId);
+        }
+      }
+    }
+    if (payload_bytes != total_beacon_id_bytes) {
+      throw std::runtime_error("beacon payload sizing is inconsistent");
+    }
+    const size_t block_count =
+        (static_cast<size_t>(finest_node_begin) + candidate_block_size - 1) /
+        candidate_block_size;
+    const size_t record_bits =
+        PackedWorldNodeLayout::bits_for_value(maximum_begin) +
+        static_cast<size_t>(candidate_block_size - 1) *
+            PackedWorldNodeLayout::bits_for_value(maximum_delta);
+    const size_t bytes = block_count * ((record_bits + 7) / 8);
+    if (bytes < minimum_beacon_begin_bytes) {
+      minimum_beacon_begin_bytes = bytes;
+      beacon_begin_block_size = candidate_block_size;
+      maximum_beacon_begin = maximum_begin;
+      maximum_beacon_block_delta = maximum_delta;
+    }
+  }
+
   const auto child_mbb_payload_key = [&to_u32](
                                          uint8_t bits,
                                          size_t child_count,
@@ -5041,7 +5097,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   view.child_beacon_dists.reserve(total_mbb_bytes);
   view.initialize_beacon_begins(
       non_finest_node_count, maximum_beacon_begin,
-      maximum_beacon_block_delta);
+      maximum_beacon_block_delta, beacon_begin_block_size);
   view.beacon_id_bytes.reserve(total_beacon_id_bytes);
   view.leaf_beacon_dists.reserve(total_leaf_beacon_bytes);
 
@@ -5292,7 +5348,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             to_u32(geometry.beacon_ids.size(), "beacons");
         const uint32_t beacon_begin =
             to_u32(view.beacon_id_bytes.size(), "beacon_id_bytes");
-        if (node_id % SearchGraphView::BEACON_BEGIN_BLOCK_SIZE == 0) {
+        if (node_id % view.beacon_begin_block_size == 0) {
           final_beacon_block_base = beacon_begin;
         }
         if (storage == WorldNodeRecord::BeaconStorage::Delta8) {
