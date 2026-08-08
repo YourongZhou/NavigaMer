@@ -1121,6 +1121,12 @@ class CompactBuildVector {
   }
 
   void clear() { size_ = 0; }
+  void truncate(size_t requested_size) {
+    if (requested_size > size_) {
+      throw std::length_error("compact build-vector truncation overflow");
+    }
+    size_ = static_cast<uint32_t>(requested_size);
+  }
   void release() {
     std::free(data_);
     data_ = nullptr;

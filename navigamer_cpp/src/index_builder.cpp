@@ -3473,7 +3473,8 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
 
     {
       ScopedTimer timer(&stats_.phase2_edge_insert_ms);
-      std::vector<std::vector<uint32_t>> children_by_parent(parents.size());
+      std::vector<CompactBuildVector<NodeId>> children_by_parent(
+          parents.size());
       for (auto& local_edges : thread_edges) {
         for (const auto& edge : local_edges) {
           children_by_parent[edge.parent_idx].push_back(edge.child_idx);
@@ -3483,14 +3484,15 @@ void BioGeometryIndexBuilder::phase2_inter_tier_rebinding(
       for (size_t parent_idx = 0; parent_idx < parents.size(); ++parent_idx) {
         auto& child_indices = children_by_parent[parent_idx];
         std::sort(child_indices.begin(), child_indices.end());
-        child_indices.erase(
-            std::unique(child_indices.begin(), child_indices.end()),
-            child_indices.end());
+        child_indices.truncate(static_cast<size_t>(
+            std::unique(child_indices.begin(), child_indices.end()) -
+            child_indices.begin()));
         auto& child_ids =
             build_nodes_[parents[parent_idx]].child_or_leaf_ids;
-        for (uint32_t child_idx : child_indices) {
-          child_ids.push_back(children[child_idx]);
+        for (NodeId& child_idx : child_indices) {
+          child_idx = children[child_idx];
         }
+        child_ids = std::move(child_indices);
       }
     }
 
