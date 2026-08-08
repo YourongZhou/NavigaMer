@@ -558,7 +558,8 @@ void assert_all_packed_child_widths_are_exact() {
       0, kCount, 0,
       navigamer::WorldNodeRecord::BeaconStorage::Delta8);
 
-  for (uint32_t bits = 1; bits <= 16; ++bits) {
+  for (uint32_t bits = 1; bits <
+       navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS; ++bits) {
     const uint32_t mask = (uint32_t{1} << bits) - 1;
     const size_t payload_bytes =
         (static_cast<size_t>(kCount) * bits + 7) / 8;
@@ -591,6 +592,27 @@ void assert_all_packed_child_widths_are_exact() {
       assert(view.child_id(0, offset) == kBase + value);
     }
   }
+
+  view.child_id_base_deltas8.clear();
+  view.append_child_base_id(0, kBase);
+  view.node_records[0].set_packed_child_layout(
+      0, navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS);
+  assert(view.packed_child_byte_count(0) == view.child_base_byte_count());
+  for (uint32_t offset = 0; offset < kCount; ++offset) {
+    assert(view.child_id(0, offset) == kBase + offset);
+  }
+
+  constexpr uint32_t kLargeContiguousCount =
+      static_cast<uint32_t>(
+          navigamer::SearchGraphView::CONTIGUOUS_CHILD_OFFSET_TABLE_SIZE +
+          1);
+  view.set_node_counts(
+      0, kLargeContiguousCount, 0,
+      navigamer::WorldNodeRecord::BeaconStorage::Delta8);
+  assert(view.packed_child_byte_count(0) == view.child_base_byte_count());
+  assert(view.child_id(0, 0) == kBase);
+  assert(view.child_id(0, kLargeContiguousCount - 1) ==
+         kBase + kLargeContiguousCount - 1);
 }
 
 void assert_leaf_id_encodings_are_exact() {

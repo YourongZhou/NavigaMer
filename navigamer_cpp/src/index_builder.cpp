@@ -4438,10 +4438,20 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         NodeId minimum_child_id = std::numeric_limits<NodeId>::max();
         NodeId maximum_child_id = 0;
         bool fits_delta16 = true;
-        for (NodeId child_id : node.child_or_leaf_ids) {
+        bool contiguous_range = true;
+        NodeId previous_child_id = 0;
+        for (size_t child_offset = 0;
+             child_offset < node.child_or_leaf_ids.size(); ++child_offset) {
+          const NodeId child_id = node.child_or_leaf_ids[child_offset];
           if (child_id >= world_node_count_) {
             return ChildStorageChoice{};
           }
+          if (child_offset != 0 &&
+              (previous_child_id == std::numeric_limits<NodeId>::max() ||
+               child_id != previous_child_id + 1)) {
+            contiguous_range = false;
+          }
+          previous_child_id = child_id;
           minimum_child_id = std::min(minimum_child_id, child_id);
           maximum_child_id = std::max(maximum_child_id, child_id);
           if (child_id <= parent_id ||
@@ -4451,6 +4461,14 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           }
         }
         const size_t count = node.child_or_leaf_ids.size();
+        if (contiguous_range &&
+            child_base_bytes < count * sizeof(NodeId)) {
+          return ChildStorageChoice{
+              WorldNodeRecord::LinkStorage::PackedDelta,
+              minimum_child_id,
+              static_cast<uint8_t>(
+                  SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS)};
+        }
         const bool fits_base_delta8 =
             maximum_child_id - minimum_child_id <=
             std::numeric_limits<uint8_t>::max();
@@ -4723,13 +4741,16 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             storage == WorldNodeRecord::LinkStorage::PackedDelta) {
           maximum_child_link_begin = std::max<uint64_t>(
               maximum_child_link_begin, total_child_base_deltas8_bytes);
-          total_child_base_deltas8_bytes +=
-              child_base_bytes + static_cast<size_t>(
-                  (static_cast<uint64_t>(
-                       node.child_or_leaf_ids.size()) *
-                       choice.packed_bits +
-                   7) /
-                  8);
+          total_child_base_deltas8_bytes += child_base_bytes;
+          if (choice.packed_bits !=
+              SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS) {
+            total_child_base_deltas8_bytes += static_cast<size_t>(
+                (static_cast<uint64_t>(
+                     node.child_or_leaf_ids.size()) *
+                     choice.packed_bits +
+                 7) /
+                8);
+          }
         } else if (storage == WorldNodeRecord::LinkStorage::Delta16) {
           maximum_child_link_begin = std::max<uint64_t>(
               maximum_child_link_begin, total_child_deltas16);
@@ -4871,15 +4892,18 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           view.append_child_base_id(node_id, base);
           if (link_storage ==
               WorldNodeRecord::LinkStorage::PackedDelta) {
-            const size_t packed_byte_count = static_cast<size_t>(
-                (static_cast<uint64_t>(
-                     node.child_or_leaf_ids.size()) *
-                     child_packed_bits +
-                 7) /
-                8);
-            view.child_id_base_deltas8.resize(
-                view.child_id_base_deltas8.size() +
-                packed_byte_count);
+            if (child_packed_bits !=
+                SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS) {
+              const size_t packed_byte_count = static_cast<size_t>(
+                  (static_cast<uint64_t>(
+                       node.child_or_leaf_ids.size()) *
+                       child_packed_bits +
+                   7) /
+                  8);
+              view.child_id_base_deltas8.resize(
+                  view.child_id_base_deltas8.size() +
+                  packed_byte_count);
+            }
           }
         } else if (
             link_storage == WorldNodeRecord::LinkStorage::Delta16) {
@@ -4914,6 +4938,14 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
               WorldNodeRecord::LinkStorage::PackedDelta) {
             const NodeId base = planned_child_base;
             const uint32_t bits = child_packed_bits;
+            if (bits == SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS) {
+              if (static_cast<uint64_t>(final_child_id) !=
+                  static_cast<uint64_t>(base) + child_offset) {
+                throw std::runtime_error(
+                    "child ID is not in the planned contiguous range");
+              }
+              continue;
+            }
             const uint32_t delta = final_child_id - base;
             if (final_child_id < base ||
                 delta >= (uint32_t{1} << bits)) {

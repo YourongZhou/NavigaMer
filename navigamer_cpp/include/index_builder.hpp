@@ -1274,6 +1274,22 @@ static_assert(sizeof(BuildNodeGeometry) == 32,
 struct SearchGraphView {
   static constexpr uint32_t COARSE_CHILD_MBB_BIN_WIDTH = 12;
   static constexpr uint32_t FINE_CHILD_MBB_BIN_WIDTH = 6;
+  // Packed child widths use 1..15 bits for ordinary bit-packed deltas.  The
+  // otherwise non-beneficial 16-bit width is a format tag for an exact dense
+  // child NodeId range: the base prefix is followed by no payload and child i
+  // is base + i.  A generic 16-bit packed payload can never beat Delta16, so
+  // reserving this value loses no chosen representation.
+  static constexpr uint32_t CONTIGUOUS_CHILD_RANGE_BITS = 16;
+  static constexpr size_t CONTIGUOUS_CHILD_OFFSET_TABLE_SIZE = 256;
+  inline static const std::array<
+      uint8_t, CONTIGUOUS_CHILD_OFFSET_TABLE_SIZE>
+      contiguous_child_offset_table = [] {
+        std::array<uint8_t, CONTIGUOUS_CHILD_OFFSET_TABLE_SIZE> table{};
+        for (size_t offset = 0; offset < table.size(); ++offset) {
+          table[offset] = static_cast<uint8_t>(offset);
+        }
+        return table;
+      }();
   // Child MBB values in [0, 10] use the 7-bit width as a format tag. Each
   // beacon-pair distance is stored once, then every child pair is ranked only
   // among base-11 states permitted by the triangle inequality. An odd final
@@ -1768,6 +1784,9 @@ struct SearchGraphView {
       if (base_deltas8) return base + base_deltas8[offset];
       if (deltas16) return base + deltas16[offset];
       if (packed_deltas) {
+        if (packed_bits == CONTIGUOUS_CHILD_RANGE_BITS) {
+          return base + offset;
+        }
         const size_t bit_offset =
             static_cast<size_t>(offset) * packed_bits;
         const size_t byte_offset = bit_offset >> 3;
@@ -1800,6 +1819,9 @@ struct SearchGraphView {
         return static_cast<const void*>(deltas16 + offset);
       }
       if (packed_deltas) {
+        if (packed_bits == CONTIGUOUS_CHILD_RANGE_BITS) {
+          return static_cast<const void*>(packed_deltas);
+        }
         return static_cast<const void*>(
             packed_deltas +
             (static_cast<size_t>(offset) * packed_bits >> 3));
@@ -1823,6 +1845,9 @@ struct SearchGraphView {
   size_t packed_child_byte_count(
       const PackedWorldNodeRecordRef& node,
       uint32_t child_count_value) const {
+    if (node.packed_child_bits() == CONTIGUOUS_CHILD_RANGE_BITS) {
+      return child_base_byte_count();
+    }
     const uint64_t bit_count =
         static_cast<uint64_t>(child_count_value) *
         node.packed_child_bits();
@@ -1863,8 +1888,13 @@ struct SearchGraphView {
         const uint8_t* segment =
             child_id_base_deltas8.data() + node.child_begin();
         const size_t base_bytes = child_base_byte_count();
-        return {child_base_id(node_id, segment, base_bytes), nullptr, nullptr,
-                segment + base_bytes,
+        const NodeId base = child_base_id(node_id, segment, base_bytes);
+        if (node.packed_child_bits() == CONTIGUOUS_CHILD_RANGE_BITS &&
+            link_count(node) <= CONTIGUOUS_CHILD_OFFSET_TABLE_SIZE) {
+          return {base, nullptr, contiguous_child_offset_table.data(),
+                  nullptr, nullptr, 0};
+        }
+        return {base, nullptr, nullptr, segment + base_bytes,
                 nullptr, node.packed_child_bits()};
       }
       case WorldNodeRecord::LinkStorage::Absolute32:
