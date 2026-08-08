@@ -730,10 +730,16 @@ struct PackedWorldNodeLayout {
 
   static PackedWorldNodeLayout compact(uint64_t maximum_link_begin,
                                        uint64_t maximum_mbb_begin,
-                                       uint64_t maximum_link_count) {
+                                       uint64_t maximum_link_count,
+                                       bool omit_mbb_begin = false) {
+    if (omit_mbb_begin && maximum_mbb_begin != 0) {
+      throw std::invalid_argument(
+          "cannot omit a nonzero world node MBB offset");
+    }
     PackedWorldNodeLayout layout;
     layout.link_begin_bits = bits_for_value(maximum_link_begin);
-    layout.mbb_begin_bits = bits_for_value(maximum_mbb_begin);
+    layout.mbb_begin_bits =
+        omit_mbb_begin ? 0 : bits_for_value(maximum_mbb_begin);
     layout.link_count_bits = bits_for_value(maximum_link_count);
     if (layout.link_begin_bits >
             WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
@@ -762,7 +768,6 @@ struct PackedWorldNodeLayout {
   bool valid() const {
     if (link_begin_bits == 0 ||
         link_begin_bits > WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
-        mbb_begin_bits == 0 ||
         mbb_begin_bits > WorldNodeRecord::CHILD_MBB_BEGIN_BITS ||
         link_count_bits == 0 ||
         link_count_bits > WorldNodeRecord::LINK_COUNT_BITS) {
@@ -829,9 +834,17 @@ class PackedWorldNodeRecordRef {
     set_packed_link_layout(begin, bits, "leaf");
   }
   uint32_t mbb_begin_value() const {
+    if (layout_->mbb_begin_bits == 0) return 0;
     return read(mbb_begin_shift(), layout_->mbb_begin_bits);
   }
   void set_mbb_begin_value(uint32_t begin) {
+    if (layout_->mbb_begin_bits == 0) {
+      if (begin != 0) {
+        throw std::length_error(
+            "packed world node MBB offset exceeds omitted layout");
+      }
+      return;
+    }
     write(mbb_begin_shift(), layout_->mbb_begin_bits, begin,
           "MBB begin");
   }
@@ -925,6 +938,7 @@ class PackedWorldNodeRecordRef {
     return mbb_begin_shift() + layout_->mbb_begin_bits;
   }
   uint32_t read(uint32_t bit_offset, uint32_t bits) const {
+    if (bits == 0) return 0;
     uint64_t value = 0;
     if (bit_offset >= 64) {
       value = high_ >> (bit_offset - 64);
@@ -938,6 +952,13 @@ class PackedWorldNodeRecordRef {
   }
   void write(uint32_t bit_offset, uint32_t bits, uint32_t value,
              const char* field) {
+    if (bits == 0) {
+      if (value != 0) {
+        throw std::length_error(std::string("packed world node ") + field +
+                                " exceeds omitted layout range");
+      }
+      return;
+    }
     const uint64_t field_mask = mask(bits);
     if (static_cast<uint64_t>(value) > field_mask) {
       throw std::length_error(std::string("packed world node ") + field +

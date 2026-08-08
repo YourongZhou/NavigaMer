@@ -778,6 +778,17 @@ void assert_compact_node_layout_is_exact() {
       navigamer::WorldNodeRecord::CHILD_MBB_BEGIN_MASK,
       navigamer::WorldNodeRecord::LINK_COUNT_MASK);
   assert(widest.record_bytes == sizeof(navigamer::WorldNodeRecord));
+
+  const auto implicit_leaf_layout =
+      navigamer::PackedWorldNodeLayout::compact(100, 0, 10, true);
+  assert(implicit_leaf_layout.mbb_begin_bits == 0);
+  assert(implicit_leaf_layout.record_bytes == 4);
+  assert(implicit_leaf_layout.valid());
+  navigamer::PackedWorldNodeArray implicit_leaf_records;
+  implicit_leaf_records.initialize(1, implicit_leaf_layout);
+  implicit_leaf_records[0].set_leaf_mbb_layout(0, 3);
+  assert(implicit_leaf_records[0].leaf_mbb_begin() == 0);
+  assert(implicit_leaf_records[0].leaf_mbb_bits() == 3);
 }
 
 void assert_child_and_leaf_node_layouts_are_independent() {

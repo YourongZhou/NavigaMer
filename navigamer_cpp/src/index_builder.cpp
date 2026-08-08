@@ -2300,6 +2300,11 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       return false;
     }
   }
+  if (view.node_records.child_layout().mbb_begin_bits == 0 ||
+      view.implicit_leaf_mbb_offsets !=
+          (view.node_records.leaf_layout().mbb_begin_bits == 0)) {
+    return false;
+  }
 
   size_t expected_child_base_delta8_begin = 0;
   size_t expected_child_delta16_begin = 0;
@@ -4960,7 +4965,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   const PackedWorldNodeLayout leaf_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_leaf_link_begin, maximum_leaf_mbb_begin,
-          maximum_leaf_count_field);
+          maximum_leaf_count_field, implicit_leaf_mbb_offsets);
   view.node_records.initialize(
       world_node_count_, child_node_layout, leaf_node_layout,
       finest_node_begin);
