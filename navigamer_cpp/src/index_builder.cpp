@@ -2382,7 +2382,8 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
                WorldNodeRecord::LinkStorage::Delta8 &&
            node.link_storage() !=
                WorldNodeRecord::LinkStorage::PackedDelta) ||
-          node.child_mbb_begin() != expected_mbb_begin ||
+          (!view.interned_child_mbb_payloads &&
+           node.child_mbb_begin() != expected_mbb_begin) ||
           !view.child_mbb_range_valid(
               node_id, node, link_count, beacon_count)) {
         return false;
@@ -2418,8 +2419,10 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
                  ? view.child_base_byte_count()
                  : 0);
       }
-      expected_mbb_begin += view.child_mbb_byte_count(
-          node_id, node, link_count, beacon_count);
+      if (!view.interned_child_mbb_payloads) {
+        expected_mbb_begin += view.child_mbb_byte_count(
+            node_id, node, link_count, beacon_count);
+      }
     }
     const uint32_t beacon_begin =
         is_finest ? 0 : view.beacon_begin(node_id);
@@ -2453,7 +2456,8 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
         expected_leaf_delta8_begin > view.leaf_id_deltas8.size() ||
         expected_leaf_delta16_begin > view.leaf_id_deltas16.size() ||
         expected_leaf_id32_begin > view.leaf_ids.size() ||
-        expected_mbb_begin > view.child_beacon_dists.size() ||
+        (!view.interned_child_mbb_payloads &&
+         expected_mbb_begin > view.child_beacon_dists.size()) ||
         expected_leaf_beacon_begin > view.leaf_beacon_dists.size() ||
         expected_beacon_payload_begin > view.beacon_id_bytes.size()) {
       return false;
@@ -2476,7 +2480,8 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       expected_leaf_delta16_begin != view.leaf_id_deltas16.size() ||
       expected_leaf_id32_begin != view.leaf_ids.size() ||
       expected_count_overflow != view.node_count_overflows.size() ||
-      expected_mbb_begin != view.child_beacon_dists.size() ||
+      (!view.interned_child_mbb_payloads &&
+       expected_mbb_begin != view.child_beacon_dists.size()) ||
       expected_leaf_beacon_begin != view.leaf_beacon_dists.size() ||
       expected_beacon_payload_begin != view.beacon_id_bytes.size()) {
     return false;
@@ -4848,6 +4853,61 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             ? 0
             : PackedWorldNodeLayout::bits_for_value(maximum_block_delta);
   }
+
+  const auto child_mbb_payload_key = [&to_u32](
+                                         uint8_t bits,
+                                         size_t child_count,
+                                         size_t beacon_count,
+                                         BuildArrayView<uint8_t> payload) {
+    std::string key;
+    key.reserve(1 + 2 * sizeof(uint32_t) + payload.size());
+    key.push_back(static_cast<char>(bits));
+    const auto append_u32 = [&key](uint32_t value) {
+      const auto* bytes = reinterpret_cast<const char*>(&value);
+      key.append(bytes, sizeof(value));
+    };
+    append_u32(to_u32(child_count, "child MBB child count"));
+    append_u32(to_u32(beacon_count, "child MBB beacon count"));
+    key.append(reinterpret_cast<const char*>(payload.data()),
+               payload.size());
+    return key;
+  };
+  std::unordered_map<std::string, uint32_t> child_mbb_payload_offsets;
+  bool interned_child_mbb_payloads = false;
+  if (total_mbb_bytes != 0) {
+    child_mbb_payload_offsets.reserve(
+        world_node_count_ - primary_layers_.back().size());
+    size_t pooled_mbb_bytes = 0;
+    uint64_t pooled_maximum_begin = 0;
+    for (size_t layer_idx = 0;
+         layer_idx + 1 < primary_layers_.size(); ++layer_idx) {
+      for (NodeId node_id : primary_layers_[layer_idx]) {
+        const auto& node = build_nodes_[node_id];
+        const auto& geometry =
+            build_node_geometry_[node.geometry_index];
+        const uint8_t bits = build_geometry_mbb_bits_[node.geometry_index];
+        auto key = child_mbb_payload_key(
+            bits, node.child_or_leaf_ids.size(),
+            geometry.beacon_ids.size(), geometry.link_beacon_dists);
+        const auto [entry, inserted] = child_mbb_payload_offsets.emplace(
+            std::move(key), to_u32(pooled_mbb_bytes,
+                                   "interned child MBB offset"));
+        if (inserted) {
+          pooled_maximum_begin = std::max<uint64_t>(
+              pooled_maximum_begin, entry->second);
+          pooled_mbb_bytes += geometry.link_beacon_dists.size();
+        } else {
+          interned_child_mbb_payloads = true;
+        }
+      }
+    }
+    if (interned_child_mbb_payloads) {
+      total_mbb_bytes = pooled_mbb_bytes;
+      maximum_child_mbb_begin = pooled_maximum_begin;
+    } else {
+      child_mbb_payload_offsets.clear();
+    }
+  }
   if (total_mbb_bytes >
       static_cast<size_t>(WorldNodeRecord::CHILD_MBB_BEGIN_MASK) + 1) {
     throw std::length_error(
@@ -4861,6 +4921,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   if (view.implicit_contiguous_child_ranges) {
     maximum_child_link_begin = 0;
   }
+  view.interned_child_mbb_payloads = interned_child_mbb_payloads;
   const PackedWorldNodeLayout child_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_child_link_begin, maximum_child_mbb_begin,
@@ -5264,13 +5325,27 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
               "packed child distance array does not match "
               "child/beacon dimensions");
         }
-        record.set_child_mbb_layout(
-            to_u32(view.child_beacon_dists.size(),
-                   "child_beacon_dists"),
-            mbb_bits);
-        view.child_beacon_dists.append(
-            geometry.link_beacon_dists.begin(),
-            geometry.link_beacon_dists.end());
+        uint32_t mbb_begin = to_u32(
+            view.child_beacon_dists.size(), "child_beacon_dists");
+        if (view.interned_child_mbb_payloads) {
+          const auto entry = child_mbb_payload_offsets.find(
+              child_mbb_payload_key(
+                  mbb_bits, node.child_or_leaf_ids.size(),
+                  geometry.beacon_ids.size(),
+                  geometry.link_beacon_dists));
+          if (entry == child_mbb_payload_offsets.end() ||
+              entry->second > view.child_beacon_dists.size()) {
+            throw std::runtime_error(
+                "interned child MBB payload is inconsistent");
+          }
+          mbb_begin = entry->second;
+        }
+        record.set_child_mbb_layout(mbb_begin, mbb_bits);
+        if (mbb_begin == view.child_beacon_dists.size()) {
+          view.child_beacon_dists.append(
+              geometry.link_beacon_dists.begin(),
+              geometry.link_beacon_dists.end());
+        }
       }
     }
   }

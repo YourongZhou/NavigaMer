@@ -1354,6 +1354,10 @@ struct SearchGraphView {
   uint8_t beacon_delta_bits = 16;
   FinalArray<uint8_t> beacon_id_bytes;
 
+  // Exact child MBB payloads with identical dimensions are interned within a
+  // shard. Node records continue to point directly at their shared payload,
+  // so query decoding and its conservative pruning bound are unchanged.
+  bool interned_child_mbb_payloads = false;
   FinalArray<uint8_t> leaf_beacon_dists;
 
   void initialize_beacon_begins(
