@@ -2318,7 +2318,9 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
        child_layout.implicit_packed_link_bits !=
            SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS) ||
       leaf_layout.has_implicit_packed_link_fields() !=
-          leaf_layout.has_implicit_center_beacon_storage()) {
+          leaf_layout.has_implicit_center_beacon_storage() ||
+      leaf_layout.has_implicit_center_beacon_storage() !=
+          leaf_layout.has_implicit_one_beacon_count()) {
     return false;
   }
   if (!view.leaf_link_begins_valid() ||
@@ -4679,6 +4681,17 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       leaf_mbb_begin += geometry.link_beacon_dists.size();
     }
   }
+  bool implicit_leaf_one_beacon_count = implicit_leaf_packed_fields;
+  if (implicit_leaf_one_beacon_count) {
+    for (NodeId node_id : primary_layers_.back()) {
+      const auto& node = build_nodes_[node_id];
+      if (node.child_or_leaf_ids.size() >
+          WorldNodeRecord::LINK_COUNT_MASK) {
+        implicit_leaf_one_beacon_count = false;
+        break;
+      }
+    }
+  }
   SearchGraphView view;
   view.beacon_delta_bits = packed_beacon_delta_bits;
   view.implicit_contiguous_child_ranges = implicit_contiguous_child_ranges;
@@ -5090,7 +5103,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           maximum_leaf_link_begin, maximum_leaf_mbb_begin,
           maximum_leaf_count_field, implicit_leaf_mbb_offsets,
           implicit_leaf_packed_fields, implicit_leaf_packed_bits,
-          implicit_leaf_packed_fields, implicit_leaf_link_begins);
+          implicit_leaf_packed_fields, implicit_leaf_link_begins,
+          implicit_leaf_one_beacon_count);
   view.node_records.initialize(
       world_node_count_, child_node_layout, leaf_node_layout,
       finest_node_begin);

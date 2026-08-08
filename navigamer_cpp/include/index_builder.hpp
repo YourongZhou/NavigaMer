@@ -723,6 +723,9 @@ struct PackedWorldNodeLayout {
   // table instead of carrying an absolute byte offset in every node record.
   // This is only valid together with IMPLICIT_PACKED_LINK_FIELDS.
   static constexpr uint8_t IMPLICIT_LINK_BEGIN = 4;
+  // Center-only leaf beacons always have cardinality one, so this four-bit
+  // count need not be repeated in each record.
+  static constexpr uint8_t IMPLICIT_ONE_BEACON_COUNT = 8;
 
   uint8_t link_begin_bits = WorldNodeRecord::PACKED_CHILD_BEGIN_BITS;
   uint8_t mbb_begin_bits = WorldNodeRecord::CHILD_MBB_BEGIN_BITS;
@@ -744,7 +747,8 @@ struct PackedWorldNodeLayout {
                                        bool omit_packed_link_fields = false,
                                        uint8_t implicit_packed_link_bits = 0,
                                        bool omit_center_beacon_storage = false,
-                                       bool omit_link_begin = false) {
+                                       bool omit_link_begin = false,
+                                       bool omit_beacon_count = false) {
     if (omit_mbb_begin && maximum_mbb_begin != 0) {
       throw std::invalid_argument(
           "cannot omit a nonzero world node MBB offset");
@@ -759,6 +763,10 @@ struct PackedWorldNodeLayout {
       throw std::invalid_argument(
           "implicit link begin requires implicit packed link fields");
     }
+    if (omit_beacon_count && !omit_center_beacon_storage) {
+      throw std::invalid_argument(
+          "implicit beacon count requires center-only beacon storage");
+    }
     PackedWorldNodeLayout layout;
     layout.link_begin_bits =
         omit_link_begin ? 0 : bits_for_value(maximum_link_begin);
@@ -768,7 +776,8 @@ struct PackedWorldNodeLayout {
     layout.flags =
         (omit_packed_link_fields ? IMPLICIT_PACKED_LINK_FIELDS : 0) |
         (omit_center_beacon_storage ? IMPLICIT_CENTER_BEACON_STORAGE : 0) |
-        (omit_link_begin ? IMPLICIT_LINK_BEGIN : 0);
+        (omit_link_begin ? IMPLICIT_LINK_BEGIN : 0) |
+        (omit_beacon_count ? IMPLICIT_ONE_BEACON_COUNT : 0);
     layout.implicit_packed_link_bits =
         omit_packed_link_fields ? implicit_packed_link_bits : 0;
     if (layout.link_begin_bits >
@@ -782,7 +791,7 @@ struct PackedWorldNodeLayout {
         layout.link_begin_bits +
         (omit_packed_link_fields ? 0 : 4) +
         (omit_packed_link_fields ? 0 : 2) + layout.link_count_bits +
-        WorldNodeRecord::BEACON_COUNT_BITS +
+        (omit_beacon_count ? 0 : WorldNodeRecord::BEACON_COUNT_BITS) +
         (omit_center_beacon_storage ? 0 : 2) +
         layout.mbb_begin_bits + 3;
     layout.record_bytes = static_cast<uint8_t>((total_bits + 7) / 8);
@@ -807,21 +816,25 @@ struct PackedWorldNodeLayout {
         link_count_bits > WorldNodeRecord::LINK_COUNT_BITS ||
         (flags & ~(IMPLICIT_PACKED_LINK_FIELDS |
                    IMPLICIT_CENTER_BEACON_STORAGE |
-                   IMPLICIT_LINK_BEGIN)) != 0 ||
+                   IMPLICIT_LINK_BEGIN |
+                   IMPLICIT_ONE_BEACON_COUNT)) != 0 ||
         ((flags & IMPLICIT_PACKED_LINK_FIELDS) != 0 &&
          (implicit_packed_link_bits == 0 ||
           implicit_packed_link_bits > 16)) ||
         ((flags & IMPLICIT_PACKED_LINK_FIELDS) == 0 &&
          implicit_packed_link_bits != 0) ||
         (has_implicit_link_begin() &&
-         !has_implicit_packed_link_fields())) {
+         !has_implicit_packed_link_fields()) ||
+        (has_implicit_one_beacon_count() &&
+         !has_implicit_center_beacon_storage())) {
       return false;
     }
     const uint32_t total_bits =
         link_begin_bits +
         (has_implicit_packed_link_fields() ? 0 : 4) +
         (has_implicit_packed_link_fields() ? 0 : 2) + link_count_bits +
-        WorldNodeRecord::BEACON_COUNT_BITS +
+        (has_implicit_one_beacon_count() ? 0 :
+                                           WorldNodeRecord::BEACON_COUNT_BITS) +
         (has_implicit_center_beacon_storage() ? 0 : 2) +
         mbb_begin_bits + 3;
     return record_bytes == (total_bits + 7) / 8;
@@ -834,6 +847,9 @@ struct PackedWorldNodeLayout {
   }
   bool has_implicit_link_begin() const {
     return (flags & IMPLICIT_LINK_BEGIN) != 0;
+  }
+  bool has_implicit_one_beacon_count() const {
+    return (flags & IMPLICIT_ONE_BEACON_COUNT) != 0;
   }
 };
 static_assert(sizeof(PackedWorldNodeLayout) == 6,
@@ -928,6 +944,7 @@ class PackedWorldNodeRecordRef {
     set_mbb_layout(begin, bits, "leaf");
   }
   bool counts_overflow() const {
+    if (layout_->has_implicit_one_beacon_count()) return false;
     return inline_beacon_count() ==
            WorldNodeRecord::COUNT_OVERFLOW_CODE;
   }
@@ -938,6 +955,7 @@ class PackedWorldNodeRecordRef {
     return mask(layout_->link_count_bits);
   }
   uint32_t inline_beacon_count() const {
+    if (layout_->has_implicit_one_beacon_count()) return 1;
     return read(beacon_count_shift(),
                 WorldNodeRecord::BEACON_COUNT_BITS);
   }
@@ -972,8 +990,15 @@ class PackedWorldNodeRecordRef {
     }
     write(link_count_shift(), layout_->link_count_bits, link_count,
           "link count");
-    write(beacon_count_shift(), WorldNodeRecord::BEACON_COUNT_BITS,
-          beacon_count, "beacon count");
+    if (layout_->has_implicit_one_beacon_count()) {
+      if (beacon_count != 1) {
+        throw std::invalid_argument(
+            "implicit beacon count requires exactly one beacon");
+      }
+    } else {
+      write(beacon_count_shift(), WorldNodeRecord::BEACON_COUNT_BITS,
+            beacon_count, "beacon count");
+    }
     if (layout_->has_implicit_center_beacon_storage()) {
       if (storage != BeaconStorage::ImplicitCenter) {
         throw std::invalid_argument(
@@ -986,6 +1011,10 @@ class PackedWorldNodeRecordRef {
   }
   void set_count_overflow(uint32_t overflow_index,
                           BeaconStorage storage) {
+    if (layout_->has_implicit_one_beacon_count()) {
+      throw std::length_error(
+          "implicit beacon count cannot represent count overflow");
+    }
     if (overflow_index > inline_link_count_mask()) {
       throw std::length_error("too many node-count overflow records");
     }
@@ -1025,7 +1054,10 @@ class PackedWorldNodeRecordRef {
     return link_count_shift() + layout_->link_count_bits;
   }
   uint32_t beacon_storage_shift() const {
-    return beacon_count_shift() + WorldNodeRecord::BEACON_COUNT_BITS;
+    return beacon_count_shift() +
+           (layout_->has_implicit_one_beacon_count()
+                ? 0
+                : WorldNodeRecord::BEACON_COUNT_BITS);
   }
   uint32_t mbb_begin_shift() const {
     return beacon_storage_shift() +

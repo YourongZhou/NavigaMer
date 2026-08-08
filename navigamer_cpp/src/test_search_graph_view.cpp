@@ -808,6 +808,33 @@ void assert_compact_node_layout_is_exact() {
   assert(implicit_leaf.leaf_mbb_begin() == 0);
   assert(implicit_leaf.leaf_mbb_bits() == 3);
 
+  const auto implicit_leaf_count_layout =
+      navigamer::PackedWorldNodeLayout::compact(
+          0, 0, 10, true, true, 3, true, true, true);
+  assert(implicit_leaf_count_layout.has_implicit_one_beacon_count());
+  assert(implicit_leaf_count_layout.record_bytes == 1);
+  assert(implicit_leaf_count_layout.valid());
+  navigamer::PackedWorldNodeArray implicit_leaf_count_records;
+  implicit_leaf_count_records.initialize(1, implicit_leaf_count_layout);
+  auto implicit_leaf_count = implicit_leaf_count_records[0];
+  implicit_leaf_count.set_packed_leaf_layout(0, 3);
+  implicit_leaf_count.set_link_storage(
+      navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+  implicit_leaf_count.set_inline_counts(
+      10, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  implicit_leaf_count.set_leaf_mbb_layout(0, 3);
+  assert(implicit_leaf_count.inline_beacon_count() == 1);
+  assert(!implicit_leaf_count.counts_overflow());
+  bool saw_implicit_count_overflow = false;
+  try {
+    implicit_leaf_count.set_count_overflow(
+        0, navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  } catch (const std::length_error&) {
+    saw_implicit_count_overflow = true;
+  }
+  assert(saw_implicit_count_overflow);
+
   const auto implicit_child_layout =
       navigamer::PackedWorldNodeLayout::compact(
           0, 300, 20, false, true,
@@ -838,9 +865,10 @@ void assert_implicit_leaf_link_begins_are_exact() {
   constexpr uint32_t kLeafCount = 10;
   constexpr uint32_t kPackedBits = 3;
   const auto layout = navigamer::PackedWorldNodeLayout::compact(
-      0, 0, 8, true, true, kPackedBits, true, true);
+      0, 0, 8, true, true, kPackedBits, true, true, true);
   assert(layout.has_implicit_link_begin());
-  assert(layout.record_bytes == 2);
+  assert(layout.has_implicit_one_beacon_count());
+  assert(layout.record_bytes == 1);
 
   navigamer::SearchGraphView view;
   view.node_records.initialize(kLeafCount, layout, layout, 0);
