@@ -1408,6 +1408,8 @@ struct SearchGraphView {
   // one absolute base plus fixed-width exact deltas; layer-local widths keep
   // random access O(1) without paying the shard-wide LeafId width per node.
   static constexpr size_t CENTER_ID_BLOCK_SIZE = 16;
+  bool center_id_block_bases_16bit = false;
+  FinalArray<uint16_t> center_id_block_bases16;
   FinalArray<LeafId> center_id_block_bases;
   FinalArray<uint8_t> center_id_block_deltas;
   std::vector<uint32_t> center_id_block_begins;
@@ -1620,7 +1622,8 @@ struct SearchGraphView {
   }
 
   void initialize_center_sequence_ids(
-      const std::vector<uint8_t>& bits_by_layer) {
+      const std::vector<uint8_t>& bits_by_layer,
+      LeafId maximum_center_id = std::numeric_limits<LeafId>::max()) {
     const size_t layer_count = layer_begin.size();
     if (layer_end.size() != layer_count ||
         bits_by_layer.size() != layer_count) {
@@ -1653,8 +1656,22 @@ struct SearchGraphView {
         throw std::length_error("center ID block storage exceeds 32 bits");
       }
     }
-    center_id_block_bases.assign(total_blocks, LeafId{0});
+    center_id_block_bases_16bit =
+        maximum_center_id <= std::numeric_limits<uint16_t>::max();
+    if (center_id_block_bases_16bit) {
+      center_id_block_bases16.assign(total_blocks, uint16_t{0});
+      center_id_block_bases.clear();
+    } else {
+      center_id_block_bases.assign(total_blocks, LeafId{0});
+      center_id_block_bases16.clear();
+    }
     center_id_block_deltas.assign(total_delta_bytes, uint8_t{0});
+  }
+
+  LeafId center_id_block_base(size_t base_idx) const {
+    return center_id_block_bases_16bit
+               ? static_cast<LeafId>(center_id_block_bases16[base_idx])
+               : center_id_block_bases[base_idx];
   }
 
   bool center_sequence_ids_valid() const {
@@ -1683,7 +1700,11 @@ struct SearchGraphView {
       expected_delta_bytes += static_cast<size_t>(
           (slots * center_id_delta_bits[layer] + 7) / 8);
     }
-    return center_id_block_bases.size() == expected_blocks &&
+    return (center_id_block_bases_16bit
+                ? center_id_block_bases16.size() == expected_blocks &&
+                      center_id_block_bases.empty()
+                : center_id_block_bases.size() == expected_blocks &&
+                      center_id_block_bases16.empty()) &&
            center_id_block_deltas.size() == expected_delta_bytes;
   }
 
@@ -1698,10 +1719,18 @@ struct SearchGraphView {
     const size_t in_block = local % CENTER_ID_BLOCK_SIZE;
     const size_t base_idx = center_id_block_begins[layer] + block;
     if (in_block == 0) {
-      center_id_block_bases[base_idx] = center_id;
+      if (center_id_block_bases_16bit) {
+        if (center_id > std::numeric_limits<uint16_t>::max()) {
+          throw std::length_error("center ID exceeds 16-bit base layout");
+        }
+        center_id_block_bases16[base_idx] =
+            static_cast<uint16_t>(center_id);
+      } else {
+        center_id_block_bases[base_idx] = center_id;
+      }
       return;
     }
-    const LeafId base = center_id_block_bases[base_idx];
+    const LeafId base = center_id_block_base(base_idx);
     if (center_id < base) {
       throw std::runtime_error(
           "center IDs are not monotone within a layer block");
@@ -1743,8 +1772,8 @@ struct SearchGraphView {
     const size_t local = node_id - layer_begin[layer];
     const size_t block = local / CENTER_ID_BLOCK_SIZE;
     const size_t in_block = local % CENTER_ID_BLOCK_SIZE;
-    const LeafId base =
-        center_id_block_bases[center_id_block_begins[layer] + block];
+    const LeafId base = center_id_block_base(
+        center_id_block_begins[layer] + block);
     if (in_block == 0) return base;
     const uint32_t bits = center_id_delta_bits[layer];
     if (bits == 0) return base;

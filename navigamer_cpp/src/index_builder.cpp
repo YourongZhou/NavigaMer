@@ -5023,7 +5023,9 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   view.node_records.initialize(
       world_node_count_, child_node_layout, leaf_node_layout,
       finest_node_begin);
-  view.initialize_center_sequence_ids(center_id_delta_bits);
+  view.initialize_center_sequence_ids(
+      center_id_delta_bits,
+      sequence_count_ == 0 ? 0 : sequence_count_ - 1);
   const size_t non_finest_node_count =
       primary_layers_.empty()
           ? 0

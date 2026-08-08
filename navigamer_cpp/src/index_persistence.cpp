@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 47) {
+  if (manifest.format_version != 48) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 47) {
+  if (manifest.format_version != 48) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -1039,8 +1039,14 @@ SequenceStore read_sequence_store(
 void write_search_graph_view(std::ostream& out,
                              const SearchGraphView& view) {
   write_sequence_store(out, view.sequences);
-  write_final_array(
-      out, view.center_id_block_bases, "center_id_block_bases");
+  write_bool(out, view.center_id_block_bases_16bit);
+  if (view.center_id_block_bases_16bit) {
+    write_final_array(
+        out, view.center_id_block_bases16, "center_id_block_bases16");
+  } else {
+    write_final_array(
+        out, view.center_id_block_bases, "center_id_block_bases");
+  }
   write_final_array(
       out, view.center_id_block_deltas, "center_id_block_deltas");
   write_u32_vector(out, view.center_id_block_begins);
@@ -1092,9 +1098,17 @@ SearchGraphView read_search_graph_view(
   SearchGraphView view;
   view.sequences =
       read_sequence_store(in, mapping, validation);
-  view.center_id_block_bases =
-      read_final_array<LeafId>(
-          in, mapping, "center_id_block_bases");
+  view.center_id_block_bases_16bit =
+      read_bool(in, "center_id_block_bases_16bit");
+  if (view.center_id_block_bases_16bit) {
+    view.center_id_block_bases16 =
+        read_final_array<uint16_t>(
+            in, mapping, "center_id_block_bases16");
+  } else {
+    view.center_id_block_bases =
+        read_final_array<LeafId>(
+            in, mapping, "center_id_block_bases");
+  }
   view.center_id_block_deltas =
       read_final_array<uint8_t>(
           in, mapping, "center_id_block_deltas");
@@ -1314,7 +1328,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 47;
+  stored.format_version = 48;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
