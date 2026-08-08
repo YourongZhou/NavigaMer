@@ -264,6 +264,39 @@ class ReferencePositionEncoder {
   void finish(SequenceStore& store) {
     flush();
     store.reference_sequence_count = static_cast<uint32_t>(count_);
+    store.reference_positions_global_linear = !blocks_.empty();
+    store.reference_position_begin = 0;
+    store.reference_position_step = 0;
+    if (store.reference_positions_global_linear) {
+      const uint32_t begin = blocks_.front().base;
+      const uint16_t step = blocks_.front().payload_size;
+      if (step == 0 || !payload_.empty()) {
+        store.reference_positions_global_linear = false;
+      } else {
+        for (size_t block_idx = 0;
+             block_idx < blocks_.size(); ++block_idx) {
+          const auto& block = blocks_[block_idx];
+          const uint64_t expected =
+              static_cast<uint64_t>(begin) +
+              static_cast<uint64_t>(block_idx) *
+                  kReferencePositionBlockSize * step;
+          const bool final_singleton =
+              block_idx + 1 == blocks_.size() &&
+              count_ % kReferencePositionBlockSize == 1;
+          if (block.encoding != ReferencePositionEncoding::Linear ||
+              (!final_singleton && block.payload_size != step) ||
+              block.base != expected) {
+            store.reference_positions_global_linear = false;
+            break;
+          }
+        }
+      }
+      if (store.reference_positions_global_linear) {
+        store.reference_position_begin = begin;
+        store.reference_position_step = step;
+        blocks_.clear();
+      }
+    }
     store.reference_position_blocks.set_owned(std::move(blocks_));
     store.reference_position_payload.set_owned(std::move(payload_));
   }
@@ -1914,10 +1947,21 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
     const std::string_view reference =
         view.sequences.reference_view();
     if (!view.sequences.records.empty() ||
-        view.sequences.reference_sequence_count != sequence_count_ ||
-        view.sequences.reference_position_blocks.size() !=
-            (sequence_count_ + kReferencePositionBlockSize - 1) /
-                kReferencePositionBlockSize) {
+        view.sequences.reference_sequence_count != sequence_count_) {
+      return false;
+    }
+    if (view.sequences.reference_positions_global_linear) {
+      if (sequence_count_ == 0 ||
+          view.sequences.reference_position_step == 0 ||
+          !view.sequences.reference_position_blocks.empty() ||
+          !view.sequences.reference_position_payload.empty()) {
+        return false;
+      }
+    } else if (view.sequences.reference_position_begin != 0 ||
+               view.sequences.reference_position_step != 0 ||
+               view.sequences.reference_position_blocks.size() !=
+                   (sequence_count_ + kReferencePositionBlockSize - 1) /
+                       kReferencePositionBlockSize) {
       return false;
     }
     uint32_t previous_contig_end = 0;
@@ -2038,6 +2082,9 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
     }
   } else {
     if (view.sequences.reference_sequence_count != 0 ||
+        view.sequences.reference_positions_global_linear ||
+        view.sequences.reference_position_begin != 0 ||
+        view.sequences.reference_position_step != 0 ||
         !view.sequences.reference_position_blocks.empty() ||
         !view.sequences.reference_position_payload.empty() ||
         !view.sequences.singleton_occurrences.empty() ||
@@ -2609,6 +2656,9 @@ void BioGeometryIndexBuilder::initialize_sequence_store(
   auto& store = search_graph_view_.sequences;
   store.reference_backed = false;
   store.reference_sequence_count = 0;
+  store.reference_positions_global_linear = false;
+  store.reference_position_begin = 0;
+  store.reference_position_step = 0;
   store.reference_position_blocks.clear();
   store.reference_position_payload.clear();
   store.singleton_occurrences.clear();
@@ -2670,6 +2720,9 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
   store.reference_backed = true;
   store.records.clear();
   store.reference_sequence_count = 0;
+  store.reference_positions_global_linear = false;
+  store.reference_position_begin = 0;
+  store.reference_position_step = 0;
   store.reference_position_blocks.clear();
   store.reference_position_payload.clear();
   store.singleton_occurrences.clear();

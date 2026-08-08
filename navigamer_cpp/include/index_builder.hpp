@@ -303,6 +303,11 @@ struct SequenceStore {
   FinalArray<ReferencePositionBlock> reference_position_blocks;
   FinalArray<uint8_t> reference_position_payload;
   uint32_t reference_sequence_count = 0;
+  // When every representative position is one arithmetic progression, avoid
+  // materializing the otherwise per-256-ID position block table.
+  bool reference_positions_global_linear = false;
+  uint32_t reference_position_begin = 0;
+  uint16_t reference_position_step = 0;
   // A sequence with one extra position uses one compact pair. Sequences with
   // two or more extras share one group record and a flat position array.
   FinalArray<ReferenceOccurrence> singleton_occurrences;
@@ -349,6 +354,10 @@ struct SequenceStore {
     if (reference_backed) {
       if (id >= reference_sequence_count) {
         throw std::out_of_range("reference sequence id");
+      }
+      if (reference_positions_global_linear) {
+        return static_cast<size_t>(reference_position_begin) +
+               static_cast<size_t>(id) * reference_position_step;
       }
       const size_t block_idx =
           static_cast<size_t>(id) / kReferencePositionBlockSize;

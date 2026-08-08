@@ -341,7 +341,8 @@ void assert_reference_backed_index_round_trip() {
       "synthetic_ref", reference, kWindowLength, 1);
   assert(built.sequence_store().reference_backed);
   assert(built.sequence_store().records.empty());
-  assert(!built.sequence_store().reference_position_blocks.empty());
+  assert(built.sequence_store().reference_positions_global_linear ||
+         !built.sequence_store().reference_position_blocks.empty());
 
   auto manifest = navigamer::make_reference_window_index_manifest(
       reference, reference.size(), static_cast<int>(kWindowLength), 1,
@@ -451,7 +452,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 52);
+  assert(loaded.manifest.format_version == 53);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);
@@ -462,9 +463,14 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   assert(loaded_store.occurrence_positions(aaaa_id) ==
          std::vector<uint32_t>({0, 16, 21}));
 #if defined(__unix__) || defined(__APPLE__)
-  assert(loaded_store.reference_position_blocks.is_mapped());
-  if (!loaded_store.reference_position_payload.empty()) {
-    assert(loaded_store.reference_position_payload.is_mapped());
+  if (loaded_store.reference_positions_global_linear) {
+    assert(loaded_store.reference_position_blocks.empty());
+    assert(loaded_store.reference_position_payload.empty());
+  } else {
+    assert(loaded_store.reference_position_blocks.is_mapped());
+    if (!loaded_store.reference_position_payload.empty()) {
+      assert(loaded_store.reference_position_payload.is_mapped());
+    }
   }
   if (!loaded_store.singleton_occurrences.empty()) {
     assert(loaded_store.singleton_occurrences.is_mapped());
@@ -639,16 +645,51 @@ void assert_reference_position_encodings_are_exact() {
   auto linear = build_store(linear_reference);
   const auto& linear_store = linear.sequence_store();
   assert(linear_store.size() > navigamer::kReferencePositionBlockSize);
-  assert(linear_store.reference_position_blocks[0].encoding ==
-         navigamer::ReferencePositionEncoding::Linear);
-  assert(linear_store.reference_position_blocks[0].payload_size == 1);
-  assert(linear_store.reference_position_blocks.size() *
-                 sizeof(navigamer::ReferencePositionBlock) +
-             linear_store.reference_position_payload.size() <
-         linear_store.size());
+  assert(linear_store.reference_positions_global_linear);
+  assert(linear_store.reference_position_begin == 0);
+  assert(linear_store.reference_position_step == 1);
+  assert(linear_store.reference_position_blocks.empty());
+  assert(linear_store.reference_position_payload.empty());
   for (size_t idx = 0; idx < linear_store.size(); ++idx) {
     assert(linear_store.source_position(static_cast<navigamer::LeafId>(idx)) ==
            idx);
+  }
+  const std::string linear_path =
+      "/tmp/navigamer_test_position_linear.navidx";
+  auto linear_manifest = navigamer::make_reference_window_index_manifest(
+      linear_reference, linear_reference.size(), kWindowLength, 1,
+      hierarchy, build_config);
+  navigamer::save_index(linear_path, linear, linear_manifest);
+  const auto loaded_linear = navigamer::load_index(linear_path);
+  const auto& loaded_linear_store = loaded_linear.builder.sequence_store();
+  assert(loaded_linear_store.reference_positions_global_linear);
+  assert(loaded_linear_store.reference_position_begin == 0);
+  assert(loaded_linear_store.reference_position_step == 1);
+  assert(loaded_linear_store.reference_position_blocks.empty());
+  assert(loaded_linear_store.reference_position_payload.empty());
+  for (size_t idx = 0; idx < linear_store.size(); ++idx) {
+    const auto id = static_cast<navigamer::LeafId>(idx);
+    assert(loaded_linear_store.source_position(id) ==
+           linear_store.source_position(id));
+    assert(loaded_linear_store.sequence(id) == linear_store.sequence(id));
+  }
+  std::remove(linear_path.c_str());
+
+  const std::string stride_linear_reference = deterministic_dna(528, 1002);
+  navigamer::BioGeometryIndexBuilder stride_linear(hierarchy, build_config);
+  stride_linear.build_reference_windows(
+      "position_encoding_stride", stride_linear_reference,
+      kWindowLength, 2);
+  const auto& stride_linear_store = stride_linear.sequence_store();
+  assert(stride_linear_store.size() == 257);
+  assert(stride_linear_store.reference_positions_global_linear);
+  assert(stride_linear_store.reference_position_begin == 0);
+  assert(stride_linear_store.reference_position_step == 2);
+  assert(stride_linear_store.reference_position_blocks.empty());
+  for (size_t idx = 0; idx < stride_linear_store.size(); ++idx) {
+    assert(stride_linear_store.source_position(
+               static_cast<navigamer::LeafId>(idx)) ==
+           idx * 2);
   }
 
   std::string bitset_reference = deterministic_dna(500, 2002);
@@ -658,6 +699,7 @@ void assert_reference_position_encodings_are_exact() {
   auto bitset = build_store(bitset_reference);
   const auto& bitset_store = bitset.sequence_store();
   assert(bitset_store.size() > navigamer::kReferencePositionBlockSize);
+  assert(!bitset_store.reference_positions_global_linear);
   assert(bitset_store.reference_position_blocks[0].encoding ==
          navigamer::ReferencePositionEncoding::Bitset);
   uint32_t previous = 0;
@@ -676,6 +718,7 @@ void assert_reference_position_encodings_are_exact() {
     auto sparse = build_store(sparse_reference(positions));
     const auto& store = sparse.sequence_store();
     assert(store.size() == positions.size());
+    assert(!store.reference_positions_global_linear);
     assert(store.reference_position_blocks.size() == 1);
     assert(store.reference_position_blocks[0].encoding == expected);
     for (size_t idx = 0; idx < positions.size(); ++idx) {

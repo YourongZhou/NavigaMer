@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 52) {
+  if (manifest.format_version != 53) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 52) {
+  if (manifest.format_version != 53) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -769,6 +769,9 @@ void write_sequence_store(std::ostream& out, const SequenceStore& store) {
   }
   if (store.reference_backed) {
     write_pod<uint32_t>(out, store.reference_sequence_count);
+    write_bool(out, store.reference_positions_global_linear);
+    write_pod<uint32_t>(out, store.reference_position_begin);
+    write_pod<uint16_t>(out, store.reference_position_step);
     write_final_array(
         out, store.reference_position_blocks,
         "sequence_store.reference_position_blocks");
@@ -865,6 +868,12 @@ SequenceStore read_sequence_store(
   if (store.reference_backed) {
     store.reference_sequence_count =
         read_pod<uint32_t>(in, "sequence_store.reference_sequence_count");
+    store.reference_positions_global_linear =
+        read_bool(in, "sequence_store.reference_positions_global_linear");
+    store.reference_position_begin =
+        read_pod<uint32_t>(in, "sequence_store.reference_position_begin");
+    store.reference_position_step =
+        read_pod<uint16_t>(in, "sequence_store.reference_position_step");
     store.reference_position_blocks =
         read_final_array<ReferencePositionBlock>(
             in, mapping, "sequence_store.reference_position_blocks");
@@ -875,68 +884,80 @@ SequenceStore read_sequence_store(
         (static_cast<size_t>(store.reference_sequence_count) +
          kReferencePositionBlockSize - 1) /
         kReferencePositionBlockSize;
-    if (store.reference_position_blocks.size() != expected_block_count) {
+    if (store.reference_positions_global_linear) {
+      if (store.reference_sequence_count == 0 ||
+          store.reference_position_step == 0 ||
+          !store.reference_position_blocks.empty() ||
+          !store.reference_position_payload.empty()) {
+        throw std::runtime_error(
+            "reference-backed index has invalid global linear positions");
+      }
+    } else if (store.reference_position_begin != 0 ||
+               store.reference_position_step != 0 ||
+               store.reference_position_blocks.size() != expected_block_count) {
       throw std::runtime_error(
           "reference-backed index has invalid position block count");
     }
-    uint64_t expected_payload_begin = 0;
-    const auto& position_blocks = store.reference_position_blocks;
-    for (size_t block_idx = 0; block_idx < expected_block_count;
-         ++block_idx) {
-      const auto& block = position_blocks[block_idx];
-      const size_t block_begin = block_idx * kReferencePositionBlockSize;
-      const size_t block_count = std::min(
-          kReferencePositionBlockSize,
-          static_cast<size_t>(store.reference_sequence_count) - block_begin);
-      if (block.reserved != 0 ||
-          block.payload_begin != expected_payload_begin) {
-        throw std::runtime_error(
-            "reference-backed index has invalid position block metadata");
-      }
-      size_t expected_payload_size = block.payload_size;
-      switch (block.encoding) {
-        case ReferencePositionEncoding::Linear:
-          if (block.payload_size == 0) {
-            throw std::runtime_error(
-                "reference-backed index has zero linear position step");
-          }
-          expected_payload_size = 0;
-          break;
-        case ReferencePositionEncoding::Bitset:
-          if (block_count <= 1 || block.payload_size == 0) {
-            throw std::runtime_error(
-                "reference-backed index has invalid position bitset");
-          }
-          break;
-        case ReferencePositionEncoding::Delta8:
-          expected_payload_size = block_count - 1;
-          break;
-        case ReferencePositionEncoding::Delta16:
-          expected_payload_size = (block_count - 1) * sizeof(uint16_t);
-          break;
-        case ReferencePositionEncoding::Absolute32:
-          expected_payload_size = (block_count - 1) * sizeof(uint32_t);
-          break;
-        default:
+    if (!store.reference_positions_global_linear) {
+      uint64_t expected_payload_begin = 0;
+      const auto& position_blocks = store.reference_position_blocks;
+      for (size_t block_idx = 0; block_idx < expected_block_count;
+           ++block_idx) {
+        const auto& block = position_blocks[block_idx];
+        const size_t block_begin = block_idx * kReferencePositionBlockSize;
+        const size_t block_count = std::min(
+            kReferencePositionBlockSize,
+            static_cast<size_t>(store.reference_sequence_count) - block_begin);
+        if (block.reserved != 0 ||
+            block.payload_begin != expected_payload_begin) {
           throw std::runtime_error(
-              "reference-backed index has invalid position encoding");
+              "reference-backed index has invalid position block metadata");
+        }
+        size_t expected_payload_size = block.payload_size;
+        switch (block.encoding) {
+          case ReferencePositionEncoding::Linear:
+            if (block.payload_size == 0) {
+              throw std::runtime_error(
+                  "reference-backed index has zero linear position step");
+            }
+            expected_payload_size = 0;
+            break;
+          case ReferencePositionEncoding::Bitset:
+            if (block_count <= 1 || block.payload_size == 0) {
+              throw std::runtime_error(
+                  "reference-backed index has invalid position bitset");
+            }
+            break;
+          case ReferencePositionEncoding::Delta8:
+            expected_payload_size = block_count - 1;
+            break;
+          case ReferencePositionEncoding::Delta16:
+            expected_payload_size = (block_count - 1) * sizeof(uint16_t);
+            break;
+          case ReferencePositionEncoding::Absolute32:
+            expected_payload_size = (block_count - 1) * sizeof(uint32_t);
+            break;
+          default:
+            throw std::runtime_error(
+                "reference-backed index has invalid position encoding");
+        }
+        if (block.encoding != ReferencePositionEncoding::Linear &&
+            block.payload_size != expected_payload_size) {
+          throw std::runtime_error(
+              "reference-backed index has invalid position payload size");
+        }
+        expected_payload_begin += expected_payload_size;
+        if (expected_payload_begin >
+            store.reference_position_payload.size()) {
+          throw std::runtime_error(
+              "reference-backed index has truncated position payload");
+        }
       }
-      if (block.encoding != ReferencePositionEncoding::Linear &&
-          block.payload_size != expected_payload_size) {
-        throw std::runtime_error(
-            "reference-backed index has invalid position payload size");
-      }
-      expected_payload_begin += expected_payload_size;
-      if (expected_payload_begin >
+      if (expected_payload_begin !=
           store.reference_position_payload.size()) {
         throw std::runtime_error(
-            "reference-backed index has truncated position payload");
+            "reference-backed index has excess position payload");
       }
-    }
-    if (expected_payload_begin !=
-        store.reference_position_payload.size()) {
-      throw std::runtime_error(
-          "reference-backed index has excess position payload");
     }
     if (validation == IndexLoadValidation::Full) {
       uint32_t previous_position = 0;
@@ -1337,7 +1358,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 52;
+  stored.format_version = 53;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
