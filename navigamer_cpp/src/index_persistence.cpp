@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 42) {
+  if (manifest.format_version != 43) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 42) {
+  if (manifest.format_version != 43) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -666,29 +666,98 @@ FinalArray<T> read_final_array(
   return values;
 }
 
-void write_mapped_reference(std::ostream& out,
-                            std::string_view reference) {
+enum class PersistedReferenceEncoding : uint8_t {
+  Raw = 0,
+  Dna2 = 1,
+};
+
+bool reference_is_two_bit_dna(std::string_view reference) {
+  return std::all_of(reference.begin(), reference.end(), [](char base) {
+    return base == 'A' || base == 'C' || base == 'G' || base == 'T';
+  });
+}
+
+uint8_t two_bit_dna_code(char base) {
+  switch (base) {
+    case 'A': return 0;
+    case 'C': return 1;
+    case 'G': return 2;
+    case 'T': return 3;
+  }
+  throw std::invalid_argument("2-bit reference contains non-ACGT base");
+}
+
+std::vector<uint8_t> pack_two_bit_dna(std::string_view reference) {
+  std::vector<uint8_t> packed((reference.size() + 3) / 4, uint8_t{0});
+  for (size_t base_idx = 0; base_idx < reference.size(); ++base_idx) {
+    packed[base_idx >> 2] |= static_cast<uint8_t>(
+        two_bit_dna_code(reference[base_idx]) << ((base_idx & 3) * 2));
+  }
+  return packed;
+}
+
+std::string unpack_two_bit_dna(BuildArrayView<uint8_t> packed,
+                               size_t reference_size) {
+  if (packed.size() != (reference_size + 3) / 4) {
+    throw std::runtime_error("2-bit reference payload has invalid size");
+  }
+  std::string reference(reference_size, 'A');
+  constexpr std::array<char, 4> kBases = {'A', 'C', 'G', 'T'};
+  for (size_t base_idx = 0; base_idx < reference_size; ++base_idx) {
+    const uint8_t code = static_cast<uint8_t>(
+        (packed[base_idx >> 2] >> ((base_idx & 3) * 2)) & 3);
+    reference[base_idx] = kBases[code];
+  }
+  return reference;
+}
+
+void write_persisted_reference(std::ostream& out,
+                               std::string_view reference) {
+  const bool two_bit = reference_is_two_bit_dna(reference);
   write_size(out, reference.size());
-  if (reference.empty()) return;
-  if (reference.size() > static_cast<size_t>(
-                             std::numeric_limits<std::streamsize>::max())) {
-    throw std::runtime_error(
-        "reference sequence exceeds stream size range");
+  write_pod<uint8_t>(
+      out, static_cast<uint8_t>(two_bit
+          ? PersistedReferenceEncoding::Dna2
+          : PersistedReferenceEncoding::Raw));
+  FinalArray<uint8_t> payload;
+  if (two_bit) {
+    payload.set_owned(pack_two_bit_dna(reference));
+  } else {
+    payload.set_owned(std::vector<uint8_t>(reference.begin(),
+                                           reference.end()));
   }
-  align_write_position(out, kMappedArrayAlignment);
-  out.write(reference.data(),
-            static_cast<std::streamsize>(reference.size()));
-  if (!out) {
-    throw std::runtime_error(
-        "failed to write mapped reference sequence");
+  write_final_array(out, payload, "sequence_store.reference_payload");
+}
+
+std::string read_persisted_reference(
+    std::istream& in, const std::shared_ptr<MappedIndexFile>& mapping) {
+  const size_t reference_size =
+      read_size(in, "sequence_store.reference_size");
+  const auto encoding = static_cast<PersistedReferenceEncoding>(
+      read_pod<uint8_t>(in, "sequence_store.reference_encoding"));
+  const auto payload = read_final_array<uint8_t>(
+      in, mapping, "sequence_store.reference_payload");
+  if (encoding == PersistedReferenceEncoding::Raw) {
+    if (payload.size() != reference_size) {
+      throw std::runtime_error("raw reference payload has invalid size");
+    }
+    if (payload.empty()) return {};
+    return std::string(reinterpret_cast<const char*>(payload.data()),
+                       payload.size());
   }
+  if (encoding == PersistedReferenceEncoding::Dna2) {
+    return unpack_two_bit_dna(
+        BuildArrayView<uint8_t>(payload.data(), payload.size()),
+        reference_size);
+  }
+  throw std::runtime_error("reference payload has unknown encoding");
 }
 
 void write_sequence_store(std::ostream& out, const SequenceStore& store) {
   write_bool(out, store.reference_backed);
   if (store.reference_backed) {
     write_string(out, store.reference_id);
-    write_mapped_reference(out, store.reference_view());
+    write_persisted_reference(out, store.reference_view());
     write_size(out, store.fixed_sequence_length);
     write_size(out, store.reference_contigs.size());
     for (const auto& contig : store.reference_contigs) {
@@ -747,9 +816,8 @@ SequenceStore read_sequence_store(
   if (store.reference_backed) {
     store.reference_id =
         read_string(in, "sequence_store.reference_id");
-    store.mapped_reference_sequence =
-        read_final_array<char>(
-            in, mapping, "sequence_store.reference_sequence");
+    store.reference_sequence = read_persisted_reference(in, mapping);
+    store.mapped_reference_sequence.clear();
     reference = store.reference_view();
     store.fixed_sequence_length =
         read_size(in, "sequence_store.fixed_sequence_length");
@@ -1243,7 +1311,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 42;
+  stored.format_version = 43;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

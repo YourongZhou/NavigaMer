@@ -434,7 +434,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 42);
+  assert(loaded.manifest.format_version == 43);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);
@@ -519,10 +519,13 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   std::remove(index_path.c_str());
 }
 
-void assert_mapped_reference_encoding_is_exact() {
+void assert_reference_encoding_is_exact() {
   const std::string index_path =
-      "/tmp/navigamer_test_mapped_reference.navidx";
+      "/tmp/navigamer_test_raw_reference.navidx";
+  const std::string packed_index_path =
+      "/tmp/navigamer_test_two_bit_reference.navidx";
   std::remove(index_path.c_str());
+  std::remove(packed_index_path.c_str());
 
   constexpr size_t kChunkBoundary = size_t{1} << 20;
   std::string reference(kChunkBoundary + 37, 'C');
@@ -544,22 +547,41 @@ void assert_mapped_reference_encoding_is_exact() {
 
   const auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded_store.reference_sequence.empty());
-  assert(loaded_store.mapped_reference_sequence.is_mapped());
-  assert((reinterpret_cast<uintptr_t>(
-              loaded_store.mapped_reference_sequence.data()) &
-          63) == 0);
-  assert(loaded_store.mapped_reference_sequence.size() == reference.size());
+  assert(loaded_store.reference_sequence == reference);
+  assert(loaded_store.mapped_reference_sequence.empty());
   assert(loaded_store.reference_view() == reference);
   assert(loaded_store.reference_view().data() ==
-         loaded_store.mapped_reference_sequence.data());
+         loaded_store.reference_sequence.data());
   assert(loaded.builder.validate_integer_ids());
   const auto reconstructed_manifest =
       navigamer::make_reference_window_index_manifest(
           loaded.manifest.ref_input, reference.size(), 4,
           static_cast<int>(reference.size()), hierarchy, build_config);
   assert(reconstructed_manifest.signature == loaded.manifest.signature);
+
+  std::string two_bit_reference = reference;
+  two_bit_reference[kChunkBoundary - 1] = 'C';
+  two_bit_reference[kChunkBoundary] = 'C';
+  two_bit_reference[kChunkBoundary + 1] = 'C';
+  navigamer::BioGeometryIndexBuilder packed(hierarchy, build_config);
+  packed.build_reference_windows(
+      "packed", two_bit_reference, 4, two_bit_reference.size());
+  const auto packed_manifest = navigamer::make_reference_window_index_manifest(
+      two_bit_reference, two_bit_reference.size(), 4,
+      static_cast<int>(two_bit_reference.size()), hierarchy, build_config);
+  navigamer::save_index(packed_index_path, packed, packed_manifest);
+  const auto packed_loaded = navigamer::load_index(packed_index_path);
+  assert(packed_loaded.builder.sequence_store().reference_view() ==
+         two_bit_reference);
+  const auto file_size = [](const std::string& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    assert(in);
+    return static_cast<uint64_t>(in.tellg());
+  };
+  assert(file_size(packed_index_path) + reference.size() / 2 <
+         file_size(index_path));
   std::remove(index_path.c_str());
+  std::remove(packed_index_path.c_str());
 }
 
 std::string deterministic_dna(size_t length, uint32_t seed) {
@@ -677,7 +699,7 @@ int main() {
   assert_reference_window_manifest_tracks_slicing_parameters();
   assert_reference_backed_index_round_trip();
   assert_multicontig_invalid_base_and_occurrence_round_trip();
-  assert_mapped_reference_encoding_is_exact();
+  assert_reference_encoding_is_exact();
   assert_reference_position_encodings_are_exact();
   std::cout << "index persistence tests passed\n";
   return 0;
