@@ -394,14 +394,18 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 43
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 44
 stores an all-ACGT shared reference in 2-bit form and restores one contiguous
 byte view per loaded shard, so edit-distance query kernels retain direct
 character access; references containing other IUPAC characters are kept
 losslessly as raw bytes. It keeps
 long literal inputs only as manifest fingerprints, and omits redundant
 child-payload offsets when a shard's child ranges are fully contiguous. It
-also interns byte-identical child MBB distance blocks. Child MBB values are
+also interns byte-identical child MBB distance blocks.
+When packed leaf-ID and leaf-MBB streams have identical per-node byte starts,
+the leaf-MBB offset is derived from the leaf-ID offset after an exact per-leaf
+build-time check, preserving the packed MBB bytes and all pruning decisions.
+Child MBB values are
 packed for at most 10 deterministic beacons per non-finest parent. Reducing the
 beacon cap only removes safe metric constraints and therefore cannot create a
 false negative. Coarse layers store child-center distances as
@@ -414,7 +418,8 @@ may retain extra children but cannot prune a true result. Values use the exact
 minimum bit width required by each parent's largest quantized value, with each
 node starting on a byte boundary for constant-time lookup. Non-finest and
 finest nodes use separate shard-local record layouts, so each region stores
-its exact absolute MBB offset at the minimum width its own payload requires.
+its exact MBB offset at the minimum width its payload requires unless the
+checked leaf-MBB offset derivation above applies.
 A shard may contain up to 512 MiB of
 packed child-MBB data. The child-layer radius plus the
 layer-specific quantization error reconstructs a conservative interval during

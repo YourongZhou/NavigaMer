@@ -2792,7 +2792,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     ScopedSearchTimer leaf_filter_timer(stats.query_profile_enabled,
                                         &stats.leaf_mbb_filter_ms);
     LeafBeaconFilterSimdStats simd_stats;
-    const uint32_t offset = node.leaf_mbb_begin();
+    const uint32_t offset = view.leaf_mbb_begin(node_id, node);
     if (config_.search_prefetch) {
       prefetch_read(view.leaf_beacon_dists.data() + offset);
       if (leaf_count != 0) prefetch_leaf_code(0);

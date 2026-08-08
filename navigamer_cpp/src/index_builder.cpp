@@ -2353,7 +2353,12 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       }
       if (!expected_leaf_begin ||
           node.leaf_begin() != *expected_leaf_begin ||
-          node.leaf_mbb_begin() != expected_leaf_beacon_begin ||
+          view.leaf_mbb_begin(node_id, node) !=
+              expected_leaf_beacon_begin ||
+          (view.implicit_leaf_mbb_offsets &&
+           (node.link_storage() !=
+                WorldNodeRecord::LinkStorage::PackedDelta ||
+            node.leaf_mbb_begin() != 0)) ||
           !view.leaf_mbb_range_valid(
               node_id, node, link_count, beacon_count)) {
         return false;
@@ -4921,7 +4926,33 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   if (view.implicit_contiguous_child_ranges) {
     maximum_child_link_begin = 0;
   }
+  bool implicit_leaf_mbb_offsets =
+      !primary_layers_.empty() && !primary_layers_.back().empty();
+  size_t expected_leaf_id_begin = 0;
+  size_t expected_leaf_mbb_begin = 0;
+  if (implicit_leaf_mbb_offsets) {
+    for (NodeId node_id : primary_layers_.back()) {
+      const auto& node = build_nodes_[node_id];
+      const auto& geometry = build_node_geometry_[node.geometry_index];
+      const auto choice = leaf_storage_for(node_id);
+      if (choice.storage != WorldNodeRecord::LinkStorage::PackedDelta ||
+          expected_leaf_id_begin != expected_leaf_mbb_begin) {
+        implicit_leaf_mbb_offsets = false;
+        break;
+      }
+      expected_leaf_id_begin += static_cast<size_t>(
+          (static_cast<uint64_t>(node.child_or_leaf_ids.size()) *
+               choice.packed_bits +
+           7) /
+          8);
+      expected_leaf_mbb_begin += geometry.link_beacon_dists.size();
+    }
+  }
+  if (implicit_leaf_mbb_offsets) {
+    maximum_leaf_mbb_begin = 0;
+  }
   view.interned_child_mbb_payloads = interned_child_mbb_payloads;
+  view.implicit_leaf_mbb_offsets = implicit_leaf_mbb_offsets;
   const PackedWorldNodeLayout child_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_child_link_begin, maximum_child_mbb_begin,
@@ -5275,8 +5306,10 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             finalization_plan, kPlanLeafMbbBitsShift,
             kPlanThreeBitMask);
         record.set_leaf_mbb_layout(
-            to_u32(view.leaf_beacon_dists.size(),
-                   "leaf_beacon_dists"),
+            view.implicit_leaf_mbb_offsets
+                ? 0
+                : to_u32(view.leaf_beacon_dists.size(),
+                         "leaf_beacon_dists"),
             leaf_mbb_bits);
         const size_t expected_bytes = static_cast<size_t>(
             (static_cast<uint64_t>(node.child_or_leaf_ids.size()) *

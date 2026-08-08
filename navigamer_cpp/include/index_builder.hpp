@@ -1358,6 +1358,11 @@ struct SearchGraphView {
   // shard. Node records continue to point directly at their shared payload,
   // so query decoding and its conservative pruning bound are unchanged.
   bool interned_child_mbb_payloads = false;
+  // In shards whose packed leaf-ID byte stream and leaf-MBB byte stream have
+  // the same per-node starts, a leaf MBB begin is exactly leaf_begin().  The
+  // node record then omits the redundant MBB offset.  The builder enables
+  // this only after checking every finest-layer node.
+  bool implicit_leaf_mbb_offsets = false;
   FinalArray<uint8_t> leaf_beacon_dists;
 
   void initialize_beacon_begins(
@@ -2160,10 +2165,25 @@ struct SearchGraphView {
     return leaf_mbb_byte_count(
         node_id, node, link_count(node), beacon_count(node));
   }
+  uint32_t leaf_mbb_begin(
+      NodeId node_id, const PackedWorldNodeRecordRef& node) const {
+    if (implicit_leaf_mbb_offsets) {
+      if (layer_begin.empty() || node_id < layer_begin.back() ||
+          node_id >= node_records.size()) {
+        throw std::runtime_error("leaf MBB node offset is missing");
+      }
+      return node.leaf_begin();
+    }
+    return node.leaf_mbb_begin();
+  }
+  uint32_t leaf_mbb_begin(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return leaf_mbb_begin(node_id, node);
+  }
   bool leaf_mbb_range_valid(
       NodeId node_id, const PackedWorldNodeRecordRef& node,
       uint32_t leaf_count_value, uint32_t beacon_count_value) const {
-    const uint32_t begin = node.leaf_mbb_begin();
+    const uint32_t begin = leaf_mbb_begin(node_id, node);
     return begin <= leaf_beacon_dists.size() &&
            leaf_mbb_byte_count(
                node_id, node, leaf_count_value, beacon_count_value) <=
@@ -2187,7 +2207,7 @@ struct SearchGraphView {
   }
   uint8_t leaf_beacon_distance_unchecked(
       NodeId node_id, size_t cell_offset, uint32_t bits) const {
-    const uint32_t begin = node_records[node_id].leaf_mbb_begin();
+    const uint32_t begin = leaf_mbb_begin(node_id);
     if (bits == 8) {
       return leaf_beacon_dists[begin + cell_offset];
     }
