@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 45 stores an all-ACGT
+edit distance fits in one byte. Persisted format version 46 stores an all-ACGT
 shared reference in 2-bit form and restores one contiguous byte view per
 loaded shard, so edit-distance query kernels retain direct character access;
 references containing other IUPAC characters are kept losslessly as raw bytes.
@@ -58,6 +58,9 @@ fully contiguous and interns byte-identical child MBB distance blocks.
 When packed leaf-ID and leaf-MBB streams have identical per-node byte starts,
 it derives the latter from the former and omits the redundant leaf-MBB offset;
 the builder checks this equality for every leaf node before enabling it.
+If every leaf in a shard also uses packed IDs, center-only beacons, and one
+shared packed-ID width, those three repeated fields are recorded once in the
+leaf layout rather than per node; unsupported shards retain the general layout.
 It stores layer-monotone center IDs in aligned 16-node blocks: one exact 32-bit
 base plus fixed-width exact deltas, with an independently chosen width per
 layer. Center lookup remains constant-time and reconstructs the original

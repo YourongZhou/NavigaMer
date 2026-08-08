@@ -780,15 +780,32 @@ void assert_compact_node_layout_is_exact() {
   assert(widest.record_bytes == sizeof(navigamer::WorldNodeRecord));
 
   const auto implicit_leaf_layout =
-      navigamer::PackedWorldNodeLayout::compact(100, 0, 10, true);
+      navigamer::PackedWorldNodeLayout::compact(
+          100, 0, 10, true, true, 3);
   assert(implicit_leaf_layout.mbb_begin_bits == 0);
-  assert(implicit_leaf_layout.record_bytes == 4);
+  assert(implicit_leaf_layout.has_implicit_leaf_packed_fields());
+  assert(implicit_leaf_layout.record_bytes == 3);
   assert(implicit_leaf_layout.valid());
   navigamer::PackedWorldNodeArray implicit_leaf_records;
   implicit_leaf_records.initialize(1, implicit_leaf_layout);
-  implicit_leaf_records[0].set_leaf_mbb_layout(0, 3);
-  assert(implicit_leaf_records[0].leaf_mbb_begin() == 0);
-  assert(implicit_leaf_records[0].leaf_mbb_bits() == 3);
+  auto implicit_leaf = implicit_leaf_records[0];
+  implicit_leaf.set_packed_leaf_layout(0, 3);
+  implicit_leaf.set_link_storage(
+      navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+  implicit_leaf.set_inline_counts(
+      10, 1,
+      navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  implicit_leaf.set_leaf_mbb_layout(0, 3);
+  assert(implicit_leaf.leaf_begin() == 0);
+  assert(implicit_leaf.packed_leaf_bits() == 3);
+  assert(implicit_leaf.link_storage() ==
+         navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+  assert(implicit_leaf.inline_link_count_or_overflow_index() == 10);
+  assert(implicit_leaf.inline_beacon_count() == 1);
+  assert(implicit_leaf.beacon_storage() ==
+         navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+  assert(implicit_leaf.leaf_mbb_begin() == 0);
+  assert(implicit_leaf.leaf_mbb_bits() == 3);
 }
 
 void assert_child_and_leaf_node_layouts_are_independent() {

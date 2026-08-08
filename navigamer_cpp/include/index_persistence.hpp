@@ -12,7 +12,7 @@
 namespace navigamer {
 
 struct IndexBuildManifest {
-  uint32_t format_version = 45;
+  uint32_t format_version = 46;
   std::string signature;
   std::string ref_input;
   std::string reads_input;

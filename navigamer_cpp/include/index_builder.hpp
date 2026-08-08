@@ -717,10 +717,14 @@ static_assert(sizeof(WorldNodeRecord) == 12,
               "scratch world node must remain 12 bytes");
 
 struct PackedWorldNodeLayout {
+  static constexpr uint8_t IMPLICIT_LEAF_PACKED_FIELDS = 1;
+
   uint8_t link_begin_bits = WorldNodeRecord::PACKED_CHILD_BEGIN_BITS;
   uint8_t mbb_begin_bits = WorldNodeRecord::CHILD_MBB_BEGIN_BITS;
   uint8_t link_count_bits = WorldNodeRecord::LINK_COUNT_BITS;
   uint8_t record_bytes = sizeof(WorldNodeRecord);
+  uint8_t flags = 0;
+  uint8_t implicit_leaf_packed_bits = 0;
 
   static uint8_t bits_for_value(uint64_t maximum) {
     uint8_t bits = 1;
@@ -731,16 +735,29 @@ struct PackedWorldNodeLayout {
   static PackedWorldNodeLayout compact(uint64_t maximum_link_begin,
                                        uint64_t maximum_mbb_begin,
                                        uint64_t maximum_link_count,
-                                       bool omit_mbb_begin = false) {
+                                       bool omit_mbb_begin = false,
+                                       bool omit_leaf_packed_fields = false,
+                                       uint8_t implicit_leaf_packed_bits = 0) {
     if (omit_mbb_begin && maximum_mbb_begin != 0) {
       throw std::invalid_argument(
           "cannot omit a nonzero world node MBB offset");
+    }
+    if (omit_leaf_packed_fields &&
+        (implicit_leaf_packed_bits == 0 ||
+         implicit_leaf_packed_bits > 16)) {
+      throw std::invalid_argument(
+          "implicit packed leaf width must be 1..16");
     }
     PackedWorldNodeLayout layout;
     layout.link_begin_bits = bits_for_value(maximum_link_begin);
     layout.mbb_begin_bits =
         omit_mbb_begin ? 0 : bits_for_value(maximum_mbb_begin);
     layout.link_count_bits = bits_for_value(maximum_link_count);
+    layout.flags = omit_leaf_packed_fields
+                       ? IMPLICIT_LEAF_PACKED_FIELDS
+                       : 0;
+    layout.implicit_leaf_packed_bits =
+        omit_leaf_packed_fields ? implicit_leaf_packed_bits : 0;
     if (layout.link_begin_bits >
             WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
         layout.mbb_begin_bits >
@@ -749,8 +766,11 @@ struct PackedWorldNodeLayout {
       throw std::length_error("world node layout exceeds supported range");
     }
     const uint32_t total_bits =
-        layout.link_begin_bits + 4 + 2 + layout.link_count_bits +
-        WorldNodeRecord::BEACON_COUNT_BITS + 2 +
+        layout.link_begin_bits +
+        (omit_leaf_packed_fields ? 0 : 4) +
+        (omit_leaf_packed_fields ? 0 : 2) + layout.link_count_bits +
+        WorldNodeRecord::BEACON_COUNT_BITS +
+        (omit_leaf_packed_fields ? 0 : 2) +
         layout.mbb_begin_bits + 3;
     layout.record_bytes = static_cast<uint8_t>((total_bits + 7) / 8);
     return layout;
@@ -760,7 +780,8 @@ struct PackedWorldNodeLayout {
     return link_begin_bits == other.link_begin_bits &&
            mbb_begin_bits == other.mbb_begin_bits &&
            link_count_bits == other.link_count_bits &&
-           record_bytes == other.record_bytes;
+           record_bytes == other.record_bytes && flags == other.flags &&
+           implicit_leaf_packed_bits == other.implicit_leaf_packed_bits;
   }
   bool operator!=(const PackedWorldNodeLayout& other) const {
     return !(*this == other);
@@ -770,18 +791,30 @@ struct PackedWorldNodeLayout {
         link_begin_bits > WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
         mbb_begin_bits > WorldNodeRecord::CHILD_MBB_BEGIN_BITS ||
         link_count_bits == 0 ||
-        link_count_bits > WorldNodeRecord::LINK_COUNT_BITS) {
+        link_count_bits > WorldNodeRecord::LINK_COUNT_BITS ||
+        (flags & ~IMPLICIT_LEAF_PACKED_FIELDS) != 0 ||
+        ((flags & IMPLICIT_LEAF_PACKED_FIELDS) != 0 &&
+         (implicit_leaf_packed_bits == 0 ||
+          implicit_leaf_packed_bits > 16)) ||
+        ((flags & IMPLICIT_LEAF_PACKED_FIELDS) == 0 &&
+         implicit_leaf_packed_bits != 0)) {
       return false;
     }
     const uint32_t total_bits =
-        link_begin_bits + 4 + 2 + link_count_bits +
-        WorldNodeRecord::BEACON_COUNT_BITS + 2 +
+        link_begin_bits +
+        (has_implicit_leaf_packed_fields() ? 0 : 4) +
+        (has_implicit_leaf_packed_fields() ? 0 : 2) + link_count_bits +
+        WorldNodeRecord::BEACON_COUNT_BITS +
+        (has_implicit_leaf_packed_fields() ? 0 : 2) +
         mbb_begin_bits + 3;
     return record_bytes == (total_bits + 7) / 8;
   }
+  bool has_implicit_leaf_packed_fields() const {
+    return (flags & IMPLICIT_LEAF_PACKED_FIELDS) != 0;
+  }
 };
-static_assert(sizeof(PackedWorldNodeLayout) == 4,
-              "packed node layout header must remain four bytes");
+static_assert(sizeof(PackedWorldNodeLayout) == 6,
+              "packed node layout header must remain compact");
 
 class PackedWorldNodeRecordRef {
  public:
@@ -824,6 +857,9 @@ class PackedWorldNodeRecordRef {
   uint32_t child_begin() const { return link_begin_value(); }
   uint32_t leaf_begin() const { return link_begin_value(); }
   uint32_t packed_child_bits() const {
+    if (layout_->has_implicit_leaf_packed_fields()) {
+      return layout_->implicit_leaf_packed_bits;
+    }
     return read(link_width_shift(), 4) + 1;
   }
   uint32_t packed_leaf_bits() const { return packed_child_bits(); }
@@ -875,12 +911,25 @@ class PackedWorldNodeRecordRef {
                 WorldNodeRecord::BEACON_COUNT_BITS);
   }
   BeaconStorage beacon_storage() const {
+    if (layout_->has_implicit_leaf_packed_fields()) {
+      return BeaconStorage::ImplicitCenter;
+    }
     return static_cast<BeaconStorage>(read(beacon_storage_shift(), 2));
   }
   LinkStorage link_storage() const {
+    if (layout_->has_implicit_leaf_packed_fields()) {
+      return LinkStorage::PackedDelta;
+    }
     return static_cast<LinkStorage>(read(link_storage_shift(), 2));
   }
   void set_link_storage(LinkStorage storage) {
+    if (layout_->has_implicit_leaf_packed_fields()) {
+      if (storage != LinkStorage::PackedDelta) {
+        throw std::invalid_argument(
+            "implicit packed leaf layout requires packed deltas");
+      }
+      return;
+    }
     write(link_storage_shift(), 2, static_cast<uint32_t>(storage),
           "link storage");
   }
@@ -894,6 +943,13 @@ class PackedWorldNodeRecordRef {
           "link count");
     write(beacon_count_shift(), WorldNodeRecord::BEACON_COUNT_BITS,
           beacon_count, "beacon count");
+    if (layout_->has_implicit_leaf_packed_fields()) {
+      if (storage != BeaconStorage::ImplicitCenter) {
+        throw std::invalid_argument(
+            "implicit packed leaf layout requires center beacon");
+      }
+      return;
+    }
     write(beacon_storage_shift(), 2, static_cast<uint32_t>(storage),
           "beacon storage");
   }
@@ -906,6 +962,13 @@ class PackedWorldNodeRecordRef {
           "node-count overflow index");
     write(beacon_count_shift(), WorldNodeRecord::BEACON_COUNT_BITS,
           WorldNodeRecord::COUNT_OVERFLOW_CODE, "beacon count");
+    if (layout_->has_implicit_leaf_packed_fields()) {
+      if (storage != BeaconStorage::ImplicitCenter) {
+        throw std::invalid_argument(
+            "implicit packed leaf layout requires center beacon");
+      }
+      return;
+    }
     write(beacon_storage_shift(), 2, static_cast<uint32_t>(storage),
           "beacon storage");
   }
@@ -920,10 +983,12 @@ class PackedWorldNodeRecordRef {
     return layout_->link_begin_bits;
   }
   uint32_t link_storage_shift() const {
-    return link_width_shift() + 4;
+    return link_width_shift() +
+           (layout_->has_implicit_leaf_packed_fields() ? 0 : 4);
   }
   uint32_t link_count_shift() const {
-    return link_storage_shift() + 2;
+    return link_storage_shift() +
+           (layout_->has_implicit_leaf_packed_fields() ? 0 : 2);
   }
   uint32_t beacon_count_shift() const {
     return link_count_shift() + layout_->link_count_bits;
@@ -932,7 +997,8 @@ class PackedWorldNodeRecordRef {
     return beacon_count_shift() + WorldNodeRecord::BEACON_COUNT_BITS;
   }
   uint32_t mbb_begin_shift() const {
-    return beacon_storage_shift() + 2;
+    return beacon_storage_shift() +
+           (layout_->has_implicit_leaf_packed_fields() ? 0 : 2);
   }
   uint32_t mbb_width_shift() const {
     return mbb_begin_shift() + layout_->mbb_begin_bits;
@@ -1002,6 +1068,13 @@ class PackedWorldNodeRecordRef {
           std::string("packed ") + kind + "-ID bit width must be 1..16");
     }
     set_link_begin_value(begin);
+    if (layout_->has_implicit_leaf_packed_fields()) {
+      if (bits != layout_->implicit_leaf_packed_bits) {
+        throw std::invalid_argument(
+            "packed leaf width differs from implicit layout");
+      }
+      return;
+    }
     write(link_width_shift(), 4, bits - 1, "link width");
   }
   void set_mbb_layout(uint32_t begin, uint32_t bits,
