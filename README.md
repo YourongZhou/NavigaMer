@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 38 stores the shared
+edit distance fits in one byte. Persisted format version 39 stores the shared
 reference as raw bases in the memory-mapped index, so loading does not allocate
 or eagerly fault a full decoded reference into heap memory, and
 keeps long literal inputs in the manifest only as content fingerprints. It
@@ -68,14 +68,14 @@ widens the metric bound by the matching maximum reconstruction error (six or
 three), so quantization can retain extra children but cannot prune a true result.
 Each parent uses the exact
 minimum integer bit width required by its largest quantized value; nodes remain
-independently byte-addressable. The three-bit width code shares
-the node's 32-bit MBB field with its 29-bit byte offset, eliminating a separate
-width array and its query-time memory load. A shard may contain up to 512 MiB
+independently byte-addressable. Non-finest and finest nodes use separate
+shard-local record layouts, so both regions keep exact absolute MBB offsets at
+their own minimum bit widths. A shard may contain up to 512 MiB
 of packed child-MBB data. Search reconstructs a conservative interval from the
 child-layer radius and the layer-specific quantization error. Leaf distances
 remain exact because they participate in the final leaf sieve, but each finest
 node packs them at the minimum 1..8-bit width required by its largest value.
-The width shares the node's 32-bit MBB field with the 29-bit byte offset, and
+The width shares the node field with its exact MBB byte offset, and
 each node begins on a byte boundary for constant-time decoding. Finest-layer
 leaf IDs use exact ZigZag deltas from the world center and the
 smallest profitable per-node 1..16-bit width; the width shares the leaf offset

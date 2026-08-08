@@ -998,6 +998,8 @@ class PackedWorldNodeRecordRef {
   uint64_t low_ = 0;
   uint64_t high_ = 0;
 };
+static_assert(sizeof(PackedWorldNodeRecordRef) <= 32,
+              "packed node proxy must remain at most 32 bytes");
 
 class PackedWorldNodeArray {
  public:
@@ -1005,21 +1007,38 @@ class PackedWorldNodeArray {
   bool empty() const { return count_ == 0; }
   const uint8_t* data() const { return bytes_.data(); }
   bool is_mapped() const { return bytes_.is_mapped(); }
-  const PackedWorldNodeLayout& layout() const { return layout_; }
+  const PackedWorldNodeLayout& child_layout() const {
+    return child_layout_;
+  }
+  const PackedWorldNodeLayout& leaf_layout() const {
+    return leaf_layout_;
+  }
   const FinalArray<uint8_t>& bytes() const { return bytes_; }
   FinalArray<uint8_t>& bytes() { return bytes_; }
+  uint32_t finest_node_begin() const { return finest_node_begin_; }
 
   PackedWorldNodeRecordRef operator[](size_t index) const {
+    if (index < finest_node_begin_) {
+      return PackedWorldNodeRecordRef(
+          const_cast<uint8_t*>(bytes_.data()) +
+              index * child_layout_.record_bytes,
+          &child_layout_);
+    }
     return PackedWorldNodeRecordRef(
-        const_cast<uint8_t*>(bytes_.data()) + index * layout_.record_bytes,
-        &layout_);
+        const_cast<uint8_t*>(bytes_.data()) + child_record_bytes() +
+            (index - finest_node_begin_) * leaf_layout_.record_bytes,
+        &leaf_layout_);
   }
   PackedWorldNodeRecordRef at(size_t index) const {
     if (index >= count_) throw std::out_of_range("packed world node index");
     return (*this)[index];
   }
   const uint8_t* record_data(size_t index) const {
-    return bytes_.data() + index * layout_.record_bytes;
+    if (index < finest_node_begin_) {
+      return bytes_.data() + index * child_layout_.record_bytes;
+    }
+    return bytes_.data() + child_record_bytes() +
+           (index - finest_node_begin_) * leaf_layout_.record_bytes;
   }
 
   void assign(size_t count, const WorldNodeRecord&) {
@@ -1029,31 +1048,67 @@ class PackedWorldNodeArray {
     initialize(count, PackedWorldNodeLayout{});
   }
   void initialize(size_t count, PackedWorldNodeLayout layout) {
-    if (!layout.valid() ||
-        count > std::numeric_limits<size_t>::max() /
-                    layout.record_bytes) {
+    initialize(count, layout, layout, count);
+  }
+  void initialize(size_t count, PackedWorldNodeLayout child_layout,
+                  PackedWorldNodeLayout leaf_layout,
+                  size_t finest_node_begin) {
+    if (!child_layout.valid() || !leaf_layout.valid() ||
+        finest_node_begin > count ||
+        count > std::numeric_limits<NodeId>::max()) {
       throw std::length_error("packed world node array is too large");
     }
     count_ = count;
-    layout_ = layout;
-    bytes_.assign(count * layout_.record_bytes, uint8_t{0});
+    child_layout_ = child_layout;
+    leaf_layout_ = leaf_layout;
+    finest_node_begin_ = static_cast<uint32_t>(finest_node_begin);
+    const size_t byte_count = checked_byte_count();
+    bytes_.assign(byte_count, uint8_t{0});
   }
-  void set_loaded(size_t count, PackedWorldNodeLayout layout,
+  void set_loaded(size_t count, PackedWorldNodeLayout child_layout,
+                  PackedWorldNodeLayout leaf_layout,
+                  uint32_t finest_node_begin,
                   FinalArray<uint8_t> bytes) {
-    if (!layout.valid() ||
-        count > std::numeric_limits<size_t>::max() /
-                    layout.record_bytes ||
-        bytes.size() != count * layout.record_bytes) {
+    if (!child_layout.valid() || !leaf_layout.valid() ||
+        finest_node_begin > count ||
+        count > std::numeric_limits<NodeId>::max()) {
       throw std::runtime_error("packed world node byte count is invalid");
     }
     count_ = count;
-    layout_ = layout;
+    child_layout_ = child_layout;
+    leaf_layout_ = leaf_layout;
+    finest_node_begin_ = finest_node_begin;
+    if (bytes.size() != checked_byte_count()) {
+      throw std::runtime_error("packed world node byte count is invalid");
+    }
     bytes_ = std::move(bytes);
   }
 
  private:
+  size_t child_record_bytes() const {
+    return static_cast<size_t>(finest_node_begin_) *
+           child_layout_.record_bytes;
+  }
+  size_t checked_byte_count() const {
+    const size_t child_bytes = child_record_bytes();
+    const size_t leaf_count = count_ - finest_node_begin_;
+    if (finest_node_begin_ != 0 &&
+        child_bytes / finest_node_begin_ !=
+            child_layout_.record_bytes) {
+      throw std::length_error("packed child node array is too large");
+    }
+    if (leaf_count >
+        (std::numeric_limits<size_t>::max() - child_bytes) /
+            leaf_layout_.record_bytes) {
+      throw std::length_error("packed leaf node array is too large");
+    }
+    return child_bytes + leaf_count * leaf_layout_.record_bytes;
+  }
+
   size_t count_ = 0;
-  PackedWorldNodeLayout layout_;
+  PackedWorldNodeLayout child_layout_;
+  PackedWorldNodeLayout leaf_layout_;
+  uint32_t finest_node_begin_ = 0;
   FinalArray<uint8_t> bytes_;
 };
 

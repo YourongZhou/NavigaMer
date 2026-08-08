@@ -756,6 +756,31 @@ void assert_compact_node_layout_is_exact() {
   assert(widest.record_bytes == sizeof(navigamer::WorldNodeRecord));
 }
 
+void assert_child_and_leaf_node_layouts_are_independent() {
+  const auto child_layout = navigamer::PackedWorldNodeLayout::compact(
+      1094080, 3657858, 1501);
+  const auto leaf_layout = navigamer::PackedWorldNodeLayout::compact(
+      100, 200, 10);
+  assert(child_layout.record_bytes == 9);
+  assert(leaf_layout.record_bytes == 5);
+
+  navigamer::PackedWorldNodeArray records;
+  records.initialize(4, child_layout, leaf_layout, 2);
+  records[0].set_child_mbb_layout(3657858, 7);
+  records[1].set_child_mbb_layout(1234567, 4);
+  records[2].set_leaf_mbb_layout(200, 3);
+  records[3].set_leaf_mbb_layout(17, 2);
+
+  assert(records[0].child_mbb_begin() == 3657858);
+  assert(records[1].child_mbb_begin() == 1234567);
+  assert(records[2].leaf_mbb_begin() == 200);
+  assert(records[3].leaf_mbb_begin() == 17);
+  assert(records.record_data(1) - records.record_data(0) == 9);
+  assert(records.record_data(2) - records.record_data(0) == 18);
+  assert(records.record_data(3) - records.record_data(2) == 5);
+  assert(records.bytes().size() == 28);
+}
+
 void assert_all_beacon_begin_widths_are_exact() {
   for (uint32_t maximum :
        {uint32_t{0}, uint32_t{1}, uint32_t{255}, uint32_t{70000},
@@ -805,6 +830,7 @@ int main() {
   assert_all_packed_child_widths_are_exact();
   assert_leaf_id_encodings_are_exact();
   assert_compact_node_layout_is_exact();
+  assert_child_and_leaf_node_layouts_are_independent();
   assert_all_beacon_begin_widths_are_exact();
   std::cout << "search graph view tests passed\n";
   return 0;

@@ -2058,7 +2058,10 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       view.layer_begin.empty()
           ? static_cast<NodeId>(view.node_records.size())
           : view.layer_begin.back();
-  if (!view.child_base_ids_valid(finest_begin)) return false;
+  if (view.node_records.finest_node_begin() != finest_begin ||
+      !view.child_base_ids_valid(finest_begin)) {
+    return false;
+  }
   for (NodeId node_id = 0; node_id < view.node_records.size(); ++node_id) {
     const auto node = view.node_records[node_id];
     const LeafId center_id = view.center_sequence_id(node_id);
@@ -4555,10 +4558,19 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   size_t total_leaf_beacon_bytes = 0;
   size_t total_beacon_id_bytes = 0;
   size_t total_mbb_bytes = 0;
-  uint64_t maximum_link_count = 0;
+  const uint32_t finest_node_begin =
+      primary_layers_.empty()
+          ? to_u32(world_node_count_, "world_node_count")
+          : to_u32(
+                world_node_count_ - primary_layers_.back().size(),
+                "finest_node_begin");
   uint64_t node_count_overflow_count = 0;
-  uint64_t maximum_link_begin = 0;
-  uint64_t maximum_mbb_begin = 0;
+  uint64_t maximum_child_link_begin = 0;
+  uint64_t maximum_leaf_link_begin = 0;
+  uint64_t maximum_child_mbb_begin = 0;
+  uint64_t maximum_leaf_mbb_begin = 0;
+  uint64_t maximum_child_count_field = 0;
+  uint64_t maximum_leaf_count_field = 0;
   uint64_t maximum_beacon_begin = 0;
   uint64_t maximum_beacon_block_delta = 0;
   uint64_t beacon_block_base = 0;
@@ -4632,12 +4644,23 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       previous_center = node.center_sequence_id;
       have_previous = true;
       ++node_offset;
-      maximum_link_count = std::max<uint64_t>(
-          maximum_link_count, node.child_or_leaf_ids.size());
-      if (node.child_or_leaf_ids.size() >
+      const bool counts_overflow =
+          node.child_or_leaf_ids.size() >
               WorldNodeRecord::LINK_COUNT_MASK ||
           (!is_finest && geometry.beacon_ids.size() >=
-                             WorldNodeRecord::COUNT_OVERFLOW_CODE)) {
+                             WorldNodeRecord::COUNT_OVERFLOW_CODE);
+      const uint64_t count_field =
+          counts_overflow
+              ? node_count_overflow_count
+              : std::min<uint64_t>(
+                    node.child_or_leaf_ids.size(),
+                    WorldNodeRecord::LINK_COUNT_MASK);
+      auto& maximum_count_field =
+          is_finest ? maximum_leaf_count_field
+                    : maximum_child_count_field;
+      maximum_count_field = std::max(
+          maximum_count_field, count_field);
+      if (counts_overflow) {
         ++node_count_overflow_count;
       }
       uint32_t plan = 0;
@@ -4654,13 +4677,13 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             plan, kPlanLeafPackedBitsShift, kPlanFourBitMask,
             choice.packed_bits == 0 ? 1 : choice.packed_bits);
         if (storage == WorldNodeRecord::LinkStorage::Delta8) {
-          maximum_link_begin = std::max<uint64_t>(
-              maximum_link_begin, total_leaf_deltas8);
+          maximum_leaf_link_begin = std::max<uint64_t>(
+              maximum_leaf_link_begin, total_leaf_deltas8);
           total_leaf_deltas8 += node.child_or_leaf_ids.size();
         } else if (
             storage == WorldNodeRecord::LinkStorage::PackedDelta) {
-          maximum_link_begin = std::max<uint64_t>(
-              maximum_link_begin, total_leaf_deltas8);
+          maximum_leaf_link_begin = std::max<uint64_t>(
+              maximum_leaf_link_begin, total_leaf_deltas8);
           total_leaf_deltas8 += static_cast<size_t>(
               (static_cast<uint64_t>(
                    node.child_or_leaf_ids.size()) *
@@ -4668,20 +4691,20 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
                7) /
               8);
         } else if (storage == WorldNodeRecord::LinkStorage::Delta16) {
-          maximum_link_begin = std::max<uint64_t>(
-              maximum_link_begin, total_leaf_deltas16);
+          maximum_leaf_link_begin = std::max<uint64_t>(
+              maximum_leaf_link_begin, total_leaf_deltas16);
           total_leaf_deltas16 += node.child_or_leaf_ids.size();
         } else {
-          maximum_link_begin = std::max<uint64_t>(
-              maximum_link_begin, total_leaf_ids32);
+          maximum_leaf_link_begin = std::max<uint64_t>(
+              maximum_leaf_link_begin, total_leaf_ids32);
           total_leaf_ids32 += node.child_or_leaf_ids.size();
         }
         const uint8_t bits =
             build_geometry_mbb_bits_[node.geometry_index];
         set_plan_bits(
             plan, kPlanLeafMbbBitsShift, kPlanThreeBitMask, bits);
-        maximum_mbb_begin = std::max<uint64_t>(
-            maximum_mbb_begin, total_leaf_beacon_bytes);
+        maximum_leaf_mbb_begin = std::max<uint64_t>(
+            maximum_leaf_mbb_begin, total_leaf_beacon_bytes);
         total_leaf_beacon_bytes += geometry.link_beacon_dists.size();
       } else {
         const auto choice = child_storage_for(build_node_id);
@@ -4692,14 +4715,14 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             plan, kPlanChildPackedBitsShift, kPlanFourBitMask,
             choice.packed_bits == 0 ? 1 : choice.packed_bits);
         if (storage == WorldNodeRecord::LinkStorage::Delta8) {
-          maximum_link_begin = std::max<uint64_t>(
-              maximum_link_begin, total_child_base_deltas8_bytes);
+          maximum_child_link_begin = std::max<uint64_t>(
+              maximum_child_link_begin, total_child_base_deltas8_bytes);
           total_child_base_deltas8_bytes +=
               child_base_bytes + node.child_or_leaf_ids.size();
         } else if (
             storage == WorldNodeRecord::LinkStorage::PackedDelta) {
-          maximum_link_begin = std::max<uint64_t>(
-              maximum_link_begin, total_child_base_deltas8_bytes);
+          maximum_child_link_begin = std::max<uint64_t>(
+              maximum_child_link_begin, total_child_base_deltas8_bytes);
           total_child_base_deltas8_bytes +=
               child_base_bytes + static_cast<size_t>(
                   (static_cast<uint64_t>(
@@ -4708,20 +4731,20 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
                    7) /
                   8);
         } else if (storage == WorldNodeRecord::LinkStorage::Delta16) {
-          maximum_link_begin = std::max<uint64_t>(
-              maximum_link_begin, total_child_deltas16);
+          maximum_child_link_begin = std::max<uint64_t>(
+              maximum_child_link_begin, total_child_deltas16);
           total_child_deltas16 += node.child_or_leaf_ids.size();
         } else {
-          maximum_link_begin = std::max<uint64_t>(
-              maximum_link_begin, total_child_ids32);
+          maximum_child_link_begin = std::max<uint64_t>(
+              maximum_child_link_begin, total_child_ids32);
           total_child_ids32 += node.child_or_leaf_ids.size();
         }
         const uint8_t bits =
             build_geometry_mbb_bits_[node.geometry_index];
         set_plan_bits(
             plan, kPlanMbbBitsShift, kPlanThreeBitMask, bits);
-        maximum_mbb_begin = std::max<uint64_t>(
-            maximum_mbb_begin, total_mbb_bytes);
+        maximum_child_mbb_begin = std::max<uint64_t>(
+            maximum_child_mbb_begin, total_mbb_bytes);
         total_mbb_bytes += geometry.link_beacon_dists.size();
         const auto beacon_storage =
             beacon_storage_for(
@@ -4767,17 +4790,17 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     throw std::length_error(
         "packed leaf MBB storage exceeds 29-bit shard range");
   }
-  const uint64_t maximum_inline_count = std::min<uint64_t>(
-      maximum_link_count, WorldNodeRecord::LINK_COUNT_MASK);
-  const uint64_t maximum_count_field = std::max<uint64_t>(
-      maximum_inline_count,
-      node_count_overflow_count == 0
-          ? 0
-          : node_count_overflow_count - 1);
+  const PackedWorldNodeLayout child_node_layout =
+      PackedWorldNodeLayout::compact(
+          maximum_child_link_begin, maximum_child_mbb_begin,
+          maximum_child_count_field);
+  const PackedWorldNodeLayout leaf_node_layout =
+      PackedWorldNodeLayout::compact(
+          maximum_leaf_link_begin, maximum_leaf_mbb_begin,
+          maximum_leaf_count_field);
   view.node_records.initialize(
-      world_node_count_, PackedWorldNodeLayout::compact(
-          maximum_link_begin, maximum_mbb_begin,
-          maximum_count_field));
+      world_node_count_, child_node_layout, leaf_node_layout,
+      finest_node_begin);
   view.initialize_center_sequence_ids(center_id_delta_bits);
   const size_t non_finest_node_count =
       primary_layers_.empty()

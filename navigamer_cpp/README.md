@@ -392,7 +392,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 38
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 39
 stores the shared reference as raw bases in the memory-mapped index, avoiding a
 full decoded heap copy and faulting reference pages only when queried. It keeps
 long literal inputs only as manifest fingerprints. Child MBB values are packed
@@ -406,21 +406,24 @@ widens every corresponding metric bound by the matching maximum reconstruction
 error, six or three, so the representation
 may retain extra children but cannot prune a true result. Values use the exact
 minimum bit width required by each parent's largest quantized value, with each
-node starting on a byte boundary for constant-time lookup. The
-three-bit width code shares the node's 32-bit MBB field with its 29-bit byte
-offset, removing the former side array and one query-time load. A shard may
-contain up to 512 MiB of packed child-MBB data. The child-layer radius plus the
+node starting on a byte boundary for constant-time lookup. Non-finest and
+finest nodes use separate shard-local record layouts, so each region stores
+its exact absolute MBB offset at the minimum width its own payload requires.
+A shard may contain up to 512 MiB of
+packed child-MBB data. The child-layer radius plus the
 layer-specific quantization error reconstructs a conservative interval during
 search. Finest-layer leaf distances remain exact, but each node packs them at
 the minimum 1..8-bit width required by its largest value. The width shares the
-same node field as its 29-bit byte offset, and nodes start on byte boundaries
+same node field as its exact byte offset, and nodes start on byte boundaries
 for constant-time decoding. This avoids both per-distance padding and a
 separate heap allocation for every child or leaf row. Finest-layer
 construction also reuses the cleared child-ID buffer for leaf IDs. Leaf IDs
 use exact ZigZag deltas from the world center and the smallest profitable
 per-node 1..16-bit width; its width shares the leaf offset field, so the
 encoding needs no side array. Finalized
-nodes are 16 bytes and are addressed directly by array index;
+nodes use one shard-wide compact bit layout and are addressed directly by array
+index; the narrower finest-node layout reduces its common record by one byte
+without adding query-time offset decoding;
 layer offsets imply the layer ID and both radii. A packed 32-bit word stores
 the common 24-bit child-or-leaf count, 4-bit beacon count, 2-bit beacon
 encoding, and 2-bit link encoding;

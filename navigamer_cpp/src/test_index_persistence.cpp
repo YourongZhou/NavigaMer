@@ -85,8 +85,12 @@ void assert_loaded_search_matches_built() {
       built.search_graph_view().center_id_block_deltas.begin(),
       built.search_graph_view().center_id_block_deltas.end(),
       loaded.builder.search_graph_view().center_id_block_deltas.begin()));
-  assert(loaded.builder.search_graph_view().node_records.layout() ==
-         built.search_graph_view().node_records.layout());
+  assert(loaded.builder.search_graph_view().node_records.child_layout() ==
+         built.search_graph_view().node_records.child_layout());
+  assert(loaded.builder.search_graph_view().node_records.leaf_layout() ==
+         built.search_graph_view().node_records.leaf_layout());
+  assert(loaded.builder.search_graph_view().node_records.finest_node_begin() ==
+         built.search_graph_view().node_records.finest_node_begin());
   assert(loaded.builder.search_graph_view().node_records.bytes() ==
          built.search_graph_view().node_records.bytes());
   assert(loaded.builder.search_graph_view().child_base_forward_delta_bytes ==
@@ -428,7 +432,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 38);
+  assert(loaded.manifest.format_version == 39);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 38) {
+  if (manifest.format_version != 39) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 38) {
+  if (manifest.format_version != 39) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -978,8 +978,12 @@ void write_search_graph_view(std::ostream& out,
   write_u32_vector(out, view.center_id_block_begins);
   write_u32_vector(out, view.center_id_delta_begins);
   write_u8_vector(out, view.center_id_delta_bits);
-  write_pod<PackedWorldNodeLayout>(out, view.node_records.layout());
+  write_pod<PackedWorldNodeLayout>(
+      out, view.node_records.child_layout());
+  write_pod<PackedWorldNodeLayout>(
+      out, view.node_records.leaf_layout());
   write_size(out, view.node_records.size());
+  write_pod<uint32_t>(out, view.node_records.finest_node_begin());
   write_final_array(
       out, view.node_records.bytes(), "node_record_bytes");
   write_final_array(
@@ -1029,14 +1033,19 @@ SearchGraphView read_search_graph_view(
       read_u32_vector(in, "center_id_delta_begins");
   view.center_id_delta_bits =
       read_u8_vector(in, "center_id_delta_bits");
-  const PackedWorldNodeLayout node_layout =
-      read_pod<PackedWorldNodeLayout>(in, "node_record_layout");
-  if (!node_layout.valid()) {
+  const PackedWorldNodeLayout child_node_layout =
+      read_pod<PackedWorldNodeLayout>(in, "child_node_record_layout");
+  const PackedWorldNodeLayout leaf_node_layout =
+      read_pod<PackedWorldNodeLayout>(in, "leaf_node_record_layout");
+  if (!child_node_layout.valid() || !leaf_node_layout.valid()) {
     throw std::runtime_error("packed world node layout is invalid");
   }
   const size_t node_count = read_size(in, "node_record_count");
+  const uint32_t finest_node_begin =
+      read_pod<uint32_t>(in, "node_record_finest_begin");
   view.node_records.set_loaded(
-      node_count, node_layout,
+      node_count, child_node_layout, leaf_node_layout,
+      finest_node_begin,
       read_final_array<uint8_t>(
           in, mapping, "node_record_bytes"));
   view.node_count_overflows =
@@ -1100,6 +1109,8 @@ bool validate_structural_layout(
   }
   return expected_begin == view.node_records.size() &&
          !view.layer_begin.empty() &&
+         view.node_records.finest_node_begin() ==
+             view.layer_begin.back() &&
          view.child_base_ids_valid(view.layer_begin.back()) &&
          view.beacon_begins_valid(view.layer_begin.back()) &&
          view.beacon_delta_bits >= 1 &&
@@ -1226,7 +1237,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 38;
+  stored.format_version = 39;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();
