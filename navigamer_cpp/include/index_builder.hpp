@@ -719,6 +719,10 @@ static_assert(sizeof(WorldNodeRecord) == 12,
 struct PackedWorldNodeLayout {
   static constexpr uint8_t IMPLICIT_PACKED_LINK_FIELDS = 1;
   static constexpr uint8_t IMPLICIT_CENTER_BEACON_STORAGE = 2;
+  // Finest-layer packed leaf payloads may be addressed from a small block
+  // table instead of carrying an absolute byte offset in every node record.
+  // This is only valid together with IMPLICIT_PACKED_LINK_FIELDS.
+  static constexpr uint8_t IMPLICIT_LINK_BEGIN = 4;
 
   uint8_t link_begin_bits = WorldNodeRecord::PACKED_CHILD_BEGIN_BITS;
   uint8_t mbb_begin_bits = WorldNodeRecord::CHILD_MBB_BEGIN_BITS;
@@ -739,7 +743,8 @@ struct PackedWorldNodeLayout {
                                        bool omit_mbb_begin = false,
                                        bool omit_packed_link_fields = false,
                                        uint8_t implicit_packed_link_bits = 0,
-                                       bool omit_center_beacon_storage = false) {
+                                       bool omit_center_beacon_storage = false,
+                                       bool omit_link_begin = false) {
     if (omit_mbb_begin && maximum_mbb_begin != 0) {
       throw std::invalid_argument(
           "cannot omit a nonzero world node MBB offset");
@@ -750,14 +755,20 @@ struct PackedWorldNodeLayout {
       throw std::invalid_argument(
           "implicit packed link width must be 1..16");
     }
+    if (omit_link_begin && !omit_packed_link_fields) {
+      throw std::invalid_argument(
+          "implicit link begin requires implicit packed link fields");
+    }
     PackedWorldNodeLayout layout;
-    layout.link_begin_bits = bits_for_value(maximum_link_begin);
+    layout.link_begin_bits =
+        omit_link_begin ? 0 : bits_for_value(maximum_link_begin);
     layout.mbb_begin_bits =
         omit_mbb_begin ? 0 : bits_for_value(maximum_mbb_begin);
     layout.link_count_bits = bits_for_value(maximum_link_count);
     layout.flags =
         (omit_packed_link_fields ? IMPLICIT_PACKED_LINK_FIELDS : 0) |
-        (omit_center_beacon_storage ? IMPLICIT_CENTER_BEACON_STORAGE : 0);
+        (omit_center_beacon_storage ? IMPLICIT_CENTER_BEACON_STORAGE : 0) |
+        (omit_link_begin ? IMPLICIT_LINK_BEGIN : 0);
     layout.implicit_packed_link_bits =
         omit_packed_link_fields ? implicit_packed_link_bits : 0;
     if (layout.link_begin_bits >
@@ -789,18 +800,21 @@ struct PackedWorldNodeLayout {
     return !(*this == other);
   }
   bool valid() const {
-    if (link_begin_bits == 0 ||
-        link_begin_bits > WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
+    if (link_begin_bits > WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
+        (link_begin_bits == 0 && !has_implicit_link_begin()) ||
         mbb_begin_bits > WorldNodeRecord::CHILD_MBB_BEGIN_BITS ||
         link_count_bits == 0 ||
         link_count_bits > WorldNodeRecord::LINK_COUNT_BITS ||
         (flags & ~(IMPLICIT_PACKED_LINK_FIELDS |
-                   IMPLICIT_CENTER_BEACON_STORAGE)) != 0 ||
+                   IMPLICIT_CENTER_BEACON_STORAGE |
+                   IMPLICIT_LINK_BEGIN)) != 0 ||
         ((flags & IMPLICIT_PACKED_LINK_FIELDS) != 0 &&
          (implicit_packed_link_bits == 0 ||
           implicit_packed_link_bits > 16)) ||
         ((flags & IMPLICIT_PACKED_LINK_FIELDS) == 0 &&
-         implicit_packed_link_bits != 0)) {
+         implicit_packed_link_bits != 0) ||
+        (has_implicit_link_begin() &&
+         !has_implicit_packed_link_fields())) {
       return false;
     }
     const uint32_t total_bits =
@@ -817,6 +831,9 @@ struct PackedWorldNodeLayout {
   }
   bool has_implicit_center_beacon_storage() const {
     return (flags & IMPLICIT_CENTER_BEACON_STORAGE) != 0;
+  }
+  bool has_implicit_link_begin() const {
+    return (flags & IMPLICIT_LINK_BEGIN) != 0;
   }
 };
 static_assert(sizeof(PackedWorldNodeLayout) == 6,
@@ -854,9 +871,17 @@ class PackedWorldNodeRecordRef {
  public:
 
   uint32_t link_begin_value() const {
+    if (layout_->has_implicit_link_begin()) return 0;
     return read(link_begin_shift(), layout_->link_begin_bits);
   }
   void set_link_begin_value(uint32_t begin) {
+    if (layout_->has_implicit_link_begin()) {
+      if (begin != 0) {
+        throw std::length_error(
+            "packed world node link offset exceeds implicit layout");
+      }
+      return;
+    }
     write(link_begin_shift(), layout_->link_begin_bits, begin,
           "link begin");
   }
@@ -1438,6 +1463,11 @@ struct SearchGraphView {
   FinalArray<int8_t> leaf_id_deltas8;
   FinalArray<int16_t> leaf_id_deltas16;
   FinalArray<LeafId> leaf_ids;
+  // When the finest layout elides its per-node link begin, one exact byte
+  // offset per small leaf-node block recovers it. The short in-block scan only
+  // reads packed node metadata and keeps the leaf payload contiguous.
+  static constexpr uint8_t LEAF_LINK_BEGIN_BLOCK_SIZE = 8;
+  FinalArray<uint32_t> leaf_link_begin_blocks;
 
   // Each child-center-to-beacon distance d is stored as floor(d / 12) above
   // the last non-finest layer and floor(d / 6) in that final child-world
@@ -1469,6 +1499,67 @@ struct SearchGraphView {
   // this only after checking every finest-layer node.
   bool implicit_leaf_mbb_offsets = false;
   FinalArray<uint8_t> leaf_beacon_dists;
+
+  void initialize_leaf_link_begin_blocks(size_t finest_node_count) {
+    if (finest_node_count == 0) {
+      leaf_link_begin_blocks.clear();
+      return;
+    }
+    const size_t block_count =
+        (finest_node_count + LEAF_LINK_BEGIN_BLOCK_SIZE - 1) /
+        LEAF_LINK_BEGIN_BLOCK_SIZE;
+    leaf_link_begin_blocks.assign(block_count, 0);
+  }
+  bool leaf_link_begins_valid() const {
+    const auto& layout = node_records.leaf_layout();
+    const size_t finest_count =
+        node_records.size() - node_records.finest_node_begin();
+    if (!layout.has_implicit_link_begin()) {
+      return leaf_link_begin_blocks.empty();
+    }
+    return finest_count != 0 &&
+           leaf_link_begin_blocks.size() ==
+               (finest_count + LEAF_LINK_BEGIN_BLOCK_SIZE - 1) /
+               LEAF_LINK_BEGIN_BLOCK_SIZE;
+  }
+  void set_leaf_link_begin(NodeId node_id, uint32_t begin) {
+    const uint32_t finest_begin = node_records.finest_node_begin();
+    if (!node_records.leaf_layout().has_implicit_link_begin() ||
+        node_id < finest_begin ||
+        (node_id - finest_begin) % LEAF_LINK_BEGIN_BLOCK_SIZE != 0) {
+      throw std::invalid_argument("invalid implicit leaf link begin");
+    }
+    leaf_link_begin_blocks[(node_id - finest_begin) /
+                           LEAF_LINK_BEGIN_BLOCK_SIZE] = begin;
+  }
+  uint32_t leaf_link_begin(
+      NodeId node_id, const PackedWorldNodeRecordRef& node) const {
+    if (!node_records.leaf_layout().has_implicit_link_begin()) {
+      return node.leaf_begin();
+    }
+    const uint32_t finest_begin = node_records.finest_node_begin();
+    if (node_id < finest_begin ||
+        leaf_link_begin_blocks.empty()) {
+      throw std::runtime_error("implicit leaf link begin is invalid");
+    }
+    const uint32_t relative = node_id - finest_begin;
+    const uint32_t block_begin =
+        relative - relative % LEAF_LINK_BEGIN_BLOCK_SIZE;
+    uint32_t begin = leaf_link_begin_blocks[
+        block_begin / LEAF_LINK_BEGIN_BLOCK_SIZE];
+    const uint32_t bits =
+        node_records.leaf_layout().implicit_packed_link_bits;
+    for (uint32_t prior = block_begin; prior < relative; ++prior) {
+      const auto previous = node_records[finest_begin + prior];
+      begin += static_cast<uint32_t>(
+          (static_cast<uint64_t>(link_count(previous)) * bits + 7) / 8);
+    }
+    return begin;
+  }
+  uint32_t leaf_link_begin(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return leaf_link_begin(node_id, node);
+  }
 
   void initialize_beacon_begins(
       size_t non_finest_node_count, uint64_t maximum_begin,
@@ -2316,7 +2407,7 @@ struct SearchGraphView {
           node_id >= node_records.size()) {
         throw std::runtime_error("leaf MBB node offset is missing");
       }
-      return node.leaf_begin();
+      return leaf_link_begin(node_id, node);
     }
     return node.leaf_mbb_begin();
   }
@@ -2387,15 +2478,15 @@ struct SearchGraphView {
       NodeId node_id, uint32_t leaf_offset) const {
     const auto node = node_records[node_id];
     return packed_leaf_id(
-        node, center_sequence_id(node_id), leaf_offset);
+        node_id, node, center_sequence_id(node_id), leaf_offset);
   }
   inline LeafId packed_leaf_id(
-      const PackedWorldNodeRecordRef& node, LeafId center,
+      NodeId node_id, const PackedWorldNodeRecordRef& node, LeafId center,
       uint32_t leaf_offset) const {
     const uint32_t bits = node.packed_leaf_bits();
     const uint8_t* data =
         reinterpret_cast<const uint8_t*>(leaf_id_deltas8.data()) +
-        node.leaf_begin();
+        leaf_link_begin(node_id, node);
     const size_t bit_offset =
         static_cast<size_t>(leaf_offset) * bits;
     const size_t byte_offset = bit_offset >> 3;
@@ -2420,21 +2511,22 @@ struct SearchGraphView {
   LeafId leaf_id(NodeId node_id, uint32_t leaf_offset) const {
     const auto node = node_records[node_id];
     const LeafId center = center_sequence_id(node_id);
-    return leaf_id(node, center, leaf_offset);
+    return leaf_id(node_id, node, center, leaf_offset);
   }
-  LeafId leaf_id(const PackedWorldNodeRecordRef& node, LeafId center,
+  LeafId leaf_id(NodeId node_id, const PackedWorldNodeRecordRef& node,
+                 LeafId center,
                  uint32_t leaf_offset) const {
     switch (node.link_storage()) {
       case WorldNodeRecord::LinkStorage::Delta8:
         return center +
-               leaf_id_deltas8[node.leaf_begin() + leaf_offset];
+               leaf_id_deltas8[leaf_link_begin(node_id, node) + leaf_offset];
       case WorldNodeRecord::LinkStorage::Delta16:
         return center +
-               leaf_id_deltas16[node.leaf_begin() + leaf_offset];
+               leaf_id_deltas16[leaf_link_begin(node_id, node) + leaf_offset];
       case WorldNodeRecord::LinkStorage::Absolute32:
-        return leaf_ids[node.leaf_begin() + leaf_offset];
+        return leaf_ids[leaf_link_begin(node_id, node) + leaf_offset];
       case WorldNodeRecord::LinkStorage::PackedDelta:
-        return packed_leaf_id(node, center, leaf_offset);
+        return packed_leaf_id(node_id, node, center, leaf_offset);
     }
     return INVALID_LEAF_ID;
   }

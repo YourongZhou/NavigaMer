@@ -834,6 +834,51 @@ void assert_compact_node_layout_is_exact() {
          navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
 }
 
+void assert_implicit_leaf_link_begins_are_exact() {
+  constexpr uint32_t kLeafCount = 10;
+  constexpr uint32_t kPackedBits = 3;
+  const auto layout = navigamer::PackedWorldNodeLayout::compact(
+      0, 0, 8, true, true, kPackedBits, true, true);
+  assert(layout.has_implicit_link_begin());
+  assert(layout.record_bytes == 2);
+
+  navigamer::SearchGraphView view;
+  view.node_records.initialize(kLeafCount, layout, layout, 0);
+  view.layer_begin = {0};
+  view.layer_end = {kLeafCount};
+  view.initialize_center_sequence_ids({0}, 1000);
+  view.initialize_leaf_link_begin_blocks(kLeafCount);
+  view.implicit_leaf_mbb_offsets = true;
+
+  uint32_t expected_begin = 0;
+  for (uint32_t node_id = 0; node_id < kLeafCount; ++node_id) {
+    const uint32_t link_count = node_id % 5 + 1;
+    view.set_center_sequence_id(node_id, 0, 1000);
+    if (node_id % 8 == 0) {
+      view.set_leaf_link_begin(node_id, expected_begin);
+    }
+    auto node = view.node_records[node_id];
+    node.set_packed_leaf_layout(0, kPackedBits);
+    node.set_link_storage(
+        navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    node.set_inline_counts(
+        link_count, 1,
+        navigamer::WorldNodeRecord::BeaconStorage::ImplicitCenter);
+    node.set_leaf_mbb_layout(0, kPackedBits);
+
+    assert(view.leaf_link_begin(node_id, node) == expected_begin);
+    assert(view.leaf_mbb_begin(node_id, node) == expected_begin);
+    expected_begin += (link_count * kPackedBits + 7) / 8;
+  }
+  view.leaf_id_deltas8.assign(expected_begin, 0);
+  view.leaf_beacon_dists.assign(expected_begin, 0);
+  assert(view.leaf_link_begins_valid());
+  for (uint32_t node_id = 0; node_id < kLeafCount; ++node_id) {
+    assert(view.leaf_id(node_id, 0) == 1000);
+    assert(view.leaf_mbb_range_valid(node_id));
+  }
+}
+
 void assert_child_and_leaf_node_layouts_are_independent() {
   const auto child_layout = navigamer::PackedWorldNodeLayout::compact(
       1094080, 3657858, 1501);
@@ -909,6 +954,7 @@ int main() {
   assert_all_packed_child_widths_are_exact();
   assert_leaf_id_encodings_are_exact();
   assert_compact_node_layout_is_exact();
+  assert_implicit_leaf_link_begins_are_exact();
   assert_child_and_leaf_node_layouts_are_independent();
   assert_all_beacon_begin_widths_are_exact();
   std::cout << "search graph view tests passed\n";

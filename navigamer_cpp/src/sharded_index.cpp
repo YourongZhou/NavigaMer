@@ -932,7 +932,7 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
     throw std::runtime_error(
         "sharded index has invalid window configuration");
   }
-  if (manifest.part_manifest.format_version != 49 ||
+  if (manifest.part_manifest.format_version != 50 ||
       manifest.part_manifest.signature.empty() ||
       manifest.part_manifest.sequence_count != 0 ||
       manifest.part_manifest.world_node_count != 0 ||
