@@ -3638,6 +3638,8 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
       std::vector<uint8_t> beacon_pair_distances;
       std::array<PreparedEdlibDnaPattern, kMaxBuildBeaconsPerNode>
           prepared_beacons;
+      std::array<PreparedMyersPattern, kMaxBuildBeaconsPerNode>
+          prepared_myers_beacons;
 
 #pragma omp single
       actual_threads = omp_get_num_threads();
@@ -3709,30 +3711,62 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
           }
           if (range_config_.distance_mode == BuildDistanceMode::Edlib) {
             for (size_t dim = 0; dim < beacon_count; ++dim) {
-              prepared_beacons[dim] = prepare_edlib_dna_pattern(
+              const std::string_view beacon =
                   search_graph_view_.sequences.sequence(
-                      geometry.beacon_ids[dim]));
+                      geometry.beacon_ids[dim]);
+              prepared_beacons[dim] = prepare_edlib_dna_pattern(beacon);
+              if (search_graph_view_.sequences.reference_backed &&
+                  child_count >= 4 && beacon.size() <= 255 &&
+                  myers_batch4_avx2_runtime_supported()) {
+                prepared_myers_beacons[dim] =
+                    prepare_myers_pattern(beacon);
+              }
             }
           }
           raw_distances.assign(mbb_cell_count, 0);
-          for (size_t child_idx = 0; child_idx < child_count; ++child_idx) {
-            const auto& child =
-                build_nodes_[node.child_or_leaf_ids[child_idx]];
-            const auto& child_sequence =
-                search_graph_view_.sequences.sequence(
+          for (size_t dim = 0; dim < beacon_count; ++dim) {
+            const LeafId beacon_id = geometry.beacon_ids[dim];
+            const std::string_view beacon =
+                search_graph_view_.sequences.sequence(beacon_id);
+            const size_t dim_offset = dim * child_count;
+            size_t child_idx = 0;
+            const bool use_batch4 =
+                range_config_.distance_mode == BuildDistanceMode::Edlib &&
+                prepared_myers_beacons[dim].supported;
+            for (; use_batch4 && child_idx + 4 <= child_count;
+                 child_idx += 4) {
+              std::array<std::string_view, 4> child_batch;
+              for (size_t lane = 0; lane < child_batch.size(); ++lane) {
+                const auto& child = build_nodes_[
+                    node.child_or_leaf_ids[child_idx + lane]];
+                child_batch[lane] = search_graph_view_.sequences.sequence(
                     child.center_sequence_id);
-            for (size_t dim = 0; dim < beacon_count; ++dim) {
-              const LeafId beacon_id = geometry.beacon_ids[dim];
-              const auto& beacon =
-                  search_graph_view_.sequences.sequence(beacon_id);
-              int dist = range_config_.distance_mode == BuildDistanceMode::Edlib
-                             ? compute_distance_edlib_prepared(
-                                   prepared_beacons[dim], child_sequence)
-                             : build_distance(
-                                   child_sequence, beacon,
-                                   range_config_.distance_mode);
-              const size_t flat = dim * child_count + child_idx;
-              raw_distances[flat] = static_cast<uint8_t>(dist);
+              }
+              std::array<int, 4> distances{};
+              if (!compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+                      prepared_myers_beacons[dim], child_batch,
+                      static_cast<int>(beacon.size()), distances)) {
+                break;
+              }
+              for (size_t lane = 0; lane < distances.size(); ++lane) {
+                raw_distances[dim_offset + child_idx + lane] =
+                    static_cast<uint8_t>(distances[lane]);
+              }
+            }
+            for (; child_idx < child_count; ++child_idx) {
+              const auto& child =
+                  build_nodes_[node.child_or_leaf_ids[child_idx]];
+              const std::string_view child_sequence =
+                  search_graph_view_.sequences.sequence(
+                      child.center_sequence_id);
+              const int dist =
+                  range_config_.distance_mode == BuildDistanceMode::Edlib
+                      ? compute_distance_edlib_prepared(
+                            prepared_beacons[dim], child_sequence)
+                      : build_distance(child_sequence, beacon,
+                                       range_config_.distance_mode);
+              raw_distances[dim_offset + child_idx] =
+                  static_cast<uint8_t>(dist);
             }
           }
           const uint32_t bin_width =
