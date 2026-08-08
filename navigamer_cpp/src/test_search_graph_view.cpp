@@ -51,6 +51,7 @@ void assert_view_equivalent_to_original() {
     assert(view.sequences.records[sequence_id].sequence_id == sequence_id);
   }
   assert(view.child_base_ids_valid(view.layer_begin.back()));
+  assert(view.implicit_contiguous_child_ranges);
   for (size_t layer = 0; layer < view.layer_begin.size(); ++layer) {
     assert(view.layer_begin[layer] <= view.layer_end[layer]);
     for (uint32_t node_id = view.layer_begin[layer];
@@ -76,20 +77,21 @@ void assert_view_equivalent_to_original() {
         assert(view.child_mbb_bin_width(node_id) ==
                expected_bin_width);
         if (view.child_ids_are_base_delta8(node_id)) {
-          assert(record.child_begin() + view.child_base_byte_count() +
+          assert(view.child_begin(node_id, record) +
+                     view.child_base_byte_count() +
                      link_count <=
                  view.child_id_base_deltas8.size());
         } else if (view.child_ids_are_packed_delta(node_id)) {
-          assert(record.child_begin() <=
+          assert(view.child_begin(node_id, record) <=
                  view.child_id_base_deltas8.size());
           assert(view.packed_child_byte_count(node_id) <=
                  view.child_id_base_deltas8.size() -
-                     record.child_begin());
+                     view.child_begin(node_id, record));
         } else if (view.child_ids_are_delta16(node_id)) {
-          assert(record.child_begin() + link_count <=
+          assert(view.child_begin(node_id, record) + link_count <=
                  view.child_id_deltas16.size());
         } else {
-          assert(record.child_begin() + link_count <=
+          assert(view.child_begin(node_id, record) + link_count <=
                  view.child_ids.size());
         }
         assert(beacon_count <= link_count);

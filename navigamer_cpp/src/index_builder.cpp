@@ -2073,6 +2073,14 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
     }
     const uint32_t link_count = view.link_count(node);
     if (node_id < finest_begin) {
+      if (view.implicit_contiguous_child_ranges &&
+          (node.link_storage() !=
+               WorldNodeRecord::LinkStorage::PackedDelta ||
+           node.packed_child_bits() !=
+               SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS)) {
+        return false;
+      }
+      const size_t child_begin = view.child_begin(node_id, node);
       if (node.link_storage() !=
               WorldNodeRecord::LinkStorage::Absolute32 &&
           node.link_storage() !=
@@ -2087,30 +2095,30 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
       switch (node.link_storage()) {
         case WorldNodeRecord::LinkStorage::Delta8:
           child_range_valid =
-              static_cast<size_t>(node.child_begin()) +
+              child_begin +
                       view.child_base_byte_count() <=
                   view.child_id_base_deltas8.size() &&
               link_count <= view.child_id_base_deltas8.size() -
-                                node.child_begin() -
+                                child_begin -
                                 view.child_base_byte_count();
           break;
         case WorldNodeRecord::LinkStorage::PackedDelta:
           child_range_valid =
               node.packed_child_bits() <= 16 &&
-              node.child_begin() <=
+              child_begin <=
                   view.child_id_base_deltas8.size() &&
               view.packed_child_byte_count(node, link_count) <=
                   view.child_id_base_deltas8.size() -
-                      node.child_begin();
+                      child_begin;
           break;
         case WorldNodeRecord::LinkStorage::Delta16:
           child_range_valid =
-              static_cast<size_t>(node.child_begin()) + link_count <=
+              child_begin + link_count <=
               view.child_id_deltas16.size();
           break;
         case WorldNodeRecord::LinkStorage::Absolute32:
           child_range_valid =
-              static_cast<size_t>(node.child_begin()) + link_count <=
+              child_begin + link_count <=
               view.child_ids.size();
           break;
       }
@@ -2243,7 +2251,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
                 WorldNodeRecord::BeaconStorage::ImplicitCenter) {
           return false;
         }
-        const size_t child_begin = node.child_begin();
+        const size_t child_begin = view.child_begin(node_id, node);
         if ((node.link_storage() ==
                  WorldNodeRecord::LinkStorage::Delta8 &&
              (child_begin + view.child_base_byte_count() >
@@ -2280,6 +2288,18 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
     expected_layer_begin = view.layer_end[layer];
   }
   if (expected_layer_begin != world_node_count_) return false;
+
+  if (view.implicit_contiguous_child_ranges) {
+    const size_t base_bytes = view.child_base_byte_count();
+    const size_t non_finest_node_count = view.layer_begin.back();
+    if (base_bytes == 0 ||
+        non_finest_node_count >
+            view.child_id_base_deltas8.size() / base_bytes ||
+        non_finest_node_count * base_bytes !=
+            view.child_id_base_deltas8.size()) {
+      return false;
+    }
+  }
 
   size_t expected_child_base_delta8_begin = 0;
   size_t expected_child_delta16_begin = 0;
@@ -2347,6 +2367,13 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
           view.leaf_mbb_byte_count(
               node_id, node, link_count, beacon_count);
     } else {
+      if (view.implicit_contiguous_child_ranges &&
+          (node.link_storage() !=
+               WorldNodeRecord::LinkStorage::PackedDelta ||
+           node.packed_child_bits() !=
+               SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS)) {
+        return false;
+      }
       if ((node.link_storage() !=
                WorldNodeRecord::LinkStorage::Absolute32 &&
            node.link_storage() !=
@@ -2376,7 +2403,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
           break;
       }
       if (!expected_child_begin ||
-          node.child_begin() != *expected_child_begin) {
+          view.child_begin(node_id, node) != *expected_child_begin) {
         return false;
       }
       if (node.link_storage() ==
@@ -4560,8 +4587,28 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         }
         return LeafStorageChoice{storage, 0};
       };
+  bool implicit_contiguous_child_ranges =
+      !primary_layers_.empty() &&
+      primary_layers_.back().size() < world_node_count_ &&
+      child_base_bytes != 0;
+  if (implicit_contiguous_child_ranges) {
+    for (size_t layer_idx = 0;
+         layer_idx + 1 < primary_layers_.size(); ++layer_idx) {
+      for (NodeId node_id : primary_layers_[layer_idx]) {
+        const auto choice = child_storage_for(node_id);
+        if (choice.storage != WorldNodeRecord::LinkStorage::PackedDelta ||
+            choice.packed_bits !=
+                SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS) {
+          implicit_contiguous_child_ranges = false;
+          break;
+        }
+      }
+      if (!implicit_contiguous_child_ranges) break;
+    }
+  }
   SearchGraphView view;
   view.beacon_delta_bits = packed_beacon_delta_bits;
+  view.implicit_contiguous_child_ranges = implicit_contiguous_child_ranges;
   view.sequences = std::move(search_graph_view_.sequences);
   std::vector<uint64_t> node_finalization_plans(world_node_count_, 0);
   view.layer_begin.assign(static_cast<size_t>(num_primary_layers()), 0);
@@ -4811,6 +4858,9 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     throw std::length_error(
         "packed leaf MBB storage exceeds 29-bit shard range");
   }
+  if (view.implicit_contiguous_child_ranges) {
+    maximum_child_link_begin = 0;
+  }
   const PackedWorldNodeLayout child_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_child_link_begin, maximum_child_mbb_begin,
@@ -4884,7 +4934,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
               "child_id_base_deltas8");
           if (link_storage == WorldNodeRecord::LinkStorage::PackedDelta) {
             record.set_packed_child_layout(
-                byte_begin, child_packed_bits);
+                view.implicit_contiguous_child_ranges ? 0 : byte_begin,
+                child_packed_bits);
           } else {
             record.set_link_begin_value(byte_begin);
           }
@@ -4957,7 +5008,8 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             const uint32_t shift =
                 static_cast<uint32_t>(bit_offset & 7);
             const size_t payload_begin =
-                record.child_begin() + view.child_base_byte_count();
+                view.child_begin(node_id, record) +
+                view.child_base_byte_count();
             view.child_id_base_deltas8[payload_begin + byte_offset] |=
                 static_cast<uint8_t>(delta << shift);
             if (shift + bits > 8) {

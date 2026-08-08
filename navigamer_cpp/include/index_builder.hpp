@@ -1323,6 +1323,11 @@ struct SearchGraphView {
   // Keeping the base adjacent to its payload preserves query locality while
   // avoiding the former 32-bit base in almost every parent segment.
   uint8_t child_base_forward_delta_bytes = 0;
+  // When every non-finest node in a shard has one exact consecutive child
+  // range, their base prefixes are a fixed-width dense array.  The prefix for
+  // node i is then at i * child_base_byte_count(), so node records need not
+  // retain a child-payload offset.  Other shards retain the per-node offset.
+  bool implicit_contiguous_child_ranges = false;
   FinalArray<uint8_t> child_id_base_deltas8;
   FinalArray<uint16_t> child_id_deltas16;
   FinalArray<NodeId> child_ids;
@@ -1733,6 +1738,20 @@ struct SearchGraphView {
     return child_base_forward_delta_bytes;
   }
 
+  uint32_t child_begin(
+      NodeId node_id, const PackedWorldNodeRecordRef& node) const {
+    if (!implicit_contiguous_child_ranges) return node.child_begin();
+    const uint64_t begin =
+        static_cast<uint64_t>(node_id) * child_base_byte_count();
+    if (begin > std::numeric_limits<uint32_t>::max()) {
+      throw std::out_of_range("implicit child payload offset exceeds uint32");
+    }
+    return static_cast<uint32_t>(begin);
+  }
+  uint32_t child_begin(NodeId node_id) const {
+    return child_begin(node_id, node_records[node_id]);
+  }
+
   void append_child_base_id(NodeId node_id, NodeId base) {
     const uint32_t bits = child_base_forward_delta_bytes * 8;
     if (bits == 0 || base <= node_id) {
@@ -1874,7 +1893,7 @@ struct SearchGraphView {
     switch (node.link_storage()) {
       case WorldNodeRecord::LinkStorage::Delta8: {
         const uint8_t* segment =
-            child_id_base_deltas8.data() + node.child_begin();
+            child_id_base_deltas8.data() + child_begin(node_id, node);
         const size_t base_bytes = child_base_byte_count();
         return {child_base_id(node_id, segment, base_bytes), nullptr,
                 segment + base_bytes, nullptr,
@@ -1882,11 +1901,11 @@ struct SearchGraphView {
       }
       case WorldNodeRecord::LinkStorage::Delta16:
         return {static_cast<NodeId>(node_id + 1),
-                child_id_deltas16.data() + node.child_begin(),
+                child_id_deltas16.data() + child_begin(node_id, node),
                 nullptr, nullptr, nullptr, 0};
       case WorldNodeRecord::LinkStorage::PackedDelta: {
         const uint8_t* segment =
-            child_id_base_deltas8.data() + node.child_begin();
+            child_id_base_deltas8.data() + child_begin(node_id, node);
         const size_t base_bytes = child_base_byte_count();
         const NodeId base = child_base_id(node_id, segment, base_bytes);
         if (node.packed_child_bits() == CONTIGUOUS_CHILD_RANGE_BITS &&
@@ -1899,7 +1918,7 @@ struct SearchGraphView {
       }
       case WorldNodeRecord::LinkStorage::Absolute32:
         return {0, nullptr, nullptr, nullptr,
-                child_ids.data() + node.child_begin(), 0};
+                child_ids.data() + child_begin(node_id, node), 0};
     }
     throw std::runtime_error("invalid child ID storage");
   }
