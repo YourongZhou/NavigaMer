@@ -656,18 +656,24 @@ struct Phase1BaseCountSignature {
 static_assert(sizeof(Phase1BaseCountSignature) == 4,
               "compact base-count signature must remain 4 bytes");
 
+bool phase1_base_shift(char base, uint32_t* shift) {
+  if (!shift) return false;
+  switch (base) {
+    case 'A': *shift = 0; return true;
+    case 'C': *shift = 8; return true;
+    case 'G': *shift = 16; return true;
+    case 'T': *shift = 24; return true;
+    default: return false;
+  }
+}
+
 Phase1BaseCountSignature phase1_base_count_signature(
     std::string_view sequence) {
   uint32_t packed = 0;
   for (char base : sequence) {
     uint32_t shift = 0;
-    switch (base) {
-      case 'A': break;
-      case 'C': shift = 8; break;
-      case 'G': shift = 16; break;
-      case 'T': shift = 24; break;
-      default:
-        return {std::numeric_limits<uint32_t>::max()};
+    if (!phase1_base_shift(base, &shift)) {
+      return {std::numeric_limits<uint32_t>::max()};
     }
     if (((packed >> shift) & 0xff) ==
         std::numeric_limits<uint8_t>::max()) {
@@ -679,6 +685,80 @@ Phase1BaseCountSignature phase1_base_count_signature(
   // sequence is longer than the compact reference-window path, so disabling
   // this lower bound remains lossless.
   return {packed};
+}
+
+class ReferenceWindowBaseCounts {
+ public:
+  explicit ReferenceWindowBaseCounts(std::string_view sequence)
+      : signature_(phase1_base_count_signature(sequence)) {}
+
+  Phase1BaseCountSignature signature() const { return signature_; }
+
+  void advance(std::string_view reference, size_t begin, size_t length,
+               size_t step) {
+    if (step == 0 || begin > reference.size() ||
+        length > reference.size() - begin ||
+        step > reference.size() - begin - length) {
+      throw std::out_of_range("reference base-count advance is out of bounds");
+    }
+    if (!signature_.safe()) return;
+    for (size_t offset = 0; offset < step; ++offset) {
+      uint32_t outgoing_shift = 0;
+      uint32_t incoming_shift = 0;
+      if (!phase1_base_shift(reference[begin + offset], &outgoing_shift) ||
+          !phase1_base_shift(reference[begin + length + offset],
+                             &incoming_shift)) {
+        signature_.packed_counts = std::numeric_limits<uint32_t>::max();
+        return;
+      }
+      signature_.packed_counts -= uint32_t{1} << outgoing_shift;
+      signature_.packed_counts += uint32_t{1} << incoming_shift;
+    }
+  }
+
+ private:
+  Phase1BaseCountSignature signature_;
+};
+
+std::vector<Phase1BaseCountSignature> phase1_base_count_signatures(
+    const SequenceStore& sequences) {
+  std::vector<Phase1BaseCountSignature> signatures(sequences.size());
+  if (!sequences.reference_backed) {
+    for (size_t sequence_id = 0; sequence_id < sequences.size();
+         ++sequence_id) {
+      signatures[sequence_id] = phase1_base_count_signature(
+          sequences.sequence(static_cast<LeafId>(sequence_id)));
+    }
+    return signatures;
+  }
+
+  const std::string_view reference = sequences.reference_view();
+  const size_t length = sequences.fixed_sequence_length;
+  size_t previous_position = 0;
+  const ReferenceContig* previous_contig = nullptr;
+  ReferenceWindowBaseCounts rolling_counts("");
+  for (size_t sequence_id = 0; sequence_id < sequences.size();
+       ++sequence_id) {
+    const size_t position =
+        sequences.source_position(static_cast<LeafId>(sequence_id));
+    const ReferenceContig& contig = sequences.contig_for_position(position);
+    if (length > static_cast<size_t>(contig.end) - position) {
+      throw std::runtime_error(
+          "reference-backed sequence extends past its contig");
+    }
+    if (previous_contig == &contig && position >= previous_position &&
+        position - previous_position < length) {
+      rolling_counts.advance(reference, previous_position, length,
+                             position - previous_position);
+    } else {
+      rolling_counts = ReferenceWindowBaseCounts(
+          reference.substr(position, length));
+    }
+    signatures[sequence_id] = rolling_counts.signature();
+    previous_position = position;
+    previous_contig = &contig;
+  }
+  return signatures;
 }
 
 int phase1_base_count_lower_bound(
@@ -3085,13 +3165,8 @@ void BioGeometryIndexBuilder::phase1_build_extended_sketch(
   };
   std::vector<CoverHint> hints(
       static_cast<size_t>(hierarchy_.num_expanded_layers()));
-  std::vector<Phase1BaseCountSignature> sequence_signatures(
-      search_graph_view_.sequences.size());
-  for (size_t sequence_id = 0;
-       sequence_id < search_graph_view_.sequences.size(); ++sequence_id) {
-    sequence_signatures[sequence_id] = phase1_base_count_signature(
-        search_graph_view_.sequences.sequence(sequence_id));
-  }
+  const std::vector<Phase1BaseCountSignature> sequence_signatures =
+      phase1_base_count_signatures(search_graph_view_.sequences);
   const auto phase1_start = Clock::now();
   Phase1DistanceCache distance_cache(search_graph_view_.sequences.size());
 
@@ -4184,19 +4259,15 @@ void BioGeometryIndexBuilder::attach_leaves(
       leaf_range_join_config.candidate_mode =
           RangeCandidateMode::PigeonholeOnly;
     }
-    std::vector<Phase1BaseCountSignature> leaf_base_counts(
-        sequences.size());
-    for (size_t seq_idx = 0; seq_idx < sequences.size(); ++seq_idx) {
-      leaf_base_counts[seq_idx] = phase1_base_count_signature(
-          sequences.sequence(static_cast<LeafId>(seq_idx)));
-    }
+    const std::vector<Phase1BaseCountSignature> leaf_base_counts =
+        phase1_base_count_signatures(sequences);
     std::vector<Phase1BaseCountSignature> world_base_counts(
         finest_layer.size());
     for (size_t world_idx = 0; world_idx < finest_layer.size();
          ++world_idx) {
       const auto& world = build_nodes_[finest_layer[world_idx]];
-      world_base_counts[world_idx] = phase1_base_count_signature(
-          search_graph_view_.sequences.sequence(world.center_sequence_id));
+      world_base_counts[world_idx] =
+          leaf_base_counts[world.center_sequence_id];
     }
     std::vector<Phase4QGramSignature> leaf_qgram_signatures;
     std::vector<Phase4QGramSignature> world_qgram_signatures;
