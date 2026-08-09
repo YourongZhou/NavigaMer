@@ -422,7 +422,12 @@ class ReferenceSequenceTable {
       id_mask_ = (uint32_t{1} << id_bits_) - 1;
       compact_slots_.reset(new uint32_t[capacity_]());
     } else {
-      wide_slots_.reset(new uint64_t[capacity_]());
+      // A 32-bit sequence ID plus an 8-bit hash fingerprint is enough here:
+      // exact comparison against the shared reference resolves fingerprints
+      // collisions.  Keeping those two fields in separate dense arrays uses
+      // five bytes per human-scale slot instead of an aligned 64-bit word.
+      wide_ids_.reset(new uint32_t[capacity_]());
+      wide_fingerprints_.reset(new uint8_t[capacity_]());
     }
   }
 
@@ -441,11 +446,11 @@ class ReferenceSequenceTable {
         fingerprint_matches =
             (packed >> id_bits_) == (hash >> id_bits_);
       } else {
-        const uint64_t packed = wide_slots_[slot];
-        if (packed == 0) return {INVALID_LEAF_ID, slot};
-        id = static_cast<LeafId>(static_cast<uint32_t>(packed) - 1);
-        fingerprint_matches =
-            static_cast<uint32_t>(packed >> 32) == hash;
+        const uint32_t encoded_id = wide_ids_[slot];
+        if (encoded_id == 0) return {INVALID_LEAF_ID, slot};
+        id = static_cast<LeafId>(encoded_id - 1);
+        fingerprint_matches = wide_fingerprints_[slot] ==
+            static_cast<uint8_t>(hash >> 24);
       }
       if (fingerprint_matches) {
         const size_t source_pos = position_of(id);
@@ -463,7 +468,7 @@ class ReferenceSequenceTable {
   void insert(const Lookup& lookup, uint32_t hash, LeafId id) {
     if (lookup.id != INVALID_LEAF_ID ||
         (compact_slots_ ? compact_slots_[lookup.slot] != 0
-                        : wide_slots_[lookup.slot] != 0) ||
+                        : wide_ids_[lookup.slot] != 0) ||
         size_ >= capacity_) {
       throw std::runtime_error("invalid reference sequence table insertion");
     }
@@ -476,9 +481,9 @@ class ReferenceSequenceTable {
       compact_slots_[lookup.slot] =
           ((hash >> id_bits_) << id_bits_) | encoded_id;
     } else {
-      wide_slots_[lookup.slot] =
-          (static_cast<uint64_t>(hash) << 32) |
-          (static_cast<uint64_t>(id) + 1);
+      wide_ids_[lookup.slot] = id + 1;
+      wide_fingerprints_[lookup.slot] =
+          static_cast<uint8_t>(hash >> 24);
     }
     ++size_;
   }
@@ -514,7 +519,8 @@ class ReferenceSequenceTable {
   uint8_t id_bits_ = 0;
   uint32_t id_mask_ = 0;
   std::unique_ptr<uint32_t[]> compact_slots_;
-  std::unique_ptr<uint64_t[]> wide_slots_;
+  std::unique_ptr<uint32_t[]> wide_ids_;
+  std::unique_ptr<uint8_t[]> wide_fingerprints_;
 };
 
 struct Phase1CoverScanResult {
