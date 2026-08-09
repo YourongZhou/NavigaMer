@@ -164,7 +164,10 @@ logical graph payloads, each capped by `--shard-windows`, and packs up to 1,024
 payloads into one `.navpack` container. Reference slices overlap only
 where needed to materialize boundary windows; every window start belongs to
 exactly one part and output coordinates remain relative to the original
-contig. Valid completed packs are reused on restart, damaged packs are rebuilt
+contig. File-backed references use sparse byte-offset checkpoints matched to
+the shard source span (bounded to 4 KiB--1 MiB), so each small shard is decoded
+without repeatedly rescanning up to a full MiB of FASTA text. Valid completed
+packs are reused on restart, damaged packs are rebuilt
 as one atomic group, and payloads are written directly into that group's
 temporary pack without per-shard temporary files. The automatic policy keeps one part
 below 8 OpenMP threads, builds two parts at 8--15 threads, and for the default

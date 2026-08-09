@@ -841,7 +841,17 @@ void run_build_sharded(
               << " stride=" << stride << "\n";
   };
   if (reference_is_regular_file) {
-    const auto reference = index_reference_genome_file(ref_input);
+    constexpr size_t kMinCheckpointStride = size_t{4} << 10;
+    constexpr size_t kMaxCheckpointStride = size_t{1} << 20;
+    const size_t stride_size = static_cast<size_t>(stride);
+    const size_t checkpoint_stride =
+        max_shard_windows > kMaxCheckpointStride / stride_size
+            ? kMaxCheckpointStride
+            : std::clamp(
+                  max_shard_windows * stride_size,
+                  kMinCheckpointStride, kMaxCheckpointStride);
+    const auto reference =
+        index_reference_genome_file(ref_input, checkpoint_stride);
     reference_bases = reference.sequence_size;
     if (reference_bases == 0) {
       throw std::runtime_error("build-sharded reference is empty");

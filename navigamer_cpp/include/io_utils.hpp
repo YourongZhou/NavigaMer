@@ -19,11 +19,6 @@ struct LoadedReference {
   std::vector<ReferenceContig> contigs;
 };
 
-struct ReferenceFileCheckpoint {
-  size_t sequence_pos = 0;
-  uint64_t file_pos = 0;
-};
-
 struct QuerySequence {
   std::string id;
   std::string seq;
@@ -53,20 +48,25 @@ struct IndexedReferenceFile {
   std::string id;
   size_t sequence_size = 0;
   std::vector<ReferenceContig> contigs;
-  std::vector<ReferenceFileCheckpoint> checkpoints;
 
   std::string slice(size_t begin, size_t end) const;
 
  private:
+  size_t checkpoint_stride = 0;
+  std::vector<uint32_t> contig_checkpoint_begins;
+  std::vector<uint64_t> checkpoint_file_positions;
   std::shared_ptr<const ReferenceFileMapping> mapping;
 
   friend IndexedReferenceFile index_reference_genome_file(
-      const std::string& path);
+      const std::string& path,
+      size_t checkpoint_stride);
 };
 
 // Load a reference: existing paths are parsed as FASTA, otherwise literal DNA.
 LoadedReference load_reference_genome(const std::string& path_or_string);
-IndexedReferenceFile index_reference_genome_file(const std::string& path);
+IndexedReferenceFile index_reference_genome_file(
+    const std::string& path,
+    size_t checkpoint_stride = size_t{1} << 20);
 std::pair<std::string, std::string> load_reference(const std::string& path_or_string);
 
 // Load reads: existing paths are parsed as FASTQ, otherwise one literal read.

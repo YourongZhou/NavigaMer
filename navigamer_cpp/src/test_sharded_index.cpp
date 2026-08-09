@@ -148,6 +148,8 @@ void test_indexed_reference_file_slices() {
       navigamer::load_reference_genome(fasta.string());
   const auto indexed =
       navigamer::index_reference_genome_file(fasta.string());
+  const auto densely_indexed =
+      navigamer::index_reference_genome_file(fasta.string(), 4096);
   assert(indexed.id == loaded.id);
   assert(indexed.sequence_size == loaded.sequence.size());
   assert(indexed.contigs.size() == loaded.contigs.size());
@@ -166,6 +168,9 @@ void test_indexed_reference_file_slices() {
       {first.size(), first.size() + 8}};
   for (const auto& slice : slices) {
     assert(indexed.slice(slice.first, slice.second) ==
+           loaded.sequence.substr(
+               slice.first, slice.second - slice.first));
+    assert(densely_indexed.slice(slice.first, slice.second) ==
            loaded.sequence.substr(
                slice.first, slice.second - slice.first));
   }

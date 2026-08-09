@@ -289,6 +289,9 @@ For references that exceed one index's 32-bit array limits,
 `build-sharded` assigns each valid window start to exactly one shard. Adjacent
 shards retain only the reference overlap required to materialize their last
 windows, so neither windows nor original contig coordinates are lost.
+File-backed builds choose sparse FASTA byte-offset checkpoints at the shard
+source span, bounded to 4 KiB--1 MiB. This bounds redundant text decoding per
+part without retaining the normalized reference in memory.
 Independent parts build concurrently. The automatic policy uses one part
 below 8 OpenMP threads, two parts at 8--15 threads, and for default small
 (at most 16,384-window) parts up to 16 concurrent builders with at least four

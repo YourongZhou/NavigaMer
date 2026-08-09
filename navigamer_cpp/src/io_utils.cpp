@@ -99,13 +99,18 @@ static bool is_file(const std::string& path) {
 }
 
 IndexedReferenceFile index_reference_genome_file(
-    const std::string& path) {
+    const std::string& path,
+    size_t checkpoint_stride) {
   if (!is_file(path)) {
     throw std::runtime_error("reference file does not exist: " + path);
   }
-  constexpr size_t kCheckpointStride = size_t{1} << 20;
+  if (checkpoint_stride == 0) {
+    throw std::invalid_argument(
+        "reference checkpoint stride must be positive");
+  }
   IndexedReferenceFile reference;
   reference.path = path;
+  reference.checkpoint_stride = checkpoint_stride;
   std::string current_id;
   size_t current_begin = 0;
   size_t next_checkpoint = 0;
@@ -126,6 +131,9 @@ IndexedReferenceFile index_reference_genome_file(
     if (reference.id.empty()) reference.id = current_id;
     current_begin = reference.sequence_size;
     next_checkpoint = current_begin;
+    reference.contig_checkpoint_begins.push_back(
+        static_cast<uint32_t>(
+            reference.checkpoint_file_positions.size()));
   };
 
   const auto process_line = [&](std::string_view line,
@@ -148,6 +156,9 @@ IndexedReferenceFile index_reference_genome_file(
       if (reference.id.empty()) reference.id = current_id;
       current_begin = reference.sequence_size;
       next_checkpoint = current_begin;
+      reference.contig_checkpoint_begins.push_back(
+          static_cast<uint32_t>(
+              reference.checkpoint_file_positions.size()));
       return;
     }
     if (current_id.empty()) begin_implicit_contig();
@@ -157,13 +168,13 @@ IndexedReferenceFile index_reference_genome_file(
           static_cast<unsigned char>(line[char_idx]);
       if (byte_table.whitespace[base]) continue;
       if (reference.sequence_size >= next_checkpoint) {
-        reference.checkpoints.push_back(
-            {reference.sequence_size, line_offset + char_idx});
+        reference.checkpoint_file_positions.push_back(
+            line_offset + char_idx);
         if (reference.sequence_size >
-            std::numeric_limits<size_t>::max() - kCheckpointStride) {
+            std::numeric_limits<size_t>::max() - checkpoint_stride) {
           throw std::runtime_error("reference checkpoint overflow");
         }
-        next_checkpoint = reference.sequence_size + kCheckpointStride;
+        next_checkpoint = reference.sequence_size + checkpoint_stride;
       }
       ++reference.sequence_size;
     }
@@ -236,6 +247,11 @@ IndexedReferenceFile index_reference_genome_file(
     }
   }
   finish_contig();
+  if (reference.contig_checkpoint_begins.size() !=
+      reference.contigs.size()) {
+    throw std::runtime_error(
+        "reference contig checkpoint index is inconsistent");
+  }
   if (reference.id.empty()) reference.id = "ref";
   return reference;
 }
@@ -259,22 +275,27 @@ std::string IndexedReferenceFile::slice(size_t begin, size_t end) const {
         "reference file slice crosses a contig boundary");
   }
 
-  const auto checkpoint_it = std::upper_bound(
-      checkpoints.begin(), checkpoints.end(), begin,
-      [](size_t position, const ReferenceFileCheckpoint& checkpoint) {
-        return position < checkpoint.sequence_pos;
-      });
-  if (checkpoint_it == checkpoints.begin()) {
+  const size_t contig_idx = static_cast<size_t>(
+      std::prev(contig_it) - contigs.begin());
+  const size_t checkpoint_offset =
+      (begin - contig.begin) / checkpoint_stride;
+  const size_t checkpoint_idx =
+      static_cast<size_t>(contig_checkpoint_begins.at(contig_idx)) +
+      checkpoint_offset;
+  if (checkpoint_idx >= checkpoint_file_positions.size()) {
     throw std::runtime_error("reference file slice has no checkpoint");
   }
-  const auto& checkpoint = *std::prev(checkpoint_it);
-  if (checkpoint.sequence_pos < contig.begin ||
-      checkpoint.sequence_pos > begin) {
+  const size_t checkpoint_sequence_pos =
+      static_cast<size_t>(contig.begin) +
+      checkpoint_offset * checkpoint_stride;
+  if (checkpoint_sequence_pos > begin) {
     throw std::runtime_error("reference file slice checkpoint is invalid");
   }
+  const uint64_t checkpoint_file_pos =
+      checkpoint_file_positions[checkpoint_idx];
 
   std::string result(end - begin, '\0');
-  size_t sequence_pos = checkpoint.sequence_pos;
+  size_t sequence_pos = checkpoint_sequence_pos;
   bool at_line_start = false;
   const auto& byte_table = reference_byte_table();
   const auto consume_byte = [&](unsigned char byte) {
@@ -295,19 +316,19 @@ std::string IndexedReferenceFile::slice(size_t begin, size_t end) const {
   };
 
   if (mapping) {
-    size_t raw_pos = static_cast<size_t>(checkpoint.file_pos);
+    size_t raw_pos = static_cast<size_t>(checkpoint_file_pos);
     while (sequence_pos < end && raw_pos < mapping->size()) {
       consume_byte(
           static_cast<unsigned char>(mapping->data()[raw_pos++]));
     }
     mapping->discard(
-        static_cast<size_t>(checkpoint.file_pos), raw_pos);
+        static_cast<size_t>(checkpoint_file_pos), raw_pos);
   } else {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
       throw std::runtime_error("unable to reopen reference file: " + path);
     }
-    in.seekg(static_cast<std::streamoff>(checkpoint.file_pos));
+    in.seekg(static_cast<std::streamoff>(checkpoint_file_pos));
     if (!in) {
       throw std::runtime_error("unable to seek reference file: " + path);
     }
