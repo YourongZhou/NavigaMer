@@ -412,17 +412,16 @@ std::pair<std::string, std::string> load_reference(
   return {std::move(reference.id), std::move(reference.sequence)};
 }
 
-std::vector<std::shared_ptr<BioSequence>> load_reads(
-    const std::string& path_or_string,
-    const std::string& /*ref_id*/) {
+template <typename EmitRead>
+void load_read_records(const std::string& path_or_string,
+                       EmitRead&& emit_read) {
   if (!is_file(path_or_string)) {
     std::string s = path_or_string;
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(0, 1);
-    auto seq = std::make_shared<BioSequence>("query_0", s);
-    return {seq};
+    emit_read("query_0", std::move(s), false, size_t{0});
+    return;
   }
-  std::vector<std::shared_ptr<BioSequence>> reads;
   std::ifstream f(path_or_string);
   std::string line;
   while (std::getline(f, line)) {
@@ -439,11 +438,40 @@ std::vector<std::shared_ptr<BioSequence>> load_reads(
     std::getline(f, line);  // +
     std::getline(f, line);   // qual
     if (!sequence.empty()) {
-      auto read = std::make_shared<BioSequence>(seq_id, sequence);
-      read->has_source_pos = parse_source_pos(header_body, &read->source_pos);
-      reads.push_back(read);
+      size_t source_pos = 0;
+      const bool has_source_pos =
+          parse_source_pos(header_body, &source_pos);
+      emit_read(std::move(seq_id), std::move(sequence),
+                has_source_pos, source_pos);
     }
   }
+}
+
+std::vector<std::shared_ptr<BioSequence>> load_reads(
+    const std::string& path_or_string,
+    const std::string& /*ref_id*/) {
+  std::vector<std::shared_ptr<BioSequence>> reads;
+  load_read_records(
+      path_or_string,
+      [&](std::string id, std::string sequence,
+          bool has_source_pos, size_t source_pos) {
+        auto read = std::make_shared<BioSequence>(
+            std::move(id), std::move(sequence));
+        read->has_source_pos = has_source_pos;
+        read->source_pos = source_pos;
+        reads.push_back(std::move(read));
+      });
+  return reads;
+}
+
+std::vector<QuerySequence> load_query_sequences(
+    const std::string& path_or_string) {
+  std::vector<QuerySequence> reads;
+  load_read_records(
+      path_or_string,
+      [&](std::string id, std::string sequence, bool, size_t) {
+        reads.push_back({std::move(id), std::move(sequence)});
+      });
   return reads;
 }
 

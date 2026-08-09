@@ -1669,7 +1669,7 @@ void run_query_index_batch(const std::string& index_path,
                 << " (searching all shards)\n";
     }
 
-    auto queries = load_reads(query_input, "ref");
+    auto queries = load_query_sequences(query_input);
     if (queries.empty()) {
       std::cerr << "No query reads loaded.\n";
       return;
@@ -1692,7 +1692,7 @@ void run_query_index_batch(const std::string& index_path,
       const auto route_start =
           std::chrono::high_resolution_clock::now();
       const bool routed = shard_router.append_selected_shards(
-          query->seq, tolerance, &query_route_shard_ids);
+          query.seq, tolerance, &query_route_shard_ids);
       const auto route_end =
           std::chrono::high_resolution_clock::now();
       query_route_ms.push_back(static_cast<float>(
@@ -1863,7 +1863,7 @@ void run_query_index_batch(const std::string& index_path,
         try {
           shard_results[active_idx] =
               engines[shard_idx]->search_adaptive(
-                  *read, tolerance);
+                  std::string_view(read.seq), tolerance);
         } catch (...) {
           shard_errors[active_idx] = std::current_exception();
         }
@@ -1984,9 +1984,9 @@ void run_query_index_batch(const std::string& index_path,
 
       for (const auto& materialized_hit : combined_hits) {
         const int ed =
-            compute_distance(read->seq, materialized_hit.seq);
+            compute_distance(read.seq, materialized_hit.seq);
         const auto rows = search_results_to_tsv_rows(
-            read->id, read->seq, 0, materialized_hit, ed);
+            read.id, read.seq, 0, materialized_hit, ed);
         for (const auto& result : rows) {
           std::vector<std::string> row = {
               result.query_id, result.hit_id,
@@ -2011,10 +2011,10 @@ void run_query_index_batch(const std::string& index_path,
       }
       if (combined_hits.empty()) {
         std::vector<std::string> row = {
-            read->id, "", "", "", read->id,
+            read.id, "", "", "", read.id,
             std::to_string(
-                static_cast<int>(read->seq.size())),
-            "", "+", "0", "0", "0", "0", "", read->seq,
+                static_cast<int>(read.seq.size())),
+            "", "+", "0", "0", "0", "0", "", read.seq,
             "", "-1", "-1",
             std::to_string(combined.dist_calc_count),
             std::to_string(combined.leaf_verify_count),
@@ -2056,7 +2056,7 @@ void run_query_index_batch(const std::string& index_path,
             << " sequences=" << loaded.manifest.sequence_count
             << " world_nodes=" << loaded.manifest.world_node_count << "\n";
 
-  auto queries = load_reads(query_input, "ref");
+  auto queries = load_query_sequences(query_input);
   if (queries.empty()) {
     std::cerr << "No query reads loaded.\n";
     return;
@@ -2092,7 +2092,8 @@ void run_query_index_batch(const std::string& index_path,
   for (size_t qi = 0; qi < queries.size(); ++qi) {
     const auto& read = queries[qi];
     auto query_start = std::chrono::high_resolution_clock::now();
-    auto [res, st] = engine.search_adaptive(*read, tolerance);
+    auto [res, st] = engine.search_adaptive(
+        std::string_view(read.seq), tolerance);
     auto query_end = std::chrono::high_resolution_clock::now();
     const double query_time_ms =
         std::chrono::duration<double, std::milli>(query_end - query_start).count();
@@ -2116,9 +2117,9 @@ void run_query_index_batch(const std::string& index_path,
 
     if (res.empty()) {
       std::vector<std::string> row = {
-          read->id, "", "", "", read->id,
-          std::to_string(static_cast<int>(read->seq.size())), "", "+",
-          "0", "0", "0", "0", "", read->seq, "", "-1", "-1",
+          read.id, "", "", "", read.id,
+          std::to_string(static_cast<int>(read.seq.size())), "", "+",
+          "0", "0", "0", "0", "", read.seq, "", "-1", "-1",
           std::to_string(st.dist_calc_count),
           std::to_string(st.leaf_verify_count),
           std::to_string(st.candidate_count_for_prune),
@@ -2129,7 +2130,7 @@ void run_query_index_batch(const std::string& index_path,
       for (LeafId hit_id : res) {
         const std::string_view hit_sequence =
             sequence_store.sequence(hit_id);
-        int ed = compute_distance(read->seq, hit_sequence);
+        int ed = compute_distance(read.seq, hit_sequence);
         BioSequence materialized_hit;
         const BioSequence* output_hit = nullptr;
         if (sequence_store.reference_backed) {
@@ -2158,7 +2159,7 @@ void run_query_index_batch(const std::string& index_path,
           output_hit = &sequence_store.at(hit_id);
         }
         auto rows = search_results_to_tsv_rows(
-            read->id, read->seq, 0, *output_hit, ed);
+            read.id, read.seq, 0, *output_hit, ed);
         for (const auto& r : rows) {
           std::vector<std::string> row = {
               r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
@@ -2200,7 +2201,7 @@ void run_query_index_batch(const std::string& index_path,
                        : stats.leaf_trace,
           has_previous);
       trace_rows.push_back({
-          queries[qi]->id,
+          queries[qi].id,
           std::to_string(qi),
           std::to_string(stats.world_trace.size()),
           std::to_string(stats.leaf_trace.size()),

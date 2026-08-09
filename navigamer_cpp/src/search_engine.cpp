@@ -24,7 +24,7 @@ namespace {
 constexpr size_t kMinRouterHintCandidateCount = 5;
 
 struct ActiveMyersQueryContext {
-  const std::string* query = nullptr;
+  std::string_view query;
   PreparedMyersPattern pattern;
 };
 
@@ -45,19 +45,20 @@ class ScopedActiveMyersQueryContext {
   ActiveMyersQueryContext* previous_ = nullptr;
 };
 
-int compute_query_distance_with_mode(const std::string& lhs,
+int compute_query_distance_with_mode(std::string_view lhs,
                                      std::string_view rhs,
                                      int tau,
                                      DistanceMode mode) {
   const auto* context = g_active_myers_query_context;
   if ((mode == DistanceMode::Myers || mode == DistanceMode::Auto) &&
-      context && context->query == &lhs && context->pattern.supported) {
+      context && context->query.data() == lhs.data() &&
+      context->query.size() == lhs.size() && context->pattern.supported) {
     return compute_distance_bounded_myers_prepared(context->pattern, rhs, tau);
   }
   return compute_distance_bounded_with_mode(lhs, rhs, tau, mode);
 }
 
-int compute_exact_distance_with_mode(const std::string& lhs,
+int compute_exact_distance_with_mode(std::string_view lhs,
                                      std::string_view rhs,
                                      DistanceMode mode) {
   const size_t max_length = std::max(lhs.size(), rhs.size());
@@ -145,7 +146,7 @@ class QueryDistanceCache {
 thread_local QueryDistanceCache g_query_distance_cache;
 
 int compute_indexed_query_distance(
-    const std::string& lhs,
+    std::string_view lhs,
     std::string_view rhs,
     LeafId sequence_id,
     int tau,
@@ -397,7 +398,7 @@ size_t minimizer_overlap_count(const std::vector<uint64_t>& lhs,
 
 struct ActiveRouterHintQueryContext {
   bool enabled = false;
-  const std::string* query_sequence = nullptr;
+  const std::string_view* query_sequence = nullptr;
   int shared_qgram_q = 0;
   const QGramSignature* shared_qgram_signature = nullptr;
   bool router_qgram_signature_ready = false;
@@ -552,10 +553,12 @@ ActivePathReuseContext* active_path_reuse_context(
   return it == g_active_path_reuse_context_by_engine.end() ? nullptr : it->second;
 }
 
-std::string build_path_reuse_fingerprint(const std::string& sequence) {
+std::string build_path_reuse_fingerprint(std::string_view sequence) {
   auto signature = compute_minimizer_signature(sequence, 4, 8);
   if (!signature.usable || signature.codes.empty()) {
-    return "seq:" + sequence;
+    std::string fingerprint = "seq:";
+    fingerprint.append(sequence.data(), sequence.size());
+    return fingerprint;
   }
   std::ostringstream out;
   out << "len:" << sequence.size();
@@ -570,22 +573,22 @@ std::string contained_root_parent_key(int layer_id) {
   return "__root_layer:" + std::to_string(layer_id);
 }
 
-std::unordered_set<std::string> near_query_qgram_set(const std::string& sequence,
+std::unordered_set<std::string> near_query_qgram_set(std::string_view sequence,
                                                      size_t q) {
   std::unordered_set<std::string> qgrams;
   if (q == 0 || sequence.size() < q) {
-    qgrams.insert(sequence);
+    qgrams.emplace(sequence);
     return qgrams;
   }
   qgrams.reserve(sequence.size() - q + 1);
   for (size_t i = 0; i + q <= sequence.size(); ++i) {
-    qgrams.insert(sequence.substr(i, q));
+    qgrams.emplace(sequence.substr(i, q));
   }
   return qgrams;
 }
 
-double near_query_qgram_jaccard(const std::string& left,
-                                const std::string& right) {
+double near_query_qgram_jaccard(std::string_view left,
+                                std::string_view right) {
   constexpr size_t kNearQueryJaccardQ = 5;
   const auto left_qgrams = near_query_qgram_set(left, kNearQueryJaccardQ);
   const auto right_qgrams = near_query_qgram_set(right, kNearQueryJaccardQ);
@@ -1015,7 +1018,7 @@ bool BioGeometrySearchEngine::leaf_beacon_prunable_row(const std::vector<int>& r
 
 std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances(
     const std::shared_ptr<WorldNode>& node,
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     SearchStats& stats) const {
   if (config_.proximal_oracle_enabled && node) {
     stats.proximal_actual_anchor_node_ids.push_back(node->node_id);
@@ -1061,7 +1064,7 @@ NAVIGAMER_QUERY_HOT_ALIGN
 std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     NodeId node_id,
     size_t layer,
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     SearchStats& stats) const {
   const auto& view = index_.search_graph_view();
   if (node_id >= view.node_records.size()) {
@@ -1323,7 +1326,7 @@ BioGeometrySearchEngine::get_mbb_surviving_children(
 
 std::vector<uint32_t> BioGeometrySearchEngine::safe_child_router_candidate_indices(
     const std::shared_ptr<WorldNode>& node,
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     const std::vector<int>& query_beacon_dists,
     int tolerance,
     SearchStats& stats,
@@ -1517,7 +1520,7 @@ std::vector<uint32_t> BioGeometrySearchEngine::safe_child_router_candidate_indic
 std::vector<uint32_t>
 BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
     NodeId node_id,
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     const std::vector<int>& query_beacon_dists,
     int child_radius,
     int tolerance,
@@ -1774,7 +1777,7 @@ std::vector<std::shared_ptr<WorldNode>>
 BioGeometrySearchEngine::rank_children_with_router_hints(
     const std::shared_ptr<WorldNode>& node,
     const std::vector<std::shared_ptr<WorldNode>>& candidates,
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     int tolerance,
     SearchStats& stats,
     const QGramSignature* router_qgram_signature,
@@ -2165,7 +2168,7 @@ std::vector<NodeId>
 BioGeometrySearchEngine::rank_child_ids_with_router_hints_view(
     NodeId node_id,
     const std::vector<NodeId>& candidates,
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     int tolerance,
     SearchStats& stats,
     const QGramSignature* router_qgram_signature,
@@ -2669,7 +2672,7 @@ int leaf_distance_cache_bound(const SearchConfig& config,
 }
 
 int BioGeometrySearchEngine::compute_center_distance_for_search(
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     const std::string& node_id,
     LeafId center_sequence_id,
     std::string_view center_sequence,
@@ -2691,7 +2694,7 @@ int BioGeometrySearchEngine::compute_center_distance_for_search(
 
 void BioGeometrySearchEngine::verify_leaf_candidates(
     const std::shared_ptr<WorldNode>& node,
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     int tolerance,
     std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
     SearchStats& stats) const {
@@ -2752,7 +2755,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates(
 NAVIGAMER_QUERY_HOT_ALIGN
 void BioGeometrySearchEngine::verify_leaf_candidates_view(
     NodeId node_id,
-    const BioSequence& query_seq,
+    const SearchQueryView& query_seq,
     int tolerance,
     std::unordered_set<LeafId>& unique_results,
     SearchStats& stats) const {
@@ -2952,7 +2955,7 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
 
 void BioGeometrySearchEngine::process_node_adaptive(
     const std::shared_ptr<WorldNode>& node, int current_layer,
-    const BioSequence& query_seq, int tolerance,
+    const SearchQueryView& query_seq, int tolerance,
     std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
     std::unordered_set<std::string>& visited_nodes,
     SearchStats& stats,
@@ -2996,7 +2999,7 @@ void BioGeometrySearchEngine::process_node_adaptive(
 
 void BioGeometrySearchEngine::search_layer_adaptive(
     const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
-    const BioSequence& query_seq, int tolerance,
+    const SearchQueryView& query_seq, int tolerance,
     std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
     std::unordered_set<std::string>& visited_nodes,
     SearchStats& stats,
@@ -3160,7 +3163,7 @@ void BioGeometrySearchEngine::search_layer_adaptive(
 
 void BioGeometrySearchEngine::process_node_adaptive_epoch(
     const std::shared_ptr<WorldNode>& node, int current_layer,
-    const BioSequence& query_seq, int tolerance,
+    const SearchQueryView& query_seq, int tolerance,
     std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
     SearchScratch& scratch,
     SearchStats& stats,
@@ -3204,7 +3207,7 @@ void BioGeometrySearchEngine::process_node_adaptive_epoch(
 
 void BioGeometrySearchEngine::search_layer_adaptive_epoch(
     const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
-    const BioSequence& query_seq, int tolerance,
+    const SearchQueryView& query_seq, int tolerance,
     std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
     SearchScratch& scratch,
     SearchStats& stats,
@@ -3595,7 +3598,7 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
 NAVIGAMER_QUERY_HOT_ALIGN
 void BioGeometrySearchEngine::process_node_adaptive_view(
     NodeId node_id, int current_layer,
-    const BioSequence& query_seq, int tolerance,
+    const SearchQueryView& query_seq, int tolerance,
     std::unordered_set<LeafId>& unique_results,
     std::unordered_set<std::string>* visited_nodes,
     SearchScratch* scratch,
@@ -3657,7 +3660,7 @@ void BioGeometrySearchEngine::process_node_adaptive_view(
 
 void BioGeometrySearchEngine::search_layer_adaptive_view(
     const std::vector<NodeId>& candidates, int layer_id,
-    const BioSequence& query_seq, int tolerance,
+    const SearchQueryView& query_seq, int tolerance,
     std::unordered_set<LeafId>& unique_results,
     std::unordered_set<std::string>* visited_nodes,
     SearchScratch* scratch,
@@ -3859,12 +3862,27 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
 
 NAVIGAMER_QUERY_HOT_ALIGN
 std::pair<SearchResult, SearchStats>
-BioGeometrySearchEngine::search_adaptive(const BioSequence& query_seq, int tolerance) {
+BioGeometrySearchEngine::search_adaptive(
+    const BioSequence& query_seq, int tolerance) {
+  return search_adaptive(SearchQueryView(query_seq), tolerance);
+}
+
+NAVIGAMER_QUERY_HOT_ALIGN
+std::pair<SearchResult, SearchStats>
+BioGeometrySearchEngine::search_adaptive(
+    std::string_view query_seq, int tolerance) {
+  return search_adaptive(SearchQueryView(query_seq), tolerance);
+}
+
+NAVIGAMER_QUERY_HOT_ALIGN
+std::pair<SearchResult, SearchStats>
+BioGeometrySearchEngine::search_adaptive(
+    const SearchQueryView& query_seq, int tolerance) {
   ActiveMyersQueryContext myers_context;
   ActiveMyersQueryContext* active_myers_context = nullptr;
   if (config_.distance_mode == DistanceMode::Myers ||
       config_.distance_mode == DistanceMode::Auto) {
-    myers_context.query = &query_seq.seq;
+    myers_context.query = query_seq.seq;
     myers_context.pattern = prepare_myers_pattern(query_seq.seq);
     if (myers_context.pattern.supported) {
       active_myers_context = &myers_context;
@@ -4201,7 +4219,7 @@ BioGeometrySearchEngine::search_greedy(const BioSequence& query_seq, int toleran
 
 void BioGeometrySearchEngine::traverse_exhaustive(
     const std::shared_ptr<WorldNode>& node, int current_layer,
-    const BioSequence& query_seq, int tolerance,
+    const SearchQueryView& query_seq, int tolerance,
     std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
     std::unordered_set<std::string>& visited_nodes,
     SearchStats& stats) const {
@@ -4230,7 +4248,7 @@ void BioGeometrySearchEngine::traverse_exhaustive(
 
 void BioGeometrySearchEngine::traverse_exhaustive_view(
     NodeId node_id, int current_layer,
-    const BioSequence& query_seq, int tolerance,
+    const SearchQueryView& query_seq, int tolerance,
     std::unordered_set<LeafId>& unique_results,
     std::vector<uint8_t>& visited_nodes,
     SearchStats& stats) const {

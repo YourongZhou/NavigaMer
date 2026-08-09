@@ -24,6 +24,11 @@ struct ReferenceFileCheckpoint {
   uint64_t file_pos = 0;
 };
 
+struct QuerySequence {
+  std::string id;
+  std::string seq;
+};
+
 // Sparse random-access index over an existing FASTA/plain-sequence file.
 // It preserves load_reference_genome() normalization without retaining the
 // complete normalized reference in memory.
@@ -52,6 +57,11 @@ std::pair<std::string, std::string> load_reference(const std::string& path_or_st
 std::vector<std::shared_ptr<BioSequence>> load_reads(
     const std::string& path_or_string,
     const std::string& ref_id = "ref");
+
+// Load only the two fields needed by query-index-batch. Unlike load_reads(),
+// this keeps records contiguous and avoids one shared allocation per query.
+std::vector<QuerySequence> load_query_sequences(
+    const std::string& path_or_string);
 
 // Write a TSV table with an explicit header.
 class TsvWriter {
