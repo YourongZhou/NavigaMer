@@ -1,6 +1,7 @@
 #include "sharded_index.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -183,21 +184,31 @@ size_t ShardedSeedRouter::upper_bound_minimizer_code(uint32_t code) const {
   return begin;
 }
 
-ShardRouteSelection ShardedSeedRouter::select(
-    std::string_view query, int tolerance) const {
-  ShardRouteSelection selection;
+bool ShardedSeedRouter::append_selected_shards(
+    std::string_view query, int tolerance,
+    std::vector<uint32_t>* shard_ids) const {
+  if (!shard_ids) {
+    throw std::invalid_argument("router shard output must not be null");
+  }
+  const size_t initial_size = shard_ids->size();
   if (!enabled() || tolerance < 0 || query.empty()) {
-    return selection;
+    return false;
   }
   const size_t partition_count =
       static_cast<size_t>(tolerance) + 1;
   if (partition_count == 0 || partition_count > query.size() ||
       query.size() / partition_count < window) {
-    return selection;
+    return false;
   }
 
-  std::vector<uint32_t> minimizers;
-  minimizers.reserve(partition_count);
+  constexpr size_t kInlineMinimizerCount = 16;
+  std::array<uint32_t, kInlineMinimizerCount> inline_minimizers{};
+  std::vector<uint32_t> overflow_minimizers;
+  uint32_t* minimizers = inline_minimizers.data();
+  if (partition_count > inline_minimizers.size()) {
+    overflow_minimizers.resize(partition_count);
+    minimizers = overflow_minimizers.data();
+  }
   for (size_t partition = 0; partition < partition_count;
        ++partition) {
     const size_t begin = partition * query.size() / partition_count;
@@ -217,32 +228,75 @@ ShardRouteSelection ShardedSeedRouter::select(
             query.substr(seed_begin, seed_length), k,
             static_cast<uint32_t>(seed_length),
             &minimizer)) {
-      return ShardRouteSelection{};
+      return false;
     }
-    minimizers.push_back(minimizer);
+    minimizers[partition] = minimizer;
   }
-  std::sort(minimizers.begin(), minimizers.end());
-  minimizers.erase(
-      std::unique(minimizers.begin(), minimizers.end()),
-      minimizers.end());
+  std::sort(minimizers, minimizers + partition_count);
+  const size_t minimizer_count = static_cast<size_t>(
+      std::unique(minimizers, minimizers + partition_count) - minimizers);
 
-  for (uint32_t minimizer : minimizers) {
-    const size_t first = lower_bound_minimizer_code(minimizer);
-    const size_t last = upper_bound_minimizer_code(minimizer);
+  struct CodeRange {
+    size_t first = 0;
+    size_t last = 0;
+  };
+  std::array<CodeRange, kInlineMinimizerCount> inline_ranges{};
+  std::vector<CodeRange> overflow_ranges;
+  CodeRange* ranges = inline_ranges.data();
+  if (minimizer_count > inline_ranges.size()) {
+    overflow_ranges.resize(minimizer_count);
+    ranges = overflow_ranges.data();
+  }
+  size_t routed_entry_count = 0;
+  for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
+       ++minimizer_idx) {
+    CodeRange& range = ranges[minimizer_idx];
+    range.first = lower_bound_minimizer_code(minimizers[minimizer_idx]);
+    range.last = upper_bound_minimizer_code(minimizers[minimizer_idx]);
+    routed_entry_count += range.last - range.first;
+  }
+  if (routed_entry_count >
+      std::numeric_limits<size_t>::max() - initial_size) {
+    throw std::length_error("router shard selection is too large");
+  }
+  const size_t required_size = initial_size + routed_entry_count;
+  if (required_size > shard_ids->capacity()) {
+    size_t new_capacity = required_size;
+    const size_t current_capacity = shard_ids->capacity();
+    if (current_capacity <=
+        std::numeric_limits<size_t>::max() - current_capacity / 2) {
+      new_capacity = std::max(
+          new_capacity, current_capacity + current_capacity / 2);
+    }
+    shard_ids->reserve(new_capacity);
+  }
+  for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
+       ++minimizer_idx) {
+    const CodeRange range = ranges[minimizer_idx];
+    const size_t first = range.first;
+    const size_t last = range.last;
     for (size_t entry_index = first; entry_index < last; ++entry_index) {
       const uint32_t shard_id = unpack_shard_id(
           packed_shard_ids, entry_index, shard_id_bits);
       if (shard_id >= shard_count) {
-        return ShardRouteSelection{};
+        shard_ids->resize(initial_size);
+        return false;
       }
-      selection.shard_ids.push_back(shard_id);
+      shard_ids->push_back(shard_id);
     }
   }
-  std::sort(selection.shard_ids.begin(), selection.shard_ids.end());
-  selection.shard_ids.erase(
-      std::unique(selection.shard_ids.begin(), selection.shard_ids.end()),
-      selection.shard_ids.end());
-  selection.enabled = true;
+  auto selected_begin = shard_ids->begin() + initial_size;
+  std::sort(selected_begin, shard_ids->end());
+  shard_ids->erase(
+      std::unique(selected_begin, shard_ids->end()), shard_ids->end());
+  return true;
+}
+
+ShardRouteSelection ShardedSeedRouter::select(
+    std::string_view query, int tolerance) const {
+  ShardRouteSelection selection;
+  selection.enabled = append_selected_shards(
+      query, tolerance, &selection.shard_ids);
   return selection;
 }
 

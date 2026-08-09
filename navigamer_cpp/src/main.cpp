@@ -1676,33 +1676,49 @@ void run_query_index_batch(const std::string& index_path,
     }
     std::cerr << "Queries: " << queries.size() << "\n";
 
-    std::vector<ShardRouteSelection> query_routes;
-    query_routes.reserve(queries.size());
+    std::vector<size_t> query_route_offsets;
+    query_route_offsets.reserve(queries.size() + 1);
+    query_route_offsets.push_back(0);
+    std::vector<uint32_t> query_route_shard_ids;
+    query_route_shard_ids.reserve(queries.size());
+    std::vector<uint8_t> query_routed_bits(
+        (queries.size() + 7) / 8, uint8_t{0});
     std::vector<double> query_route_ms;
     query_route_ms.reserve(queries.size());
     size_t routed_queries = 0;
     bool has_unrouted_query = false;
-    for (const auto& query : queries) {
+    for (size_t query_idx = 0; query_idx < queries.size(); ++query_idx) {
+      const auto& query = queries[query_idx];
       const auto route_start =
           std::chrono::high_resolution_clock::now();
-      auto route = shard_router.select(query->seq, tolerance);
+      const bool routed = shard_router.append_selected_shards(
+          query->seq, tolerance, &query_route_shard_ids);
       const auto route_end =
           std::chrono::high_resolution_clock::now();
       query_route_ms.push_back(
           std::chrono::duration<double, std::milli>(
               route_end - route_start)
               .count());
-      if (route.enabled) {
+      if (routed) {
         ++routed_queries;
+        query_routed_bits[query_idx >> 3] |= static_cast<uint8_t>(
+            uint8_t{1} << (query_idx & 7));
       } else {
         has_unrouted_query = true;
       }
-      query_routes.push_back(std::move(route));
+      query_route_offsets.push_back(query_route_shard_ids.size());
     }
+    const auto query_is_routed = [&](size_t query_idx) {
+      return (query_routed_bits[query_idx >> 3] &
+              static_cast<uint8_t>(uint8_t{1} << (query_idx & 7))) != 0;
+    };
 
     struct ShardQueryBatch {
-      std::vector<size_t> query_indices;
+      size_t query_begin = 0;
+      size_t query_end = 0;
       std::vector<uint32_t> shard_ids;
+
+      bool empty() const { return query_begin == query_end; }
     };
     // A large random human-read batch can touch thousands of 10k-window
     // shards. Keep only one bounded union resident while preserving input
@@ -1713,7 +1729,7 @@ void run_query_index_batch(const std::string& index_path,
         shard_manifest.shards.size(), uint8_t{0});
     ShardQueryBatch batch;
     const auto flush_batch = [&]() {
-      if (batch.query_indices.empty()) return;
+      if (batch.empty()) return;
       for (uint32_t shard_id : batch.shard_ids) {
         batch_shard_bits[shard_id] = 0;
       }
@@ -1721,33 +1737,38 @@ void run_query_index_batch(const std::string& index_path,
       batch = ShardQueryBatch{};
     };
     if (has_unrouted_query) {
-      batch.query_indices.resize(queries.size());
-      std::iota(batch.query_indices.begin(), batch.query_indices.end(),
-                size_t{0});
+      batch.query_begin = 0;
+      batch.query_end = queries.size();
       batch.shard_ids.resize(shard_manifest.shards.size());
       std::iota(batch.shard_ids.begin(), batch.shard_ids.end(),
                 uint32_t{0});
       shard_query_batches.push_back(std::move(batch));
     } else {
-      for (size_t query_idx = 0; query_idx < query_routes.size();
+      for (size_t query_idx = 0; query_idx < queries.size();
            ++query_idx) {
-        const auto& route = query_routes[query_idx];
+        const size_t route_begin = query_route_offsets[query_idx];
+        const size_t route_end = query_route_offsets[query_idx + 1];
         size_t new_shard_count = 0;
-        for (uint32_t shard_id : route.shard_ids) {
+        for (size_t route_idx = route_begin; route_idx < route_end;
+             ++route_idx) {
+          const uint32_t shard_id = query_route_shard_ids[route_idx];
           if (!batch_shard_bits[shard_id]) ++new_shard_count;
         }
-        if (!batch.query_indices.empty() &&
+        if (!batch.empty() &&
             batch.shard_ids.size() + new_shard_count >
                 kMaxResidentQueryShards) {
           flush_batch();
         }
-        for (uint32_t shard_id : route.shard_ids) {
+        for (size_t route_idx = route_begin; route_idx < route_end;
+             ++route_idx) {
+          const uint32_t shard_id = query_route_shard_ids[route_idx];
           if (!batch_shard_bits[shard_id]) {
             batch_shard_bits[shard_id] = 1;
             batch.shard_ids.push_back(shard_id);
           }
         }
-        batch.query_indices.push_back(query_idx);
+        if (batch.empty()) batch.query_begin = query_idx;
+        batch.query_end = query_idx + 1;
       }
       flush_batch();
     }
@@ -1800,18 +1821,22 @@ void run_query_index_batch(const std::string& index_path,
         engines.push_back(std::make_unique<BioGeometrySearchEngine>(
             shard.builder, search_config));
       }
-      for (size_t query_idx : shard_batch.query_indices) {
+      for (size_t query_idx = shard_batch.query_begin;
+           query_idx < shard_batch.query_end; ++query_idx) {
       const auto& read = queries[query_idx];
       auto query_start =
           std::chrono::high_resolution_clock::now();
-      const auto& route = query_routes[query_idx];
+      const bool route_enabled = query_is_routed(query_idx);
+      const size_t route_begin = query_route_offsets[query_idx];
+      const size_t route_end = query_route_offsets[query_idx + 1];
       const size_t active_shard_count =
-          route.enabled ? route.shard_ids.size() : engines.size();
+          route_enabled ? route_end - route_begin : engines.size();
       std::vector<uint32_t> active_engine_ids(active_shard_count);
-      if (route.enabled) {
+      if (route_enabled) {
         for (size_t active_idx = 0; active_idx < active_shard_count;
              ++active_idx) {
-          const uint32_t shard_id = route.shard_ids[active_idx];
+          const uint32_t shard_id =
+              query_route_shard_ids[route_begin + active_idx];
           const uint32_t loaded_idx = shard_to_loaded[shard_id];
           if (loaded_idx == UINT32_MAX) {
             throw std::runtime_error(

@@ -91,6 +91,9 @@ struct ShardedSeedRouter {
   uint32_t minimizer_code_at(size_t entry_index) const;
   size_t lower_bound_minimizer_code(uint32_t code) const;
   size_t upper_bound_minimizer_code(uint32_t code) const;
+  bool append_selected_shards(
+      std::string_view query, int tolerance,
+      std::vector<uint32_t>* shard_ids) const;
   ShardRouteSelection select(
       std::string_view query, int tolerance) const;
 };
