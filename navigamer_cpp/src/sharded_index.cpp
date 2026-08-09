@@ -419,7 +419,6 @@ struct RouterBuildData {
   RouterBuildData& operator=(const RouterBuildData&) = delete;
   RouterBuildData(RouterBuildData&& other) noexcept
       : spool_path(std::move(other.spool_path)),
-        shard_offsets(std::move(other.shard_offsets)),
         shard_counts(std::move(other.shard_counts)),
         spool_size(other.spool_size),
         entry_count(other.entry_count) {
@@ -433,7 +432,6 @@ struct RouterBuildData {
   }
 
   std::filesystem::path spool_path;
-  std::vector<uint64_t> shard_offsets;
   std::vector<uint32_t> shard_counts;
   size_t spool_size = 0;
   size_t entry_count = 0;
@@ -544,9 +542,8 @@ std::vector<ShardPackEntry> read_shard_pack_directory(
 uint64_t save_router_sidecar(
     const std::filesystem::path& path,
     uint32_t k, uint32_t window, uint32_t shard_count,
-    const RouterBuildData& data) {
-  if (data.shard_offsets.size() != shard_count ||
-      data.shard_counts.size() != shard_count ||
+    RouterBuildData& data) {
+  if (data.shard_counts.size() != shard_count ||
       data.entry_count == 0 || data.spool_size == 0) {
     throw std::runtime_error("invalid shard router build data");
   }
@@ -603,22 +600,27 @@ uint64_t save_router_sidecar(
     }
     const uint8_t* spool_bytes = owned_spool.data();
 #endif
-    for (uint32_t shard_id = 0; shard_id < shard_count; ++shard_id) {
-      const size_t offset = data.shard_offsets[shard_id];
-      const size_t count = data.shard_counts[shard_id];
+    size_t counted_entries = 0;
+    size_t nonempty_shard_count = 0;
+    for (uint32_t count : data.shard_counts) {
       if (count >
-              (std::numeric_limits<size_t>::max() - offset) /
-                  sizeof(uint32_t) ||
-          offset + count * sizeof(uint32_t) > data.spool_size) {
+          std::numeric_limits<size_t>::max() - counted_entries) {
         throw std::runtime_error("invalid shard router code range");
       }
+      counted_entries += count;
+      nonempty_shard_count += count != 0;
     }
-    const auto code_at = [&](uint32_t shard_id, size_t offset) {
+    if (counted_entries != data.entry_count ||
+        counted_entries >
+            std::numeric_limits<size_t>::max() / sizeof(uint32_t) ||
+        counted_entries * sizeof(uint32_t) != data.spool_size) {
+      throw std::runtime_error("invalid shard router code range");
+    }
+    const auto code_at = [&](size_t entry_index) {
       uint32_t code = 0;
       std::memcpy(
           &code,
-          spool_bytes + data.shard_offsets[shard_id] +
-              offset * sizeof(uint32_t),
+          spool_bytes + entry_index * sizeof(uint32_t),
           sizeof(code));
       return code;
     };
@@ -653,24 +655,32 @@ uint64_t save_router_sidecar(
       throw std::runtime_error("failed to reserve shard router metadata");
     }
 
-    struct Cursor {
+    struct Cursor32 {
       uint32_t code = 0;
       uint32_t shard_id = 0;
-      size_t offset = 0;
+      uint32_t entry_index = 0;
     };
-    struct CursorGreater {
-      bool operator()(const Cursor& left, const Cursor& right) const {
+    static_assert(sizeof(Cursor32) == 12,
+                  "32-bit router cursor must remain 12 bytes");
+    struct Cursor32Greater {
+      bool operator()(const Cursor32& left,
+                      const Cursor32& right) const {
         if (left.code != right.code) return left.code > right.code;
         return left.shard_id > right.shard_id;
       }
     };
-    std::priority_queue<
-        Cursor, std::vector<Cursor>, CursorGreater> queue;
-    for (uint32_t shard_id = 0; shard_id < shard_count; ++shard_id) {
-      if (data.shard_counts[shard_id] != 0) {
-        queue.push({code_at(shard_id, 0), shard_id, 0});
+    struct Cursor64 {
+      uint32_t code = 0;
+      uint32_t shard_id = 0;
+      size_t entry_index = 0;
+    };
+    struct Cursor64Greater {
+      bool operator()(const Cursor64& left,
+                      const Cursor64& right) const {
+        if (left.code != right.code) return left.code > right.code;
+        return left.shard_id > right.shard_id;
       }
-    }
+    };
 
     std::vector<uint32_t> code_bases;
     std::vector<uint8_t> code_widths;
@@ -766,14 +776,13 @@ uint64_t save_router_sidecar(
     uint64_t pending_shard_bits = 0;
     uint32_t pending_bit_count = 0;
     size_t emitted = 0;
-    while (!queue.empty()) {
-      const Cursor cursor = queue.top();
-      queue.pop();
-      code_block[code_block_size++] = cursor.code;
+    const auto emit_router_entry = [&](uint32_t code,
+                                       uint32_t shard_id) {
+      code_block[code_block_size++] = code;
       if (code_block_size == code_block.size()) flush_code_block();
 
       pending_shard_bits |=
-          static_cast<uint64_t>(cursor.shard_id) << pending_bit_count;
+          static_cast<uint64_t>(shard_id) << pending_bit_count;
       pending_bit_count += shard_id_bits;
       while (pending_bit_count >= 8) {
         emit_packed_byte(static_cast<uint8_t>(pending_shard_bits));
@@ -781,12 +790,65 @@ uint64_t save_router_sidecar(
         pending_bit_count -= 8;
       }
       ++emitted;
+    };
 
-      const size_t next_offset = cursor.offset + 1;
-      if (next_offset < data.shard_counts[cursor.shard_id]) {
-        queue.push({
-            code_at(cursor.shard_id, next_offset),
-            cursor.shard_id, next_offset});
+    if (data.entry_count <= std::numeric_limits<uint32_t>::max()) {
+      // Reuse the count array as exclusive entry ends. Human-scale routers
+      // remain below 2^32 entries, so every live heap cursor is only 12 bytes
+      // and the hot merge loop performs no per-entry metadata writes.
+      std::vector<Cursor32> cursor_storage;
+      cursor_storage.reserve(nonempty_shard_count);
+      std::priority_queue<
+          Cursor32, std::vector<Cursor32>, Cursor32Greater> queue(
+              Cursor32Greater{}, std::move(cursor_storage));
+      uint32_t entry_begin = 0;
+      for (uint32_t shard_id = 0; shard_id < shard_count; ++shard_id) {
+        const uint32_t count = data.shard_counts[shard_id];
+        const uint32_t entry_end = static_cast<uint32_t>(
+            static_cast<uint64_t>(entry_begin) + count);
+        data.shard_counts[shard_id] = entry_end;
+        if (count != 0) {
+          queue.push({code_at(entry_begin), shard_id, entry_begin});
+        }
+        entry_begin = entry_end;
+      }
+      while (!queue.empty()) {
+        const Cursor32 cursor = queue.top();
+        queue.pop();
+        emit_router_entry(cursor.code, cursor.shard_id);
+        const uint32_t next_entry_index = cursor.entry_index + 1;
+        if (next_entry_index < data.shard_counts[cursor.shard_id]) {
+          queue.push({code_at(next_entry_index), cursor.shard_id,
+                      next_entry_index});
+        }
+      }
+    } else {
+      // Exceptionally large routers retain size_t entry indices. Counts are
+      // consumed in place so this path still needs no offset array.
+      std::vector<Cursor64> cursor_storage;
+      cursor_storage.reserve(nonempty_shard_count);
+      std::priority_queue<
+          Cursor64, std::vector<Cursor64>, Cursor64Greater> queue(
+              Cursor64Greater{}, std::move(cursor_storage));
+      size_t entry_begin = 0;
+      for (uint32_t shard_id = 0; shard_id < shard_count; ++shard_id) {
+        const uint32_t count = data.shard_counts[shard_id];
+        if (count != 0) {
+          queue.push({code_at(entry_begin), shard_id, entry_begin});
+          data.shard_counts[shard_id] = count - 1;
+        }
+        entry_begin += count;
+      }
+      while (!queue.empty()) {
+        const Cursor64 cursor = queue.top();
+        queue.pop();
+        emit_router_entry(cursor.code, cursor.shard_id);
+        if (data.shard_counts[cursor.shard_id] != 0) {
+          const size_t next_entry_index = cursor.entry_index + 1;
+          --data.shard_counts[cursor.shard_id];
+          queue.push({code_at(next_entry_index), cursor.shard_id,
+                      next_entry_index});
+        }
       }
     }
     flush_code_block();
@@ -921,7 +983,6 @@ RouterBuildData build_router_data(
     throw std::runtime_error("too many shards for seed router");
   }
   RouterBuildData data(spool_path);
-  data.shard_offsets.reserve(descriptors.size());
   data.shard_counts.reserve(descriptors.size());
   std::ofstream spool(data.spool_path, std::ios::binary);
   if (!spool) {
@@ -930,9 +991,8 @@ RouterBuildData build_router_data(
   size_t spool_position = 0;
   std::vector<uint32_t> minimizer_scratch;
   for (const auto& descriptor : descriptors) {
-    // Keep lists contiguous. Page-aligning millions of small shards would
-    // add one mostly empty 4 KiB page per shard and fault it during merge.
-    data.shard_offsets.push_back(spool_position);
+    // Keep lists contiguous. Their offsets are implicit prefix sums of the
+    // counts, avoiding one 64-bit build record per shard.
     const auto slice = load_slice(descriptor);
     reference_minimizers(slice, k, window, &minimizer_scratch);
     if (minimizer_scratch.size() > std::numeric_limits<uint32_t>::max()) {
