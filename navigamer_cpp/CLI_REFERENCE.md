@@ -359,7 +359,7 @@ length-compatible candidate superset without allocating a q-gram posting index.
 | ---- | ------- | ----------- |
 | `--window` | `200` | Reference-window length |
 | `--stride` | `1` | Step between window starts |
-| `--shard-windows` | *(required)* | Maximum window starts per logical shard; `10000` is the recommended human stride-1 starting point, then benchmark nearby sizes |
+| `--shard-windows` | *(required)* | Maximum window starts per logical shard; `5000` is the recommended human stride-1 starting point when construction time/RAM matter (`10000` trades that for fewer logical shards), then benchmark nearby sizes |
 | `--shard-build-jobs` | auto | Maximum concurrently built parts; auto uses one below 8 OpenMP threads, two at 8--15 threads, and at most four thereafter, dividing the thread budget among internal teams |
 | `--index` | *(required)* | Output `.navshard` manifest; packed part containers are created beside it |
 | `--progress-interval-seconds` | `600` | Periodic progress interval inside each shard build |
