@@ -160,6 +160,35 @@ void test_batch4_avx2_matches_scalar() {
       }
     }
   }
+
+  const std::string pattern = random_dna(250, gen);
+  std::array<std::string, 4> near_texts = {
+      pattern, pattern, pattern, pattern};
+  for (size_t edit = 0; edit < 2; ++edit) {
+    const size_t position = edit * 37 + 11;
+    near_texts[1][position] =
+        near_texts[1][position] == 'A' ? 'C' : 'A';
+  }
+  for (size_t edit = 0; edit < 6; ++edit) {
+    const size_t position = edit * 37 + 11;
+    near_texts[2][position] =
+        near_texts[2][position] == 'A' ? 'C' : 'A';
+  }
+  near_texts[3] = near_texts[2];
+  const auto prepared = navigamer::prepare_myers_dna_pattern(pattern);
+  const std::array<std::string_view, 4> views = {
+      near_texts[0], near_texts[1], near_texts[2], near_texts[3]};
+  for (int tau : {0, 1, 2, 5}) {
+    std::array<int, 4> batch_distances{};
+    assert(navigamer::
+               compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+                   prepared, views, tau, batch_distances));
+    for (size_t lane = 0; lane < views.size(); ++lane) {
+      assert(batch_distances[lane] ==
+             navigamer::compute_distance_bounded_edlib(
+                 pattern, views[lane], tau));
+    }
+  }
 }
 
 void test_mode_wrapper() {

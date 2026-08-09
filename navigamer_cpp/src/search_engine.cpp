@@ -70,9 +70,10 @@ int compute_exact_distance_with_mode(std::string_view lhs,
       lhs, rhs, static_cast<int>(max_length), mode);
 }
 
-bool compute_exact_query_distances_batch4(
+bool compute_query_distances_batch4(
     std::string_view query,
     const std::array<std::string_view, 4>& texts,
+    int tau,
     DistanceMode mode,
     std::array<int, 4>& distances) {
   const auto* context = g_active_myers_query_context;
@@ -84,8 +85,7 @@ bool compute_exact_query_distances_batch4(
     return false;
   }
   return compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
-      context->batch_pattern, texts, static_cast<int>(query.size()),
-      distances);
+      context->batch_pattern, texts, tau, distances);
 }
 
 // One compact entry records an exact distance for the current query. A
@@ -1288,8 +1288,9 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
       for (size_t lane = missing_count; lane < kBatchWidth; ++lane) {
         texts[lane] = texts[missing_count - 1];
       }
-      used_batch = compute_exact_query_distances_batch4(
-          query_seq.seq, texts, config_.distance_mode, missing_distances);
+      used_batch = compute_query_distances_batch4(
+          query_seq.seq, texts, static_cast<int>(query_seq.seq.size()),
+          config_.distance_mode, missing_distances);
     }
     if (!used_batch) {
       for (size_t missing_idx = 0; missing_idx < missing_count;
@@ -2980,6 +2981,65 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
   }
 
   const auto verify_survivors = [&](const auto& leaf_id_at) {
+    constexpr size_t kBatchWidth = 4;
+    std::array<LeafId, kBatchWidth> pending_leaf_ids{};
+    size_t pending_leaf_count = 0;
+    const bool cache_leaf_distance =
+        active_path_reuse_context(this) &&
+        active_path_reuse_context(this)->enabled;
+    const int distance_bound = leaf_distance_cache_bound(
+        config_, tolerance, cache_leaf_distance);
+    const auto record_verified_leaf = [&](LeafId leaf_id,
+                                          int leaf_dist,
+                                          bool cache_hit) {
+      if (auto* reuse = active_path_reuse_context(this);
+          reuse && reuse->enabled) {
+        reuse->next.leaf_dist_by_sequence_id[leaf_id] = leaf_dist;
+      }
+      if (!cache_hit) {
+        stats.leaf_exact_distance_call_count++;
+        stats.dist_calc_count++;
+      }
+      stats.leaf_verify_count++;
+      if (config_.trace_paths) stats.leaf_trace.push_back(leaf_id);
+      if (leaf_dist <= tolerance) unique_results.insert(leaf_id);
+    };
+    const auto flush_pending_leaves = [&]() {
+      if (pending_leaf_count == 0) return;
+      ScopedSearchTimer leaf_verify_timer(
+          stats.query_profile_enabled, &stats.leaf_verify_ms);
+      std::array<int, kBatchWidth> distances{};
+      bool used_batch = false;
+      if (pending_leaf_count >= 2 && view.sequences.reference_backed) {
+        std::array<std::string_view, kBatchWidth> texts{};
+        for (size_t lane = 0; lane < pending_leaf_count; ++lane) {
+          texts[lane] = view.sequences.sequence(pending_leaf_ids[lane]);
+        }
+        for (size_t lane = pending_leaf_count; lane < kBatchWidth; ++lane) {
+          texts[lane] = texts[pending_leaf_count - 1];
+        }
+        used_batch = compute_query_distances_batch4(
+            query_seq.seq, texts, distance_bound, config_.distance_mode,
+            distances);
+      }
+      for (size_t lane = 0; lane < pending_leaf_count; ++lane) {
+        bool cache_hit = false;
+        if (!used_batch) {
+          distances[lane] = compute_indexed_query_distance(
+              query_seq.seq,
+              view.sequences.sequence(pending_leaf_ids[lane]),
+              pending_leaf_ids[lane], distance_bound,
+              config_.distance_mode, false, &cache_hit);
+        } else if (distances[lane] <= distance_bound) {
+          g_query_distance_cache.store(
+              pending_leaf_ids[lane], distances[lane]);
+        }
+        record_verified_leaf(
+            pending_leaf_ids[lane], distances[lane], cache_hit);
+      }
+      pending_leaf_count = 0;
+    };
+
     for (size_t survivor_idx = 0;
          survivor_idx < survivor_offsets.size(); ++survivor_idx) {
       const uint32_t leaf_offset = survivor_offsets[survivor_idx];
@@ -3010,34 +3070,38 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
               this, leaf_id, tolerance, stats)) {
         continue;
       }
-      ScopedSearchTimer leaf_verify_timer(
-          stats.query_profile_enabled, &stats.leaf_verify_ms);
       stats.candidate_count++;
       stats.raw_candidate_count++;
       stats.candidate_verify_count++;
-      const bool cache_leaf_distance =
-          active_path_reuse_context(this) &&
-          active_path_reuse_context(this)->enabled;
-      const int distance_bound = leaf_distance_cache_bound(
-          config_, tolerance, cache_leaf_distance);
-      bool cache_hit = false;
-      int leaf_dist = compute_indexed_query_distance(
-          query_seq.seq, view.sequences.sequence(leaf_id), leaf_id,
-          distance_bound, config_.distance_mode, false, &cache_hit);
-      if (auto* reuse = active_path_reuse_context(this);
-          reuse && reuse->enabled) {
-        reuse->next.leaf_dist_by_sequence_id[leaf_id] = leaf_dist;
+      int cached_distance = 0;
+      if (g_query_distance_cache.lookup(leaf_id, &cached_distance)) {
+        flush_pending_leaves();
+        ScopedSearchTimer leaf_verify_timer(
+            stats.query_profile_enabled, &stats.leaf_verify_ms);
+        record_verified_leaf(leaf_id, cached_distance, true);
+        continue;
       }
-      if (!cache_hit) {
-        stats.leaf_exact_distance_call_count++;
-        stats.dist_calc_count++;
+
+      bool pending_duplicate = false;
+      for (size_t lane = 0; lane < pending_leaf_count; ++lane) {
+        if (pending_leaf_ids[lane] == leaf_id) {
+          pending_duplicate = true;
+          break;
+        }
       }
-      stats.leaf_verify_count++;
-      if (config_.trace_paths) {
-        stats.leaf_trace.push_back(leaf_id);
+      if (pending_duplicate) {
+        flush_pending_leaves();
+        if (g_query_distance_cache.lookup(leaf_id, &cached_distance)) {
+          ScopedSearchTimer leaf_verify_timer(
+              stats.query_profile_enabled, &stats.leaf_verify_ms);
+          record_verified_leaf(leaf_id, cached_distance, true);
+          continue;
+        }
       }
-      if (leaf_dist <= tolerance) unique_results.insert(leaf_id);
+      pending_leaf_ids[pending_leaf_count++] = leaf_id;
+      if (pending_leaf_count == kBatchWidth) flush_pending_leaves();
     }
+    flush_pending_leaves();
   };
 
   switch (node.link_storage()) {
