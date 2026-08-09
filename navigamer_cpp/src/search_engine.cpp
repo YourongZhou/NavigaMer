@@ -26,6 +26,7 @@ constexpr size_t kMinRouterHintCandidateCount = 5;
 struct ActiveMyersQueryContext {
   std::string_view query;
   PreparedMyersPattern pattern;
+  PreparedMyersDnaPattern batch_pattern;
 };
 
 thread_local ActiveMyersQueryContext* g_active_myers_query_context = nullptr;
@@ -67,6 +68,24 @@ int compute_exact_distance_with_mode(std::string_view lhs,
   }
   return compute_query_distance_with_mode(
       lhs, rhs, static_cast<int>(max_length), mode);
+}
+
+bool compute_exact_query_distances_batch4(
+    std::string_view query,
+    const std::array<std::string_view, 4>& texts,
+    DistanceMode mode,
+    std::array<int, 4>& distances) {
+  const auto* context = g_active_myers_query_context;
+  if ((mode != DistanceMode::Myers && mode != DistanceMode::Auto) ||
+      !context || context->query.data() != query.data() ||
+      context->query.size() != query.size() ||
+      !context->batch_pattern.supported ||
+      query.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    return false;
+  }
+  return compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+      context->batch_pattern, texts, static_cast<int>(query.size()),
+      distances);
 }
 
 // One compact entry records an exact distance for the current query. A
@@ -1099,19 +1118,20 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
   ScopedSearchTimer timer(stats.query_profile_enabled, &stats.anchor_distance_ms);
   std::vector<int> dists;
   dists.reserve(beacon_count);
-  const auto measure_beacon = [&](LeafId beacon_id) {
-    if (beacon_id >= view.sequences.size()) {
-      throw std::runtime_error("array beacon id has no sequence");
+  constexpr size_t kBatchWidth = 4;
+  std::array<LeafId, kBatchWidth> inline_beacon_ids{};
+  std::vector<LeafId> overflow_beacon_ids;
+  if (beacon_count > kBatchWidth) {
+    overflow_beacon_ids.reserve(beacon_count);
+  }
+  size_t collected_beacon_count = 0;
+  const auto collect_beacon = [&](LeafId beacon_id) {
+    if (beacon_count <= kBatchWidth) {
+      inline_beacon_ids[collected_beacon_count] = beacon_id;
+    } else {
+      overflow_beacon_ids.push_back(beacon_id);
     }
-    bool cache_hit = false;
-    dists.push_back(compute_indexed_query_distance(
-        query_seq.seq, view.sequences.sequence(beacon_id), beacon_id,
-        0,
-        config_.distance_mode, true, &cache_hit));
-    stats.anchor_distance_count++;
-    if (!cache_hit) {
-      stats.dist_calc_count++;
-    }
+    ++collected_beacon_count;
   };
   const uint32_t beacon_begin =
       node.beacon_storage() ==
@@ -1130,7 +1150,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     const int8_t* deltas =
         view.dense_beacon_pattern_deltas.data() + code * 3;
     for (uint32_t offset = 0; offset < 3; ++offset) {
-      measure_beacon(static_cast<LeafId>(
+      collect_beacon(static_cast<LeafId>(
           static_cast<int64_t>(center_id) + deltas[offset]));
     }
   } else if (view.wide_beacon_patterns &&
@@ -1142,7 +1162,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     const int16_t* deltas =
         view.wide_beacon_pattern_deltas.data() + code * 3;
     for (uint32_t offset = 0; offset < 3; ++offset) {
-      measure_beacon(static_cast<LeafId>(
+      collect_beacon(static_cast<LeafId>(
           static_cast<int64_t>(center_id) + deltas[offset]));
     }
   } else {
@@ -1152,7 +1172,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
           reinterpret_cast<const int8_t*>(
               view.beacon_id_bytes.data() + beacon_begin);
       for (uint32_t offset = 0; offset < beacon_count; ++offset) {
-        measure_beacon(static_cast<LeafId>(
+        collect_beacon(static_cast<LeafId>(
             static_cast<int64_t>(center_id) +
             deltas[offset]));
       }
@@ -1177,12 +1197,12 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
               (packed >> packed_shift) & mask);
           const int32_t delta = static_cast<int32_t>(zigzag >> 1) ^
                                 -static_cast<int32_t>(zigzag & 1);
-          measure_beacon(static_cast<LeafId>(
+          collect_beacon(static_cast<LeafId>(
               static_cast<int64_t>(center_id) + delta));
         }
       } else {
         for (uint32_t offset = 0; offset < beacon_count; ++offset) {
-          measure_beacon(view.beacon_sequence_id(
+          collect_beacon(view.beacon_sequence_id(
               node_id, node, center_id, offset));
         }
       }
@@ -1196,13 +1216,101 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
             view.beacon_id_bytes.data() + beacon_begin +
                 static_cast<size_t>(offset) * sizeof(LeafId),
             sizeof(beacon_id));
-        measure_beacon(beacon_id);
+        collect_beacon(beacon_id);
       }
       break;
     }
     case WorldNodeRecord::BeaconStorage::ImplicitCenter:
-      measure_beacon(center_id);
+      collect_beacon(center_id);
       break;
+    }
+  }
+  if (collected_beacon_count != beacon_count) {
+    throw std::runtime_error("array beacon count is inconsistent");
+  }
+
+  const auto beacon_id_at = [&](size_t beacon_idx) {
+    return beacon_count <= kBatchWidth
+               ? inline_beacon_ids[beacon_idx]
+               : overflow_beacon_ids[beacon_idx];
+  };
+  if (beacon_count > kBatchWidth || !view.sequences.reference_backed) {
+    for (size_t beacon_idx = 0; beacon_idx < beacon_count; ++beacon_idx) {
+      const LeafId beacon_id = beacon_id_at(beacon_idx);
+      if (beacon_id >= view.sequences.size()) {
+        throw std::runtime_error("array beacon id has no sequence");
+      }
+      bool cache_hit = false;
+      dists.push_back(compute_indexed_query_distance(
+          query_seq.seq, view.sequences.sequence(beacon_id), beacon_id, 0,
+          config_.distance_mode, true, &cache_hit));
+      stats.anchor_distance_count++;
+      if (!cache_hit) stats.dist_calc_count++;
+    }
+  } else {
+    std::array<LeafId, kBatchWidth> missing_ids{};
+    std::array<uint8_t, kBatchWidth> missing_slots{};
+    size_t missing_count = 0;
+    dists.resize(beacon_count);
+    for (size_t beacon_idx = 0; beacon_idx < beacon_count; ++beacon_idx) {
+      const LeafId beacon_id = beacon_id_at(beacon_idx);
+      if (beacon_id >= view.sequences.size()) {
+        throw std::runtime_error("array beacon id has no sequence");
+      }
+      stats.anchor_distance_count++;
+      int distance = 0;
+      if (g_query_distance_cache.lookup(beacon_id, &distance)) {
+        dists[beacon_idx] = distance;
+        missing_slots[beacon_idx] = static_cast<uint8_t>(kBatchWidth);
+        continue;
+      }
+      size_t missing_idx = 0;
+      while (missing_idx < missing_count &&
+             missing_ids[missing_idx] != beacon_id) {
+        ++missing_idx;
+      }
+      if (missing_idx == missing_count) {
+        missing_ids[missing_count++] = beacon_id;
+        stats.dist_calc_count++;
+      }
+      missing_slots[beacon_idx] = static_cast<uint8_t>(missing_idx);
+    }
+
+    std::array<int, kBatchWidth> missing_distances{};
+    bool used_batch = false;
+    if (missing_count >= 2) {
+      std::array<std::string_view, kBatchWidth> texts{};
+      for (size_t missing_idx = 0; missing_idx < missing_count;
+           ++missing_idx) {
+        texts[missing_idx] = view.sequences.sequence(
+            missing_ids[missing_idx]);
+      }
+      for (size_t lane = missing_count; lane < kBatchWidth; ++lane) {
+        texts[lane] = texts[missing_count - 1];
+      }
+      used_batch = compute_exact_query_distances_batch4(
+          query_seq.seq, texts, config_.distance_mode, missing_distances);
+    }
+    if (!used_batch) {
+      for (size_t missing_idx = 0; missing_idx < missing_count;
+           ++missing_idx) {
+        missing_distances[missing_idx] = compute_indexed_query_distance(
+            query_seq.seq,
+            view.sequences.sequence(missing_ids[missing_idx]),
+            missing_ids[missing_idx], 0, config_.distance_mode, true);
+      }
+    } else {
+      for (size_t missing_idx = 0; missing_idx < missing_count;
+           ++missing_idx) {
+        g_query_distance_cache.store(
+            missing_ids[missing_idx], missing_distances[missing_idx]);
+      }
+    }
+    for (size_t beacon_idx = 0; beacon_idx < beacon_count; ++beacon_idx) {
+      const uint8_t missing_idx = missing_slots[beacon_idx];
+      if (missing_idx < kBatchWidth) {
+        dists[beacon_idx] = missing_distances[missing_idx];
+      }
     }
   }
   if (config_.path_reuse_enabled) {
@@ -3914,6 +4022,15 @@ BioGeometrySearchEngine::search_adaptive(
     myers_context.query = query_seq.seq;
     myers_context.pattern = prepare_myers_pattern(query_seq.seq);
     if (myers_context.pattern.supported) {
+      if (index_.search_graph_view().sequences.reference_backed &&
+          myers_batch4_avx2_runtime_supported()) {
+        myers_context.batch_pattern.peq = myers_context.pattern.peq;
+        myers_context.batch_pattern.masks = myers_context.pattern.masks;
+        myers_context.batch_pattern.pattern_length = query_seq.seq.size();
+        myers_context.batch_pattern.block_count =
+            myers_context.pattern.block_count;
+        myers_context.batch_pattern.supported = true;
+      }
       active_myers_context = &myers_context;
     }
   }
