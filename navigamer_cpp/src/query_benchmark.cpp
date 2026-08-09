@@ -211,10 +211,6 @@ const BioSequence* sequence_pointer(
   return sequence.get();
 }
 
-const BioSequence* sequence_pointer(const BioSequence& sequence) {
-  return &sequence;
-}
-
 template <typename SequenceContainer>
 std::vector<std::string> exact_hit_ids(
     const std::string& query,
@@ -225,6 +221,19 @@ std::vector<std::string> exact_hit_ids(
     const BioSequence* sequence = sequence_pointer(stored);
     if (sequence && compute_distance(query, sequence->seq) <= tolerance) {
       ids.push_back(sequence->id);
+    }
+  }
+  return sorted_unique(std::move(ids));
+}
+
+std::vector<std::string> exact_hit_ids(
+    const std::string& query,
+    const SequenceStore& sequence_store,
+    int tolerance) {
+  std::vector<std::string> ids;
+  for (LeafId id = 0; id < sequence_store.size(); ++id) {
+    if (compute_distance(query, sequence_store.sequence(id)) <= tolerance) {
+      ids.push_back(sequence_store.identifier(id));
     }
   }
   return sorted_unique(std::move(ids));
@@ -699,6 +708,45 @@ std::vector<std::shared_ptr<BioSequence>> build_reference_windows(
   return out;
 }
 
+std::vector<std::string> benchmark_query_windows(
+    const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
+    int query_length) {
+  std::vector<std::string> windows;
+  for (const auto& sequence : index_sequences) {
+    if (!sequence || sequence->seq.size() < static_cast<size_t>(query_length)) {
+      throw std::invalid_argument("index sequences must be at least query length");
+    }
+    for (size_t start = 0;
+         start + static_cast<size_t>(query_length) <= sequence->seq.size();
+         ++start) {
+      windows.push_back(
+          sequence->seq.substr(start, static_cast<size_t>(query_length)));
+    }
+  }
+  return windows;
+}
+
+std::vector<std::string> benchmark_query_windows(
+    std::string_view reference, int window_length, int stride,
+    int query_length) {
+  if (window_length < query_length) {
+    throw std::invalid_argument("index windows must be at least query length");
+  }
+  std::vector<std::string> windows;
+  for (size_t window_start = 0;
+       window_start + static_cast<size_t>(window_length) <= reference.size();
+       window_start += static_cast<size_t>(stride)) {
+    for (size_t offset = 0;
+         offset + static_cast<size_t>(query_length) <=
+             static_cast<size_t>(window_length);
+         ++offset) {
+      windows.emplace_back(reference.substr(
+          window_start + offset, static_cast<size_t>(query_length)));
+    }
+  }
+  return windows;
+}
+
 std::vector<std::string> result_ids(
     const SearchResult& results,
     const SequenceStore& sequence_store) {
@@ -890,7 +938,7 @@ bool node_subtree_has_hit(
       const LeafId leaf_id =
           view.leaf_id(node_id, offset);
       if (leaf_id < view.sequences.size() &&
-          hit_ids.count(view.sequences[leaf_id].id)) {
+          hit_ids.count(view.sequences.identifier(leaf_id))) {
         memo[node_id] = true;
         return true;
       }
@@ -1165,10 +1213,10 @@ ProximalAnchorSetDiagnostics compute_proximal_anchor_set_diagnostics(
   return out;
 }
 
-template <typename SequenceContainer>
+template <typename ExactHitIds>
 std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries_impl(
-    const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
-    const SequenceContainer& unique_sequences,
+    std::vector<std::string> windows,
+    ExactHitIds&& exact_hits,
     int query_length,
     int tolerance,
     unsigned seed,
@@ -1178,20 +1226,8 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries_impl(
   if (queries_per_class == 0) {
     throw std::invalid_argument("queries per class must be positive");
   }
-  if (index_sequences.empty() || unique_sequences.empty()) {
+  if (windows.empty()) {
     throw std::invalid_argument("benchmark sequence sets must not be empty");
-  }
-
-  std::vector<std::string> windows;
-  for (const auto& sequence : index_sequences) {
-    if (!sequence || sequence->seq.size() < static_cast<size_t>(query_length)) {
-      throw std::invalid_argument("index sequences must be at least query length");
-    }
-    for (size_t start = 0;
-         start + static_cast<size_t>(query_length) <= sequence->seq.size();
-         ++start) {
-      windows.push_back(sequence->seq.substr(start, static_cast<size_t>(query_length)));
-    }
   }
 
   struct ClassifiedWindow {
@@ -1203,7 +1239,7 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries_impl(
   classified.reserve(windows.size());
   for (const auto& window : windows) {
     classified.push_back(
-        {window, exact_hit_ids(window, unique_sequences, tolerance),
+        {window, exact_hits(window),
          shannon_entropy(window)});
   }
 
@@ -1264,7 +1300,7 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries_impl(
               tolerance <= 0 ? 0 : attempt % (static_cast<size_t>(tolerance) + 1);
           candidate = mutate_substitutions(source, edit_count, generator);
         }
-        auto hit_ids = exact_hit_ids(candidate, unique_sequences, tolerance);
+        auto hit_ids = exact_hits(candidate);
         if (hit_ids.size() >= minimum_hits && hit_ids.size() <= maximum_hits) {
           append(kind, candidate, std::move(hit_ids));
           found = true;
@@ -1293,9 +1329,15 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
     int tolerance,
     unsigned seed,
     size_t queries_per_class) {
+  if (unique_sequences.empty()) {
+    throw std::invalid_argument("benchmark sequence sets must not be empty");
+  }
   return generate_benchmark_queries_impl(
-      index_sequences, unique_sequences, query_length, tolerance, seed,
-      queries_per_class);
+      benchmark_query_windows(index_sequences, query_length),
+      [&](const std::string& query) {
+        return exact_hit_ids(query, unique_sequences, tolerance);
+      },
+      query_length, tolerance, seed, queries_per_class);
 }
 
 std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
@@ -1305,9 +1347,31 @@ std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
     int tolerance,
     unsigned seed,
     size_t queries_per_class) {
+  if (unique_sequences.empty()) {
+    throw std::invalid_argument("benchmark sequence sets must not be empty");
+  }
   return generate_benchmark_queries_impl(
-      index_sequences, unique_sequences.records, query_length, tolerance, seed,
-      queries_per_class);
+      benchmark_query_windows(index_sequences, query_length),
+      [&](const std::string& query) {
+        return exact_hit_ids(query, unique_sequences, tolerance);
+      },
+      query_length, tolerance, seed, queries_per_class);
+}
+
+std::vector<GeneratedBenchmarkQuery> generate_reference_backed_benchmark_queries(
+    const SequenceStore& sequence_store, int window_length, int stride,
+    int query_length, int tolerance, unsigned seed, size_t queries_per_class) {
+  if (!sequence_store.reference_backed) {
+    throw std::invalid_argument(
+        "reference-backed benchmark queries require a reference-backed store");
+  }
+  return generate_benchmark_queries_impl(
+      benchmark_query_windows(
+          sequence_store.reference_view(), window_length, stride, query_length),
+      [&](const std::string& query) {
+        return exact_hit_ids(query, sequence_store, tolerance);
+      },
+      query_length, tolerance, seed, queries_per_class);
 }
 
 LocalityBenchmarkQuerySets generate_locality_benchmark_queries(
@@ -2471,8 +2535,7 @@ QueryBenchmarkRunResult run_query_benchmark(
   }
 
   omp_set_num_threads(config.threads);
-  auto [ref_id, loaded_reference] = load_reference(config.ref_input);
-  std::string reference = loaded_reference;
+  auto [ref_id, reference] = load_reference(config.ref_input);
   if (config.reference_subset_length > 0 &&
       reference.size() > config.reference_subset_length) {
     reference.resize(config.reference_subset_length);
@@ -2480,26 +2543,41 @@ QueryBenchmarkRunResult run_query_benchmark(
   if (reference.size() < static_cast<size_t>(config.window_length)) {
     throw std::invalid_argument("reference is shorter than benchmark window length");
   }
-  auto index_sequences = build_reference_windows(
-      ref_id, reference, config.window_length, config.stride);
-  if (index_sequences.empty()) {
-    throw std::runtime_error("query benchmark could not generate index windows");
-  }
+  const bool reference_is_acgt = std::all_of(
+      reference.begin(), reference.end(), [](char base) {
+        return base == 'A' || base == 'C' || base == 'G' || base == 'T';
+      });
+  std::vector<std::shared_ptr<BioSequence>> index_sequences;
 
   const MemorySnapshot before_build = memory_snapshot();
   const auto build_start = std::chrono::steady_clock::now();
   BioGeometryIndexBuilder builder(hierarchy, build_config);
-  builder.build(index_sequences);
+  if (reference_is_acgt) {
+    builder.build_reference_windows(
+        ref_id, std::move(reference), static_cast<size_t>(config.window_length),
+        static_cast<size_t>(config.stride));
+  } else {
+    index_sequences = build_reference_windows(
+        ref_id, reference, config.window_length, config.stride);
+    if (index_sequences.empty()) {
+      throw std::runtime_error("query benchmark could not generate index windows");
+    }
+    builder.build(index_sequences);
+  }
   const auto build_end = std::chrono::steady_clock::now();
   const double build_duration_ms =
       std::chrono::duration<double, std::milli>(build_end - build_start).count();
   const MemorySnapshot after_build = memory_snapshot();
   const auto build_stats = builder.get_statistics();
 
-  auto queries = generate_benchmark_queries(
-      index_sequences, builder.sequence_store(), config.query_length,
-      config.tolerance,
-      config.seed, config.queries_per_class);
+  auto queries = reference_is_acgt
+      ? generate_reference_backed_benchmark_queries(
+            builder.sequence_store(), config.window_length, config.stride,
+            config.query_length, config.tolerance, config.seed,
+            config.queries_per_class)
+      : generate_benchmark_queries(
+            index_sequences, builder.sequence_store(), config.query_length,
+            config.tolerance, config.seed, config.queries_per_class);
   if (optimized_search_config.path_reuse_enabled) {
     std::stable_sort(queries.begin(), queries.end(),
                      [](const GeneratedBenchmarkQuery& left,

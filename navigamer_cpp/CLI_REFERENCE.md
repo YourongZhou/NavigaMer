@@ -557,6 +557,10 @@ Builds one shared in-memory index, deterministically generates six query
 classes (`random_region`, `ordinary_region`, `low_complexity_region`,
 `no_hit`, `single_hit`, and `multi_hit`), and compares:
 
+For an A/C/G/T-only reference, the benchmark index uses the shared
+reference-backed leaf store rather than copied window strings. Inputs with
+ambiguous bases retain the generic path so their prior semantics are unchanged.
+
 - baseline: fixed `scan` MBB filtering, legacy `string` visited mode, the
   `original` compatibility label (same canonical array traversal), scalar MBB
   filtering, `dp` distance mode, search q-gram disabled, and `best-first`
