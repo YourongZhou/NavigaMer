@@ -241,7 +241,7 @@ quality-audit time only.
 | `src/main.cpp` | CLI entry points |
 | `include/experiment_utils.hpp`, `src/experiment_utils.cpp` | Radius-schedule helpers for layer/radius search-cost experiments |
 
-**Note:** Genomic coordinates in existing TSV paths are emitted from `BioSequence::ref_positions`. `map150 --locator refpos` uses the same scaffold locator, while `--locator seqan` is an optional build-time backend that fills `BioSequence::bwt_interval` as a suffix-array interval and uses that stored interval as the occurrence lookup handle during mapping.
+**Note:** Generic-read TSV paths emit genomic coordinates from `BioSequence::ref_positions`. `map150 --locator refpos` instead uses the reference-backed sequence store: leaves are `LeafId` values with representative/duplicate reference positions, so no individual 150-mer strings are retained. `--locator seqan` remains an optional build-time backend that fills `BioSequence::bwt_interval` as a suffix-array interval and uses that stored interval as the occurrence lookup handle during mapping.
 
 **Note:** `build` and `query` can persist and reuse an index with
 `--index <file>`. The binary file stores a manifest signature derived from input

@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace navigamer {
@@ -53,7 +54,7 @@ std::vector<std::shared_ptr<BioSequence>> build_map150_reference_windows(
 
 std::vector<Map150Result> map150_reads_with_locator(
     const std::string& ref_id,
-    const std::string& ref_seq,
+    std::string_view ref_seq,
     const std::vector<std::shared_ptr<BioSequence>>& reads,
     int tolerance,
     const std::string& mode,

@@ -2193,27 +2193,45 @@ void run_map150(const std::string& ref_input,
     throw std::runtime_error("map150 loaded no reads");
   }
 
-  auto index_seqs = build_map150_reference_windows(ref_id, ref_seq);
-  std::cerr << "map150: windows=" << index_seqs.size()
+  std::string normalized_ref =
+      normalize_acgt_sequence(ref_seq, "reference");
+  if (normalized_ref.size() < static_cast<size_t>(MAP150_READ_LEN)) {
+    throw std::runtime_error("map150 reference must be at least 150 bp");
+  }
+  const size_t window_count =
+      normalized_ref.size() - static_cast<size_t>(MAP150_READ_LEN) + 1;
+  std::cerr << "map150: windows=" << window_count
             << " reads=" << reads.size()
             << " tolerance=" << tolerance
             << " candidate_tolerance=" << map150_candidate_tolerance(tolerance)
             << " locator=" << locator_kind << "\n";
 
   BioGeometryIndexBuilder builder(config, range_config);
-  builder.build(std::move(index_seqs));
+  if (locator_kind == "refpos") {
+    builder.build_reference_windows(
+        ref_id, std::move(normalized_ref), MAP150_READ_LEN, 1);
+  } else if (locator_kind == "seqan") {
+    auto index_seqs = build_map150_reference_windows(ref_id, normalized_ref);
+    builder.build(std::move(index_seqs));
+  } else {
+    throw std::runtime_error("map150 --locator must be refpos or seqan");
+  }
 
   std::unique_ptr<OccurrenceLocator> locator;
   if (locator_kind == "refpos") {
     locator = std::make_unique<RefPositionLocator>();
   } else if (locator_kind == "seqan") {
-    locator = make_seqan_fm_locator(ref_id, normalize_acgt_sequence(ref_seq, "reference"), builder);
-  } else {
-    throw std::runtime_error("map150 --locator must be refpos or seqan");
+    locator = make_seqan_fm_locator(ref_id, normalized_ref, builder);
   }
 
+  std::string().swap(ref_seq);
+  const std::string_view mapping_reference =
+      builder.sequence_store().reference_backed
+          ? builder.sequence_store().reference_view()
+          : std::string_view(normalized_ref);
+
   auto results = map150_reads_with_locator(
-      ref_id, ref_seq, reads, tolerance, mode, config, *locator, builder,
+      ref_id, mapping_reference, reads, tolerance, mode, config, *locator, builder,
       search_config);
   auto rows = map150_results_to_tsv_rows(results);
   if (!out_tsv.empty()) {

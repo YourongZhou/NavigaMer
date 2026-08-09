@@ -531,7 +531,7 @@ Fixed-length mapper path for 150 bp reads. Builds an in-memory index from all fo
 | ---- | ------- | ----------- |
 | `--tolerance` | `2` | Final edit-distance threshold; the candidate search uses `2 * tolerance` |
 | `--mode` | `adaptive` | Currently only `adaptive` is accepted |
-| `--locator` | `refpos` | `refpos` uses stored reference-window positions; `seqan` requires optional SeqAn3 support |
+| `--locator` | `refpos` | `refpos` uses the shared reference-backed leaf-position store (no per-150-mer strings); `seqan` requires optional SeqAn3 support |
 | `--out` | *(required)* | Output TSV path; header is written even when there are no hits |
 
 Safety constraints: every read must be exactly 150 bp, reference and reads must contain only A/C/G/T, and the finest primary radius must be greater than `2 * tolerance`.
