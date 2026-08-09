@@ -1683,7 +1683,7 @@ void run_query_index_batch(const std::string& index_path,
     query_route_shard_ids.reserve(queries.size());
     std::vector<uint8_t> query_routed_bits(
         (queries.size() + 7) / 8, uint8_t{0});
-    std::vector<double> query_route_ms;
+    std::vector<float> query_route_ms;
     query_route_ms.reserve(queries.size());
     size_t routed_queries = 0;
     bool has_unrouted_query = false;
@@ -1695,10 +1695,10 @@ void run_query_index_batch(const std::string& index_path,
           query->seq, tolerance, &query_route_shard_ids);
       const auto route_end =
           std::chrono::high_resolution_clock::now();
-      query_route_ms.push_back(
+      query_route_ms.push_back(static_cast<float>(
           std::chrono::duration<double, std::milli>(
               route_end - route_start)
-              .count());
+              .count()));
       if (routed) {
         ++routed_queries;
         query_routed_bits[query_idx >> 3] |= static_cast<uint8_t>(
@@ -1821,6 +1821,9 @@ void run_query_index_batch(const std::string& index_path,
         engines.push_back(std::make_unique<BioGeometrySearchEngine>(
             shard.builder, search_config));
       }
+      std::vector<uint32_t> active_engine_ids;
+      std::vector<std::pair<SearchResult, SearchStats>> shard_results;
+      std::vector<std::exception_ptr> shard_errors;
       for (size_t query_idx = shard_batch.query_begin;
            query_idx < shard_batch.query_end; ++query_idx) {
       const auto& read = queries[query_idx];
@@ -1831,7 +1834,7 @@ void run_query_index_batch(const std::string& index_path,
       const size_t route_end = query_route_offsets[query_idx + 1];
       const size_t active_shard_count =
           route_enabled ? route_end - route_begin : engines.size();
-      std::vector<uint32_t> active_engine_ids(active_shard_count);
+      active_engine_ids.resize(active_shard_count);
       if (route_enabled) {
         for (size_t active_idx = 0; active_idx < active_shard_count;
              ++active_idx) {
@@ -1849,9 +1852,10 @@ void run_query_index_batch(const std::string& index_path,
                   uint32_t{0});
       }
       searched_shards += active_shard_count;
-      std::vector<std::pair<SearchResult, SearchStats>>
-          shard_results(active_shard_count);
-      std::vector<std::exception_ptr> shard_errors(active_shard_count);
+      shard_results.resize(active_shard_count);
+      shard_errors.resize(active_shard_count);
+      std::fill(shard_errors.begin(), shard_errors.end(),
+                std::exception_ptr{});
 #pragma omp parallel for schedule(static) if(active_shard_count > 1)
       for (size_t active_idx = 0;
            active_idx < active_shard_count; ++active_idx) {
