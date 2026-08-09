@@ -104,6 +104,10 @@ void assert_loaded_search_matches_built() {
          built.search_graph_view().node_records.bytes());
   assert(loaded.builder.search_graph_view().child_base_forward_delta_bytes ==
          built.search_graph_view().child_base_forward_delta_bytes);
+  assert(loaded.builder.search_graph_view().compact_child_base_blocks ==
+         built.search_graph_view().compact_child_base_blocks);
+  assert(loaded.builder.search_graph_view().child_base_block_bases ==
+         built.search_graph_view().child_base_block_bases);
   assert(loaded.builder.search_graph_view().implicit_child_mbb_widths ==
          built.search_graph_view().implicit_child_mbb_widths);
   assert(loaded.builder.search_graph_view().implicit_child_mbb_exception_bits ==
@@ -161,6 +165,7 @@ void assert_loaded_search_matches_built() {
   assert_mapped(loaded_view.center_id_block_deltas);
   assert_mapped(loaded_view.node_count_overflows);
   assert_mapped(loaded_view.child_id_base_deltas8);
+  assert_mapped(loaded_view.child_base_block_bases);
   assert_mapped(loaded_view.child_id_deltas16);
   assert_mapped(loaded_view.child_ids);
   assert_mapped(loaded_view.child_mbb_width_exceptions);
@@ -473,7 +478,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 57);
+  assert(loaded.manifest.format_version == 58);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);
@@ -637,6 +642,45 @@ std::string deterministic_dna(size_t length, uint32_t seed) {
   return sequence;
 }
 
+void assert_compact_child_base_blocks_round_trip() {
+  const std::string path = "/tmp/navigamer_test_compact_child_bases.navidx";
+  std::remove(path.c_str());
+  const std::string reference = deterministic_dna(10000, 0x91e10da5U);
+  constexpr size_t kWindowLength = 150;
+  navigamer::HierarchyConfig hierarchy({8, 4, 2});
+  navigamer::BuildRangeConfig build_config;
+  navigamer::BioGeometryIndexBuilder built(hierarchy, build_config);
+  built.build_reference_windows(
+      "compact_child_bases", reference, kWindowLength, 1);
+  const auto& built_view = built.search_graph_view();
+  assert(built_view.compact_child_base_blocks);
+  assert(!built_view.child_base_block_bases.empty());
+
+  auto manifest = navigamer::make_reference_window_index_manifest(
+      reference, reference.size(), static_cast<int>(kWindowLength), 1,
+      hierarchy, build_config);
+  navigamer::save_index(path, built, manifest);
+  const auto loaded = navigamer::load_index(path);
+  const auto& loaded_view = loaded.builder.search_graph_view();
+  assert(loaded_view.compact_child_base_blocks);
+  assert(loaded_view.child_base_block_bases ==
+         built_view.child_base_block_bases);
+  assert(loaded_view.child_id_base_deltas8 ==
+         built_view.child_id_base_deltas8);
+  for (navigamer::NodeId node_id = 0;
+       node_id < built_view.node_records.finest_node_begin();
+       ++node_id) {
+    assert(built_view.child_count(node_id) ==
+           loaded_view.child_count(node_id));
+    for (uint32_t child = 0;
+         child < built_view.child_count(node_id); ++child) {
+      assert(built_view.child_id(node_id, child) ==
+             loaded_view.child_id(node_id, child));
+    }
+  }
+  std::remove(path.c_str());
+}
+
 std::string sparse_reference(const std::vector<size_t>& positions) {
   constexpr size_t kWindowLength = 16;
   std::string reference(positions.back() + kWindowLength, 'N');
@@ -782,6 +826,7 @@ int main() {
   assert_multicontig_invalid_base_and_occurrence_round_trip();
   assert_reference_encoding_is_exact();
   assert_reference_position_encodings_are_exact();
+  assert_compact_child_base_blocks_round_trip();
   std::cout << "index persistence tests passed\n";
   return 0;
 }

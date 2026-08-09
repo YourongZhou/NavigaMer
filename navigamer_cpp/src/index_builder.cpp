@@ -2232,6 +2232,14 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
           ? static_cast<NodeId>(view.node_records.size())
           : view.layer_begin.back();
   if (!view.child_base_ids_valid(finest_begin)) return false;
+  if (view.compact_child_base_blocks &&
+      !view.implicit_contiguous_child_ranges) {
+    return false;
+  }
+  if (!view.compact_child_base_blocks &&
+      !view.child_base_block_bases.empty()) {
+    return false;
+  }
   if (!view.center_sequence_ids_valid()) {
     return false;
   }
@@ -5370,6 +5378,52 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   if (view.implicit_contiguous_child_ranges) {
     maximum_child_link_begin = 0;
   }
+  std::vector<NodeId> compact_child_base_block_bases;
+  bool compact_child_base_blocks =
+      view.implicit_contiguous_child_ranges && child_base_bytes > 1;
+  if (compact_child_base_blocks) {
+    const size_t non_finest_node_count =
+        primary_layers_.empty()
+            ? 0
+            : world_node_count_ - primary_layers_.back().size();
+    const size_t block_count =
+        (non_finest_node_count + SearchGraphView::CHILD_BASE_BLOCK_SIZE - 1) /
+        SearchGraphView::CHILD_BASE_BLOCK_SIZE;
+    compact_child_base_block_bases.assign(
+        block_count, std::numeric_limits<NodeId>::max());
+    std::vector<NodeId> block_maxima(block_count, 0);
+    for (NodeId node_id = 0; node_id < non_finest_node_count; ++node_id) {
+      const NodeId base = static_cast<NodeId>(
+          node_finalization_plans[node_id]);
+      const size_t block_idx =
+          node_id / SearchGraphView::CHILD_BASE_BLOCK_SIZE;
+      compact_child_base_block_bases[block_idx] = std::min(
+          compact_child_base_block_bases[block_idx], base);
+      block_maxima[block_idx] = std::max(block_maxima[block_idx], base);
+    }
+    for (size_t block_idx = 0; block_idx < block_count; ++block_idx) {
+      if (compact_child_base_block_bases[block_idx] ==
+              std::numeric_limits<NodeId>::max() ||
+          block_maxima[block_idx] - compact_child_base_block_bases[block_idx] >
+              std::numeric_limits<uint8_t>::max()) {
+        compact_child_base_blocks = false;
+        compact_child_base_block_bases.clear();
+        break;
+      }
+    }
+    const size_t compact_bytes =
+        non_finest_node_count + block_count * sizeof(NodeId);
+    const size_t ordinary_bytes = non_finest_node_count * child_base_bytes;
+    if (compact_bytes >= ordinary_bytes) {
+      compact_child_base_blocks = false;
+      compact_child_base_block_bases.clear();
+    }
+  }
+  view.compact_child_base_blocks = compact_child_base_blocks;
+  if (compact_child_base_blocks) {
+    view.child_base_block_bases.set_owned(
+        std::move(compact_child_base_block_bases));
+  }
   bool implicit_leaf_mbb_offsets =
       dense_leaf_mbb_ternary_ || matching_leaf_payload_starts;
   size_t expected_leaf_id_begin = 0;
@@ -5509,7 +5563,10 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         (static_cast<size_t>(non_finest_node_count) + 7) / 8,
         uint8_t{0});
   }
-  view.child_id_base_deltas8.reserve(total_child_base_deltas8_bytes);
+  view.child_id_base_deltas8.reserve(
+      view.compact_child_base_blocks
+          ? non_finest_node_count
+          : total_child_base_deltas8_bytes);
   view.child_id_deltas16.reserve(total_child_deltas16);
   view.child_ids.reserve(total_child_ids32);
   view.leaf_id_deltas8.reserve(total_leaf_deltas8);

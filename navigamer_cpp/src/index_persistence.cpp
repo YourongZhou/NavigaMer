@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 57) {
+  if (manifest.format_version != 58) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 57) {
+  if (manifest.format_version != 58) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -1088,6 +1088,9 @@ void write_search_graph_view(std::ostream& out,
   write_pod<uint8_t>(
       out, view.child_base_forward_delta_bytes);
   write_bool(out, view.implicit_contiguous_child_ranges);
+  write_bool(out, view.compact_child_base_blocks);
+  write_final_array(
+      out, view.child_base_block_bases, "child_base_block_bases");
   write_final_array(
       out, view.child_id_base_deltas8, "child_id_base_deltas8");
   write_final_array(
@@ -1181,6 +1184,11 @@ SearchGraphView read_search_graph_view(
       read_pod<uint8_t>(in, "child_base_forward_delta_bytes");
   view.implicit_contiguous_child_ranges =
       read_bool(in, "implicit_contiguous_child_ranges");
+  view.compact_child_base_blocks =
+      read_bool(in, "compact_child_base_blocks");
+  view.child_base_block_bases =
+      read_final_array<NodeId>(
+          in, mapping, "child_base_block_bases");
   view.child_id_base_deltas8 =
       read_final_array<uint8_t>(
           in, mapping, "child_id_base_deltas8");
@@ -1396,7 +1404,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 57;
+  stored.format_version = 58;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

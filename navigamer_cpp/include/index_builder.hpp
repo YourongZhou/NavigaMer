@@ -1556,6 +1556,12 @@ struct SearchGraphView {
   // Keeping the base adjacent to its payload preserves query locality while
   // avoiding the former 32-bit base in almost every parent segment.
   uint8_t child_base_forward_delta_bytes = 0;
+  // When every contiguous child range's base lies within one byte of its
+  // 32-node block minimum, keep that minimum once and retain one exact byte
+  // per node. This is only a representation change: child IDs remain exact.
+  static constexpr uint8_t CHILD_BASE_BLOCK_SIZE = 32;
+  bool compact_child_base_blocks = false;
+  FinalArray<NodeId> child_base_block_bases;
   // When every non-finest node in a shard has one exact consecutive child
   // range, their base prefixes are a fixed-width dense array.  The prefix for
   // node i is then at i * child_base_byte_count(), so node records need not
@@ -2118,14 +2124,22 @@ struct SearchGraphView {
 
   bool child_base_ids_valid(size_t non_finest_node_count) const {
     if (non_finest_node_count == 0) {
-      return child_base_forward_delta_bytes == 0;
+      return child_base_forward_delta_bytes == 0 &&
+             !compact_child_base_blocks && child_base_block_bases.empty();
     }
-    return child_base_forward_delta_bytes != 0 &&
-           child_base_forward_delta_bytes <= sizeof(NodeId);
+    if (child_base_forward_delta_bytes == 0 ||
+        child_base_forward_delta_bytes > sizeof(NodeId)) {
+      return false;
+    }
+    return !compact_child_base_blocks ||
+           (child_base_forward_delta_bytes > 1 &&
+            child_base_block_bases.size() ==
+                (non_finest_node_count + CHILD_BASE_BLOCK_SIZE - 1) /
+                    CHILD_BASE_BLOCK_SIZE);
   }
 
   size_t child_base_byte_count() const {
-    return child_base_forward_delta_bytes;
+    return compact_child_base_blocks ? 1 : child_base_forward_delta_bytes;
   }
 
   uint32_t child_begin(
@@ -2147,6 +2161,18 @@ struct SearchGraphView {
     if (bits == 0 || base <= node_id) {
       throw std::out_of_range("child base does not follow its parent");
     }
+    if (compact_child_base_blocks) {
+      const size_t block_idx = node_id / CHILD_BASE_BLOCK_SIZE;
+      if (block_idx >= child_base_block_bases.size() ||
+          base < child_base_block_bases[block_idx] ||
+          base - child_base_block_bases[block_idx] >
+              std::numeric_limits<uint8_t>::max()) {
+        throw std::length_error("child base exceeds compact block range");
+      }
+      child_id_base_deltas8.push_back(static_cast<uint8_t>(
+          base - child_base_block_bases[block_idx]));
+      return;
+    }
     const uint32_t delta = base - node_id - 1;
     const uint64_t mask =
         bits == 32 ? std::numeric_limits<uint32_t>::max()
@@ -2166,6 +2192,14 @@ struct SearchGraphView {
 #endif
   inline NodeId child_base_id(NodeId node_id, const uint8_t* segment,
                               size_t byte_count) const {
+    if (compact_child_base_blocks) {
+      const size_t block_idx = node_id / CHILD_BASE_BLOCK_SIZE;
+      if (byte_count != 1 || block_idx >= child_base_block_bases.size()) {
+        throw std::out_of_range("compact child base is outside block storage");
+      }
+      return static_cast<NodeId>(
+          child_base_block_bases[block_idx] + segment[0]);
+    }
     if (byte_count == 2) {
       uint16_t delta = 0;
       std::memcpy(&delta, segment, sizeof(delta));

@@ -1056,6 +1056,38 @@ void assert_dense_child_mbb_widths_are_exact() {
   assert(view.node_records.bytes().size() == 6);
 }
 
+void assert_compact_child_base_blocks_are_exact() {
+  const auto layout = navigamer::PackedWorldNodeLayout::compact(
+      0, 0, 1, false, true,
+      navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS, false,
+      true);
+  navigamer::SearchGraphView view;
+  view.node_records.initialize(3, layout, layout, 2);
+  view.layer_begin = {0, 2};
+  view.layer_end = {2, 3};
+  view.child_base_forward_delta_bytes = 2;
+  view.implicit_contiguous_child_ranges = true;
+  view.compact_child_base_blocks = true;
+  view.child_base_block_bases = {100};
+  view.append_child_base_id(0, 103);
+  view.append_child_base_id(1, 108);
+  for (uint32_t node_id = 0; node_id < 2; ++node_id) {
+    auto node = view.node_records[node_id];
+    node.set_packed_child_layout(
+        0, navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS);
+    node.set_link_storage(
+        navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    node.set_inline_counts(
+        1, 0, navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
+  }
+  assert(view.child_base_ids_valid(2));
+  assert(view.child_base_byte_count() == 1);
+  assert(view.child_id(0, 0) == 103);
+  assert(view.child_id(1, 0) == 108);
+  assert(view.packed_child_byte_count(0) == 1);
+  assert(view.packed_child_byte_count(1) == 1);
+}
+
 void assert_child_and_leaf_node_layouts_are_independent() {
   const auto child_layout = navigamer::PackedWorldNodeLayout::compact(
       1094080, 3657858, 1501);
@@ -1136,6 +1168,7 @@ int main() {
   assert_implicit_consecutive_leaf_ids_are_exact();
   assert_dense_beacon_patterns_are_exact();
   assert_dense_child_mbb_widths_are_exact();
+  assert_compact_child_base_blocks_are_exact();
   assert_child_and_leaf_node_layouts_are_independent();
   assert_all_beacon_begin_widths_are_exact();
   std::cout << "search graph view tests passed\n";
