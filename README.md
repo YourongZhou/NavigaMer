@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 61 stores an all-ACGT
+edit distance fits in one byte. Persisted format version 62 stores an all-ACGT
 shared reference in 2-bit form and restores one contiguous byte view per
 loaded shard, so edit-distance query kernels retain direct character access;
 references containing other IUPAC characters are kept losslessly as raw bytes.
@@ -74,6 +74,11 @@ When every non-leaf world uses one of at most 16 exact center-relative
 three-beacon patterns, the index stores one 4-bit pattern code per world and
 the shard-local pattern table, omitting both beacon payload offsets and the
 repeated three IDs.
+Shards with more than 16 patterns use the same exact representation whenever
+the pattern count fits in 16 bits and every center-relative delta fits in a
+signed 16-bit value: the pattern code uses only
+`ceil(log2(pattern_count))` bits and the shard-local table stores signed
+16-bit deltas. The common 4-bit/signed-byte query path is unchanged.
 For that same dense non-leaf layout, it stores the dominant MBB bit width once
 per shard and uses an exact one-bit-per-node map only for the alternate width.
 When the bases of 32 consecutive contiguous child ranges differ by at most
@@ -274,7 +279,7 @@ loads that persisted `.navidx` once and calls `navigamer query-index-batch`;
 without it, the bridge falls back to `navigamer benchmark` on reference windows.
 
 The C++ `build` and `query` commands support explicit persisted indexes with
-`--index <file>`. The v19 index file stores a manifest with input fingerprints
+`--index <file>`. The v62 index file stores a manifest with input fingerprints
 and construction parameters plus the canonical sequence, node, child, leaf,
 beacon, MBB, and leaf-beacon arrays. Older pointer-graph index files must be
 rebuilt. `query --index <file> --query <seq>` and
@@ -312,7 +317,7 @@ Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
 During a rebuild only the current group's atomic temporary pack exists; shard
-payloads are written directly into it, without per-shard temporary files. The final v16
+payloads are written directly into it, without per-shard temporary files. The final v17
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph

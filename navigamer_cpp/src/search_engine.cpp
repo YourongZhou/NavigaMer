@@ -1133,6 +1133,18 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
       measure_beacon(static_cast<LeafId>(
           static_cast<int64_t>(center_id) + deltas[offset]));
     }
+  } else if (view.wide_beacon_patterns &&
+             node_id < view.node_records.finest_node_begin()) {
+    const uint16_t code = view.wide_beacon_pattern_code(node_id);
+    if (beacon_count != 3 || code >= view.wide_beacon_pattern_count) {
+      throw std::runtime_error("wide beacon pattern is invalid");
+    }
+    const int16_t* deltas =
+        view.wide_beacon_pattern_deltas.data() + code * 3;
+    for (uint32_t offset = 0; offset < 3; ++offset) {
+      measure_beacon(static_cast<LeafId>(
+          static_cast<int64_t>(center_id) + deltas[offset]));
+    }
   } else {
     switch (node.beacon_storage()) {
     case WorldNodeRecord::BeaconStorage::Delta8: {

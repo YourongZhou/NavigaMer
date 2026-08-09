@@ -25,9 +25,9 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '4', '0'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '4', '1'};
 constexpr std::array<char, 8> kPayloadMagic = {
-    'N', 'G', 'P', 'A', 'Y', 'L', '0', '1'};
+    'N', 'G', 'P', 'A', 'Y', 'L', '0', '2'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 constexpr size_t kMappedArrayAlignment = 64;
 
@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 61) {
+  if (manifest.format_version != 62) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 61) {
+  if (manifest.format_version != 62) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -669,6 +669,12 @@ FinalArray<T> read_final_array(
 enum class PersistedReferenceEncoding : uint8_t {
   Raw = 0,
   Dna2 = 1,
+};
+
+enum class PersistedBeaconPatternMode : uint8_t {
+  None = 0,
+  Dense = 1,
+  Wide = 2,
 };
 
 bool reference_is_two_bit_dna(std::string_view reference) {
@@ -1114,10 +1120,25 @@ void write_search_graph_view(std::ostream& out,
   write_bool(out, view.implicit_consecutive_leaf_ids);
   write_pod<LeafId>(out, view.implicit_consecutive_leaf_radius);
   write_final_array(out, view.beacon_id_bytes, "beacon_id_bytes");
-  write_bool(out, view.dense_beacon_patterns);
-  write_pod<uint8_t>(out, view.dense_beacon_pattern_count);
-  for (int8_t delta : view.dense_beacon_pattern_deltas) {
-    write_pod<int8_t>(out, delta);
+  const auto beacon_pattern_mode = view.dense_beacon_patterns
+      ? PersistedBeaconPatternMode::Dense
+      : view.wide_beacon_patterns
+          ? PersistedBeaconPatternMode::Wide
+          : PersistedBeaconPatternMode::None;
+  write_pod<uint8_t>(out, static_cast<uint8_t>(beacon_pattern_mode));
+  if (beacon_pattern_mode == PersistedBeaconPatternMode::Dense) {
+    write_pod<uint8_t>(out, view.dense_beacon_pattern_count);
+    for (size_t idx = 0;
+         idx < static_cast<size_t>(view.dense_beacon_pattern_count) * 3;
+         ++idx) {
+      write_pod<int8_t>(out, view.dense_beacon_pattern_deltas[idx]);
+    }
+  } else if (beacon_pattern_mode == PersistedBeaconPatternMode::Wide) {
+    write_pod<uint16_t>(out, view.wide_beacon_pattern_count);
+    write_pod<uint8_t>(out, view.wide_beacon_pattern_bits);
+    write_final_array(
+        out, view.wide_beacon_pattern_deltas,
+        "wide_beacon_pattern_deltas");
   }
   write_pod<uint8_t>(out, view.beacon_delta_bits);
   write_pod<uint8_t>(out, view.beacon_begin_block_size);
@@ -1230,12 +1251,35 @@ SearchGraphView read_search_graph_view(
       read_pod<LeafId>(in, "implicit_consecutive_leaf_radius");
   view.beacon_id_bytes =
       read_final_array<uint8_t>(in, mapping, "beacon_id_bytes");
+  const auto beacon_pattern_mode = static_cast<PersistedBeaconPatternMode>(
+      read_pod<uint8_t>(in, "beacon_pattern_mode"));
   view.dense_beacon_patterns =
-      read_bool(in, "dense_beacon_patterns");
-  view.dense_beacon_pattern_count =
-      read_pod<uint8_t>(in, "dense_beacon_pattern_count");
-  for (int8_t& delta : view.dense_beacon_pattern_deltas) {
-    delta = read_pod<int8_t>(in, "dense_beacon_pattern_delta");
+      beacon_pattern_mode == PersistedBeaconPatternMode::Dense;
+  view.wide_beacon_patterns =
+      beacon_pattern_mode == PersistedBeaconPatternMode::Wide;
+  if (view.dense_beacon_patterns) {
+    view.dense_beacon_pattern_count =
+        read_pod<uint8_t>(in, "dense_beacon_pattern_count");
+    if (view.dense_beacon_pattern_count == 0 ||
+        view.dense_beacon_pattern_count > 16) {
+      throw std::runtime_error("dense beacon pattern count is invalid");
+    }
+    for (size_t idx = 0;
+         idx < static_cast<size_t>(view.dense_beacon_pattern_count) * 3;
+         ++idx) {
+      view.dense_beacon_pattern_deltas[idx] =
+          read_pod<int8_t>(in, "dense_beacon_pattern_delta");
+    }
+  } else if (view.wide_beacon_patterns) {
+    view.wide_beacon_pattern_count =
+        read_pod<uint16_t>(in, "wide_beacon_pattern_count");
+    view.wide_beacon_pattern_bits =
+        read_pod<uint8_t>(in, "wide_beacon_pattern_bits");
+    view.wide_beacon_pattern_deltas =
+        read_final_array<int16_t>(
+            in, mapping, "wide_beacon_pattern_deltas");
+  } else if (beacon_pattern_mode != PersistedBeaconPatternMode::None) {
+    throw std::runtime_error("beacon pattern mode is invalid");
   }
   view.beacon_delta_bits =
       read_pod<uint8_t>(in, "beacon_delta_bits");
@@ -1417,7 +1461,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 61;
+  stored.format_version = 62;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

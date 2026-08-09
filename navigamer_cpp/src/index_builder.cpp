@@ -2528,7 +2528,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
   const size_t non_finest_node_count =
       view.layer_begin.empty() ? 0 : view.layer_begin.back();
   if (view.implicit_child_mbb_widths) {
-    if (!view.dense_beacon_patterns ||
+    if (!view.has_beacon_patterns() ||
         !view.implicit_contiguous_child_ranges ||
         child_layout.implicit_child_mbb_bits == 0 ||
         child_layout.implicit_child_mbb_bits > 8 ||
@@ -2711,14 +2711,22 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
     }
     const uint32_t beacon_begin =
         is_finest ? 0 : view.beacon_begin(node_id);
-    if (view.dense_beacon_patterns && !is_finest) {
-      const uint8_t packed = view.beacon_id_bytes[node_id >> 1];
-      const uint8_t code = static_cast<uint8_t>(
-          (node_id & 1) == 0 ? packed & 0x0FU : packed >> 4);
+    if (view.has_beacon_patterns() && !is_finest) {
+      const uint16_t code =
+          view.dense_beacon_patterns
+              ? static_cast<uint16_t>(
+                    (node_id & 1) == 0
+                        ? view.beacon_id_bytes[node_id >> 1] & 0x0FU
+                        : view.beacon_id_bytes[node_id >> 1] >> 4)
+              : view.wide_beacon_pattern_code(node_id);
+      const uint16_t pattern_count =
+          view.dense_beacon_patterns
+              ? view.dense_beacon_pattern_count
+              : view.wide_beacon_pattern_count;
       if (node.beacon_storage() !=
               WorldNodeRecord::BeaconStorage::PackedDelta ||
           beacon_count != 3 || beacon_begin != 0 ||
-          code >= view.dense_beacon_pattern_count) {
+          code >= pattern_count) {
         return false;
       }
     } else {
@@ -2756,7 +2764,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
         (!view.interned_child_mbb_payloads &&
          expected_mbb_begin > view.child_beacon_dists.size()) ||
         expected_leaf_beacon_begin > view.leaf_beacon_dists.size() ||
-        (!view.dense_beacon_patterns &&
+        (!view.has_beacon_patterns() &&
          expected_beacon_payload_begin > view.beacon_id_bytes.size())) {
       return false;
     }
@@ -2781,9 +2789,10 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       (!view.interned_child_mbb_payloads &&
        expected_mbb_begin != view.child_beacon_dists.size()) ||
       expected_leaf_beacon_begin != view.leaf_beacon_dists.size() ||
-      (view.dense_beacon_patterns
+      (view.has_beacon_patterns()
            ? view.beacon_id_bytes.size() !=
-                 (static_cast<size_t>(view.layer_begin.back()) + 1) / 2
+                 view.beacon_pattern_code_byte_count(
+                     view.layer_begin.back())
            : expected_beacon_payload_begin != view.beacon_id_bytes.size())) {
     return false;
   }
@@ -4897,74 +4906,122 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         }
         return storage;
       };
-  bool dense_beacon_patterns =
+  bool beacon_patterns_available =
       !primary_layers_.empty() && primary_layers_.back().size() <
                                       world_node_count_;
-  uint8_t dense_beacon_pattern_count = 0;
-  std::array<int8_t, 16 * 3> dense_beacon_pattern_deltas{};
+  bool beacon_patterns_fit_int8 = true;
+  std::vector<std::array<int16_t, 3>> beacon_patterns;
+  std::unordered_map<uint64_t, uint16_t> beacon_pattern_codes;
+  beacon_pattern_codes.reserve(std::min<size_t>(
+      primary_layers_.empty()
+          ? 0
+          : world_node_count_ - primary_layers_.back().size(),
+      256));
+  const auto beacon_pattern_key = [](const std::array<int16_t, 3>& pattern) {
+    return static_cast<uint64_t>(static_cast<uint16_t>(pattern[0])) |
+           (static_cast<uint64_t>(static_cast<uint16_t>(pattern[1])) << 16) |
+           (static_cast<uint64_t>(static_cast<uint16_t>(pattern[2])) << 32);
+  };
   for (size_t layer_idx = 0;
-       dense_beacon_patterns && layer_idx + 1 < primary_layers_.size();
+       beacon_patterns_available &&
+           layer_idx + 1 < primary_layers_.size();
        ++layer_idx) {
     for (NodeId node_id : primary_layers_[layer_idx]) {
       const auto& node = build_nodes_[node_id];
       const auto& beacon_ids =
           build_node_geometry_[node.geometry_index].beacon_ids;
       if (beacon_ids.size() != 3) {
-        dense_beacon_patterns = false;
+        beacon_patterns_available = false;
         break;
       }
-      std::array<int8_t, 3> deltas{};
+      std::array<int16_t, 3> deltas{};
       for (size_t offset = 0; offset < deltas.size(); ++offset) {
         const int64_t delta =
             static_cast<int64_t>(beacon_ids[offset]) -
             node.center_sequence_id;
-        if (delta < std::numeric_limits<int8_t>::min() ||
-            delta > std::numeric_limits<int8_t>::max()) {
-          dense_beacon_patterns = false;
+        if (delta < std::numeric_limits<int16_t>::min() ||
+            delta > std::numeric_limits<int16_t>::max()) {
+          beacon_patterns_available = false;
           break;
         }
-        deltas[offset] = static_cast<int8_t>(delta);
+        beacon_patterns_fit_int8 =
+            beacon_patterns_fit_int8 &&
+            delta >= std::numeric_limits<int8_t>::min() &&
+            delta <= std::numeric_limits<int8_t>::max();
+        deltas[offset] = static_cast<int16_t>(delta);
       }
-      if (!dense_beacon_patterns) break;
-      uint8_t code = 0;
-      while (code < dense_beacon_pattern_count &&
-             !std::equal(deltas.begin(), deltas.end(),
-                         dense_beacon_pattern_deltas.begin() + code * 3)) {
-        ++code;
-      }
-      if (code == dense_beacon_pattern_count) {
-        if (dense_beacon_pattern_count == 16) {
-          dense_beacon_patterns = false;
+      if (!beacon_patterns_available) break;
+      const uint64_t pattern_key = beacon_pattern_key(deltas);
+      if (beacon_pattern_codes.find(pattern_key) ==
+          beacon_pattern_codes.end()) {
+        if (beacon_patterns.size() ==
+            std::numeric_limits<uint16_t>::max()) {
+          beacon_patterns_available = false;
           break;
         }
-        std::copy(deltas.begin(), deltas.end(),
-                  dense_beacon_pattern_deltas.begin() + code * 3);
-        ++dense_beacon_pattern_count;
+        beacon_pattern_codes.emplace(
+            pattern_key, static_cast<uint16_t>(beacon_patterns.size()));
+        beacon_patterns.push_back(deltas);
       }
     }
   }
-  const auto dense_beacon_pattern_code =
+  const bool dense_beacon_patterns =
+      beacon_patterns_available && beacon_patterns_fit_int8 &&
+      beacon_patterns.size() <= 16;
+  const bool wide_beacon_patterns =
+      beacon_patterns_available && !dense_beacon_patterns;
+  const uint8_t dense_beacon_pattern_count =
+      dense_beacon_patterns
+          ? static_cast<uint8_t>(beacon_patterns.size())
+          : 0;
+  std::array<int8_t, 16 * 3> dense_beacon_pattern_deltas{};
+  if (dense_beacon_patterns) {
+    for (size_t code = 0; code < beacon_patterns.size(); ++code) {
+      for (size_t offset = 0; offset < 3; ++offset) {
+        dense_beacon_pattern_deltas[code * 3 + offset] =
+            static_cast<int8_t>(beacon_patterns[code][offset]);
+      }
+    }
+  }
+  const uint16_t wide_beacon_pattern_count =
+      wide_beacon_patterns
+          ? static_cast<uint16_t>(beacon_patterns.size())
+          : 0;
+  const uint8_t wide_beacon_pattern_bits =
+      wide_beacon_patterns
+          ? PackedWorldNodeLayout::bits_for_value(
+                wide_beacon_pattern_count - 1)
+          : 0;
+  std::vector<int16_t> wide_beacon_pattern_deltas;
+  if (wide_beacon_patterns) {
+    wide_beacon_pattern_deltas.reserve(beacon_patterns.size() * 3);
+    for (const auto& pattern : beacon_patterns) {
+      wide_beacon_pattern_deltas.insert(
+          wide_beacon_pattern_deltas.end(),
+          pattern.begin(), pattern.end());
+    }
+  }
+  const auto beacon_pattern_code =
       [&](LeafId center, BuildArrayView<LeafId> beacon_ids) {
-        if (!dense_beacon_patterns || beacon_ids.size() != 3) {
-          throw std::logic_error("dense beacon pattern is unavailable");
+        if (!beacon_patterns_available || beacon_ids.size() != 3) {
+          throw std::logic_error("beacon pattern is unavailable");
         }
-        std::array<int8_t, 3> deltas{};
+        std::array<int16_t, 3> deltas{};
         for (size_t offset = 0; offset < deltas.size(); ++offset) {
           const int64_t delta =
               static_cast<int64_t>(beacon_ids[offset]) - center;
-          if (delta < std::numeric_limits<int8_t>::min() ||
-              delta > std::numeric_limits<int8_t>::max()) {
-            throw std::runtime_error("dense beacon delta is out of range");
+          if (delta < std::numeric_limits<int16_t>::min() ||
+              delta > std::numeric_limits<int16_t>::max()) {
+            throw std::runtime_error("beacon delta is out of range");
           }
-          deltas[offset] = static_cast<int8_t>(delta);
+          deltas[offset] = static_cast<int16_t>(delta);
         }
-        for (uint8_t code = 0; code < dense_beacon_pattern_count; ++code) {
-          if (std::equal(deltas.begin(), deltas.end(),
-                         dense_beacon_pattern_deltas.begin() + code * 3)) {
-            return code;
-          }
+        const auto found = beacon_pattern_codes.find(
+            beacon_pattern_key(deltas));
+        if (found != beacon_pattern_codes.end()) {
+          return found->second;
         }
-        throw std::runtime_error("dense beacon pattern is missing");
+        throw std::runtime_error("beacon pattern is missing");
       };
   struct ChildStorageChoice {
     WorldNodeRecord::LinkStorage storage =
@@ -5200,6 +5257,11 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   view.dense_beacon_patterns = dense_beacon_patterns;
   view.dense_beacon_pattern_count = dense_beacon_pattern_count;
   view.dense_beacon_pattern_deltas = dense_beacon_pattern_deltas;
+  view.wide_beacon_patterns = wide_beacon_patterns;
+  view.wide_beacon_pattern_count = wide_beacon_pattern_count;
+  view.wide_beacon_pattern_bits = wide_beacon_pattern_bits;
+  view.wide_beacon_pattern_deltas.set_owned(
+      std::move(wide_beacon_pattern_deltas));
   view.implicit_contiguous_child_ranges = implicit_contiguous_child_ranges;
   view.implicit_consecutive_leaf_ids = implicit_consecutive_leaf_ids;
   view.implicit_consecutive_leaf_radius = implicit_consecutive_leaf_radius_;
@@ -5422,7 +5484,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
         maximum_child_mbb_begin = std::max<uint64_t>(
             maximum_child_mbb_begin, total_mbb_bytes);
         total_mbb_bytes += geometry.link_beacon_dists.size();
-        if (!dense_beacon_patterns) {
+        if (!beacon_patterns_available) {
           const auto beacon_storage =
               beacon_storage_for(
                   node.center_sequence_id, geometry.beacon_ids);
@@ -5459,9 +5521,13 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
             : PackedWorldNodeLayout::bits_for_value(maximum_block_delta);
   }
 
-  if (dense_beacon_patterns) {
-    total_beacon_id_bytes =
-        (static_cast<size_t>(finest_node_begin) + 1) / 2;
+  if (beacon_patterns_available) {
+    total_beacon_id_bytes = dense_beacon_patterns
+        ? (static_cast<size_t>(finest_node_begin) + 1) / 2
+        : (static_cast<size_t>(finest_node_begin) *
+                   wide_beacon_pattern_bits +
+               7) /
+              8;
     maximum_beacon_begin = 0;
     maximum_beacon_block_delta = 0;
   }
@@ -5471,7 +5537,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   for (uint8_t candidate_block_size : {uint8_t{2}, uint8_t{4},
                                        uint8_t{8}, uint8_t{16},
                                        uint8_t{32}}) {
-    if (dense_beacon_patterns) break;
+    if (beacon_patterns_available) break;
     size_t payload_bytes = 0;
     uint64_t maximum_begin = 0;
     uint64_t maximum_delta = 0;
@@ -5685,7 +5751,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     }
   }
   bool implicit_child_mbb_widths =
-      view.dense_beacon_patterns && implicit_contiguous_child_ranges &&
+      view.has_beacon_patterns() && implicit_contiguous_child_ranges &&
       implicit_child_mbb_bits != 0;
   if (implicit_child_mbb_widths) {
     for (uint8_t bits = 1; bits <= 8; ++bits) {
@@ -5930,7 +5996,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   view.initialize_beacon_begins(
       non_finest_node_count, maximum_beacon_begin,
       maximum_beacon_block_delta, beacon_begin_block_size);
-  if (view.dense_beacon_patterns) {
+  if (view.has_beacon_patterns()) {
     view.beacon_id_bytes.assign(total_beacon_id_bytes, uint8_t{0});
   } else {
     view.beacon_id_bytes.reserve(total_beacon_id_bytes);
@@ -6189,18 +6255,36 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           WorldNodeRecord::BeaconStorage::ImplicitCenter;
       uint32_t beacon_count = 1;
       if (!is_finest) {
-        storage = view.dense_beacon_patterns
+        storage = view.has_beacon_patterns()
                       ? WorldNodeRecord::BeaconStorage::PackedDelta
                       : beacon_storage_for(
                             node.center_sequence_id, geometry.beacon_ids);
         beacon_count =
             to_u32(geometry.beacon_ids.size(), "beacons");
-        if (view.dense_beacon_patterns) {
-          const uint8_t code = dense_beacon_pattern_code(
+        if (view.has_beacon_patterns()) {
+          const uint16_t code = beacon_pattern_code(
               node.center_sequence_id, geometry.beacon_ids);
-          uint8_t& packed = view.beacon_id_bytes[node_id >> 1];
-          packed |= static_cast<uint8_t>(
-              (node_id & 1) == 0 ? code : code << 4);
+          if (view.dense_beacon_patterns) {
+            uint8_t& packed = view.beacon_id_bytes[node_id >> 1];
+            packed |= static_cast<uint8_t>(
+                (node_id & 1) == 0 ? code : code << 4);
+          } else {
+            const uint32_t bits = view.wide_beacon_pattern_bits;
+            const size_t bit_offset = static_cast<size_t>(node_id) * bits;
+            const size_t byte_offset = bit_offset >> 3;
+            const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+            const uint32_t shifted = static_cast<uint32_t>(code) << shift;
+            view.beacon_id_bytes[byte_offset] |=
+                static_cast<uint8_t>(shifted);
+            if (shift + bits > 8) {
+              view.beacon_id_bytes[byte_offset + 1] |=
+                  static_cast<uint8_t>(shifted >> 8);
+            }
+            if (shift + bits > 16) {
+              view.beacon_id_bytes[byte_offset + 2] |=
+                  static_cast<uint8_t>(shifted >> 16);
+            }
+          }
         } else {
           const uint32_t beacon_begin =
               to_u32(view.beacon_id_bytes.size(), "beacon_id_bytes");

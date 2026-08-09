@@ -1721,6 +1721,13 @@ struct SearchGraphView {
   bool dense_beacon_patterns = false;
   uint8_t dense_beacon_pattern_count = 0;
   std::array<int8_t, 16 * 3> dense_beacon_pattern_deltas{};
+  // Shards that exceed either the 16-pattern or signed-byte limit retain the
+  // same O(1) pattern lookup with minimum-width codes and signed-16 deltas.
+  // The common dense mode above remains unchanged on its hot path.
+  bool wide_beacon_patterns = false;
+  uint16_t wide_beacon_pattern_count = 0;
+  uint8_t wide_beacon_pattern_bits = 0;
+  FinalArray<int16_t> wide_beacon_pattern_deltas;
   // A dense child layout fixes the common MBB width in the shared node layout;
   // this bit map marks exact nodes that use the one alternate width.
   bool implicit_child_mbb_widths = false;
@@ -1747,6 +1754,37 @@ struct SearchGraphView {
   // enabling this representation.
   bool implicit_shift_leaf_mbb = false;
   FinalArray<uint8_t> leaf_beacon_dists;
+
+  bool has_beacon_patterns() const {
+    return dense_beacon_patterns || wide_beacon_patterns;
+  }
+
+  size_t beacon_pattern_code_byte_count(size_t node_count) const {
+    if (dense_beacon_patterns) return (node_count + 1) / 2;
+    if (wide_beacon_patterns) {
+      return (node_count * wide_beacon_pattern_bits + 7) / 8;
+    }
+    return 0;
+  }
+
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((always_inline))
+#endif
+  inline uint16_t wide_beacon_pattern_code(NodeId node_id) const {
+    const uint32_t bits = wide_beacon_pattern_bits;
+    const size_t bit_offset = static_cast<size_t>(node_id) * bits;
+    const size_t byte_offset = bit_offset >> 3;
+    const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+    uint32_t word = beacon_id_bytes[byte_offset];
+    if (shift + bits > 8) {
+      word |= static_cast<uint32_t>(beacon_id_bytes[byte_offset + 1]) << 8;
+    }
+    if (shift + bits > 16) {
+      word |= static_cast<uint32_t>(beacon_id_bytes[byte_offset + 2]) << 16;
+    }
+    const uint32_t mask = (uint32_t{1} << bits) - 1;
+    return static_cast<uint16_t>((word >> shift) & mask);
+  }
 
   void initialize_leaf_link_begin_blocks(size_t finest_node_count) {
     if (finest_node_count == 0) {
@@ -1820,7 +1858,7 @@ struct SearchGraphView {
     beacon_begin_block_size = block_size;
     beacon_begin_base_bits = 0;
     beacon_begin_delta_bits = 0;
-    if (dense_beacon_patterns) {
+    if (has_beacon_patterns()) {
       beacon_begin_blocks.clear();
       return;
     }
@@ -1849,12 +1887,39 @@ struct SearchGraphView {
   bool beacon_begins_valid(size_t non_finest_node_count) const {
     if (dense_beacon_patterns) {
       return non_finest_node_count != 0 &&
+             !wide_beacon_patterns &&
              dense_beacon_pattern_count != 0 &&
              dense_beacon_pattern_count <= 16 &&
+             wide_beacon_pattern_count == 0 &&
+             wide_beacon_pattern_bits == 0 &&
+             wide_beacon_pattern_deltas.empty() &&
              beacon_begin_base_bits == 0 && beacon_begin_delta_bits == 0 &&
              beacon_begin_blocks.empty() &&
              beacon_id_bytes.size() ==
-                 (non_finest_node_count + 1) / 2;
+                 beacon_pattern_code_byte_count(non_finest_node_count);
+    }
+    if (wide_beacon_patterns) {
+      const uint8_t expected_bits =
+          wide_beacon_pattern_count == 0
+              ? 0
+              : PackedWorldNodeLayout::bits_for_value(
+                    wide_beacon_pattern_count - 1);
+      return non_finest_node_count != 0 &&
+             dense_beacon_pattern_count == 0 &&
+             wide_beacon_pattern_count != 0 &&
+             wide_beacon_pattern_bits == expected_bits &&
+             wide_beacon_pattern_bits <= 16 &&
+             wide_beacon_pattern_deltas.size() ==
+                 static_cast<size_t>(wide_beacon_pattern_count) * 3 &&
+             beacon_begin_base_bits == 0 && beacon_begin_delta_bits == 0 &&
+             beacon_begin_blocks.empty() &&
+             beacon_id_bytes.size() ==
+                 beacon_pattern_code_byte_count(non_finest_node_count);
+    }
+    if (dense_beacon_pattern_count != 0 ||
+        wide_beacon_pattern_count != 0 || wide_beacon_pattern_bits != 0 ||
+        !wide_beacon_pattern_deltas.empty()) {
+      return false;
     }
     if (non_finest_node_count == 0) {
       return beacon_begin_block_size >= 2 &&
@@ -1886,8 +1951,8 @@ struct SearchGraphView {
 
   void set_beacon_begin(
       NodeId node_id, uint32_t begin, uint32_t block_base) {
-    if (dense_beacon_patterns) {
-      throw std::logic_error("dense beacon patterns have no begin offsets");
+    if (has_beacon_patterns()) {
+      throw std::logic_error("beacon patterns have no begin offsets");
     }
     if (beacon_begin_base_bits == 0 || beacon_begin_base_bits > 32 ||
         beacon_begin_delta_bits == 0 || beacon_begin_delta_bits > 32 ||
@@ -1939,7 +2004,7 @@ struct SearchGraphView {
   __attribute__((always_inline))
 #endif
   inline uint32_t beacon_begin(NodeId node_id) const {
-    if (dense_beacon_patterns) return 0;
+    if (has_beacon_patterns()) return 0;
     const size_t record_bits =
         beacon_begin_base_bits +
         (beacon_begin_block_size - 1) * beacon_begin_delta_bits;
@@ -3172,20 +3237,29 @@ struct SearchGraphView {
   LeafId beacon_sequence_id(
       NodeId node_id, const PackedWorldNodeRecordRef& node,
       LeafId center, uint32_t beacon_offset) const {
-    if (dense_beacon_patterns &&
+    if (has_beacon_patterns() &&
         node_id < node_records.finest_node_begin()) {
       if (beacon_offset >= 3) {
-        throw std::out_of_range("dense beacon pattern offset is invalid");
+        throw std::out_of_range("beacon pattern offset is invalid");
       }
-      const uint8_t packed = beacon_id_bytes[node_id >> 1];
-      const uint8_t code = static_cast<uint8_t>(
-          (node_id & 1) == 0 ? packed & 0x0FU : packed >> 4);
-      if (code >= dense_beacon_pattern_count) {
-        throw std::runtime_error("dense beacon pattern code is invalid");
+      if (dense_beacon_patterns) {
+        const uint8_t packed = beacon_id_bytes[node_id >> 1];
+        const uint8_t code = static_cast<uint8_t>(
+            (node_id & 1) == 0 ? packed & 0x0FU : packed >> 4);
+        if (code >= dense_beacon_pattern_count) {
+          throw std::runtime_error("dense beacon pattern code is invalid");
+        }
+        return static_cast<LeafId>(
+            static_cast<int64_t>(center) +
+            dense_beacon_pattern_deltas[code * 3 + beacon_offset]);
+      }
+      const uint16_t code = wide_beacon_pattern_code(node_id);
+      if (code >= wide_beacon_pattern_count) {
+        throw std::runtime_error("wide beacon pattern code is invalid");
       }
       return static_cast<LeafId>(
           static_cast<int64_t>(center) +
-          dense_beacon_pattern_deltas[code * 3 + beacon_offset]);
+          wide_beacon_pattern_deltas[code * 3 + beacon_offset]);
     }
     const uint32_t beacon_begin =
         node.beacon_storage() ==

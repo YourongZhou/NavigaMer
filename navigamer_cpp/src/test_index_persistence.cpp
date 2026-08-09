@@ -132,6 +132,14 @@ void assert_loaded_search_matches_built() {
          built.search_graph_view().dense_beacon_pattern_count);
   assert(loaded.builder.search_graph_view().dense_beacon_pattern_deltas ==
          built.search_graph_view().dense_beacon_pattern_deltas);
+  assert(loaded.builder.search_graph_view().wide_beacon_patterns ==
+         built.search_graph_view().wide_beacon_patterns);
+  assert(loaded.builder.search_graph_view().wide_beacon_pattern_count ==
+         built.search_graph_view().wide_beacon_pattern_count);
+  assert(loaded.builder.search_graph_view().wide_beacon_pattern_bits ==
+         built.search_graph_view().wide_beacon_pattern_bits);
+  assert(loaded.builder.search_graph_view().wide_beacon_pattern_deltas ==
+         built.search_graph_view().wide_beacon_pattern_deltas);
   assert(loaded.builder.search_graph_view().dense_leaf_mbb_ternary ==
          built.search_graph_view().dense_leaf_mbb_ternary);
   assert(loaded.builder.search_graph_view().dense_leaf_mbb_values ==
@@ -486,7 +494,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 61);
+  assert(loaded.manifest.format_version == 62);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

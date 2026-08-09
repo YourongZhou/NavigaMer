@@ -122,10 +122,10 @@ class PackedCodeDeltaReader {
   PackedCodeDeltaReader(
       const ShardedSeedRouter& router, size_t payload_offset,
       size_t payload_size, uint8_t width)
-      : width_(width),
-        mask_(width == 32
+      : mask_(width == 32
                   ? UINT32_MAX
-                  : ((uint64_t{1} << width) - 1)) {
+                  : ((uint64_t{1} << width) - 1)),
+        width_(width) {
     if (width == 0 || width > 32 ||
         payload_offset > router.packed_minimizer_code_deltas.size() ||
         payload_size >
