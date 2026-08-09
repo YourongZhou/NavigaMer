@@ -168,8 +168,9 @@ contig. Valid completed packs are reused on restart, damaged packs are rebuilt
 as one atomic group, and payloads are written directly into that group's
 temporary pack without per-shard temporary files. The automatic policy keeps one part
 below 8 OpenMP threads, builds two parts at 8--15 threads, and for the default
-small (at most 16,384-window) parts builds up to 16 parts with at least four
-threads each; larger parts stay capped at four concurrent builders. Use
+small parts build up to 20 parts at the recommended at-most-8,192-window size,
+or up to 16 parts through 16,384 windows, with at least four threads each;
+larger parts stay capped at four concurrent builders. Use
 `--shard-build-jobs N` to cap concurrent builders and their
 aggregate memory; nested teams remain inside the original OpenMP thread
 budget.
