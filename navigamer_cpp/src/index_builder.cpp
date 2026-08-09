@@ -1261,6 +1261,21 @@ class Phase1CoverGroupIndex {
 
     const int min_seed_len = config.range_join.min_seed_len;
     const int max_seed_len = config.range_join.max_seed_len;
+    // The fixed-layout index can only use a seed that survives the largest
+    // radius requested for this cover group. If that pigeonhole block is
+    // shorter than the configured minimum, IncrementalPigeonholeIndex::query
+    // would unconditionally return an unsafe result. Avoid constructing and
+    // synchronising an index which cannot emit a candidate.
+    const size_t maximum_block_count =
+        static_cast<size_t>(maximum_radius) + 1;
+    if (maximum_block_count > sequence.size() ||
+        sequence.size() / maximum_block_count <
+            static_cast<size_t>(min_seed_len)) {
+      result.source = Phase1CoverSource::FallbackScan;
+      result.fallback_scan = true;
+      result.pigeonhole_fallbacks = 1;
+      return result;
+    }
     if (!seed_index_ || seed_min_len_ != min_seed_len ||
         seed_max_len_ != max_seed_len ||
         seed_query_length_ != sequence.size() ||
