@@ -322,10 +322,10 @@ are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
 descriptor per logical shard in memory.
 Multi-part bundles with
-windows of at least 25 bases also store a memory-mapped `.route` sidecar of
+windows of at least 24 bases also store a memory-mapped `.route` sidecar of
 exact 16-mer minimizers. Minimizers use a 32-bit array and parallel shard IDs
 use exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
-25- to 64-base seed is taken from each of `d + 1` disjoint query blocks; only
+24- to 64-base seed is taken from each of `d + 1` disjoint query blocks; only
 shards containing at least one seed minimizer are searched. This is a pigeonhole
 necessary condition for an exact edit-distance hit. Unsupported
 short/ambiguous queries or an unavailable

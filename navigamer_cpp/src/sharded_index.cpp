@@ -46,10 +46,10 @@ constexpr size_t kRouterHeaderBytes = 80;
 constexpr std::streamoff kRouterCodePayloadSizeOffset = 60;
 constexpr std::streamoff kRouterChecksumOffset = 68;
 constexpr uint32_t kRouterK = 16;
-// A 150 bp query at d=5 has six 25 bp pigeonhole blocks.  Keeping the
-// router window at this exact floor makes that common lossless routing case
-// available without materializing every k-mer in the reference.
-constexpr uint32_t kRouterWindow = 25;
+// A 150 bp reference hit at d=5 can lose five bases, leaving six 24 bp
+// pigeonhole blocks. Keeping the router window at this exact floor routes
+// those lossless indel cases without materializing every k-mer in reference.
+constexpr uint32_t kRouterWindow = 24;
 constexpr uint32_t kRouterCodeBlockSize = 16;
 constexpr uint32_t kRouterCodeBlocksPerGroup = 4;
 constexpr uint64_t kMaxShardCount =
