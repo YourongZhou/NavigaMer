@@ -89,6 +89,9 @@ struct BuildRangeConfig {
   bool phase2_qgram_postfilter = false;
   bool leaf_qgram_postfilter = false;
   int progress_interval_seconds = 600;
+  // Sharded construction disables diagnostics for its internal part builders;
+  // the outer command still reports the completed shard index.
+  bool emit_build_output = true;
 };
 
 // Build-time owned vector that can become a read-only view into a persisted

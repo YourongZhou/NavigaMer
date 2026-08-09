@@ -4525,8 +4525,11 @@ void BioGeometryIndexBuilder::attach_leaves(
   stats_.leaf_attachments_added = total_links;
   double avg_links =
       finest_layer.empty() ? 0.0 : static_cast<double>(total_links) / finest_layer.size();
-  std::cerr << "    Attached " << total_links << " leaf links to finest primary layer"
-            << " (avg " << avg_links << " per node)\n";
+  if (range_config_.emit_build_output) {
+    std::cerr << "    Attached " << total_links
+              << " leaf links to finest primary layer"
+              << " (avg " << avg_links << " per node)\n";
+  }
   if (progress) progress->finish_phase();
 }
 
@@ -6340,6 +6343,8 @@ void BioGeometryIndexBuilder::build_impl(
     }
   }
   BuildProgressReporter progress(range_config_.progress_interval_seconds);
+  BuildProgressReporter* progress_ptr =
+      range_config_.emit_build_output ? &progress : nullptr;
   stats_ = Statistics{};
   stats_.created_primary_nodes.assign(static_cast<size_t>(num_primary_layers()), 0);
   world_node_count_ = 0;
@@ -6356,10 +6361,12 @@ void BioGeometryIndexBuilder::build_impl(
                          std::vector<NodeId>());
   extended_layers_.clear();
 
-  std::cerr << "[Build generalized hierarchy] Starting for " << raw_sequence_count
-            << " sequences...\n";
-  std::cerr << "  Phase 0: Deduplicating sequences...\n";
-  progress.begin_phase("phase0_dedup", raw_sequence_count);
+  if (range_config_.emit_build_output) {
+    std::cerr << "[Build generalized hierarchy] Starting for "
+              << raw_sequence_count << " sequences...\n";
+    std::cerr << "  Phase 0: Deduplicating sequences...\n";
+  }
+  if (progress_ptr) progress_ptr->begin_phase("phase0_dedup", raw_sequence_count);
   std::vector<std::shared_ptr<BioSequence>> unique_seqs;
   size_t unique_sequence_count = 0;
   {
@@ -6368,7 +6375,7 @@ void BioGeometryIndexBuilder::build_impl(
       initialize_reference_sequence_store(
           std::move(reference_id), std::move(reference_sequence),
           reference_window_length, reference_stride,
-          std::move(reference_contigs), &progress);
+          std::move(reference_contigs), progress_ptr);
       unique_sequence_count = search_graph_view_.sequences.size();
     } else {
       unique_seqs = deduplicate(std::move(raw_sequences));
@@ -6377,56 +6384,63 @@ void BioGeometryIndexBuilder::build_impl(
       std::vector<std::shared_ptr<BioSequence>>().swap(unique_seqs);
     }
   }
-  progress.finish_phase();
-  std::cerr << "    " << raw_sequence_count << " -> "
-            << unique_sequence_count << " unique ("
-            << stats_.deduplicated << " merged";
-  if (build_from_reference) {
-    std::cerr << ", " << stats_.invalid_reference_windows
-              << " invalid windows skipped";
-  }
-  std::cerr << ")\n";
+  if (progress_ptr) progress_ptr->finish_phase();
+  if (range_config_.emit_build_output) {
+    std::cerr << "    " << raw_sequence_count << " -> "
+              << unique_sequence_count << " unique ("
+              << stats_.deduplicated << " merged";
+    if (build_from_reference) {
+      std::cerr << ", " << stats_.invalid_reference_windows
+                << " invalid windows skipped";
+    }
+    std::cerr << ")\n";
 
-  std::cerr << "  Phase 1: Extended hierarchy sketch (top-down)...\n";
-  std::cerr << "    Primary radii: ";
-  for (size_t i = 0; i < hierarchy_.primary_radii.size(); ++i) {
-    if (i) std::cerr << ",";
-    std::cerr << hierarchy_.primary_radii[i];
+    std::cerr << "  Phase 1: Extended hierarchy sketch (top-down)...\n";
+    std::cerr << "    Primary radii: ";
+    for (size_t i = 0; i < hierarchy_.primary_radii.size(); ++i) {
+      if (i) std::cerr << ",";
+      std::cerr << hierarchy_.primary_radii[i];
+    }
+    std::cerr << "\n";
+    std::cerr << "    Auxiliary radii: ";
+    for (size_t i = 0; i < hierarchy_.auxiliary_radii.size(); ++i) {
+      if (i) std::cerr << ",";
+      std::cerr << hierarchy_.auxiliary_radii[i];
+    }
+    std::cerr << "\n";
   }
-  std::cerr << "\n";
-  std::cerr << "    Auxiliary radii: ";
-  for (size_t i = 0; i < hierarchy_.auxiliary_radii.size(); ++i) {
-    if (i) std::cerr << ",";
-    std::cerr << hierarchy_.auxiliary_radii[i];
-  }
-  std::cerr << "\n";
   {
     ScopedTimer timer(&stats_.phase1_sketch_ms);
-    phase1_build_extended_sketch(&progress);
+    phase1_build_extended_sketch(progress_ptr);
   }
 
-  std::cerr << "    Expanded layers:";
-  for (size_t i = 0; i < extended_layers_.size(); ++i) {
-    std::cerr << " L" << i << "=" << extended_layers_[i].size();
+  if (range_config_.emit_build_output) {
+    std::cerr << "    Expanded layers:";
+    for (size_t i = 0; i < extended_layers_.size(); ++i) {
+      std::cerr << " L" << i << "=" << extended_layers_[i].size();
+    }
+    std::cerr << "\n";
+    std::cerr << "  Phase 2: Inter-tier rebinding (DAG)...\n";
   }
-  std::cerr << "\n";
-
-  std::cerr << "  Phase 2: Inter-tier rebinding (DAG)...\n";
   {
     ScopedTimer timer(&stats_.phase2_rebinding_ms);
-    phase2_inter_tier_rebinding(&progress);
+    phase2_inter_tier_rebinding(progress_ptr);
   }
 
-  std::cerr << "  Phase 3: Collapse auxiliary tiers + MBB...\n";
+  if (range_config_.emit_build_output) {
+    std::cerr << "  Phase 3: Collapse auxiliary tiers + MBB...\n";
+  }
   {
     ScopedTimer timer(&stats_.phase3_mbb_ms);
-    phase3_collapse_and_compute_mbb(&progress);
+    phase3_collapse_and_compute_mbb(progress_ptr);
   }
 
-  std::cerr << "  Phase 4: Leaf attachment...\n";
+  if (range_config_.emit_build_output) {
+    std::cerr << "  Phase 4: Leaf attachment...\n";
+  }
   {
     ScopedTimer timer(&stats_.phase4_attach_ms);
-    attach_leaves(&progress);
+    attach_leaves(progress_ptr);
   }
   // Phase 4 destroys its range index and parallel work buffers before the
   // finalized graph is allocated.  glibc otherwise retains many of those
@@ -6441,9 +6455,11 @@ void BioGeometryIndexBuilder::build_impl(
     build_search_graph_view();
   }
 
-  std::cerr << "[Build generalized hierarchy] Completed.\n";
+  if (range_config_.emit_build_output) {
+    std::cerr << "[Build generalized hierarchy] Completed.\n";
+  }
   stats_.total_build_ms = elapsed_ms_since(build_start);
-  {
+  if (range_config_.emit_build_output) {
     ScopedTimer timer(&stats_.print_summary_ms);
     print_summary();
   }

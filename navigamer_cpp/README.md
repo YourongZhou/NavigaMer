@@ -173,7 +173,9 @@ or up to 16 parts through 16,384 windows, with at least four threads each;
 larger parts stay capped at four concurrent builders. Use
 `--shard-build-jobs N` to cap concurrent builders and their
 aggregate memory; nested teams remain inside the original OpenMP thread
-budget.
+budget. Parallel builders suppress per-part progress/summary output, avoiding
+large contended stderr streams at human-genome shard counts while retaining the
+outer completed-index summary.
 For a human stride-1 build, `--shard-windows 5000` is the recommended
 starting point when construction time and peak memory matter. Packing keeps
 the resulting logical-shard count manageable, while smaller bounded parts

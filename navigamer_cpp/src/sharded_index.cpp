@@ -1623,6 +1623,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
         BuildRangeConfig shard_range_config = range_config;
         if (job_count > 1) {
           shard_range_config.progress_interval_seconds = 0;
+          shard_range_config.emit_build_output = false;
         }
         BioGeometryIndexBuilder builder(hierarchy, shard_range_config);
         builder.build_reference_windows(
