@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <queue>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -237,8 +238,9 @@ bool ShardedSeedRouter::append_selected_shards(
       std::unique(minimizers, minimizers + partition_count) - minimizers);
 
   struct CodeRange {
-    size_t first = 0;
+    size_t next = 0;
     size_t last = 0;
+    uint32_t shard_id = 0;
   };
   std::array<CodeRange, kInlineMinimizerCount> inline_ranges{};
   std::vector<CodeRange> overflow_ranges;
@@ -251,15 +253,22 @@ bool ShardedSeedRouter::append_selected_shards(
   for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
        ++minimizer_idx) {
     CodeRange& range = ranges[minimizer_idx];
-    range.first = lower_bound_minimizer_code(minimizers[minimizer_idx]);
+    range.next = lower_bound_minimizer_code(minimizers[minimizer_idx]);
     range.last = upper_bound_minimizer_code(minimizers[minimizer_idx]);
-    routed_entry_count += range.last - range.first;
+    routed_entry_count += range.last - range.next;
   }
-  if (routed_entry_count >
+  constexpr size_t kDirectSortEntryLimit = 4096;
+  const bool use_direct_sort =
+      routed_entry_count <= kDirectSortEntryLimit;
+  const size_t maximum_unique_count = std::min(
+      routed_entry_count, static_cast<size_t>(shard_count));
+  const size_t reserve_count =
+      use_direct_sort ? routed_entry_count : maximum_unique_count;
+  if (reserve_count >
       std::numeric_limits<size_t>::max() - initial_size) {
     throw std::length_error("router shard selection is too large");
   }
-  const size_t required_size = initial_size + routed_entry_count;
+  const size_t required_size = initial_size + reserve_count;
   if (required_size > shard_ids->capacity()) {
     size_t new_capacity = required_size;
     const size_t current_capacity = shard_ids->capacity();
@@ -270,25 +279,132 @@ bool ShardedSeedRouter::append_selected_shards(
     }
     shard_ids->reserve(new_capacity);
   }
+  if (use_direct_sort) {
+    for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
+         ++minimizer_idx) {
+      const CodeRange& range = ranges[minimizer_idx];
+      for (size_t entry_index = range.next;
+           entry_index < range.last; ++entry_index) {
+        const uint32_t shard_id = unpack_shard_id(
+            packed_shard_ids, entry_index, shard_id_bits);
+        if (shard_id >= shard_count) {
+          shard_ids->resize(initial_size);
+          return false;
+        }
+        shard_ids->push_back(shard_id);
+      }
+    }
+    auto selected_begin = shard_ids->begin() + initial_size;
+    std::sort(selected_begin, shard_ids->end());
+    shard_ids->erase(
+        std::unique(selected_begin, shard_ids->end()),
+        shard_ids->end());
+    return true;
+  }
+  size_t active_range_count = 0;
   for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
        ++minimizer_idx) {
-    const CodeRange range = ranges[minimizer_idx];
-    const size_t first = range.first;
-    const size_t last = range.last;
-    for (size_t entry_index = first; entry_index < last; ++entry_index) {
-      const uint32_t shard_id = unpack_shard_id(
-          packed_shard_ids, entry_index, shard_id_bits);
-      if (shard_id >= shard_count) {
-        shard_ids->resize(initial_size);
+    CodeRange& range = ranges[minimizer_idx];
+    if (range.next != range.last) {
+      range.shard_id = unpack_shard_id(
+          packed_shard_ids, range.next, shard_id_bits);
+      if (range.shard_id >= shard_count) {
         return false;
       }
-      shard_ids->push_back(shard_id);
+      ++active_range_count;
     }
   }
-  auto selected_begin = shard_ids->begin() + initial_size;
-  std::sort(selected_begin, shard_ids->end());
-  shard_ids->erase(
-      std::unique(selected_begin, shard_ids->end()), shard_ids->end());
+  const auto append_unique = [&](uint32_t shard_id) {
+    if (shard_ids->size() == initial_size ||
+        shard_ids->back() != shard_id) {
+      shard_ids->push_back(shard_id);
+    }
+  };
+  const auto advance_range = [&](CodeRange* range) {
+    const uint32_t previous_shard_id = range->shard_id;
+    ++range->next;
+    if (range->next == range->last) return 0;
+    range->shard_id = unpack_shard_id(
+        packed_shard_ids, range->next, shard_id_bits);
+    return range->shard_id < shard_count &&
+                   range->shard_id >= previous_shard_id
+               ? 1
+               : -1;
+  };
+
+  // Entries with one minimizer code are emitted in shard-ID order. Merge the
+  // already sorted code ranges directly instead of materializing every
+  // duplicate ID and sorting the expanded list. Fixed-length mapping queries
+  // stay in the allocation-free path; unusually many partitions use a heap
+  // so long-query complexity remains O(entries log partitions).
+  if (minimizer_count <= kInlineMinimizerCount) {
+    while (active_range_count != 0) {
+      uint32_t next_shard_id = UINT32_MAX;
+      for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
+           ++minimizer_idx) {
+        const CodeRange& range = ranges[minimizer_idx];
+        if (range.next != range.last) {
+          next_shard_id = std::min(next_shard_id, range.shard_id);
+        }
+      }
+      append_unique(next_shard_id);
+      for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
+           ++minimizer_idx) {
+        CodeRange& range = ranges[minimizer_idx];
+        if (range.next == range.last ||
+            range.shard_id != next_shard_id) {
+          continue;
+        }
+        const int state = advance_range(&range);
+        if (state < 0) {
+          shard_ids->resize(initial_size);
+          return false;
+        }
+        if (state == 0) --active_range_count;
+      }
+    }
+  } else {
+    struct RangeHead {
+      uint32_t shard_id = 0;
+      size_t range_index = 0;
+    };
+    struct RangeHeadGreater {
+      bool operator()(const RangeHead& left,
+                      const RangeHead& right) const {
+        return left.shard_id > right.shard_id;
+      }
+    };
+    std::vector<RangeHead> heads;
+    heads.reserve(active_range_count);
+    for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
+         ++minimizer_idx) {
+      if (ranges[minimizer_idx].next != ranges[minimizer_idx].last) {
+        heads.push_back(
+            {ranges[minimizer_idx].shard_id, minimizer_idx});
+      }
+    }
+    std::priority_queue<
+        RangeHead, std::vector<RangeHead>, RangeHeadGreater> queue(
+            RangeHeadGreater{}, std::move(heads));
+    while (!queue.empty()) {
+      const uint32_t next_shard_id = queue.top().shard_id;
+      append_unique(next_shard_id);
+      do {
+        const size_t range_index = queue.top().range_index;
+        queue.pop();
+        CodeRange& range = ranges[range_index];
+        const int state = advance_range(&range);
+        if (state < 0) {
+          shard_ids->resize(initial_size);
+          return false;
+        }
+        if (state > 0) {
+          queue.push({range.shard_id, range_index});
+        }
+      } while (!queue.empty() &&
+               queue.top().shard_id == next_shard_id);
+    }
+  }
   return true;
 }
 

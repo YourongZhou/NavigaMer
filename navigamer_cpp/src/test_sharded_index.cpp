@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <numeric>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -236,6 +237,70 @@ void test_bit_packed_shard_id_boundaries() {
     assert(selected.enabled);
     assert(selected.shard_ids == expected);
   }
+}
+
+void test_router_merges_sorted_code_ranges() {
+  navigamer::ShardedSeedRouter router;
+  router.k = 1;
+  router.window = 1;
+  router.shard_count = 100;
+  router.shard_id_bits = shard_id_bits(router.shard_count);
+  router.minimizer_codes = {0, 0, 0, 1, 1, 1};
+  router.packed_shard_ids.set_owned(
+      pack_shard_ids({1, 3, 5, 0, 3, 4}, router.shard_id_bits));
+
+  std::vector<uint32_t> selected = {99};
+  assert(router.append_selected_shards("AC", 1, &selected));
+  assert((selected == std::vector<uint32_t>{99, 0, 1, 3, 4, 5}));
+
+  navigamer::ShardedSeedRouter large_router;
+  large_router.k = 1;
+  large_router.window = 1;
+  large_router.shard_count = 3000;
+  large_router.shard_id_bits = shard_id_bits(large_router.shard_count);
+  std::vector<uint32_t> large_shard_ids;
+  for (uint32_t code = 0; code < 2; ++code) {
+    for (uint32_t shard_id = 0;
+         shard_id < large_router.shard_count; ++shard_id) {
+      large_router.minimizer_codes.push_back(code);
+      large_shard_ids.push_back(shard_id);
+    }
+  }
+  large_router.packed_shard_ids.set_owned(
+      pack_shard_ids(large_shard_ids, large_router.shard_id_bits));
+  large_shard_ids.resize(large_router.shard_count);
+  std::iota(
+      large_shard_ids.begin(), large_shard_ids.end(), uint32_t{0});
+  const auto large_selection = large_router.select("AC", 1);
+  assert(large_selection.enabled);
+  assert(large_selection.shard_ids == large_shard_ids);
+
+  navigamer::ShardedSeedRouter long_router;
+  long_router.k = 3;
+  long_router.window = 3;
+  long_router.shard_count = 300;
+  long_router.shard_id_bits = shard_id_bits(long_router.shard_count);
+  std::string long_query;
+  std::vector<uint32_t> long_shard_ids;
+  const std::array<char, 4> bases = {'A', 'C', 'G', 'T'};
+  for (uint32_t code = 0; code < 17; ++code) {
+    long_query.push_back(bases[(code >> 4) & 3]);
+    long_query.push_back(bases[(code >> 2) & 3]);
+    long_query.push_back(bases[code & 3]);
+    for (uint32_t shard_id = 0;
+         shard_id < long_router.shard_count; ++shard_id) {
+      long_router.minimizer_codes.push_back(code);
+      long_shard_ids.push_back(shard_id);
+    }
+  }
+  long_router.packed_shard_ids.set_owned(
+      pack_shard_ids(long_shard_ids, long_router.shard_id_bits));
+  long_shard_ids.resize(long_router.shard_count);
+  std::iota(
+      long_shard_ids.begin(), long_shard_ids.end(), uint32_t{0});
+  const auto long_selection = long_router.select(long_query, 16);
+  assert(long_selection.enabled);
+  assert(long_selection.shard_ids == long_shard_ids);
 }
 
 std::set<std::string> matching_sequences(
@@ -602,6 +667,7 @@ void test_seed_router_no_false_negatives() {
 int main() {
   test_indexed_reference_file_slices();
   test_bit_packed_shard_id_boundaries();
+  test_router_merges_sorted_code_ranges();
   test_sharded_round_trip_and_no_false_negatives();
   test_seed_router_no_false_negatives();
   std::cout << "sharded index tests passed\n";

@@ -309,7 +309,9 @@ are reused across block boundaries, so memory is independent of total FASTQ
 record count. Each block is executed in online subplans that stop after at
 least 65,536 selected shard IDs. A query route is never split, bounding the
 route table by that budget plus one complete route; stderr reports
-`peak_route_ids`. Single-shard results bypass cross-shard hash merging. Non-sharded
+`peak_route_ids`. Large sorted per-minimizer shard ranges are merged directly
+into that unique route; the ordinary small-sort path expands at most 4,096 IDs
+(16 KiB). Single-shard results bypass cross-shard hash merging. Non-sharded
 queries stream one record at a time, and path tracing retains only the previous
 query trace needed for overlap statistics. Bundle query
 loading validates signatures, counts, mapped pack bounds, layer ranges, shard coordinates, and

@@ -336,6 +336,10 @@ batch, search those parts in parallel, and merge identical sequences and all
 of their occurrences before reporting results. Routed selections larger than
 64 shards use the same bounded groups. A fallback query searches every
 shard to preserve recall without mapping the complete human index at once.
+Large per-minimizer shard ranges are already sorted, so routing merges them
+directly into the final unique ID list. A small-sort fast path retains at most
+4,096 expanded IDs (16 KiB), bounding temporary route memory by the selected
+shard count plus that constant allowance.
 Batch planning and active-engine lookup use only the sorted IDs in the
 current 64-shard group; they do not allocate a bitmap or reverse map sized to
 the total logical shard count. FASTQ records and their route plans are
