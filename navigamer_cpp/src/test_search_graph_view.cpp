@@ -1020,6 +1020,42 @@ void assert_dense_beacon_patterns_are_exact() {
   assert(view.beacon_sequence_id(1, 2) == 14);
 }
 
+void assert_dense_child_mbb_widths_are_exact() {
+  const auto layout = navigamer::PackedWorldNodeLayout::compact(
+      0, 300, 20, false, true,
+      navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS, false,
+      true, false, true, 7);
+  assert(layout.has_implicit_dense_child_fields());
+  assert(layout.record_bytes == 2);
+  assert(layout.valid());
+
+  navigamer::SearchGraphView view;
+  view.node_records.initialize(3, layout, layout, 2);
+  view.layer_begin = {0, 2};
+  view.layer_end = {2, 3};
+  view.implicit_child_mbb_widths = true;
+  view.implicit_child_mbb_exception_bits = 3;
+  view.child_mbb_width_exceptions = {0x02};
+  for (uint32_t node_id = 0; node_id < 2; ++node_id) {
+    auto node = view.node_records[node_id];
+    node.set_packed_child_layout(
+        0, navigamer::SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS);
+    node.set_link_storage(
+        navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    node.set_inline_counts(
+        20, 3, navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
+    node.set_child_mbb_layout(node_id == 0 ? 300 : 100,
+                              node_id == 0 ? 7 : 3);
+  }
+  assert(view.node_records[0].child_mbb_bits() == 7);
+  assert(view.node_records[1].child_mbb_bits() == 7);
+  assert(view.child_mbb_bits(0) == 7);
+  assert(view.child_mbb_bits(1) == 3);
+  assert(view.node_records[0].child_mbb_begin() == 300);
+  assert(view.node_records[1].child_mbb_begin() == 100);
+  assert(view.node_records.bytes().size() == 6);
+}
+
 void assert_child_and_leaf_node_layouts_are_independent() {
   const auto child_layout = navigamer::PackedWorldNodeLayout::compact(
       1094080, 3657858, 1501);
@@ -1099,6 +1135,7 @@ int main() {
   assert_implicit_leaf_link_begins_are_exact();
   assert_implicit_consecutive_leaf_ids_are_exact();
   assert_dense_beacon_patterns_are_exact();
+  assert_dense_child_mbb_widths_are_exact();
   assert_child_and_leaf_node_layouts_are_independent();
   assert_all_beacon_begin_widths_are_exact();
   std::cout << "search graph view tests passed\n";

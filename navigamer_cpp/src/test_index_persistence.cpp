@@ -104,6 +104,12 @@ void assert_loaded_search_matches_built() {
          built.search_graph_view().node_records.bytes());
   assert(loaded.builder.search_graph_view().child_base_forward_delta_bytes ==
          built.search_graph_view().child_base_forward_delta_bytes);
+  assert(loaded.builder.search_graph_view().implicit_child_mbb_widths ==
+         built.search_graph_view().implicit_child_mbb_widths);
+  assert(loaded.builder.search_graph_view().implicit_child_mbb_exception_bits ==
+         built.search_graph_view().implicit_child_mbb_exception_bits);
+  assert(loaded.builder.search_graph_view().child_mbb_width_exceptions ==
+         built.search_graph_view().child_mbb_width_exceptions);
   assert(loaded.builder.search_graph_view().interned_child_mbb_payloads ==
          built.search_graph_view().interned_child_mbb_payloads);
   assert(loaded.builder.search_graph_view().implicit_leaf_mbb_offsets ==
@@ -157,6 +163,7 @@ void assert_loaded_search_matches_built() {
   assert_mapped(loaded_view.child_id_base_deltas8);
   assert_mapped(loaded_view.child_id_deltas16);
   assert_mapped(loaded_view.child_ids);
+  assert_mapped(loaded_view.child_mbb_width_exceptions);
   assert_mapped(loaded_view.leaf_id_deltas8);
   assert_mapped(loaded_view.leaf_id_deltas16);
   assert_mapped(loaded_view.leaf_ids);
@@ -466,7 +473,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 56);
+  assert(loaded.manifest.format_version == 57);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

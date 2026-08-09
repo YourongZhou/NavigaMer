@@ -2361,6 +2361,8 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
           (leaf_layout.mbb_begin_bits == 0) ||
       child_layout.has_implicit_packed_link_fields() !=
           view.implicit_contiguous_child_ranges ||
+      child_layout.has_implicit_dense_child_fields() !=
+          view.implicit_child_mbb_widths ||
       (child_layout.has_implicit_packed_link_fields() &&
        child_layout.implicit_packed_link_bits !=
            SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS) ||
@@ -2368,6 +2370,25 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
           leaf_layout.has_implicit_center_beacon_storage() ||
       leaf_layout.has_implicit_center_beacon_storage() !=
           leaf_layout.has_implicit_one_beacon_count()) {
+    return false;
+  }
+  const size_t non_finest_node_count =
+      view.layer_begin.empty() ? 0 : view.layer_begin.back();
+  if (view.implicit_child_mbb_widths) {
+    if (!view.dense_beacon_patterns ||
+        !view.implicit_contiguous_child_ranges ||
+        child_layout.implicit_child_mbb_bits == 0 ||
+        child_layout.implicit_child_mbb_bits > 8 ||
+        view.implicit_child_mbb_exception_bits > 8 ||
+        (view.implicit_child_mbb_exception_bits == 0 &&
+         !view.child_mbb_width_exceptions.empty()) ||
+        (view.implicit_child_mbb_exception_bits != 0 &&
+         view.child_mbb_width_exceptions.size() !=
+             (non_finest_node_count + 7) / 8)) {
+      return false;
+    }
+  } else if (view.implicit_child_mbb_exception_bits != 0 ||
+             !view.child_mbb_width_exceptions.empty()) {
     return false;
   }
   if (!view.leaf_link_begins_valid() ||
@@ -5378,14 +5399,91 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   }
   const bool implicit_leaf_link_begins =
       implicit_leaf_packed_fields && !implicit_consecutive_leaf_ids;
-  view.interned_child_mbb_payloads = interned_child_mbb_payloads;
-  view.implicit_leaf_mbb_offsets = implicit_leaf_mbb_offsets;
-  const PackedWorldNodeLayout child_node_layout =
+  std::array<size_t, 9> child_mbb_width_counts{};
+  for (size_t layer_idx = 0;
+       layer_idx + 1 < primary_layers_.size(); ++layer_idx) {
+    for (NodeId node_id : primary_layers_[layer_idx]) {
+      const uint8_t bits =
+          build_geometry_mbb_bits_[build_nodes_[node_id].geometry_index];
+      if (bits == 0 || bits > 8) {
+        throw std::runtime_error("child MBB width is invalid");
+      }
+      ++child_mbb_width_counts[bits];
+    }
+  }
+  uint8_t implicit_child_mbb_bits = 0;
+  uint8_t implicit_child_mbb_exception_bits = 0;
+  for (uint8_t bits = 1; bits <= 8; ++bits) {
+    if (child_mbb_width_counts[bits] >
+        child_mbb_width_counts[implicit_child_mbb_bits]) {
+      implicit_child_mbb_bits = bits;
+    }
+  }
+  bool implicit_child_mbb_widths =
+      view.dense_beacon_patterns && implicit_contiguous_child_ranges &&
+      implicit_child_mbb_bits != 0;
+  if (implicit_child_mbb_widths) {
+    for (uint8_t bits = 1; bits <= 8; ++bits) {
+      if (bits == implicit_child_mbb_bits || child_mbb_width_counts[bits] == 0) {
+        continue;
+      }
+      if (implicit_child_mbb_exception_bits != 0) {
+        implicit_child_mbb_widths = false;
+        break;
+      }
+      implicit_child_mbb_exception_bits = bits;
+    }
+  }
+  const size_t non_finest_world_count =
+      primary_layers_.empty()
+          ? 0
+          : world_node_count_ - primary_layers_.back().size();
+  const PackedWorldNodeLayout ordinary_child_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_child_link_begin, maximum_child_mbb_begin,
           maximum_child_count_field, false,
           implicit_contiguous_child_ranges,
           SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS);
+  if (implicit_child_mbb_widths) {
+    const PackedWorldNodeLayout candidate_child_node_layout =
+        PackedWorldNodeLayout::compact(
+            maximum_child_link_begin, maximum_child_mbb_begin,
+            maximum_child_count_field, false,
+            implicit_contiguous_child_ranges,
+            SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS, false,
+            implicit_contiguous_child_ranges, false, true,
+            implicit_child_mbb_bits);
+    const size_t exception_bytes =
+        implicit_child_mbb_exception_bits == 0
+            ? 0
+            : (non_finest_world_count + 7) / 8;
+    const size_t candidate_total_bytes =
+        static_cast<size_t>(candidate_child_node_layout.record_bytes) *
+            non_finest_world_count +
+        exception_bytes;
+    const size_t ordinary_total_bytes =
+        static_cast<size_t>(ordinary_child_node_layout.record_bytes) *
+        non_finest_world_count;
+    if (candidate_total_bytes >= ordinary_total_bytes) {
+      implicit_child_mbb_widths = false;
+      implicit_child_mbb_exception_bits = 0;
+    }
+  }
+  view.interned_child_mbb_payloads = interned_child_mbb_payloads;
+  view.implicit_leaf_mbb_offsets = implicit_leaf_mbb_offsets;
+  view.implicit_child_mbb_widths = implicit_child_mbb_widths;
+  view.implicit_child_mbb_exception_bits =
+      implicit_child_mbb_exception_bits;
+  const PackedWorldNodeLayout child_node_layout =
+      implicit_child_mbb_widths
+          ? PackedWorldNodeLayout::compact(
+                maximum_child_link_begin, maximum_child_mbb_begin,
+                maximum_child_count_field, false,
+                implicit_contiguous_child_ranges,
+                SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS, false,
+                implicit_contiguous_child_ranges, false, true,
+                implicit_child_mbb_bits)
+          : ordinary_child_node_layout;
   const PackedWorldNodeLayout leaf_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_leaf_link_begin, maximum_leaf_mbb_begin,
@@ -5405,6 +5503,12 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           : world_node_count_ - primary_layers_.back().size();
   view.initialize_child_base_ids(
       non_finest_node_count, maximum_child_base_forward_delta);
+  if (view.implicit_child_mbb_widths &&
+      view.implicit_child_mbb_exception_bits != 0) {
+    view.child_mbb_width_exceptions.assign(
+        (static_cast<size_t>(non_finest_node_count) + 7) / 8,
+        uint8_t{0});
+  }
   view.child_id_base_deltas8.reserve(total_child_base_deltas8_bytes);
   view.child_id_deltas16.reserve(total_child_deltas16);
   view.child_ids.reserve(total_child_ids32);
@@ -5842,6 +5946,17 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           mbb_begin = entry->second;
         }
         record.set_child_mbb_layout(mbb_begin, mbb_bits);
+        if (view.implicit_child_mbb_widths) {
+          const uint8_t default_bits =
+              view.node_records.child_layout().implicit_child_mbb_bits;
+          if (mbb_bits == view.implicit_child_mbb_exception_bits) {
+            view.child_mbb_width_exceptions[node_id >> 3] |=
+                static_cast<uint8_t>(1U << (node_id & 7));
+          } else if (mbb_bits != default_bits) {
+            throw std::runtime_error(
+                "child MBB width does not match dense layout");
+          }
+        }
         if (mbb_begin == view.child_beacon_dists.size()) {
           view.child_beacon_dists.append(
               geometry.link_beacon_dists.begin(),
