@@ -246,6 +246,8 @@ layer-local minimum bit width and constant-time decoding.
 Base-relative child payloads store a minimum whole-byte forward base delta from
 `node_id + 1` immediately before their local child offsets, preserving cache
 locality while avoiding a fixed 32-bit base.
+Fully contiguous shards may instead interleave one minimum-width forward base
+and 32 exact byte offsets in one directly addressable parent block.
 Paired child-MBB bins are stored as metric ranks: the exact distance between
 the two beacons selects the triangle-inequality-feasible codebook, and each
 child stores only its rank in that codebook. Decoding is exact with respect to
@@ -310,13 +312,13 @@ relative to the original contig.
 
 Each logical part is an independently mmap-decodable graph payload. Up to
 1,024 payloads are stored in one `.navpack` container with a checked
-offset/length directory. The common v63 construction manifest is stored once
+offset/length directory. The common v64 construction manifest is stored once
 at bundle scope instead of once per logical part. A completed pack is reused
 only after every selected payload's construction signature, reference slice,
 contig, and source coordinates validate. Damaged
 or incompatible packs are rebuilt one atomic group at a time; only that group's
 temporary pack exists during construction because payloads are written directly
-into it. The final v18 `.navshard`
+into it. The final v19 `.navshard`
 manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric

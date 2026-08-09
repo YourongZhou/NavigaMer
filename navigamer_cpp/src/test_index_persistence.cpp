@@ -110,8 +110,14 @@ void assert_loaded_search_matches_built() {
          built.search_graph_view().child_base_forward_delta_bytes);
   assert(loaded.builder.search_graph_view().compact_child_base_blocks ==
          built.search_graph_view().compact_child_base_blocks);
-  assert(loaded.builder.search_graph_view().child_base_block_bases ==
-         built.search_graph_view().child_base_block_bases);
+  assert(loaded.builder.search_graph_view()
+             .compact_child_base_forward_bytes ==
+         built.search_graph_view().compact_child_base_forward_bytes);
+  assert(loaded.builder.search_graph_view()
+             .compact_child_base_offset_bits ==
+         built.search_graph_view().compact_child_base_offset_bits);
+  assert(loaded.builder.search_graph_view().child_base_block_payload ==
+         built.search_graph_view().child_base_block_payload);
   assert(loaded.builder.search_graph_view().implicit_child_mbb_widths ==
          built.search_graph_view().implicit_child_mbb_widths);
   assert(loaded.builder.search_graph_view().implicit_child_mbb_exception_bits ==
@@ -187,7 +193,7 @@ void assert_loaded_search_matches_built() {
   assert_mapped(loaded_view.periodic_center_offsets);
   assert_mapped(loaded_view.node_count_overflows);
   assert_mapped(loaded_view.child_id_base_deltas8);
-  assert_mapped(loaded_view.child_base_block_bases);
+  assert_mapped(loaded_view.child_base_block_payload);
   assert_mapped(loaded_view.child_id_deltas16);
   assert_mapped(loaded_view.child_ids);
   assert_mapped(loaded_view.child_mbb_width_exceptions);
@@ -500,7 +506,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 63);
+  assert(loaded.manifest.format_version == 64);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);
@@ -676,7 +682,10 @@ void assert_compact_child_base_blocks_round_trip() {
       "compact_child_bases", reference, kWindowLength, 1);
   const auto& built_view = built.search_graph_view();
   assert(built_view.compact_child_base_blocks);
-  assert(!built_view.child_base_block_bases.empty());
+  assert(!built_view.child_base_block_payload.empty());
+  assert(built_view.compact_child_base_forward_bytes != 0);
+  assert(built_view.compact_child_base_offset_bits != 0);
+  assert(built_view.child_id_base_deltas8.empty());
 
   auto manifest = navigamer::make_reference_window_index_manifest(
       reference, reference.size(), static_cast<int>(kWindowLength), 1,
@@ -685,8 +694,12 @@ void assert_compact_child_base_blocks_round_trip() {
   const auto loaded = navigamer::load_index(path);
   const auto& loaded_view = loaded.builder.search_graph_view();
   assert(loaded_view.compact_child_base_blocks);
-  assert(loaded_view.child_base_block_bases ==
-         built_view.child_base_block_bases);
+  assert(loaded_view.compact_child_base_forward_bytes ==
+         built_view.compact_child_base_forward_bytes);
+  assert(loaded_view.compact_child_base_offset_bits ==
+         built_view.compact_child_base_offset_bits);
+  assert(loaded_view.child_base_block_payload ==
+         built_view.child_base_block_payload);
   assert(loaded_view.child_id_base_deltas8 ==
          built_view.child_id_base_deltas8);
   for (navigamer::NodeId node_id = 0;

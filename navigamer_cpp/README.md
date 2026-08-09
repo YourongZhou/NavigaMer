@@ -255,7 +255,7 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v63 bit-packs each node to the minimum whole-byte width supported by
+Format v64 bit-packs each node to the minimum whole-byte width supported by
 that shard's actual offset and count ranges (9 bytes per node in the 100k-window
 reference benchmark, with wider automatic fallbacks). Base-relative child
 payloads store a minimum whole-byte forward base delta from `node_id + 1`.
@@ -288,7 +288,7 @@ representable, still omitting per-node beacon offsets and repeated IDs.
 Dense child layouts with at most 256 exact interned `(child count, MBB begin)`
 pairs store one descriptor code in each node and one 16-bit shard-local table;
 the direct layout remains the zero-growth fallback.
-A v18 `.navshard` bundle stores the common v63 construction manifest once and
+A v19 `.navshard` bundle stores the common v64 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
@@ -427,7 +427,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 63
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 64
 stores an all-ACGT shared reference in 2-bit form and restores one contiguous
 byte view per loaded shard, so edit-distance query kernels retain direct
 character access; references containing other IUPAC characters are kept
@@ -457,9 +457,9 @@ beacon IDs. It keeps
 the common non-leaf MBB bit width once per shard when the dense beacon layout
 is active; an exact one-bit-per-node exception map restores the sole alternate
 width when present. It keeps
-contiguous child-range bases as a 32-node absolute base plus exact one-byte
-deltas when every block fits, reducing the former fixed-width base stream
-without changing child IDs. It keeps
+contiguous child-range bases as one interleaved 32-node block with a
+minimum-width forward base and exact byte offsets, reducing the former base
+stream without changing child IDs or adding bit unpacking to query. It keeps
 long literal inputs only as manifest fingerprints, and omits redundant
 child-payload offsets when a shard's child ranges are fully contiguous. It
 also interns byte-identical child MBB distance blocks.

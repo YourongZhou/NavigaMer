@@ -395,7 +395,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(reloaded_manifest.window_length == window);
-  assert(reloaded_manifest.format_version == 18);
+  assert(reloaded_manifest.format_version == 19);
   assert(reloaded_manifest.stride == stride);
   assert(reloaded_manifest.shards.size() ==
          manifest.shards.size());

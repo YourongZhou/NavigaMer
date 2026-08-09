@@ -1664,16 +1664,20 @@ struct SearchGraphView {
   // Keeping the base adjacent to its payload preserves query locality while
   // avoiding the former 32-bit base in almost every parent segment.
   uint8_t child_base_forward_delta_bytes = 0;
-  // When every contiguous child range's base lies within one byte of its
-  // 32-node block minimum, keep that minimum once and retain one exact byte
-  // per node. This is only a representation change: child IDs remain exact.
+  // Contiguous child ranges may share one interleaved 32-node block. Each
+  // block stores a minimum-width forward base followed by exact byte offsets
+  // for its 32 parents (or no offsets when every base is equal). Query resolves
+  // one block directly, preserving
+  // O(1) random access while removing unused high bits and a second array.
   static constexpr uint8_t CHILD_BASE_BLOCK_SIZE = 32;
   bool compact_child_base_blocks = false;
-  FinalArray<NodeId> child_base_block_bases;
+  uint8_t compact_child_base_forward_bytes = 0;
+  uint8_t compact_child_base_offset_bits = 0;
+  FinalArray<uint8_t> child_base_block_payload;
   // When every non-finest node in a shard has one exact consecutive child
-  // range, their base prefixes are a fixed-width dense array.  The prefix for
-  // node i is then at i * child_base_byte_count(), so node records need not
-  // retain a child-payload offset.  Other shards retain the per-node offset.
+  // range, their bases use either the interleaved block payload above or a
+  // fixed-width dense array. Node records then need no child-payload offset.
+  // Other shards retain the per-node offset.
   bool implicit_contiguous_child_ranges = false;
   FinalArray<uint8_t> child_id_base_deltas8;
   FinalArray<uint16_t> child_id_deltas16;
@@ -2604,21 +2608,103 @@ struct SearchGraphView {
   bool child_base_ids_valid(size_t non_finest_node_count) const {
     if (non_finest_node_count == 0) {
       return child_base_forward_delta_bytes == 0 &&
-             !compact_child_base_blocks && child_base_block_bases.empty();
+             !compact_child_base_blocks &&
+             compact_child_base_forward_bytes == 0 &&
+             compact_child_base_offset_bits == 0 &&
+             child_base_block_payload.empty();
     }
     if (child_base_forward_delta_bytes == 0 ||
         child_base_forward_delta_bytes > sizeof(NodeId)) {
       return false;
     }
-    return !compact_child_base_blocks ||
-           (child_base_forward_delta_bytes > 1 &&
-            child_base_block_bases.size() ==
-                (non_finest_node_count + CHILD_BASE_BLOCK_SIZE - 1) /
-                    CHILD_BASE_BLOCK_SIZE);
+    if (!compact_child_base_blocks) {
+      return compact_child_base_forward_bytes == 0 &&
+             compact_child_base_offset_bits == 0 &&
+             child_base_block_payload.empty();
+    }
+    if (child_base_forward_delta_bytes <= 1 ||
+        compact_child_base_forward_bytes == 0 ||
+        compact_child_base_forward_bytes > sizeof(NodeId) ||
+        (compact_child_base_offset_bits != 0 &&
+         compact_child_base_offset_bits != 8)) {
+      return false;
+    }
+    const size_t block_count =
+        (non_finest_node_count + CHILD_BASE_BLOCK_SIZE - 1) /
+        CHILD_BASE_BLOCK_SIZE;
+    const size_t record_bytes = compact_child_base_block_bytes();
+    return record_bytes != 0 &&
+           block_count <=
+               std::numeric_limits<size_t>::max() / record_bytes &&
+           child_base_block_payload.size() == block_count * record_bytes;
   }
 
   size_t child_base_byte_count() const {
-    return compact_child_base_blocks ? 1 : child_base_forward_delta_bytes;
+    return compact_child_base_blocks ? 0 : child_base_forward_delta_bytes;
+  }
+
+  size_t compact_child_base_block_bytes() const {
+    return compact_child_base_forward_bytes +
+           (static_cast<size_t>(CHILD_BASE_BLOCK_SIZE) *
+            compact_child_base_offset_bits + 7) / 8;
+  }
+
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((always_inline))
+#endif
+  inline NodeId compact_child_base_block_base(size_t block_idx) const {
+    const size_t record_bytes = compact_child_base_block_bytes();
+    if (!compact_child_base_blocks || record_bytes == 0 ||
+        block_idx >= child_base_block_payload.size() / record_bytes) {
+      throw std::out_of_range("compact child base block is invalid");
+    }
+    const uint8_t* record =
+        child_base_block_payload.data() + block_idx * record_bytes;
+    uint32_t forward = 0;
+    if (compact_child_base_forward_bytes == 2) {
+      uint16_t value = 0;
+      std::memcpy(&value, record, sizeof(value));
+      forward = value;
+    } else {
+      for (size_t byte = 0;
+           byte < compact_child_base_forward_bytes; ++byte) {
+        forward |= static_cast<uint32_t>(record[byte]) << (byte * 8);
+      }
+    }
+    const uint64_t block_node_begin =
+        static_cast<uint64_t>(block_idx) * CHILD_BASE_BLOCK_SIZE;
+    const uint64_t base = block_node_begin + 1 + forward;
+    if (base > std::numeric_limits<NodeId>::max()) {
+      throw std::out_of_range("compact child base exceeds NodeId");
+    }
+    return static_cast<NodeId>(base);
+  }
+
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((always_inline))
+#endif
+  inline NodeId compact_child_base_id(NodeId node_id) const {
+    const size_t block_idx = node_id / CHILD_BASE_BLOCK_SIZE;
+    const size_t in_block = node_id % CHILD_BASE_BLOCK_SIZE;
+    const size_t record_bytes = compact_child_base_block_bytes();
+    const uint8_t* record =
+        child_base_block_payload.data() + block_idx * record_bytes;
+    uint32_t forward = 0;
+    if (compact_child_base_forward_bytes == 2) {
+      uint16_t value = 0;
+      std::memcpy(&value, record, sizeof(value));
+      forward = value;
+    } else {
+      for (size_t byte = 0;
+           byte < compact_child_base_forward_bytes; ++byte) {
+        forward |= static_cast<uint32_t>(record[byte]) << (byte * 8);
+      }
+    }
+    const NodeId block_base = static_cast<NodeId>(
+        block_idx * CHILD_BASE_BLOCK_SIZE + 1 + forward);
+    if (compact_child_base_offset_bits == 0) return block_base;
+    return block_base +
+           record[compact_child_base_forward_bytes + in_block];
   }
 
   uint32_t child_begin(
@@ -2642,14 +2728,26 @@ struct SearchGraphView {
     }
     if (compact_child_base_blocks) {
       const size_t block_idx = node_id / CHILD_BASE_BLOCK_SIZE;
-      if (block_idx >= child_base_block_bases.size() ||
-          base < child_base_block_bases[block_idx] ||
-          base - child_base_block_bases[block_idx] >
-              std::numeric_limits<uint8_t>::max()) {
+      const NodeId block_base = compact_child_base_block_base(block_idx);
+      if (base < block_base) {
         throw std::length_error("child base exceeds compact block range");
       }
-      child_id_base_deltas8.push_back(static_cast<uint8_t>(
-          base - child_base_block_bases[block_idx]));
+      const uint32_t offset = base - block_base;
+      if (offset > std::numeric_limits<uint8_t>::max()) {
+        throw std::length_error("child base exceeds compact block width");
+      }
+      if (compact_child_base_offset_bits == 0) {
+        if (offset != 0) {
+          throw std::length_error("child base exceeds zero-bit block width");
+        }
+        return;
+      }
+      const size_t in_block = node_id % CHILD_BASE_BLOCK_SIZE;
+      const size_t record_begin =
+          block_idx * compact_child_base_block_bytes();
+      child_base_block_payload[
+          record_begin + compact_child_base_forward_bytes + in_block] =
+          static_cast<uint8_t>(offset);
       return;
     }
     const uint32_t delta = base - node_id - 1;
@@ -2672,12 +2770,11 @@ struct SearchGraphView {
   inline NodeId child_base_id(NodeId node_id, const uint8_t* segment,
                               size_t byte_count) const {
     if (compact_child_base_blocks) {
-      const size_t block_idx = node_id / CHILD_BASE_BLOCK_SIZE;
-      if (byte_count != 1 || block_idx >= child_base_block_bases.size()) {
-        throw std::out_of_range("compact child base is outside block storage");
+      (void)segment;
+      if (byte_count != 0) {
+        throw std::out_of_range("compact child base has inline bytes");
       }
-      return static_cast<NodeId>(
-          child_base_block_bases[block_idx] + segment[0]);
+      return compact_child_base_id(node_id);
     }
     if (byte_count == 2) {
       uint16_t delta = 0;
@@ -2793,6 +2890,17 @@ struct SearchGraphView {
 #endif
   inline ChildIdAccessor child_ids_for(
       NodeId node_id, const PackedWorldNodeRecordRef& node) const {
+    if (compact_child_base_blocks) {
+      if (node.link_storage() !=
+              WorldNodeRecord::LinkStorage::PackedDelta ||
+          node.packed_child_bits() != CONTIGUOUS_CHILD_RANGE_BITS) {
+        throw std::runtime_error(
+            "compact child base requires a contiguous child range");
+      }
+      return {compact_child_base_id(node_id), nullptr, nullptr,
+              contiguous_child_offset_table.data(), nullptr,
+              CONTIGUOUS_CHILD_RANGE_BITS};
+    }
     switch (node.link_storage()) {
       case WorldNodeRecord::LinkStorage::Delta8: {
         const uint8_t* segment =

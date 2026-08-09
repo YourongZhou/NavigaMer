@@ -2382,7 +2382,9 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
     return false;
   }
   if (!view.compact_child_base_blocks &&
-      !view.child_base_block_bases.empty()) {
+      (!view.child_base_block_payload.empty() ||
+       view.compact_child_base_forward_bytes != 0 ||
+       view.compact_child_base_offset_bits != 0)) {
     return false;
   }
   if (!view.center_sequence_ids_valid()) {
@@ -2497,14 +2499,18 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
   if (expected_layer_begin != world_node_count_) return false;
 
   if (view.implicit_contiguous_child_ranges) {
-    const size_t base_bytes = view.child_base_byte_count();
     const size_t non_finest_node_count = view.layer_begin.back();
-    if (base_bytes == 0 ||
-        non_finest_node_count >
-            view.child_id_base_deltas8.size() / base_bytes ||
-        non_finest_node_count * base_bytes !=
-            view.child_id_base_deltas8.size()) {
-      return false;
+    if (view.compact_child_base_blocks) {
+      if (!view.child_id_base_deltas8.empty()) return false;
+    } else {
+      const size_t base_bytes = view.child_base_byte_count();
+      if (base_bytes == 0 ||
+          non_finest_node_count >
+              view.child_id_base_deltas8.size() / base_bytes ||
+          non_finest_node_count * base_bytes !=
+              view.child_id_base_deltas8.size()) {
+        return false;
+      }
     }
   }
   const auto& child_layout = view.node_records.child_layout();
@@ -5673,6 +5679,9 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   std::vector<NodeId> compact_child_base_block_bases;
   bool compact_child_base_blocks =
       view.implicit_contiguous_child_ranges && child_base_bytes > 1;
+  uint8_t compact_child_base_forward_bytes = 0;
+  uint8_t compact_child_base_offset_bits = 0;
+  std::vector<uint8_t> compact_child_base_block_payload;
   if (compact_child_base_blocks) {
     const size_t non_finest_node_count =
         primary_layers_.empty()
@@ -5695,26 +5704,90 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
     }
     for (size_t block_idx = 0; block_idx < block_count; ++block_idx) {
       if (compact_child_base_block_bases[block_idx] ==
-              std::numeric_limits<NodeId>::max() ||
-          block_maxima[block_idx] - compact_child_base_block_bases[block_idx] >
-              std::numeric_limits<uint8_t>::max()) {
+              std::numeric_limits<NodeId>::max()) {
         compact_child_base_blocks = false;
         compact_child_base_block_bases.clear();
         break;
       }
     }
-    const size_t compact_bytes =
-        non_finest_node_count + block_count * sizeof(NodeId);
+    uint32_t maximum_block_forward = 0;
+    uint32_t maximum_block_offset = 0;
+    if (compact_child_base_blocks) {
+      for (size_t block_idx = 0; block_idx < block_count; ++block_idx) {
+        const uint64_t block_node_begin =
+            block_idx * SearchGraphView::CHILD_BASE_BLOCK_SIZE;
+        const NodeId block_base =
+            compact_child_base_block_bases[block_idx];
+        if (block_base <= block_node_begin) {
+          compact_child_base_blocks = false;
+          break;
+        }
+        maximum_block_forward = std::max<uint32_t>(
+            maximum_block_forward,
+            block_base - static_cast<NodeId>(block_node_begin) - 1);
+        maximum_block_offset = std::max<uint32_t>(
+            maximum_block_offset,
+            block_maxima[block_idx] - block_base);
+      }
+    }
+    if (compact_child_base_blocks) {
+      if (maximum_block_offset >
+          std::numeric_limits<uint8_t>::max()) {
+        compact_child_base_blocks = false;
+      }
+      compact_child_base_forward_bytes = static_cast<uint8_t>(
+          (PackedWorldNodeLayout::bits_for_value(maximum_block_forward) + 7) /
+          8);
+      compact_child_base_offset_bits =
+          maximum_block_offset == 0 ? 0 : 8;
+      if (compact_child_base_forward_bytes == 0 ||
+          compact_child_base_forward_bytes > sizeof(NodeId) ||
+          (compact_child_base_offset_bits != 0 &&
+           compact_child_base_offset_bits != 8)) {
+        compact_child_base_blocks = false;
+      }
+    }
+    size_t compact_block_bytes = 0;
+    if (compact_child_base_blocks) {
+      compact_block_bytes = compact_child_base_forward_bytes +
+          (static_cast<size_t>(SearchGraphView::CHILD_BASE_BLOCK_SIZE) *
+               compact_child_base_offset_bits +
+           7) /
+              8;
+    }
+    const size_t compact_bytes = block_count * compact_block_bytes;
     const size_t ordinary_bytes = non_finest_node_count * child_base_bytes;
-    if (compact_bytes >= ordinary_bytes) {
+    if (!compact_child_base_blocks || compact_bytes >= ordinary_bytes) {
       compact_child_base_blocks = false;
       compact_child_base_block_bases.clear();
+      compact_child_base_forward_bytes = 0;
+      compact_child_base_offset_bits = 0;
+    } else {
+      compact_child_base_block_payload.assign(
+          compact_bytes, uint8_t{0});
+      for (size_t block_idx = 0; block_idx < block_count; ++block_idx) {
+        const uint32_t block_node_begin = static_cast<uint32_t>(
+            block_idx * SearchGraphView::CHILD_BASE_BLOCK_SIZE);
+        const uint32_t forward =
+            compact_child_base_block_bases[block_idx] -
+            block_node_begin - 1;
+        const size_t record_begin = block_idx * compact_block_bytes;
+        for (size_t byte = 0;
+             byte < compact_child_base_forward_bytes; ++byte) {
+          compact_child_base_block_payload[record_begin + byte] =
+              static_cast<uint8_t>(forward >> (byte * 8));
+        }
+      }
     }
   }
   view.compact_child_base_blocks = compact_child_base_blocks;
   if (compact_child_base_blocks) {
-    view.child_base_block_bases.set_owned(
-        std::move(compact_child_base_block_bases));
+    view.compact_child_base_forward_bytes =
+        compact_child_base_forward_bytes;
+    view.compact_child_base_offset_bits =
+        compact_child_base_offset_bits;
+    view.child_base_block_payload.set_owned(
+        std::move(compact_child_base_block_payload));
   }
   bool implicit_leaf_mbb_offsets =
       dense_leaf_mbb_ternary_ || matching_leaf_payload_starts;
@@ -6093,7 +6166,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
   }
   view.child_id_base_deltas8.reserve(
       view.compact_child_base_blocks
-          ? non_finest_node_count
+          ? 0
           : total_child_base_deltas8_bytes);
   view.child_id_deltas16.reserve(total_child_deltas16);
   view.child_ids.reserve(total_child_ids32);
