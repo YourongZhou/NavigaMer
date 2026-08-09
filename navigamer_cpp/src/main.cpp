@@ -3305,10 +3305,10 @@ int main(int argc, char** argv) {
             std::cerr << "Report index not reused: " << reason << "\n";
           }
           std::string index_ref_seq = ref_seq.substr(0, actual_prefix);
-          auto windows =
-              build_reference_windows(ref_id, index_ref_seq, window_size, stride);
           navigamer::BioGeometryIndexBuilder builder(hierarchy, range_config);
-          builder.build(std::move(windows));
+          builder.build_reference_windows(
+              ref_id, std::move(index_ref_seq),
+              static_cast<size_t>(window_size), static_cast<size_t>(stride));
           navigamer::save_index(report_index_path, builder, manifest);
           std::cerr << "Built report index: " << report_index_path << "\n";
         }
