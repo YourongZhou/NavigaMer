@@ -3780,10 +3780,21 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
     const uint64_t local_seen_bytes =
         static_cast<uint64_t>(build_nodes_.size()) * sizeof(uint32_t) +
         static_cast<uint64_t>(thread_capacity) * next_primary_layer.size();
+    // Bitmap deduplication is faster for ordinary builds, but its working set
+    // grows with all expanded nodes times the OpenMP team.  At human-reference
+    // scale that temporary allocation alone can exceed the available RAM.  The
+    // sort/unique fallback below is exact and needs space only for a parent's
+    // actual collapsed children.
+    constexpr uint64_t kMaxPhase3ChildSeenBytes =
+        uint64_t{512} * 1024 * 1024;
+    const uint64_t smallest_seen_bytes =
+        std::min(global_seen_bytes, local_seen_bytes);
+    const bool use_child_seen =
+        smallest_seen_bytes <= kMaxPhase3ChildSeenBytes;
     // Use a shared global-to-layer map only when it makes all per-thread
     // deduplication bitmaps smaller in aggregate.
     const bool use_layer_local_child_seen =
-        local_seen_bytes < global_seen_bytes;
+        use_child_seen && local_seen_bytes < global_seen_bytes;
     std::vector<uint32_t> child_local_indices;
     if (use_layer_local_child_seen) {
       child_local_indices.assign(
@@ -3821,11 +3832,14 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
 #pragma omp parallel if(thread_capacity > 1) num_threads(thread_capacity)
     {
       const int tid = omp_get_thread_num();
-      std::vector<uint8_t> child_seen(
-          use_layer_local_child_seen
-              ? next_primary_layer.size()
-              : build_nodes_.size(),
-          uint8_t{0});
+      std::vector<uint8_t> child_seen;
+      if (use_child_seen) {
+        child_seen.assign(
+            use_layer_local_child_seen
+                ? next_primary_layer.size()
+                : build_nodes_.size(),
+            uint8_t{0});
+      }
       std::vector<uint8_t> raw_distances;
       std::vector<uint8_t> beacon_pair_distances;
       std::array<PreparedEdlibDnaPattern, kMaxBuildBeaconsPerNode>
@@ -3866,6 +3880,10 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
           ScopedTimer timer(&collapse_ms[static_cast<size_t>(tid)]);
           for (NodeId aux_id : auxiliary_nodes) {
             for (NodeId child : build_nodes_[aux_id].child_or_leaf_ids) {
+              if (!use_child_seen) {
+                direct_children.push_back(child);
+                continue;
+              }
               const size_t local_child =
                   use_layer_local_child_seen
                       ? child_local_indices[child]
@@ -3876,12 +3894,19 @@ void BioGeometryIndexBuilder::phase3_collapse_and_compute_mbb(
               }
             }
           }
-          for (NodeId child : direct_children) {
-            const size_t local_child =
-                use_layer_local_child_seen
-                    ? child_local_indices[child]
-                    : child;
-            child_seen[local_child] = 0;
+          if (use_child_seen) {
+            for (NodeId child : direct_children) {
+              const size_t local_child =
+                  use_layer_local_child_seen
+                      ? child_local_indices[child]
+                      : child;
+              child_seen[local_child] = 0;
+            }
+          } else {
+            std::sort(direct_children.begin(), direct_children.end());
+            direct_children.truncate(static_cast<size_t>(
+                std::unique(direct_children.begin(), direct_children.end()) -
+                direct_children.begin()));
           }
           node.child_or_leaf_ids = std::move(direct_children);
         }
