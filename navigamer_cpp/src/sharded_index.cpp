@@ -1667,21 +1667,23 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   // use a fixed OpenMP budget more efficiently than a few wide teams. Keep
   // larger parts conservative so their peak working sets do not multiply.
   const bool small_shards = max_shard_windows <= 16384;
-  // At the recommended 5k-window scale, 20 shallow teams improve aggregate
-  // throughput over 16 on a 128-thread host while retaining a bounded peak.
-  // Wider small shards keep the 16-team cap because their Phase-2 work grows
-  // enough that deeper teams are more efficient.
-  const size_t small_shard_job_cap =
-      max_shard_windows <= 8192 ? 20 : 16;
+  const bool shallow_shards = max_shard_windows <= 8192;
+  // Recommended 5k-window shards get the best aggregate throughput with two
+  // threads per independent build. Cap the number of live builders to retain
+  // a bounded peak on hosts with very wide OpenMP teams. Wider shards keep
+  // deeper teams because their Phase-2 work and per-builder working set grow.
   const size_t automatic_jobs =
-      available_threads < 8
+      shallow_shards
+          ? std::max<size_t>(
+                1, std::min<size_t>(56, available_threads / 2))
+          : available_threads < 8
           ? 1
           : available_threads < 16
                 ? 2
                 : small_shards
                       ? std::max<size_t>(
                             2, std::min<size_t>(
-                                   small_shard_job_cap,
+                                   16,
                                    available_threads / 4))
                       : std::max<size_t>(
                             2, std::min<size_t>(
