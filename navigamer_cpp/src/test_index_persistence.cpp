@@ -132,6 +132,8 @@ void assert_loaded_search_matches_built() {
          built.search_graph_view().dense_leaf_mbb_ternary);
   assert(loaded.builder.search_graph_view().dense_leaf_mbb_values ==
          built.search_graph_view().dense_leaf_mbb_values);
+  assert(loaded.builder.search_graph_view().implicit_shift_leaf_mbb ==
+         built.search_graph_view().implicit_shift_leaf_mbb);
   assert(loaded.builder.search_graph_view().leaf_link_begin_blocks ==
          built.search_graph_view().leaf_link_begin_blocks);
   assert(loaded_mbb.size() == built_mbb.size());
@@ -478,7 +480,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 59);
+  assert(loaded.manifest.format_version == 60);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

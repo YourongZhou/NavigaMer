@@ -67,6 +67,8 @@ bool verify_implicit_dense_leaf_layout(
     saw_layout = true;
     assert(view.dense_leaf_mbb_ternary);
     assert(view.implicit_consecutive_leaf_ids);
+    assert(view.implicit_shift_leaf_mbb);
+    assert(view.leaf_beacon_dists.empty());
     assert(view.node_records.leaf_layout().record_bytes == 0);
     for (navigamer::NodeId node_id =
              view.node_records.finest_node_begin();
@@ -74,8 +76,21 @@ bool verify_implicit_dense_leaf_layout(
       const auto node = view.node_records[node_id];
       const navigamer::LeafId center =
           view.center_sequence_id(node_id);
-      assert(view.link_count(node_id, node, center) ==
-             view.implicit_consecutive_leaf_count(center));
+      const uint32_t leaf_count =
+          view.link_count(node_id, node, center);
+      assert(leaf_count == view.implicit_consecutive_leaf_count(center));
+      const navigamer::LeafId leaf_begin =
+          center > view.implicit_consecutive_leaf_radius
+              ? center - view.implicit_consecutive_leaf_radius
+              : 0;
+      for (uint32_t leaf_offset = 0; leaf_offset < leaf_count;
+           ++leaf_offset) {
+        const navigamer::LeafId leaf_id = leaf_begin + leaf_offset;
+        const uint32_t delta =
+            leaf_id > center ? leaf_id - center : center - leaf_id;
+        assert(view.leaf_beacon_distance(node_id, leaf_offset) ==
+               delta * 2);
+      }
     }
   }
   return saw_layout;
@@ -380,7 +395,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(reloaded_manifest.window_length == window);
-  assert(reloaded_manifest.format_version == 13);
+  assert(reloaded_manifest.format_version == 14);
   assert(reloaded_manifest.stride == stride);
   assert(reloaded_manifest.shards.size() ==
          manifest.shards.size());

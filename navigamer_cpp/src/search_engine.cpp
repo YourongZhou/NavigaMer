@@ -2815,11 +2815,16 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
                                         &stats.leaf_mbb_filter_ms);
     LeafBeaconFilterSimdStats simd_stats;
     const uint32_t offset = view.leaf_mbb_begin(node_id, node);
-    if (config_.search_prefetch) {
+    if (config_.search_prefetch && !view.implicit_shift_leaf_mbb) {
       prefetch_read(view.leaf_beacon_dists.data() + offset);
       if (leaf_count != 0) prefetch_leaf_code(0);
     }
-    if (view.dense_leaf_mbb_ternary) {
+    if (view.implicit_shift_leaf_mbb) {
+      survivor_offsets = filter_dense_leaf_ternary_survivors(
+          view.implicit_shift_leaf_mbb_code(center_id, leaf_count),
+          leaf_count, V_Q.front(), static_cast<int32_t>(tolerance),
+          view.dense_leaf_mbb_values, &simd_stats);
+    } else if (view.dense_leaf_mbb_ternary) {
       survivor_offsets = filter_dense_leaf_ternary_survivors(
           view.leaf_beacon_dists[offset], leaf_count, V_Q.front(),
           static_cast<int32_t>(tolerance), view.dense_leaf_mbb_values,

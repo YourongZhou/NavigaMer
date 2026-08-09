@@ -1710,6 +1710,11 @@ struct SearchGraphView {
   // per leaf world replaces the individually padded bit streams.
   bool dense_leaf_mbb_ternary = false;
   std::array<uint8_t, 3> dense_leaf_mbb_values{};
+  // When every consecutive finest-layer leaf has exact distance
+  // 2 * abs(leaf_id - center_id), the dense ternary byte is derived from the
+  // clipped interval and omitted. The builder verifies every packed row before
+  // enabling this representation.
+  bool implicit_shift_leaf_mbb = false;
   FinalArray<uint8_t> leaf_beacon_dists;
 
   void initialize_leaf_link_begin_blocks(size_t finest_node_count) {
@@ -2110,6 +2115,37 @@ struct SearchGraphView {
         sequences.size(), static_cast<uint64_t>(center) +
                               implicit_consecutive_leaf_radius + 1);
     return static_cast<uint32_t>(end - begin);
+  }
+  static uint8_t consecutive_shift_leaf_mbb_code(
+      uint32_t leaf_count_value, uint32_t center_offset) {
+    const uint32_t key = (leaf_count_value << 3) | center_offset;
+    switch (key) {
+      case (1U << 3) | 0U: return 0;
+      case (2U << 3) | 0U: return 3;
+      case (2U << 3) | 1U: return 1;
+      case (3U << 3) | 0U: return 21;
+      case (3U << 3) | 1U: return 10;
+      case (3U << 3) | 2U: return 5;
+      case (4U << 3) | 1U: return 64;
+      case (4U << 3) | 2U: return 32;
+      case (5U << 3) | 2U: return 194;
+      default:
+        throw std::runtime_error(
+            "implicit shift leaf MBB shape is invalid");
+    }
+  }
+  uint8_t implicit_shift_leaf_mbb_code(
+      LeafId center, uint32_t leaf_count_value) const {
+    if (!implicit_shift_leaf_mbb || !implicit_consecutive_leaf_ids ||
+        dense_leaf_mbb_values != std::array<uint8_t, 3>{0, 2, 4}) {
+      throw std::runtime_error("implicit shift leaf MBB is invalid");
+    }
+    const LeafId begin =
+        center > implicit_consecutive_leaf_radius
+            ? center - implicit_consecutive_leaf_radius
+            : 0;
+    return consecutive_shift_leaf_mbb_code(
+        leaf_count_value, center - begin);
   }
   uint32_t link_count(NodeId node_id,
                       const PackedWorldNodeRecordRef& node,
@@ -2708,6 +2744,13 @@ struct SearchGraphView {
   size_t leaf_mbb_byte_count(
       NodeId node_id, const PackedWorldNodeRecordRef& node,
       uint32_t leaf_count_value, uint32_t beacon_count_value) const {
+    if (implicit_shift_leaf_mbb) {
+      if (!dense_leaf_mbb_ternary || beacon_count_value != 1 ||
+          leaf_count_value > 5) {
+        throw std::runtime_error("implicit shift leaf MBB shape is invalid");
+      }
+      return 0;
+    }
     if (dense_leaf_mbb_ternary) {
       if (beacon_count_value != 1 || leaf_count_value > 5) {
         throw std::runtime_error("dense ternary leaf MBB shape is invalid");
@@ -2726,6 +2769,13 @@ struct SearchGraphView {
   }
   uint32_t leaf_mbb_begin(
       NodeId node_id, const PackedWorldNodeRecordRef& node) const {
+    if (implicit_shift_leaf_mbb) {
+      if (layer_begin.empty() || node_id < layer_begin.back() ||
+          node_id >= node_records.size()) {
+        throw std::runtime_error("implicit shift leaf MBB node is missing");
+      }
+      return 0;
+    }
     if (dense_leaf_mbb_ternary) {
       if (layer_begin.empty() || node_id < layer_begin.back() ||
           node_id >= node_records.size()) {
@@ -2774,6 +2824,23 @@ struct SearchGraphView {
   uint8_t leaf_beacon_distance_unchecked(
       NodeId node_id, size_t cell_offset, uint32_t bits) const {
     const uint32_t begin = leaf_mbb_begin(node_id);
+    if (implicit_shift_leaf_mbb) {
+      const LeafId center = center_sequence_id(node_id);
+      const LeafId leaf_begin =
+          center > implicit_consecutive_leaf_radius
+              ? center - implicit_consecutive_leaf_radius
+              : 0;
+      const size_t center_offset = center - leaf_begin;
+      const size_t delta =
+          cell_offset > center_offset
+              ? cell_offset - center_offset
+              : center_offset - cell_offset;
+      if (delta > 2) {
+        throw std::runtime_error(
+            "implicit shift leaf MBB distance is invalid");
+      }
+      return static_cast<uint8_t>(delta * 2);
+    }
     if (dense_leaf_mbb_ternary) {
       const uint32_t leaf_count_value = leaf_count(node_id);
       if (cell_offset >= leaf_count_value) {
@@ -3137,6 +3204,7 @@ class BioGeometryIndexBuilder {
   std::vector<uint8_t> build_geometry_mbb_bits_;
   bool dense_leaf_mbb_ternary_ = false;
   std::array<uint8_t, 3> dense_leaf_mbb_values_{};
+  bool implicit_shift_leaf_mbb_ = false;
   bool implicit_consecutive_leaf_ids_ = false;
   LeafId implicit_consecutive_leaf_radius_ = 0;
   std::vector<std::vector<NodeId>> extended_layers_;

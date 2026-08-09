@@ -316,7 +316,7 @@ only after every selected payload's construction signature, reference slice,
 contig, and source coordinates validate. Damaged
 or incompatible packs are rebuilt one atomic group at a time; only that group's
 temporary pack exists during construction because payloads are written directly
-into it. The final v13 `.navshard`
+into it. The final v14 `.navshard`
 manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
