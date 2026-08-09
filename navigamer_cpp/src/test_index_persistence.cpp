@@ -178,7 +178,7 @@ void assert_loaded_search_matches_built() {
   const auto assert_mapped = [](const auto& array) {
     if (!array.empty()) {
       assert(array.is_mapped());
-      assert((reinterpret_cast<uintptr_t>(array.data()) & 63) == 0);
+      assert((reinterpret_cast<uintptr_t>(array.data()) & 31) == 0);
     }
   };
   const auto& loaded_view = loaded.builder.search_graph_view();
@@ -506,7 +506,7 @@ void assert_multicontig_invalid_base_and_occurrence_round_trip() {
   navigamer::save_index(index_path, built, manifest);
   auto loaded = navigamer::load_index(index_path);
   const auto& loaded_store = loaded.builder.sequence_store();
-  assert(loaded.manifest.format_version == 64);
+  assert(loaded.manifest.format_version == 65);
   assert(loaded_store.reference_contigs.size() == 2);
   assert(loaded_store.singleton_occurrences ==
          store.singleton_occurrences);

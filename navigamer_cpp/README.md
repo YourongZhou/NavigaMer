@@ -255,7 +255,7 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v64 bit-packs each node to the minimum whole-byte width supported by
+Format v65 bit-packs each node to the minimum whole-byte width supported by
 that shard's actual offset and count ranges (9 bytes per node in the 100k-window
 reference benchmark, with wider automatic fallbacks). Base-relative child
 payloads store a minimum whole-byte forward base delta from `node_id + 1`.
@@ -288,7 +288,7 @@ representable, still omitting per-node beacon offsets and repeated IDs.
 Dense child layouts with at most 256 exact interned `(child count, MBB begin)`
 pairs store one descriptor code in each node and one 16-bit shard-local table;
 the direct layout remains the zero-growth fallback.
-A v19 `.navshard` bundle stores the common v64 construction manifest once and
+A v20 `.navshard` bundle stores the common v65 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
@@ -427,7 +427,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 64
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 65
 stores an all-ACGT shared reference in 2-bit form and restores one contiguous
 byte view per loaded shard, so edit-distance query kernels retain direct
 character access; references containing other IUPAC characters are kept
@@ -532,8 +532,8 @@ Repeated reference positions use one pair for a singleton duplicate, while
 larger duplicate groups share one group offset and a flat 32-bit position
 array.
 Finalized node, edge, beacon, MBB, leaf, reference-record, and repeated
-occurrence arrays start on 64-byte boundaries in the index and load through
-read-only memory mappings, so SIMD scans do not inherit accidental cache-line
+occurrence arrays start on 32-byte boundaries in the index and load through
+read-only memory mappings, so AVX2 scans do not inherit accidental vector
 misalignment and index loading does not duplicate the arrays into heap memory.
 Query access still uses cached raw pointers and sizes.
 Because finest nodes use leaf links and all other nodes use child links, those

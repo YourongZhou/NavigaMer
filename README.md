@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 64 stores an all-ACGT
+edit distance fits in one byte. Persisted format version 65 stores an all-ACGT
 shared reference in 2-bit form and restores one contiguous byte view per
 loaded shard, so edit-distance query kernels retain direct character access;
 references containing other IUPAC characters are kept losslessly as raw bytes.
@@ -284,7 +284,7 @@ loads that persisted `.navidx` once and calls `navigamer query-index-batch`;
 without it, the bridge falls back to `navigamer benchmark` on reference windows.
 
 The C++ `build` and `query` commands support explicit persisted indexes with
-`--index <file>`. The v64 index file stores a manifest with input fingerprints
+`--index <file>`. The v65 index file stores a manifest with input fingerprints
 and construction parameters plus the canonical sequence, node, child, leaf,
 beacon, MBB, and leaf-beacon arrays. Older pointer-graph index files must be
 rebuilt. `query --index <file> --query <seq>` and
@@ -322,7 +322,7 @@ Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
 During a rebuild only the current group's atomic temporary pack exists; shard
-payloads are written directly into it, without per-shard temporary files. The final v19
+payloads are written directly into it, without per-shard temporary files. The final v20
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph
