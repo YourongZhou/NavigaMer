@@ -338,7 +338,11 @@ current 64-shard group; they do not allocate a bitmap or reverse map sized to
 the total logical shard count. FASTQ records and their route plans are
 streamed in blocks of at most 8,192 queries, while an unchanged resident
 shard group is reused across block boundaries. Thus query memory does not
-grow with total FASTQ record count. A one-shard hit path bypasses cross-shard
+grow with total FASTQ record count. Within each input block, planning stops
+after at least 65,536 selected shard IDs and executes that subplan before
+routing more records. One query is never split, so the route-table bound is
+the 65,536-ID budget plus one complete query route; `peak_route_ids` reports
+the observed maximum. A one-shard hit path bypasses cross-shard
 hash merging without changing the exact verifier or reported occurrences.
 Non-sharded bundle queries consume one record at a time; optional path traces
 retain only the immediately preceding query needed for overlap statistics.

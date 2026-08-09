@@ -1831,6 +1831,7 @@ void run_query_index_batch(const std::string& index_path,
     size_t routed_queries = 0;
     size_t searched_shards = 0;
     size_t peak_loaded_shards = 0;
+    size_t peak_planned_route_ids = 0;
     std::vector<uint32_t> cached_shard_ids;
     std::vector<LoadedIndex> cached_loaded_shards;
     std::vector<std::unique_ptr<BioGeometrySearchEngine>> cached_engines;
@@ -1841,18 +1842,25 @@ void run_query_index_batch(const std::string& index_path,
     };
 
     do {
+    size_t query_block_begin = 0;
+    while (query_block_begin < queries.size()) {
+    constexpr size_t kMaxPlannedRouteIds = 65536;
 
     std::vector<size_t> query_route_offsets;
-    query_route_offsets.reserve(queries.size() + 1);
+    query_route_offsets.reserve(
+        queries.size() - query_block_begin + 1);
     query_route_offsets.push_back(0);
     std::vector<uint32_t> query_route_shard_ids;
-    query_route_shard_ids.reserve(queries.size());
+    query_route_shard_ids.reserve(kMaxPlannedRouteIds);
     std::vector<uint8_t> query_routed_bits(
-        (queries.size() + 7) / 8, uint8_t{0});
+        (queries.size() - query_block_begin + 7) / 8,
+        uint8_t{0});
     std::vector<float> query_route_ms;
-    query_route_ms.reserve(queries.size());
-    for (size_t query_idx = 0; query_idx < queries.size(); ++query_idx) {
-      const auto& query = queries[query_idx];
+    query_route_ms.reserve(queries.size() - query_block_begin);
+    size_t query_block_end = query_block_begin;
+    while (query_block_end < queries.size()) {
+      const size_t query_idx = query_block_end - query_block_begin;
+      const auto& query = queries[query_block_end];
       const auto route_start =
           std::chrono::high_resolution_clock::now();
       const bool routed = shard_router.append_selected_shards(
@@ -1869,7 +1877,15 @@ void run_query_index_batch(const std::string& index_path,
             uint8_t{1} << (query_idx & 7));
       }
       query_route_offsets.push_back(query_route_shard_ids.size());
+      ++query_block_end;
+      if (query_route_shard_ids.size() >= kMaxPlannedRouteIds) {
+        break;
+      }
     }
+    const size_t planned_query_count =
+        query_block_end - query_block_begin;
+    peak_planned_route_ids = std::max(
+        peak_planned_route_ids, query_route_shard_ids.size());
     const auto query_is_routed = [&](size_t query_idx) {
       return (query_routed_bits[query_idx >> 3] &
               static_cast<uint8_t>(uint8_t{1} << (query_idx & 7))) != 0;
@@ -1914,7 +1930,7 @@ void run_query_index_batch(const std::string& index_path,
     };
     std::array<uint32_t, 2 * kMaxResidentQueryShards>
         merged_shard_ids;
-    for (size_t query_idx = 0; query_idx < queries.size();
+    for (size_t query_idx = 0; query_idx < planned_query_count;
          ++query_idx) {
       if (!query_is_routed(query_idx)) {
         flush_batch();
@@ -2016,7 +2032,8 @@ void run_query_index_batch(const std::string& index_path,
           for (size_t query_offset = 0;
                query_offset < query_count; ++query_offset) {
             const auto& read =
-                queries[shard_batch.query_begin + query_offset];
+                queries[query_block_begin +
+                        shard_batch.query_begin + query_offset];
             std::fill(shard_errors.begin(), shard_errors.end(),
                       std::exception_ptr{});
             const auto search_start =
@@ -2116,7 +2133,8 @@ void run_query_index_batch(const std::string& index_path,
               shard_batch.query_begin + query_offset;
           auto& aggregate = aggregates[query_offset];
           emit_query_hits(
-              queries[query_idx], aggregate.stats, aggregate.hits,
+              queries[query_block_begin + query_idx],
+              aggregate.stats, aggregate.hits,
               aggregate.search_ms + query_route_ms[query_idx]);
         }
         continue;
@@ -2140,7 +2158,7 @@ void run_query_index_batch(const std::string& index_path,
       std::vector<std::exception_ptr> shard_errors;
       for (size_t query_idx = shard_batch.query_begin;
            query_idx < shard_batch.query_end; ++query_idx) {
-      const auto& read = queries[query_idx];
+      const auto& read = queries[query_block_begin + query_idx];
       auto query_start =
           std::chrono::high_resolution_clock::now();
       const bool route_enabled = query_is_routed(query_idx);
@@ -2272,8 +2290,10 @@ void run_query_index_batch(const std::string& index_path,
       emit_query_hits(read, combined, combined_hits, query_time_ms);
       }
     }
-    total_query_count += queries.size();
+    total_query_count += planned_query_count;
     total_batch_count += shard_query_batches.size();
+    query_block_begin = query_block_end;
+    }
     } while (query_reader.read_block(
                  kQueryBlockRecords, &queries) != 0);
 
@@ -2281,6 +2301,7 @@ void run_query_index_batch(const std::string& index_path,
     std::cerr << "Loaded sharded index: " << index_path
               << " peak_shards=" << peak_loaded_shards
               << "/" << shard_manifest.shards.size()
+              << " peak_route_ids=" << peak_planned_route_ids
               << " batches=" << total_batch_count
               << " sequences="
               << shard_manifest.total_sequence_count

@@ -513,6 +513,71 @@ int main() {
     assert(recovered_fallback_source);
     assert(recovered_oversized_route_source);
   }
+  const std::string route_budget_reads =
+      "/tmp/navigamer_route_budget_queries.fq";
+  const std::string route_budget_tsv =
+      "/tmp/navigamer_route_budget_queries.tsv";
+  constexpr size_t route_budget_query_count = 185;
+  {
+    std::ofstream reads(route_budget_reads);
+    assert(reads.good());
+    const std::string sequence = fallback_reference.substr(123, 150);
+    const std::string quality(150, 'I');
+    for (size_t query_idx = 0;
+         query_idx < route_budget_query_count; ++query_idx) {
+      reads << "@route_budget_" << query_idx << '\n'
+            << sequence << "\n+\n" << quality << '\n';
+    }
+  }
+  const std::string route_budget_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index-batch --index " +
+      fallback_index + " --reads " + route_budget_reads +
+      " --tolerance 5 --out " + route_budget_tsv +
+      " >/tmp/navigamer_route_budget.stdout "
+      "2>/tmp/navigamer_route_budget.stderr";
+  assert(std::system(route_budget_command.c_str()) == 0);
+  {
+    std::ifstream stderr_in(
+        "/tmp/navigamer_route_budget.stderr");
+    assert(stderr_in.good());
+    const std::string stderr_text(
+        (std::istreambuf_iterator<char>(stderr_in)),
+        std::istreambuf_iterator<char>());
+    assert(stderr_text.find("Queries: 185") != std::string::npos);
+    assert(stderr_text.find("peak_route_ids=65688") !=
+           std::string::npos);
+    assert(stderr_text.find("routed_queries=185/185") !=
+           std::string::npos);
+  }
+  {
+    std::ifstream tsv(route_budget_tsv);
+    assert(tsv.good());
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    const auto output_header = split_tsv_line(line);
+    std::map<std::string, size_t> output_columns;
+    for (size_t idx = 0; idx < output_header.size(); ++idx) {
+      output_columns[output_header[idx]] = idx;
+    }
+    std::vector<uint8_t> recovered(route_budget_query_count, uint8_t{0});
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      if (row[output_columns.at("reference_start")] != "123" ||
+          row[output_columns.at("edit_distance")] != "0") {
+        continue;
+      }
+      const std::string& query_id = row[output_columns.at("query_id")];
+      const std::string prefix = "route_budget_";
+      if (query_id.compare(0, prefix.size(), prefix) != 0) continue;
+      const size_t query_idx = std::stoul(query_id.substr(prefix.size()));
+      assert(query_idx < recovered.size());
+      recovered[query_idx] = 1;
+    }
+    for (uint8_t was_recovered : recovered) {
+      assert(was_recovered != 0);
+    }
+  }
   const std::string fallback_single_command =
       "OMP_NUM_THREADS=4 ./navigamer query-index --index " +
       fallback_index + " --query " + fallback_query +
