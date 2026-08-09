@@ -393,15 +393,6 @@ std::filesystem::path shard_pack_output_path(
   return bundle_path.parent_path() / name.str();
 }
 
-struct ShardBuildSpec {
-  uint32_t contig_id = 0;
-  uint32_t slice_begin = 0;
-  uint32_t source_begin = 0;
-  uint32_t window_count = 0;
-};
-static_assert(sizeof(ShardBuildSpec) == 16,
-              "millions of shard plans must remain compact");
-
 struct RouterBuildData {
   explicit RouterBuildData(std::filesystem::path path)
       : spool_path(std::move(path)) {}
@@ -872,26 +863,26 @@ uint64_t save_router_sidecar(
 
 template <typename SliceLoader>
 RouterBuildData build_router_data(
-    const std::vector<ShardBuildSpec>& specs,
+    const std::vector<IndexShardDescriptor>& descriptors,
     uint32_t k, uint32_t window,
     const std::filesystem::path& spool_path,
     SliceLoader&& load_slice) {
-  if (specs.size() > std::numeric_limits<uint32_t>::max()) {
+  if (descriptors.size() > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("too many shards for seed router");
   }
   RouterBuildData data(spool_path);
-  data.shard_offsets.reserve(specs.size());
-  data.shard_counts.reserve(specs.size());
+  data.shard_offsets.reserve(descriptors.size());
+  data.shard_counts.reserve(descriptors.size());
   std::ofstream spool(data.spool_path, std::ios::binary);
   if (!spool) {
     throw std::runtime_error("unable to create shard router code spool");
   }
   size_t spool_position = 0;
-  for (const auto& spec : specs) {
+  for (const auto& descriptor : descriptors) {
     // Keep lists contiguous. Page-aligning millions of small shards would
     // add one mostly empty 4 KiB page per shard and fault it during merge.
     data.shard_offsets.push_back(spool_position);
-    const auto slice = load_slice(spec);
+    const auto slice = load_slice(descriptor);
     const auto minimizers = reference_minimizers(slice, k, window);
     if (minimizers.size() > std::numeric_limits<uint32_t>::max()) {
       throw std::runtime_error(
@@ -1475,7 +1466,12 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
           static_cast<int>(window_length),
           static_cast<int>(stride), hierarchy, range_config);
 
-  std::vector<ShardBuildSpec> specs;
+  // Reuse the final manifest descriptors as the build plan. Keeping a second
+  // 16-byte plan beside 48-byte descriptors costs nearly 10 MiB for a
+  // 3 Gb reference split into recommended 5k-window shards.
+  std::vector<IndexShardDescriptor> descriptors;
+  descriptors.reserve(
+      reference_size / max_shard_windows + reference_contigs.size() + 1);
   std::vector<std::string> contig_ids;
   contig_ids.reserve(reference_contigs.size());
   uint32_t expected_contig_begin = 0;
@@ -1517,22 +1513,23 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
             "reference shard coordinate exceeds 32-bit storage");
       }
 
-      specs.push_back({
-          static_cast<uint32_t>(contig_idx),
-          static_cast<uint32_t>(slice_begin),
-          static_cast<uint32_t>(source_begin),
-          static_cast<uint32_t>(shard_window_count)});
+      IndexShardDescriptor descriptor;
+      descriptor.contig_id = static_cast<uint32_t>(contig_idx);
+      descriptor.source_begin = static_cast<uint32_t>(source_begin);
+      descriptor.source_end = static_cast<uint32_t>(source_end);
+      descriptor.window_count = static_cast<uint32_t>(shard_window_count);
+      descriptors.push_back(descriptor);
     }
   }
   if (expected_contig_begin != reference_size) {
     throw std::invalid_argument(
         "reference contigs do not cover the reference");
   }
-  if (specs.empty()) {
+  if (descriptors.empty()) {
     throw std::invalid_argument(
         "sharded index reference contains no complete windows");
   }
-  if (specs.size() > kMaxShardCount) {
+  if (descriptors.size() > kMaxShardCount) {
     throw std::runtime_error(
         "reference requires more than 2^32 logical shards");
   }
@@ -1568,7 +1565,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   const size_t requested_jobs =
       build_jobs == 0 ? automatic_jobs : build_jobs;
   const size_t job_count_size = std::min(
-      {requested_jobs, specs.size(), available_threads});
+      {requested_jobs, descriptors.size(), available_threads});
   if (job_count_size >
       static_cast<size_t>(std::numeric_limits<int>::max())) {
     throw std::invalid_argument(
@@ -1577,13 +1574,29 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   const int job_count = static_cast<int>(job_count_size);
   const int threads_per_job = static_cast<int>(
       std::max<size_t>(1, available_threads / job_count_size));
-  const auto spec_slice_end = [&](const ShardBuildSpec& spec) {
-    return static_cast<size_t>(spec.slice_begin) +
-           (static_cast<size_t>(spec.window_count) - 1) * stride +
+  const auto descriptor_slice_begin =
+      [&](const IndexShardDescriptor& descriptor) {
+        if (descriptor.contig_id >= reference_contigs.size()) {
+          throw std::runtime_error("shard descriptor has invalid contig ID");
+        }
+        const auto& contig = reference_contigs[descriptor.contig_id];
+        if (descriptor.source_begin < contig.source_begin) {
+          throw std::runtime_error("shard descriptor precedes its contig");
+        }
+        const size_t slice_begin = static_cast<size_t>(contig.begin) +
+            (static_cast<size_t>(descriptor.source_begin) -
+             contig.source_begin);
+        if (slice_begin > contig.end) {
+          throw std::runtime_error("shard descriptor lies beyond its contig");
+        }
+        return slice_begin;
+      };
+  const auto descriptor_slice_end = [&](const IndexShardDescriptor& descriptor) {
+    return descriptor_slice_begin(descriptor) +
+           (static_cast<size_t>(descriptor.window_count) - 1) * stride +
            window_length;
   };
 
-  std::vector<IndexShardDescriptor> descriptors(specs.size());
   const auto build_one = [&](size_t spec_idx,
                              const std::function<void(
                                  size_t,
@@ -1592,21 +1605,22 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
                              const std::function<void()>& signal_failure,
                              std::exception_ptr* error) {
     try {
-      const auto& spec = specs[spec_idx];
-      const size_t slice_end = spec_slice_end(spec);
-      const std::string& ref_id = contig_ids[spec.contig_id];
+      const auto& descriptor = descriptors[spec_idx];
+      const size_t slice_begin = descriptor_slice_begin(descriptor);
+      const size_t slice_end = descriptor_slice_end(descriptor);
+      const std::string& ref_id = contig_ids[descriptor.contig_id];
       const std::filesystem::path part_path =
           shard_output_path(bundle, spec_idx);
       std::string slice =
-          load_slice(spec.slice_begin, slice_end);
-      if (slice.size() != slice_end - spec.slice_begin) {
+          load_slice(slice_begin, slice_end);
+      if (slice.size() != slice_end - slice_begin) {
         throw std::runtime_error(
             "reference slice loader returned the wrong number of bases");
       }
       const uint32_t slice_size = static_cast<uint32_t>(slice.size());
       ReferenceContig slice_contig{
           ref_id, 0, slice_size,
-          spec.source_begin};
+          descriptor.source_begin};
 
       LoadedIndex reusable;
       const bool reused = load_reusable_shard(
@@ -1638,14 +1652,10 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
         throw std::runtime_error("logical shard count exceeds 32-bit storage");
       }
 
-      auto& descriptor = descriptors[spec_idx];
-      descriptor.contig_id = spec.contig_id;
-      descriptor.source_begin = spec.source_begin;
-      descriptor.source_end = static_cast<uint32_t>(
-          static_cast<size_t>(spec.source_begin) + slice_size);
-      descriptor.window_count = spec.window_count;
-      descriptor.sequence_count = static_cast<uint32_t>(sequence_count);
-      descriptor.world_node_count =
+      auto& completed_descriptor = descriptors[spec_idx];
+      completed_descriptor.sequence_count =
+          static_cast<uint32_t>(sequence_count);
+      completed_descriptor.world_node_count =
           static_cast<uint32_t>(world_node_count);
     } catch (...) {
       *error = std::current_exception();
@@ -1654,7 +1664,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   };
 
   const size_t pack_count =
-      (specs.size() + kShardsPerPack - 1) / kShardsPerPack;
+      (descriptors.size() + kShardsPerPack - 1) / kShardsPerPack;
   std::vector<std::string> pack_paths(pack_count);
   for (size_t pack_idx = 0; pack_idx < pack_count; ++pack_idx) {
     const std::filesystem::path pack_path =
@@ -1662,7 +1672,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     pack_paths[pack_idx] = pack_path.filename().string();
     const size_t group_begin = pack_idx * kShardsPerPack;
     const size_t group_end =
-        std::min(specs.size(), group_begin + kShardsPerPack);
+        std::min(descriptors.size(), group_begin + kShardsPerPack);
 
     bool reused_pack = false;
     try {
@@ -1674,18 +1684,22 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
       reused_descriptors.reserve(entries.size());
       for (size_t local_idx = 0; local_idx < entries.size(); ++local_idx) {
         const size_t spec_idx = group_begin + local_idx;
-        const auto& spec = specs[spec_idx];
-        const size_t slice_end = spec_slice_end(spec);
-        const std::string& ref_id = contig_ids[spec.contig_id];
+        const auto& planned_descriptor = descriptors[spec_idx];
+        const size_t slice_begin =
+            descriptor_slice_begin(planned_descriptor);
+        const size_t slice_end =
+            descriptor_slice_end(planned_descriptor);
+        const std::string& ref_id =
+            contig_ids[planned_descriptor.contig_id];
         std::string slice =
-            load_slice(spec.slice_begin, slice_end);
-        if (slice.size() != slice_end - spec.slice_begin) {
+            load_slice(slice_begin, slice_end);
+        if (slice.size() != slice_end - slice_begin) {
           throw std::runtime_error(
               "reference slice loader returned the wrong number of bases");
         }
         ReferenceContig slice_contig{
             ref_id, 0, static_cast<uint32_t>(slice.size()),
-            spec.source_begin};
+            planned_descriptor.source_begin};
         LoadedIndex candidate = load_index_payload_range(
             pack_path.string(), entries[local_idx].offset,
             entries[local_idx].size, part_manifest);
@@ -1694,20 +1708,15 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
                 slice, slice_contig, window_length)) {
           throw std::runtime_error("shard pack input changed");
         }
-        IndexShardDescriptor descriptor;
-        descriptor.pack_id = static_cast<uint32_t>(pack_idx);
-        descriptor.file_offset = entries[local_idx].offset;
-        descriptor.file_size = entries[local_idx].size;
-        descriptor.contig_id = spec.contig_id;
-        descriptor.source_begin = spec.source_begin;
-        descriptor.source_end = static_cast<uint32_t>(
-            static_cast<size_t>(spec.source_begin) + slice.size());
-        descriptor.window_count = spec.window_count;
-        descriptor.sequence_count = static_cast<uint32_t>(
+        IndexShardDescriptor reused_descriptor = planned_descriptor;
+        reused_descriptor.pack_id = static_cast<uint32_t>(pack_idx);
+        reused_descriptor.file_offset = entries[local_idx].offset;
+        reused_descriptor.file_size = entries[local_idx].size;
+        reused_descriptor.sequence_count = static_cast<uint32_t>(
             candidate.builder.num_sequences());
-        descriptor.world_node_count = static_cast<uint32_t>(
+        reused_descriptor.world_node_count = static_cast<uint32_t>(
             candidate.builder.num_world_nodes());
-        reused_descriptors.push_back(std::move(descriptor));
+        reused_descriptors.push_back(std::move(reused_descriptor));
       }
       std::move(
           reused_descriptors.begin(), reused_descriptors.end(),
@@ -1852,6 +1861,41 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     }
   }
 
+  ShardedSeedRouter router_metadata;
+  uint64_t router_checksum = 0;
+  size_t router_entry_count = 0;
+  if (descriptors.size() > 1 && window_length >= kRouterWindow) {
+    const auto router_path = router_output_path(bundle);
+    auto router_data = contiguous_reference
+        ? build_router_data(
+              descriptors, kRouterK, kRouterWindow,
+              router_path.string() + ".codes.tmp",
+              [&](const IndexShardDescriptor& descriptor) {
+                const size_t slice_begin =
+                    descriptor_slice_begin(descriptor);
+                return std::string_view(
+                    contiguous_reference->data() + slice_begin,
+                    descriptor_slice_end(descriptor) - slice_begin);
+              })
+        : build_router_data(
+              descriptors, kRouterK, kRouterWindow,
+              router_path.string() + ".codes.tmp",
+              [&](const IndexShardDescriptor& descriptor) {
+                return load_slice(descriptor_slice_begin(descriptor),
+                                  descriptor_slice_end(descriptor));
+              });
+    if (router_data.entry_count != 0) {
+      router_metadata.k = kRouterK;
+      router_metadata.window = kRouterWindow;
+      router_entry_count = router_data.entry_count;
+      router_checksum = save_router_sidecar(
+          router_path, router_metadata.k,
+          router_metadata.window,
+          static_cast<uint32_t>(descriptors.size()),
+          router_data);
+    }
+  }
+
   ShardedIndexManifest manifest;
   manifest.window_length = window_length;
   manifest.stride = stride;
@@ -1864,33 +1908,11 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     manifest.total_world_node_count += descriptor.world_node_count;
   }
   manifest.shards = std::move(descriptors);
-  if (specs.size() > 1 && window_length >= kRouterWindow) {
-    const auto router_path = router_output_path(bundle);
-    auto router_data = contiguous_reference
-        ? build_router_data(
-              specs, kRouterK, kRouterWindow,
-              router_path.string() + ".codes.tmp",
-              [&](const ShardBuildSpec& spec) {
-                return std::string_view(
-                    contiguous_reference->data() + spec.slice_begin,
-                    spec_slice_end(spec) - spec.slice_begin);
-              })
-        : build_router_data(
-              specs, kRouterK, kRouterWindow,
-              router_path.string() + ".codes.tmp",
-              [&](const ShardBuildSpec& spec) {
-                return load_slice(spec.slice_begin, spec_slice_end(spec));
-              });
-    if (router_data.entry_count != 0) {
-      manifest.router_k = kRouterK;
-      manifest.router_window = kRouterWindow;
-      manifest.router_entry_count = router_data.entry_count;
-      manifest.router_checksum = save_router_sidecar(
-          router_path, manifest.router_k,
-          manifest.router_window,
-          static_cast<uint32_t>(manifest.shards.size()),
-          router_data);
-    }
+  if (router_entry_count != 0) {
+    manifest.router_k = router_metadata.k;
+    manifest.router_window = router_metadata.window;
+    manifest.router_entry_count = router_entry_count;
+    manifest.router_checksum = router_checksum;
   }
   save_sharded_index_manifest(bundle_path, manifest);
   return manifest;
