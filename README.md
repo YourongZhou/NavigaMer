@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 60 stores an all-ACGT
+edit distance fits in one byte. Persisted format version 61 stores an all-ACGT
 shared reference in 2-bit form and restores one contiguous byte view per
 loaded shard, so edit-distance query kernels retain direct character access;
 references containing other IUPAC characters are kept losslessly as raw bytes.
@@ -55,6 +55,9 @@ When all representative window positions form one exact arithmetic progression,
 their per-256-position table is omitted and positions decode directly as
 `base + LeafId * stride`; every irregular reference keeps the existing exact
 block encoding.
+Center IDs whose adjacent deltas repeat exactly within a layer store one
+verified byte-offset cycle; query reconstructs each ID arithmetically and
+irregular layers retain the exact block-base/delta representation.
 For leaf worlds with at most five links and at most three distinct exact
 leaf-to-center distances, the index uses one base-3 byte per world rather than
 per-node bit-padded distance data; all other leaf payloads retain exact packing.
@@ -309,7 +312,7 @@ Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
 During a rebuild only the current group's atomic temporary pack exists; shard
-payloads are written directly into it, without per-shard temporary files. The final v14
+payloads are written directly into it, without per-shard temporary files. The final v15
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph

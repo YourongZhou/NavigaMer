@@ -36,11 +36,11 @@ namespace {
 constexpr std::array<char, 8> kShardMagic = {
     'N', 'G', 'S', 'H', 'R', 'D', '1', '0'};
 constexpr std::array<char, 8> kShardPackMagic = {
-    'N', 'G', 'P', 'A', 'C', 'K', '0', '8'};
+    'N', 'G', 'P', 'A', 'C', 'K', '0', '9'};
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '3'};
-constexpr uint32_t kShardFormatVersion = 14;
-constexpr uint32_t kShardPackFormatVersion = 8;
+constexpr uint32_t kShardFormatVersion = 15;
+constexpr uint32_t kShardPackFormatVersion = 9;
 constexpr uint32_t kRouterFormatVersion = 4;
 constexpr size_t kRouterHeaderBytes = 80;
 constexpr std::streamoff kRouterCodePayloadSizeOffset = 60;
@@ -1037,7 +1037,7 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
     throw std::runtime_error(
         "sharded index has invalid window configuration");
   }
-  if (manifest.part_manifest.format_version != 60 ||
+  if (manifest.part_manifest.format_version != 61 ||
       manifest.part_manifest.signature.empty() ||
       manifest.part_manifest.sequence_count != 0 ||
       manifest.part_manifest.world_node_count != 0 ||

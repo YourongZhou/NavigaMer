@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 60) {
+  if (manifest.format_version != 61) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 60) {
+  if (manifest.format_version != 61) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -1073,6 +1073,10 @@ void write_search_graph_view(std::ostream& out,
   write_u32_vector(out, view.center_id_block_begins);
   write_u32_vector(out, view.center_id_delta_begins);
   write_u8_vector(out, view.center_id_delta_bits);
+  write_final_array(
+      out, view.periodic_center_layers, "periodic_center_layers");
+  write_final_array(
+      out, view.periodic_center_offsets, "periodic_center_offsets");
   write_pod<PackedWorldNodeLayout>(
       out, view.node_records.child_layout());
   write_pod<PackedWorldNodeLayout>(
@@ -1161,6 +1165,12 @@ SearchGraphView read_search_graph_view(
       read_u32_vector(in, "center_id_delta_begins");
   view.center_id_delta_bits =
       read_u8_vector(in, "center_id_delta_bits");
+  view.periodic_center_layers =
+      read_final_array<PeriodicCenterLayer>(
+          in, mapping, "periodic_center_layers");
+  view.periodic_center_offsets =
+      read_final_array<uint8_t>(
+          in, mapping, "periodic_center_offsets");
   const PackedWorldNodeLayout child_node_layout =
       read_pod<PackedWorldNodeLayout>(in, "child_node_record_layout");
   const PackedWorldNodeLayout leaf_node_layout =
@@ -1407,7 +1417,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 60;
+  stored.format_version = 61;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

@@ -5762,12 +5762,145 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           implicit_leaf_packed_fields, implicit_leaf_link_begins,
           implicit_leaf_one_beacon_count, false, 0,
           implicit_dense_leaf_fields);
+  std::vector<PeriodicCenterLayer> periodic_center_layers(
+      primary_layers_.size());
+  std::vector<std::vector<uint8_t>> periodic_offsets_by_layer(
+      primary_layers_.size());
+  size_t periodic_center_savings = 0;
+  size_t periodic_center_offset_count = 0;
+  const size_t center_base_bytes =
+      sequence_count_ == 0 ||
+              sequence_count_ - 1 <=
+                  std::numeric_limits<uint16_t>::max()
+          ? sizeof(uint16_t)
+          : sizeof(LeafId);
+  for (size_t layer_idx = 0;
+       layer_idx < primary_layers_.size(); ++layer_idx) {
+    const auto& layer = primary_layers_[layer_idx];
+    constexpr size_t kMaximumPeriodicCenterScanNodes = 1U << 20;
+    if (layer.size() < 2 ||
+        layer.size() > kMaximumPeriodicCenterScanNodes) {
+      continue;
+    }
+    const auto delta_at = [&](size_t offset) {
+      const LeafId previous =
+          build_nodes_[layer[offset]].center_sequence_id;
+      const LeafId current =
+          build_nodes_[layer[offset + 1]].center_sequence_id;
+      if (current <= previous) {
+        throw std::runtime_error(
+            "periodic center detection requires increasing IDs");
+      }
+      return static_cast<LeafId>(current - previous);
+    };
+    const size_t delta_count = layer.size() - 1;
+    std::vector<uint32_t> prefix(delta_count, 0);
+    for (size_t idx = 1; idx < delta_count; ++idx) {
+      uint32_t matched = prefix[idx - 1];
+      while (matched != 0 && delta_at(idx) != delta_at(matched)) {
+        matched = prefix[matched - 1];
+      }
+      if (delta_at(idx) == delta_at(matched)) ++matched;
+      prefix[idx] = matched;
+    }
+    const size_t period = delta_count - prefix.back();
+    if (period == 0 ||
+        period > std::numeric_limits<uint8_t>::max() ||
+        periodic_center_offset_count + period >
+            std::numeric_limits<uint16_t>::max()) {
+      continue;
+    }
+    uint64_t cycle_span = 0;
+    uint64_t prefix_offset = 0;
+    std::vector<uint8_t> offsets(period, uint8_t{0});
+    bool byte_offsets = true;
+    for (size_t offset = 0; offset < period; ++offset) {
+      if (prefix_offset > std::numeric_limits<uint8_t>::max()) {
+        byte_offsets = false;
+        break;
+      }
+      offsets[offset] = static_cast<uint8_t>(prefix_offset);
+      prefix_offset += delta_at(offset);
+      cycle_span += delta_at(offset);
+    }
+    if (!byte_offsets ||
+        cycle_span > std::numeric_limits<LeafId>::max()) {
+      continue;
+    }
+    const size_t blocks =
+        (layer.size() + SearchGraphView::CENTER_ID_BLOCK_SIZE - 1) /
+        SearchGraphView::CENTER_ID_BLOCK_SIZE;
+    const uint64_t slots =
+        static_cast<uint64_t>(blocks) *
+        (SearchGraphView::CENTER_ID_BLOCK_SIZE - 1);
+    const size_t ordinary_bytes =
+        blocks * center_base_bytes +
+        static_cast<size_t>(
+            (slots * center_id_delta_bits[layer_idx] + 7) / 8);
+    if (ordinary_bytes <= period) continue;
+
+    PeriodicCenterLayer descriptor;
+    descriptor.first = build_nodes_[layer.front()].center_sequence_id;
+    descriptor.cycle_span = static_cast<LeafId>(cycle_span);
+    descriptor.period = static_cast<uint8_t>(period);
+    if (descriptor.first == 0 && descriptor.cycle_span == 16) {
+      if (offsets.size() == 1 && offsets[0] == 0) {
+        descriptor.pattern = PeriodicCenterLayer::Linear16;
+      } else if (offsets.size() == 3 && offsets[0] == 0 &&
+                 offsets[1] == 8 && offsets[2] == 12) {
+        descriptor.pattern = PeriodicCenterLayer::DefaultPeriod3;
+      } else if (offsets.size() == 7 && offsets[0] == 0 &&
+                 offsets[1] == 3 && offsets[2] == 6 &&
+                 offsets[3] == 8 && offsets[4] == 11 &&
+                 offsets[5] == 12 && offsets[6] == 15) {
+        descriptor.pattern = PeriodicCenterLayer::DefaultPeriod7;
+      }
+    }
+    for (size_t local = 0; local < layer.size(); ++local) {
+      const size_t quotient = local / period;
+      const size_t remainder = local - quotient * period;
+      const uint64_t reconstructed =
+          static_cast<uint64_t>(descriptor.first) +
+          static_cast<uint64_t>(quotient) * descriptor.cycle_span +
+          offsets[remainder];
+      if (reconstructed !=
+          build_nodes_[layer[local]].center_sequence_id) {
+        throw std::runtime_error(
+            "periodic center detection changed an exact center ID");
+      }
+    }
+    periodic_center_layers[layer_idx] = descriptor;
+    periodic_offsets_by_layer[layer_idx] = std::move(offsets);
+    periodic_center_savings += ordinary_bytes - period;
+    periodic_center_offset_count += period;
+  }
+  std::vector<uint8_t> periodic_center_offsets;
+  if (periodic_center_savings >
+      periodic_center_layers.size() * sizeof(PeriodicCenterLayer)) {
+    periodic_center_offsets.reserve(periodic_center_offset_count);
+    for (size_t layer_idx = 0;
+         layer_idx < periodic_center_layers.size(); ++layer_idx) {
+      auto& descriptor = periodic_center_layers[layer_idx];
+      if (descriptor.period == 0) continue;
+      descriptor.offset_begin = static_cast<uint16_t>(
+          periodic_center_offsets.size());
+      const auto& offsets = periodic_offsets_by_layer[layer_idx];
+      periodic_center_offsets.insert(
+          periodic_center_offsets.end(), offsets.begin(), offsets.end());
+      center_id_delta_bits[layer_idx] = 0;
+    }
+  } else {
+    periodic_center_layers.clear();
+    periodic_center_offsets.clear();
+  }
   view.node_records.initialize(
       world_node_count_, child_node_layout, leaf_node_layout,
       finest_node_begin);
   view.initialize_center_sequence_ids(
       center_id_delta_bits,
-      sequence_count_ == 0 ? 0 : sequence_count_ - 1);
+      sequence_count_ == 0 ? 0 : sequence_count_ - 1,
+      std::move(periodic_center_layers),
+      std::move(periodic_center_offsets));
   const size_t non_finest_node_count =
       primary_layers_.empty()
           ? 0

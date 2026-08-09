@@ -395,7 +395,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(reloaded_manifest.window_length == window);
-  assert(reloaded_manifest.format_version == 14);
+  assert(reloaded_manifest.format_version == 15);
   assert(reloaded_manifest.stride == stride);
   assert(reloaded_manifest.shards.size() ==
          manifest.shards.size());
@@ -731,6 +731,30 @@ void test_implicit_dense_leaf_fields() {
 
   const auto& builder = shards.front().builder;
   const auto& view = builder.search_graph_view();
+  assert(view.periodic_center_layers.size() == 3);
+  assert(view.periodic_center_layers[0].period == 1);
+  assert(view.periodic_center_layers[1].period == 3);
+  assert(view.periodic_center_layers[2].period == 7);
+  assert(view.periodic_center_layers[0].pattern ==
+         navigamer::PeriodicCenterLayer::Linear16);
+  assert(view.periodic_center_layers[1].pattern ==
+         navigamer::PeriodicCenterLayer::DefaultPeriod3);
+  assert(view.periodic_center_layers[2].pattern ==
+         navigamer::PeriodicCenterLayer::DefaultPeriod7);
+  assert(view.periodic_center_offsets.size() == 11);
+  assert(view.center_id_block_bases16.empty());
+  assert(view.center_id_block_bases.empty());
+  assert(view.center_id_block_deltas.empty());
+  for (size_t layer = 0; layer < view.layer_begin.size(); ++layer) {
+    navigamer::LeafId previous = 0;
+    for (navigamer::NodeId node_id = view.layer_begin[layer];
+         node_id < view.layer_end[layer]; ++node_id) {
+      const navigamer::LeafId center =
+          view.center_sequence_id(node_id, layer);
+      if (node_id != view.layer_begin[layer]) assert(center > previous);
+      previous = center;
+    }
+  }
   assert(view.node_records.bytes().size() ==
          static_cast<size_t>(view.node_records.finest_node_begin()) *
              view.node_records.child_layout().record_bytes);

@@ -310,6 +310,35 @@ void assert_all_center_id_widths_are_exact() {
   }
 }
 
+void assert_generic_periodic_center_ids_are_exact() {
+  constexpr navigamer::NodeId kNodeCount = 11;
+  navigamer::SearchGraphView view;
+  view.node_records.resize(kNodeCount);
+  view.layer_begin = {0};
+  view.layer_end = {kNodeCount};
+  view.sequences.records.resize(100);
+
+  navigamer::PeriodicCenterLayer descriptor;
+  descriptor.first = 5;
+  descriptor.cycle_span = 10;
+  descriptor.period = 3;
+  view.initialize_center_sequence_ids(
+      {0}, 99, {descriptor}, {0, 2, 7});
+
+  assert(view.center_id_block_bases16.empty());
+  assert(view.center_id_block_bases.empty());
+  assert(view.center_id_block_deltas.empty());
+  for (navigamer::NodeId node_id = 0; node_id < kNodeCount;
+       ++node_id) {
+    static constexpr std::array<uint8_t, 3> offsets = {0, 2, 7};
+    const navigamer::LeafId expected =
+        5 + (node_id / 3) * 10 + offsets[node_id % 3];
+    view.set_center_sequence_id(node_id, 0, expected);
+    assert(view.center_sequence_id(node_id, 0) == expected);
+  }
+  assert(view.center_sequence_ids_valid());
+}
+
 void assert_node_count_overflow_is_exact() {
   navigamer::SearchGraphView view;
   view.node_records.resize(2);
@@ -1154,6 +1183,7 @@ int main() {
   assert_flat_search_matches_original();
   assert_max_byte_distance_is_recall_safe();
   assert_all_center_id_widths_are_exact();
+  assert_generic_periodic_center_ids_are_exact();
   assert_all_beacon_id_encodings_are_exact();
   assert_node_count_overflow_is_exact();
   assert_child_mbb_layout_is_exact();
