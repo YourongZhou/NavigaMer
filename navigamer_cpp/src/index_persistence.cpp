@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 55) {
+  if (manifest.format_version != 56) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 55) {
+  if (manifest.format_version != 56) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -1103,6 +1103,11 @@ void write_search_graph_view(std::ostream& out,
   write_bool(out, view.implicit_consecutive_leaf_ids);
   write_pod<LeafId>(out, view.implicit_consecutive_leaf_radius);
   write_final_array(out, view.beacon_id_bytes, "beacon_id_bytes");
+  write_bool(out, view.dense_beacon_patterns);
+  write_pod<uint8_t>(out, view.dense_beacon_pattern_count);
+  for (int8_t delta : view.dense_beacon_pattern_deltas) {
+    write_pod<int8_t>(out, delta);
+  }
   write_pod<uint8_t>(out, view.beacon_delta_bits);
   write_pod<uint8_t>(out, view.beacon_begin_block_size);
   write_pod<uint8_t>(out, view.beacon_begin_base_bits);
@@ -1195,6 +1200,13 @@ SearchGraphView read_search_graph_view(
       read_pod<LeafId>(in, "implicit_consecutive_leaf_radius");
   view.beacon_id_bytes =
       read_final_array<uint8_t>(in, mapping, "beacon_id_bytes");
+  view.dense_beacon_patterns =
+      read_bool(in, "dense_beacon_patterns");
+  view.dense_beacon_pattern_count =
+      read_pod<uint8_t>(in, "dense_beacon_pattern_count");
+  for (int8_t& delta : view.dense_beacon_pattern_deltas) {
+    delta = read_pod<int8_t>(in, "dense_beacon_pattern_delta");
+  }
   view.beacon_delta_bits =
       read_pod<uint8_t>(in, "beacon_delta_bits");
   view.beacon_begin_block_size =
@@ -1373,7 +1385,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 55;
+  stored.format_version = 56;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

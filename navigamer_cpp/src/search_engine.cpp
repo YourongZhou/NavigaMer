@@ -1116,7 +1116,22 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
           ? 0
           : view.beacon_begin(node_id);
   const LeafId center_id = view.center_sequence_id(node_id, layer);
-  switch (node.beacon_storage()) {
+  if (view.dense_beacon_patterns &&
+      node_id < view.node_records.finest_node_begin()) {
+    const uint8_t packed = view.beacon_id_bytes[node_id >> 1];
+    const uint8_t code = static_cast<uint8_t>(
+        (node_id & 1) == 0 ? packed & 0x0FU : packed >> 4);
+    if (beacon_count != 3 || code >= view.dense_beacon_pattern_count) {
+      throw std::runtime_error("dense beacon pattern is invalid");
+    }
+    const int8_t* deltas =
+        view.dense_beacon_pattern_deltas.data() + code * 3;
+    for (uint32_t offset = 0; offset < 3; ++offset) {
+      measure_beacon(static_cast<LeafId>(
+          static_cast<int64_t>(center_id) + deltas[offset]));
+    }
+  } else {
+    switch (node.beacon_storage()) {
     case WorldNodeRecord::BeaconStorage::Delta8: {
       const int8_t* deltas =
           reinterpret_cast<const int8_t*>(
@@ -1173,6 +1188,7 @@ std::vector<int> BioGeometrySearchEngine::compute_query_beacon_distances_view(
     case WorldNodeRecord::BeaconStorage::ImplicitCenter:
       measure_beacon(center_id);
       break;
+    }
   }
   if (config_.path_reuse_enabled) {
     if (auto* reuse = active_path_reuse_context(this); reuse && reuse->enabled) {

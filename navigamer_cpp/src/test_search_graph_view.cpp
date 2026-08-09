@@ -984,6 +984,42 @@ void assert_implicit_consecutive_leaf_ids_are_exact() {
   assert(view.leaf_id(1, 2) == 9);
 }
 
+void assert_dense_beacon_patterns_are_exact() {
+  const auto layout = navigamer::PackedWorldNodeLayout::compact(0, 0, 1);
+  navigamer::SearchGraphView view;
+  view.node_records.initialize(3, layout, layout, 2);
+  view.layer_begin = {0, 2};
+  view.layer_end = {2, 3};
+  view.initialize_center_sequence_ids({4, 0}, 20);
+  view.set_center_sequence_id(0, 0, 4);
+  view.set_center_sequence_id(1, 0, 10);
+  view.dense_beacon_patterns = true;
+  view.dense_beacon_pattern_count = 2;
+  view.dense_beacon_pattern_deltas[0] = -2;
+  view.dense_beacon_pattern_deltas[1] = 0;
+  view.dense_beacon_pattern_deltas[2] = 2;
+  view.dense_beacon_pattern_deltas[3] = -4;
+  view.dense_beacon_pattern_deltas[4] = 0;
+  view.dense_beacon_pattern_deltas[5] = 4;
+  view.beacon_id_bytes = {0x10};
+  for (uint32_t node_id = 0; node_id < 2; ++node_id) {
+    auto node = view.node_records[node_id];
+    node.set_link_storage(
+        navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    node.set_inline_counts(
+        1, 3, navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
+  }
+  assert(view.beacon_begins_valid(2));
+  assert(view.beacon_begin(0) == 0);
+  assert(view.beacon_begin(1) == 0);
+  assert(view.beacon_sequence_id(0, 0) == 2);
+  assert(view.beacon_sequence_id(0, 1) == 4);
+  assert(view.beacon_sequence_id(0, 2) == 6);
+  assert(view.beacon_sequence_id(1, 0) == 6);
+  assert(view.beacon_sequence_id(1, 1) == 10);
+  assert(view.beacon_sequence_id(1, 2) == 14);
+}
+
 void assert_child_and_leaf_node_layouts_are_independent() {
   const auto child_layout = navigamer::PackedWorldNodeLayout::compact(
       1094080, 3657858, 1501);
@@ -1062,6 +1098,7 @@ int main() {
   assert_compact_node_layout_is_exact();
   assert_implicit_leaf_link_begins_are_exact();
   assert_implicit_consecutive_leaf_ids_are_exact();
+  assert_dense_beacon_patterns_are_exact();
   assert_child_and_leaf_node_layouts_are_independent();
   assert_all_beacon_begin_widths_are_exact();
   std::cout << "search graph view tests passed\n";

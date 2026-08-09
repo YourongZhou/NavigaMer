@@ -1537,6 +1537,12 @@ struct SearchGraphView {
   uint8_t beacon_begin_delta_bits = 0;
   uint8_t beacon_delta_bits = 16;
   FinalArray<uint8_t> beacon_id_bytes;
+  // When every non-leaf world has one of at most 16 exact three-beacon
+  // center-relative patterns, a dense 4-bit pattern code replaces both the
+  // variable-width beacon payload and its offset table.
+  bool dense_beacon_patterns = false;
+  uint8_t dense_beacon_pattern_count = 0;
+  std::array<int8_t, 16 * 3> dense_beacon_pattern_deltas{};
 
   // Exact child MBB payloads with identical dimensions are interned within a
   // shard. Node records continue to point directly at their shared payload,
@@ -1626,6 +1632,10 @@ struct SearchGraphView {
     beacon_begin_block_size = block_size;
     beacon_begin_base_bits = 0;
     beacon_begin_delta_bits = 0;
+    if (dense_beacon_patterns) {
+      beacon_begin_blocks.clear();
+      return;
+    }
     if (non_finest_node_count == 0) {
       beacon_begin_blocks.clear();
       return;
@@ -1649,6 +1659,15 @@ struct SearchGraphView {
   }
 
   bool beacon_begins_valid(size_t non_finest_node_count) const {
+    if (dense_beacon_patterns) {
+      return non_finest_node_count != 0 &&
+             dense_beacon_pattern_count != 0 &&
+             dense_beacon_pattern_count <= 16 &&
+             beacon_begin_base_bits == 0 && beacon_begin_delta_bits == 0 &&
+             beacon_begin_blocks.empty() &&
+             beacon_id_bytes.size() ==
+                 (non_finest_node_count + 1) / 2;
+    }
     if (non_finest_node_count == 0) {
       return beacon_begin_block_size >= 2 &&
              beacon_begin_block_size <= 32 &&
@@ -1679,6 +1698,9 @@ struct SearchGraphView {
 
   void set_beacon_begin(
       NodeId node_id, uint32_t begin, uint32_t block_base) {
+    if (dense_beacon_patterns) {
+      throw std::logic_error("dense beacon patterns have no begin offsets");
+    }
     if (beacon_begin_base_bits == 0 || beacon_begin_base_bits > 32 ||
         beacon_begin_delta_bits == 0 || beacon_begin_delta_bits > 32 ||
         begin < block_base) {
@@ -1729,6 +1751,7 @@ struct SearchGraphView {
   __attribute__((always_inline))
 #endif
   inline uint32_t beacon_begin(NodeId node_id) const {
+    if (dense_beacon_patterns) return 0;
     const size_t record_bits =
         beacon_begin_base_bits +
         (beacon_begin_block_size - 1) * beacon_begin_delta_bits;
@@ -2630,6 +2653,21 @@ struct SearchGraphView {
   LeafId beacon_sequence_id(
       NodeId node_id, const PackedWorldNodeRecordRef& node,
       LeafId center, uint32_t beacon_offset) const {
+    if (dense_beacon_patterns &&
+        node_id < node_records.finest_node_begin()) {
+      if (beacon_offset >= 3) {
+        throw std::out_of_range("dense beacon pattern offset is invalid");
+      }
+      const uint8_t packed = beacon_id_bytes[node_id >> 1];
+      const uint8_t code = static_cast<uint8_t>(
+          (node_id & 1) == 0 ? packed & 0x0FU : packed >> 4);
+      if (code >= dense_beacon_pattern_count) {
+        throw std::runtime_error("dense beacon pattern code is invalid");
+      }
+      return static_cast<LeafId>(
+          static_cast<int64_t>(center) +
+          dense_beacon_pattern_deltas[code * 3 + beacon_offset]);
+    }
     const uint32_t beacon_begin =
         node.beacon_storage() ==
                 WorldNodeRecord::BeaconStorage::ImplicitCenter
