@@ -39,7 +39,7 @@ constexpr std::array<char, 8> kShardPackMagic = {
     'N', 'G', 'P', 'A', 'C', 'K', '0', '7'};
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '3'};
-constexpr uint32_t kShardFormatVersion = 11;
+constexpr uint32_t kShardFormatVersion = 12;
 constexpr uint32_t kShardPackFormatVersion = 7;
 constexpr uint32_t kRouterFormatVersion = 4;
 constexpr size_t kRouterHeaderBytes = 80;
@@ -199,7 +199,6 @@ uint64_t manifest_checksum(
     hash_pod<uint64_t>(&hash, shard.file_size);
     hash_pod<uint32_t>(&hash, shard.contig_id);
     hash_pod<uint32_t>(&hash, shard.source_begin);
-    hash_pod<uint32_t>(&hash, shard.source_end);
     hash_pod<uint64_t>(&hash, shard.window_count);
     hash_pod<uint64_t>(&hash, shard.sequence_count);
     hash_pod<uint64_t>(&hash, shard.world_node_count);
@@ -1029,7 +1028,6 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
         shard.contig_id >= manifest.contig_ids.size() ||
         shard.file_offset % kShardPackAlignment != 0 ||
         shard.file_size == 0 ||
-        shard.source_end < shard.source_begin ||
         shard.window_count == 0) {
       throw std::runtime_error(
           "sharded index contains an invalid shard descriptor");
@@ -1047,9 +1045,7 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
         (static_cast<uint64_t>(shard.window_count) - 1) *
             manifest.stride +
         manifest.window_length;
-    if (expected_source_end >
-            std::numeric_limits<uint32_t>::max() ||
-        shard.source_end != expected_source_end) {
+    if (expected_source_end > std::numeric_limits<uint32_t>::max()) {
       throw std::runtime_error(
           "sharded index has inconsistent shard coordinates");
     }
@@ -1140,7 +1136,6 @@ void save_sharded_index_manifest(
       write_pod<uint64_t>(out, shard.file_size);
       write_pod<uint32_t>(out, shard.contig_id);
       write_pod<uint32_t>(out, shard.source_begin);
-      write_pod<uint32_t>(out, shard.source_end);
       write_pod<uint32_t>(out, shard.window_count);
       write_pod<uint32_t>(out, shard.sequence_count);
       write_pod<uint32_t>(out, shard.world_node_count);
@@ -1228,8 +1223,6 @@ ShardedIndexManifest read_sharded_index_manifest(
     shard.contig_id = read_pod<uint32_t>(in, "shard.contig_id");
     shard.source_begin =
         read_pod<uint32_t>(in, "shard.source_begin");
-    shard.source_end =
-        read_pod<uint32_t>(in, "shard.source_end");
     shard.window_count = read_pod<uint32_t>(in, "shard.window_count");
     shard.sequence_count =
         read_pod<uint32_t>(in, "shard.sequence_count");
@@ -1587,7 +1580,6 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
       IndexShardDescriptor descriptor;
       descriptor.contig_id = static_cast<uint32_t>(contig_idx);
       descriptor.source_begin = static_cast<uint32_t>(source_begin);
-      descriptor.source_end = static_cast<uint32_t>(source_end);
       descriptor.window_count = static_cast<uint32_t>(shard_window_count);
       descriptors.push_back(descriptor);
     }
@@ -2061,9 +2053,13 @@ LoadedIndex load_sharded_index_part(
   const size_t source_end =
       static_cast<size_t>(contig.source_begin) +
       contig.end - contig.begin;
+  const uint64_t descriptor_source_end =
+      static_cast<uint64_t>(descriptor.source_begin) +
+      (static_cast<uint64_t>(descriptor.window_count) - 1) *
+          manifest.stride + manifest.window_length;
   if (contig.id != manifest.contig_ids[descriptor.contig_id] ||
       contig.source_begin != descriptor.source_begin ||
-      source_end != descriptor.source_end ||
+      source_end != descriptor_source_end ||
       store.size() != descriptor.sequence_count ||
       loaded.builder.num_world_nodes() !=
           descriptor.world_node_count) {

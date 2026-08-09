@@ -21,16 +21,15 @@ struct IndexShardDescriptor {
   uint32_t pack_id = 0;
   uint32_t contig_id = 0;
   uint32_t source_begin = 0;
-  uint32_t source_end = 0;
   uint32_t window_count = 0;
   uint32_t sequence_count = 0;
   uint32_t world_node_count = 0;
 };
-static_assert(sizeof(IndexShardDescriptor) <= 48,
+static_assert(sizeof(IndexShardDescriptor) == 40,
               "shard descriptors must remain compact");
 
 struct ShardedIndexManifest {
-  uint32_t format_version = 11;
+  uint32_t format_version = 12;
   size_t window_length = 0;
   size_t stride = 0;
   size_t total_window_count = 0;
