@@ -281,14 +281,15 @@ Explicit beacon IDs use exact ZigZag deltas with one shard-wide 1..32-bit
 width chosen by evaluating every width. Direct signed bytes and absolute IDs
 remain available per node; choosing 16 bits can exactly match the former
 8/16/32-bit payload, so the optimizer never makes this array larger.
-A v15 `.navshard` bundle stores the common v61 construction manifest once and
+A v16 `.navshard` bundle stores the common v61 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
 has multiple shards and windows of at least 24 bases, a memory-mapped
 `.route` sidecar. The router uses 16-mer minimizers from 24- to 64-base seeds
-in `d + 1` disjoint query blocks. Its keys are 32-bit arrays and the parallel
-shard IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
+in `d + 1` disjoint query blocks. Sorted keys use exact 16-entry blocks with
+one 32-bit base and minimum-width packed adjacent deltas; the parallel shard
+IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
 within edit distance `d` must contain one whole block exactly, so omitting
 shards without any of those minimizers is no-FN-safe.
 Pack paths and contig names are interned once in the manifest; logical-shard

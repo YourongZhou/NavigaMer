@@ -87,6 +87,140 @@ size_t packed_delta_byte_count(size_t code_count, uint8_t width) {
   return ((code_count - 1) * static_cast<size_t>(width) + 7) / 8;
 }
 
+size_t code_block_payload_offset(
+    const ShardedSeedRouter& router, size_t block_index) {
+  const size_t entry_count = router.minimizer_code_count();
+  if (router.code_block_size == 0 ||
+      block_index >= router.minimizer_code_bases.size()) {
+    throw std::out_of_range("router minimizer code block payload");
+  }
+  const size_t group_index =
+      block_index / kRouterCodeBlocksPerGroup;
+  const size_t supergroup_index =
+      group_index / kRouterCodeGroupsPerSupergroup;
+  if (group_index >= router.minimizer_code_group_offsets.size() ||
+      supergroup_index >=
+          router.minimizer_code_supergroup_offsets.size()) {
+    throw std::runtime_error("invalid shard router code block index");
+  }
+  size_t payload_offset = static_cast<size_t>(
+      router.minimizer_code_supergroup_offsets[supergroup_index]) +
+      router.minimizer_code_group_offsets[group_index];
+  const size_t first_block =
+      group_index * kRouterCodeBlocksPerGroup;
+  for (size_t previous = first_block; previous < block_index; ++previous) {
+    payload_offset += packed_delta_byte_count(
+        code_block_entry_count(
+            entry_count, router.code_block_size, previous),
+        router.minimizer_code_widths[previous]);
+  }
+  return payload_offset;
+}
+
+class PackedCodeDeltaReader {
+ public:
+  PackedCodeDeltaReader(
+      const ShardedSeedRouter& router, size_t payload_offset,
+      size_t payload_size, uint8_t width)
+      : width_(width),
+        mask_(width == 32
+                  ? UINT32_MAX
+                  : ((uint64_t{1} << width) - 1)) {
+    if (width == 0 || width > 32 ||
+        payload_offset > router.packed_minimizer_code_deltas.size() ||
+        payload_size >
+            router.packed_minimizer_code_deltas.size() - payload_offset) {
+      throw std::runtime_error("invalid shard router code payload");
+    }
+    data_ = router.packed_minimizer_code_deltas.data() + payload_offset;
+    size_ = payload_size;
+  }
+
+  uint32_t next() {
+    while (pending_bit_count_ < width_) {
+      if (position_ == size_) {
+        throw std::runtime_error("truncated shard router code payload");
+      }
+      pending_bits_ |=
+          static_cast<uint64_t>(data_[position_++]) << pending_bit_count_;
+      pending_bit_count_ += 8;
+    }
+    const uint32_t delta =
+        static_cast<uint32_t>(pending_bits_ & mask_);
+    pending_bits_ >>= width_;
+    pending_bit_count_ -= width_;
+    return delta;
+  }
+
+ private:
+  const uint8_t* data_ = nullptr;
+  size_t size_ = 0;
+  size_t position_ = 0;
+  uint64_t pending_bits_ = 0;
+  uint64_t mask_ = 0;
+  uint32_t pending_bit_count_ = 0;
+  uint8_t width_ = 0;
+};
+
+uint32_t add_code_delta(uint32_t code, uint32_t delta) {
+  if (delta > std::numeric_limits<uint32_t>::max() - code) {
+    throw std::runtime_error("shard router minimizer code overflow");
+  }
+  return code + delta;
+}
+
+template <typename Predicate>
+size_t find_in_code_block(
+    const ShardedSeedRouter& router, size_t block_index,
+    Predicate&& matches) {
+  const size_t entry_count = router.minimizer_code_count();
+  const size_t entry_begin = block_index * router.code_block_size;
+  const size_t block_count = code_block_entry_count(
+      entry_count, router.code_block_size, block_index);
+  uint32_t code = router.minimizer_code_bases[block_index];
+  if (matches(code)) return entry_begin;
+  if (block_count == 1) return entry_begin + 1;
+  const uint8_t width = router.minimizer_code_widths[block_index];
+  const size_t payload_size = packed_delta_byte_count(block_count, width);
+  const size_t payload_offset =
+      code_block_payload_offset(router, block_index);
+  PackedCodeDeltaReader deltas(
+      router, payload_offset, payload_size, width);
+  for (size_t local = 1; local < block_count; ++local) {
+    code = add_code_delta(code, deltas.next());
+    if (matches(code)) return entry_begin + local;
+  }
+  return entry_begin + block_count;
+}
+
+std::pair<size_t, size_t> equal_range_in_code_block(
+    const ShardedSeedRouter& router, size_t block_index,
+    uint32_t target) {
+  const size_t entry_count = router.minimizer_code_count();
+  const size_t entry_begin = block_index * router.code_block_size;
+  const size_t block_count = code_block_entry_count(
+      entry_count, router.code_block_size, block_index);
+  uint32_t code = router.minimizer_code_bases[block_index];
+  size_t lower = code >= target ? entry_begin : entry_begin + block_count;
+  if (code > target) return {lower, entry_begin};
+  if (block_count == 1) return {lower, entry_begin + 1};
+  const uint8_t width = router.minimizer_code_widths[block_index];
+  const size_t payload_size = packed_delta_byte_count(block_count, width);
+  const size_t payload_offset =
+      code_block_payload_offset(router, block_index);
+  PackedCodeDeltaReader deltas(
+      router, payload_offset, payload_size, width);
+  for (size_t local = 1; local < block_count; ++local) {
+    code = add_code_delta(code, deltas.next());
+    const size_t entry = entry_begin + local;
+    if (lower == entry_begin + block_count && code >= target) {
+      lower = entry;
+    }
+    if (code > target) return {lower, entry};
+  }
+  return {lower, entry_begin + block_count};
+}
+
 }  // namespace
 
 size_t ShardedSeedRouter::minimizer_code_count() const {
@@ -107,82 +241,76 @@ uint32_t ShardedSeedRouter::minimizer_code_at(size_t entry_index) const {
   }
 
   const size_t block_index = entry_index / code_block_size;
-  const size_t group_index = block_index / 4;
-  const size_t supergroup_index =
-      group_index / kRouterCodeGroupsPerSupergroup;
   if (block_index >= minimizer_code_bases.size() ||
-      group_index >= minimizer_code_group_offsets.size() ||
-      supergroup_index >= minimizer_code_supergroup_offsets.size()) {
+      block_index >= minimizer_code_widths.size()) {
     throw std::runtime_error("invalid shard router code block index");
   }
-  size_t payload_offset = static_cast<size_t>(
-      minimizer_code_supergroup_offsets[supergroup_index]) +
-      minimizer_code_group_offsets[group_index];
-  const size_t first_block = group_index * 4;
-  for (size_t previous = first_block; previous < block_index; ++previous) {
-    const uint8_t previous_width = minimizer_code_widths[previous];
-    payload_offset += packed_delta_byte_count(
-        code_block_entry_count(entry_count, code_block_size, previous),
-        previous_width);
-  }
-
   const size_t local_index = entry_index % code_block_size;
   const size_t block_count = code_block_entry_count(
       entry_count, code_block_size, block_index);
-  const uint32_t base = minimizer_code_bases[block_index];
-  if (local_index == 0) return base;
+  uint32_t code = minimizer_code_bases[block_index];
+  if (local_index == 0) return code;
   const uint8_t width = minimizer_code_widths[block_index];
   const size_t payload_size = packed_delta_byte_count(block_count, width);
-  if (payload_offset > packed_minimizer_code_deltas.size() ||
-      payload_size > packed_minimizer_code_deltas.size() - payload_offset) {
-    throw std::runtime_error("invalid shard router code payload range");
+  const size_t payload_offset =
+      code_block_payload_offset(*this, block_index);
+  PackedCodeDeltaReader deltas(
+      *this, payload_offset, payload_size, width);
+  for (size_t delta_index = 0; delta_index < local_index; ++delta_index) {
+    code = add_code_delta(code, deltas.next());
   }
-  const size_t bit_offset = (local_index - 1) * static_cast<size_t>(width);
-  const size_t byte_offset = payload_offset + bit_offset / 8;
-  const uint32_t shift = static_cast<uint32_t>(bit_offset % 8);
-  const size_t bytes_needed = (shift + width + 7) / 8;
-  if (bytes_needed > sizeof(uint64_t) ||
-      bytes_needed > packed_minimizer_code_deltas.size() ||
-      byte_offset > packed_minimizer_code_deltas.size() - bytes_needed) {
-    throw std::runtime_error("invalid shard router code payload");
-  }
-  uint64_t packed_delta = 0;
-  for (size_t byte = 0; byte < bytes_needed; ++byte) {
-    packed_delta |= static_cast<uint64_t>(
-        packed_minimizer_code_deltas[byte_offset + byte]) << (byte * 8);
-  }
-  const uint64_t mask = width == 32
-      ? UINT32_MAX
-      : ((uint64_t{1} << width) - 1);
-  return base + static_cast<uint32_t>((packed_delta >> shift) & mask);
+  return code;
 }
 
 size_t ShardedSeedRouter::lower_bound_minimizer_code(uint32_t code) const {
-  size_t begin = 0;
-  size_t end = minimizer_code_count();
-  while (begin < end) {
-    const size_t middle = begin + (end - begin) / 2;
-    if (minimizer_code_at(middle) < code) {
-      begin = middle + 1;
-    } else {
-      end = middle;
-    }
-  }
-  return begin;
+  return equal_range_minimizer_code(code).first;
 }
 
 size_t ShardedSeedRouter::upper_bound_minimizer_code(uint32_t code) const {
-  size_t begin = 0;
-  size_t end = minimizer_code_count();
-  while (begin < end) {
-    const size_t middle = begin + (end - begin) / 2;
-    if (code < minimizer_code_at(middle)) {
-      end = middle;
-    } else {
-      begin = middle + 1;
-    }
+  return equal_range_minimizer_code(code).second;
+}
+
+std::pair<size_t, size_t>
+ShardedSeedRouter::equal_range_minimizer_code(uint32_t code) const {
+  if (code_entry_count == 0) {
+    const auto range = std::equal_range(
+        minimizer_codes.begin(), minimizer_codes.end(), code);
+    return {
+        static_cast<size_t>(range.first - minimizer_codes.begin()),
+        static_cast<size_t>(range.second - minimizer_codes.begin())};
   }
-  return begin;
+  if (minimizer_code_bases.empty() || code_block_size == 0) {
+    throw std::runtime_error("invalid compressed shard router codes");
+  }
+
+  const auto lower_base = std::lower_bound(
+      minimizer_code_bases.begin(), minimizer_code_bases.end(), code);
+  size_t lower_block = static_cast<size_t>(
+      lower_base - minimizer_code_bases.begin());
+  if (lower_block == minimizer_code_bases.size()) {
+    --lower_block;
+  } else if (*lower_base > code) {
+    if (lower_block != 0) --lower_block;
+  } else if (lower_block != 0) {
+    const size_t previous_last = lower_block * code_block_size - 1;
+    if (minimizer_code_at(previous_last) == code) --lower_block;
+  }
+
+  const auto upper_base = std::upper_bound(
+      minimizer_code_bases.begin(), minimizer_code_bases.end(), code);
+  size_t upper_block = static_cast<size_t>(
+      upper_base - minimizer_code_bases.begin());
+  if (upper_block != 0) --upper_block;
+  if (lower_block == upper_block) {
+    return equal_range_in_code_block(*this, lower_block, code);
+  }
+  return {
+      find_in_code_block(
+          *this, lower_block,
+          [code](uint32_t candidate) { return candidate >= code; }),
+      find_in_code_block(
+          *this, upper_block,
+          [code](uint32_t candidate) { return candidate > code; })};
 }
 
 bool ShardedSeedRouter::append_selected_shards(
@@ -253,8 +381,10 @@ bool ShardedSeedRouter::append_selected_shards(
   for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
        ++minimizer_idx) {
     CodeRange& range = ranges[minimizer_idx];
-    range.next = lower_bound_minimizer_code(minimizers[minimizer_idx]);
-    range.last = upper_bound_minimizer_code(minimizers[minimizer_idx]);
+    const auto bounds =
+        equal_range_minimizer_code(minimizers[minimizer_idx]);
+    range.next = bounds.first;
+    range.last = bounds.second;
     routed_entry_count += range.last - range.next;
   }
   constexpr size_t kDirectSortEntryLimit = 4096;

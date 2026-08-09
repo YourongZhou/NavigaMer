@@ -312,7 +312,7 @@ Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
 During a rebuild only the current group's atomic temporary pack exists; shard
-payloads are written directly into it, without per-shard temporary files. The final v15
+payloads are written directly into it, without per-shard temporary files. The final v16
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph
@@ -332,8 +332,10 @@ Queries mmap only selected byte ranges, so packing removes millions of
 filesystem entries without coarsening the logical shards or increasing search
 work. Contig names and pack paths are interned once; each in-memory shard
 descriptor is a fixed 40-byte numeric record. The sidecar stores sorted
-32-bit minimizers plus shard IDs at exactly `ceil(log2(shard_count))` bits per
-entry. During construction, per-shard minimizer lists are contiguous in the
+minimizers in exact 16-entry blocks: one 32-bit base followed by the
+minimum-width packed adjacent deltas. Shard IDs use exactly
+`ceil(log2(shard_count))` bits per entry. During construction, per-shard
+minimizer lists are contiguous in the
 spool, so their starts are implicit prefix sums and only one 32-bit count is
 retained per shard. For a query at tolerance `d`, the router takes one seed of
 32 to 64 bases from each of `d + 1` disjoint query blocks and searches only

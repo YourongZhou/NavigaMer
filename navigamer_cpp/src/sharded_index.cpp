@@ -38,10 +38,10 @@ constexpr std::array<char, 8> kShardMagic = {
 constexpr std::array<char, 8> kShardPackMagic = {
     'N', 'G', 'P', 'A', 'C', 'K', '0', '9'};
 constexpr std::array<char, 8> kRouterMagic = {
-    'N', 'G', 'R', 'O', 'U', 'T', '0', '3'};
-constexpr uint32_t kShardFormatVersion = 15;
+    'N', 'G', 'R', 'O', 'U', 'T', '0', '4'};
+constexpr uint32_t kShardFormatVersion = 16;
 constexpr uint32_t kShardPackFormatVersion = 9;
-constexpr uint32_t kRouterFormatVersion = 4;
+constexpr uint32_t kRouterFormatVersion = 5;
 constexpr size_t kRouterHeaderBytes = 80;
 constexpr std::streamoff kRouterCodePayloadSizeOffset = 60;
 constexpr std::streamoff kRouterChecksumOffset = 68;
@@ -51,7 +51,6 @@ constexpr uint32_t kRouterK = 16;
 // those lossless indel cases without materializing every k-mer in reference.
 constexpr uint32_t kRouterWindow = 24;
 constexpr uint32_t kRouterCodeBlockSize = 16;
-constexpr uint32_t kRouterCodeBlocksPerGroup = 4;
 static_assert(
     static_cast<uint64_t>(kRouterCodeGroupsPerSupergroup) *
         kRouterCodeBlocksPerGroup * (kRouterCodeBlockSize - 1) *
@@ -718,8 +717,12 @@ uint64_t save_router_sidecar(
     const auto flush_code_block = [&]() {
       if (code_block_size == 0) return;
       const uint32_t base = code_block[0];
-      const uint8_t width = minimizer_delta_width(
-          code_block[code_block_size - 1] - base);
+      uint32_t maximum_delta = 0;
+      for (size_t idx = 1; idx < code_block_size; ++idx) {
+        maximum_delta = std::max(
+            maximum_delta, code_block[idx] - code_block[idx - 1]);
+      }
+      const uint8_t width = minimizer_delta_width(maximum_delta);
       if (code_bases.size() % kRouterCodeBlocksPerGroup == 0) {
         const uint64_t payload_offset = checked_router_add(
             code_payload_written, code_payload_buffered);
@@ -743,7 +746,7 @@ uint64_t save_router_sidecar(
       uint64_t pending_bits = 0;
       uint32_t pending_bit_count = 0;
       for (size_t idx = 1; idx < code_block_size; ++idx) {
-        const uint32_t delta = code_block[idx] - base;
+        const uint32_t delta = code_block[idx] - code_block[idx - 1];
         pending_bits |= static_cast<uint64_t>(delta) << pending_bit_count;
         pending_bit_count += width;
         while (pending_bit_count >= 8) {

@@ -7,10 +7,12 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace navigamer {
 
+constexpr uint32_t kRouterCodeBlocksPerGroup = 4;
 constexpr uint32_t kRouterCodeGroupsPerSupergroup = 256;
 
 struct IndexedReferenceFile;
@@ -29,7 +31,7 @@ static_assert(sizeof(IndexShardDescriptor) == 40,
               "shard descriptors must remain compact");
 
 struct ShardedIndexManifest {
-  uint32_t format_version = 15;
+  uint32_t format_version = 16;
   size_t window_length = 0;
   size_t stride = 0;
   size_t total_window_count = 0;
@@ -50,8 +52,8 @@ struct ShardRouteSelection {
   std::vector<uint32_t> shard_ids;
 };
 
-// Sorted minimizer codes are stored as exact delta-coded blocks and shard IDs
-// as a bit-packed parallel array. Both are memory-mapped from the router
+// Sorted minimizer codes are stored as exact adjacent-delta blocks and shard
+// IDs as a bit-packed parallel array. Both are memory-mapped from the router
 // sidecar. Exact query blocks provide a no-false-negative necessary
 // condition; unsupported queries conservatively disable routing.
 struct ShardedSeedRouter {
@@ -91,6 +93,8 @@ struct ShardedSeedRouter {
   uint32_t minimizer_code_at(size_t entry_index) const;
   size_t lower_bound_minimizer_code(uint32_t code) const;
   size_t upper_bound_minimizer_code(uint32_t code) const;
+  std::pair<size_t, size_t> equal_range_minimizer_code(
+      uint32_t code) const;
   bool append_selected_shards(
       std::string_view query, int tolerance,
       std::vector<uint32_t>* shard_ids) const;

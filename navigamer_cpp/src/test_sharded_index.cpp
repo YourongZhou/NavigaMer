@@ -395,7 +395,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(reloaded_manifest.window_length == window);
-  assert(reloaded_manifest.format_version == 15);
+  assert(reloaded_manifest.format_version == 16);
   assert(reloaded_manifest.stride == stride);
   assert(reloaded_manifest.shards.size() ==
          manifest.shards.size());
@@ -604,10 +604,37 @@ void test_seed_router_no_false_negatives() {
   assert(router.packed_shard_ids.is_mapped());
   assert(router.minimizer_code_count() ==
          rebuilt_manifest.router_entry_count);
+  std::vector<uint32_t> decoded_router_codes;
+  decoded_router_codes.reserve(router.minimizer_code_count());
   for (size_t code_idx = 1;
        code_idx < router.minimizer_code_count(); ++code_idx) {
     assert(router.minimizer_code_at(code_idx - 1) <=
            router.minimizer_code_at(code_idx));
+  }
+  for (size_t code_idx = 0;
+       code_idx < router.minimizer_code_count(); ++code_idx) {
+    decoded_router_codes.push_back(router.minimizer_code_at(code_idx));
+  }
+  std::vector<uint32_t> bound_probes = decoded_router_codes;
+  bound_probes.push_back(0);
+  bound_probes.push_back(UINT32_MAX);
+  for (uint32_t code : decoded_router_codes) {
+    if (code != 0) bound_probes.push_back(code - 1);
+    if (code != UINT32_MAX) bound_probes.push_back(code + 1);
+  }
+  for (uint32_t code : bound_probes) {
+    const size_t expected_lower = static_cast<size_t>(
+        std::lower_bound(
+            decoded_router_codes.begin(), decoded_router_codes.end(), code) -
+        decoded_router_codes.begin());
+    const size_t expected_upper = static_cast<size_t>(
+        std::upper_bound(
+            decoded_router_codes.begin(), decoded_router_codes.end(), code) -
+        decoded_router_codes.begin());
+    assert(router.lower_bound_minimizer_code(code) == expected_lower);
+    assert(router.upper_bound_minimizer_code(code) == expected_upper);
+    assert(router.equal_range_minimizer_code(code) ==
+           std::make_pair(expected_lower, expected_upper));
   }
   const auto shards = navigamer::load_sharded_index(
       bundle.string(), rebuilt_manifest);

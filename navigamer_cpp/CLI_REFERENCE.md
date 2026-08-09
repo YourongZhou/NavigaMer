@@ -316,15 +316,16 @@ only after every selected payload's construction signature, reference slice,
 contig, and source coordinates validate. Damaged
 or incompatible packs are rebuilt one atomic group at a time; only that group's
 temporary pack exists during construction because payloads are written directly
-into it. The final v15 `.navshard`
+into it. The final v16 `.navshard`
 manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
 descriptor per logical shard in memory.
 Multi-part bundles with
 windows of at least 24 bases also store a memory-mapped `.route` sidecar of
-exact 16-mer minimizers. Minimizers use a 32-bit array and parallel shard IDs
-use exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
+exact 16-mer minimizers. Sorted minimizers use exact 16-entry blocks with one
+32-bit base and minimum-width packed adjacent deltas; parallel shard IDs use
+exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
 24- to 64-base seed is taken from each of `d + 1` disjoint query blocks; only
 shards containing at least one seed minimizer are searched. This is a pigeonhole
 necessary condition for an exact edit-distance hit. Unsupported
