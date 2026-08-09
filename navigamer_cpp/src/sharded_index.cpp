@@ -41,7 +41,7 @@ constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '3'};
 constexpr uint32_t kShardFormatVersion = 11;
 constexpr uint32_t kShardPackFormatVersion = 7;
-constexpr uint32_t kRouterFormatVersion = 3;
+constexpr uint32_t kRouterFormatVersion = 4;
 constexpr size_t kRouterHeaderBytes = 80;
 constexpr std::streamoff kRouterCodePayloadSizeOffset = 60;
 constexpr std::streamoff kRouterChecksumOffset = 68;
@@ -52,6 +52,12 @@ constexpr uint32_t kRouterK = 16;
 constexpr uint32_t kRouterWindow = 24;
 constexpr uint32_t kRouterCodeBlockSize = 16;
 constexpr uint32_t kRouterCodeBlocksPerGroup = 4;
+static_assert(
+    static_cast<uint64_t>(kRouterCodeGroupsPerSupergroup) *
+        kRouterCodeBlocksPerGroup * (kRouterCodeBlockSize - 1) *
+        sizeof(uint32_t) <=
+    std::numeric_limits<uint16_t>::max(),
+    "router supergroup offsets must fit uint16_t");
 constexpr uint64_t kMaxShardCount =
     std::numeric_limits<uint32_t>::max();
 constexpr uint64_t kMaxStringLength = uint64_t{1} << 30;
@@ -253,9 +259,11 @@ size_t align_router_size(size_t value, size_t alignment) {
 struct RouterStorageLayout {
   size_t code_block_count = 0;
   size_t code_group_count = 0;
+  size_t code_supergroup_count = 0;
   size_t bases_begin = 0;
   size_t widths_begin = 0;
   size_t group_offsets_begin = 0;
+  size_t supergroup_offsets_begin = 0;
   size_t payload_begin = 0;
   size_t shard_ids_begin = 0;
   size_t total_size = 0;
@@ -274,17 +282,26 @@ RouterStorageLayout router_storage_layout(
   layout.code_group_count =
       (layout.code_block_count + kRouterCodeBlocksPerGroup - 1) /
       kRouterCodeBlocksPerGroup;
+  layout.code_supergroup_count =
+      (layout.code_group_count + kRouterCodeGroupsPerSupergroup - 1) /
+      kRouterCodeGroupsPerSupergroup;
   layout.bases_begin = kRouterHeaderBytes;
   layout.widths_begin = checked_router_add(
       layout.bases_begin,
       checked_router_multiply(layout.code_block_count, sizeof(uint32_t)));
   layout.group_offsets_begin = align_router_size(
       checked_router_add(layout.widths_begin, layout.code_block_count),
+      alignof(uint16_t));
+  layout.supergroup_offsets_begin = align_router_size(
+      checked_router_add(
+          layout.group_offsets_begin,
+          checked_router_multiply(
+              layout.code_group_count, sizeof(uint16_t))),
       alignof(uint64_t));
   layout.payload_begin = checked_router_add(
-      layout.group_offsets_begin,
+      layout.supergroup_offsets_begin,
       checked_router_multiply(
-          layout.code_group_count, sizeof(uint64_t)));
+          layout.code_supergroup_count, sizeof(uint64_t)));
   layout.shard_ids_begin = checked_router_add(
       layout.payload_begin, static_cast<size_t>(payload_size));
   layout.total_size = checked_router_add(
@@ -658,10 +675,12 @@ uint64_t save_router_sidecar(
 
     std::vector<uint32_t> code_bases;
     std::vector<uint8_t> code_widths;
-    std::vector<uint64_t> code_group_offsets;
+    std::vector<uint16_t> code_group_offsets;
+    std::vector<uint64_t> code_supergroup_offsets;
     code_bases.reserve(layout.code_block_count);
     code_widths.reserve(layout.code_block_count);
     code_group_offsets.reserve(layout.code_group_count);
+    code_supergroup_offsets.reserve(layout.code_supergroup_count);
     std::vector<uint8_t> code_payload_buffer(65536);
     size_t code_payload_buffered = 0;
     size_t code_payload_written = 0;
@@ -693,9 +712,22 @@ uint64_t save_router_sidecar(
       const uint8_t width = minimizer_delta_width(
           code_block[code_block_size - 1] - base);
       if (code_bases.size() % kRouterCodeBlocksPerGroup == 0) {
-        code_group_offsets.push_back(static_cast<uint64_t>(
-            checked_router_add(code_payload_written,
-                               code_payload_buffered)));
+        const uint64_t payload_offset = checked_router_add(
+            code_payload_written, code_payload_buffered);
+        if (code_group_offsets.size() % kRouterCodeGroupsPerSupergroup ==
+            0) {
+          code_supergroup_offsets.push_back(payload_offset);
+        }
+        const uint64_t supergroup_offset =
+            code_supergroup_offsets.back();
+        if (payload_offset < supergroup_offset ||
+            payload_offset - supergroup_offset >
+                std::numeric_limits<uint16_t>::max()) {
+          throw std::runtime_error(
+              "shard router compact group offset overflow");
+        }
+        code_group_offsets.push_back(static_cast<uint16_t>(
+            payload_offset - supergroup_offset));
       }
       code_bases.push_back(base);
       code_widths.push_back(width);
@@ -772,13 +804,16 @@ uint64_t save_router_sidecar(
 
     if (code_bases.size() != layout.code_block_count ||
         code_widths.size() != layout.code_block_count ||
-        code_group_offsets.size() != layout.code_group_count) {
+        code_group_offsets.size() != layout.code_group_count ||
+        code_supergroup_offsets.size() != layout.code_supergroup_count) {
       throw std::runtime_error("invalid compressed shard router code count");
     }
     const RouterStorageLayout finalized_layout = router_storage_layout(
         data.entry_count, code_payload_written, packed_size);
     if (finalized_layout.code_block_count != layout.code_block_count ||
         finalized_layout.code_group_count != layout.code_group_count ||
+        finalized_layout.code_supergroup_count !=
+            layout.code_supergroup_count ||
         finalized_layout.payload_begin != layout.payload_begin) {
       throw std::runtime_error("invalid finalized shard router layout");
     }
@@ -804,6 +839,19 @@ uint64_t save_router_sidecar(
     }
     hash_bytes(&checksum, code_group_offsets.data(),
                code_group_offsets.size() * sizeof(code_group_offsets[0]));
+    out.seekp(static_cast<std::streamoff>(layout.supergroup_offsets_begin),
+              std::ios::beg);
+    out.write(reinterpret_cast<const char*>(code_supergroup_offsets.data()),
+              static_cast<std::streamsize>(
+                  code_supergroup_offsets.size() *
+                  sizeof(code_supergroup_offsets[0])));
+    if (!out) {
+      throw std::runtime_error(
+          "failed to write shard router supergroup offsets");
+    }
+    hash_bytes(&checksum, code_supergroup_offsets.data(),
+               code_supergroup_offsets.size() *
+                   sizeof(code_supergroup_offsets[0]));
 
     std::ifstream packed_in(packed_temporary, std::ios::binary);
     if (!packed_in) {
@@ -1318,9 +1366,13 @@ ShardedSeedRouter load_sharded_seed_router(
       mapping, mapping->data() + layout.widths_begin,
       layout.code_block_count);
   router.minimizer_code_group_offsets.set_mapped(
-      mapping, reinterpret_cast<const uint64_t*>(
+      mapping, reinterpret_cast<const uint16_t*>(
           mapping->data() + layout.group_offsets_begin),
       layout.code_group_count);
+  router.minimizer_code_supergroup_offsets.set_mapped(
+      mapping, reinterpret_cast<const uint64_t*>(
+          mapping->data() + layout.supergroup_offsets_begin),
+      layout.code_supergroup_count);
   router.packed_minimizer_code_deltas.set_mapped(
       mapping, mapping->data() + layout.payload_begin,
       static_cast<size_t>(stored_code_payload_size));
@@ -1375,7 +1427,9 @@ ShardedSeedRouter load_sharded_seed_router(
   }
   std::vector<uint32_t> code_bases(layout.code_block_count);
   std::vector<uint8_t> code_widths(layout.code_block_count);
-  std::vector<uint64_t> code_group_offsets(layout.code_group_count);
+  std::vector<uint16_t> code_group_offsets(layout.code_group_count);
+  std::vector<uint64_t> code_supergroup_offsets(
+      layout.code_supergroup_count);
   std::vector<uint8_t> packed_minimizer_code_deltas(
       static_cast<size_t>(stored_code_payload_size));
   std::vector<uint8_t> packed_shard_ids(packed_size);
@@ -1390,7 +1444,15 @@ ShardedSeedRouter load_sharded_seed_router(
       layout.group_offsets_begin - descriptor_end));
   in.read(reinterpret_cast<char*>(code_group_offsets.data()),
           static_cast<std::streamsize>(
-              code_group_offsets.size() * sizeof(uint64_t)));
+              code_group_offsets.size() * sizeof(code_group_offsets[0])));
+  const size_t group_offsets_end = layout.group_offsets_begin +
+      code_group_offsets.size() * sizeof(code_group_offsets[0]);
+  in.ignore(static_cast<std::streamsize>(
+      layout.supergroup_offsets_begin - group_offsets_end));
+  in.read(reinterpret_cast<char*>(code_supergroup_offsets.data()),
+          static_cast<std::streamsize>(
+              code_supergroup_offsets.size() *
+              sizeof(code_supergroup_offsets[0])));
   in.read(reinterpret_cast<char*>(packed_minimizer_code_deltas.data()),
           static_cast<std::streamsize>(
               packed_minimizer_code_deltas.size()));
@@ -1405,7 +1467,10 @@ ShardedSeedRouter load_sharded_seed_router(
              code_bases.size() * sizeof(uint32_t));
   hash_bytes(&checksum, code_widths.data(), code_widths.size());
   hash_bytes(&checksum, code_group_offsets.data(),
-             code_group_offsets.size() * sizeof(uint64_t));
+             code_group_offsets.size() * sizeof(code_group_offsets[0]));
+  hash_bytes(&checksum, code_supergroup_offsets.data(),
+             code_supergroup_offsets.size() *
+                 sizeof(code_supergroup_offsets[0]));
   hash_bytes(&checksum, packed_shard_ids.data(), packed_shard_ids.size());
   if (!in || in.peek() != std::char_traits<char>::eof() ||
       checksum != stored_checksum) {
@@ -1421,6 +1486,8 @@ ShardedSeedRouter load_sharded_seed_router(
   router.minimizer_code_widths.set_owned(std::move(code_widths));
   router.minimizer_code_group_offsets.set_owned(
       std::move(code_group_offsets));
+  router.minimizer_code_supergroup_offsets.set_owned(
+      std::move(code_supergroup_offsets));
   router.packed_minimizer_code_deltas.set_owned(
       std::move(packed_minimizer_code_deltas));
   router.packed_shard_ids.set_owned(std::move(packed_shard_ids));

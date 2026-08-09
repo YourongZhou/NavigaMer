@@ -11,6 +11,8 @@
 
 namespace navigamer {
 
+constexpr uint32_t kRouterCodeGroupsPerSupergroup = 256;
+
 struct IndexedReferenceFile;
 
 struct IndexShardDescriptor {
@@ -62,7 +64,11 @@ struct ShardedSeedRouter {
   size_t code_entry_count = 0;
   FinalArray<uint32_t> minimizer_code_bases;
   FinalArray<uint8_t> minimizer_code_widths;
-  FinalArray<uint64_t> minimizer_code_group_offsets;
+  // Each code group contains four blocks and has at most 240 packed bytes.
+  // A 16-bit offset is therefore sufficient relative to its 256-group
+  // supergroup base, while the sparse 64-bit bases retain unbounded files.
+  FinalArray<uint16_t> minimizer_code_group_offsets;
+  FinalArray<uint64_t> minimizer_code_supergroup_offsets;
   FinalArray<uint8_t> packed_minimizer_code_deltas;
   // Retained only for direct in-memory test fixtures. Persisted routers use
   // the compact block arrays above and never materialize this array.
@@ -75,7 +81,8 @@ struct ShardedSeedRouter {
         code_entry_count != 0 && code_block_size != 0 &&
         !minimizer_code_bases.empty() &&
         !minimizer_code_widths.empty() &&
-        !minimizer_code_group_offsets.empty();
+        !minimizer_code_group_offsets.empty() &&
+        !minimizer_code_supergroup_offsets.empty();
     return k != 0 && window >= k && shard_count != 0 &&
            shard_id_bits != 0 &&
            (has_raw_codes || has_compact_codes) &&

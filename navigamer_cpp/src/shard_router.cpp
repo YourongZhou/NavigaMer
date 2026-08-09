@@ -99,18 +99,23 @@ uint32_t ShardedSeedRouter::minimizer_code_at(size_t entry_index) const {
   if (code_entry_count == 0) return minimizer_codes[entry_index];
   if (code_block_size == 0 || minimizer_code_bases.empty() ||
       minimizer_code_widths.size() != minimizer_code_bases.size() ||
-      minimizer_code_group_offsets.empty()) {
+      minimizer_code_group_offsets.empty() ||
+      minimizer_code_supergroup_offsets.empty()) {
     throw std::runtime_error("invalid compressed shard router codes");
   }
 
   const size_t block_index = entry_index / code_block_size;
   const size_t group_index = block_index / 4;
+  const size_t supergroup_index =
+      group_index / kRouterCodeGroupsPerSupergroup;
   if (block_index >= minimizer_code_bases.size() ||
-      group_index >= minimizer_code_group_offsets.size()) {
+      group_index >= minimizer_code_group_offsets.size() ||
+      supergroup_index >= minimizer_code_supergroup_offsets.size()) {
     throw std::runtime_error("invalid shard router code block index");
   }
   size_t payload_offset = static_cast<size_t>(
-      minimizer_code_group_offsets[group_index]);
+      minimizer_code_supergroup_offsets[supergroup_index]) +
+      minimizer_code_group_offsets[group_index];
   const size_t first_block = group_index * 4;
   for (size_t previous = first_block; previous < block_index; ++previous) {
     const uint8_t previous_width = minimizer_code_widths[previous];
