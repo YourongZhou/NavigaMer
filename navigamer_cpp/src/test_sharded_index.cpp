@@ -417,7 +417,7 @@ void test_seed_router_no_false_negatives() {
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(manifest.shards.size() > 3);
   assert(manifest.router_k == 16);
-  assert(manifest.router_window == 32);
+  assert(manifest.router_window == 25);
   assert(manifest.router_entry_count > 0);
   const size_t raw_router_bytes =
       48 + manifest.router_entry_count * sizeof(uint32_t) +
@@ -541,6 +541,34 @@ void test_seed_router_no_false_negatives() {
              matching_occurrences(
                  shards, query, 5, &route.shard_ids));
     }
+  }
+
+  // A 150 bp query at d=5 splits into six 25 bp blocks. This is the shortest
+  // fixed-length case the production router selects rather than conservatively
+  // falling back to every shard.
+  const auto short_bundle = directory / "reference-150.navshard";
+  const auto short_manifest = navigamer::build_sharded_reference_index(
+      short_bundle.string(), "literal-router-reference", "chrR",
+      reference, contigs, 150, stride, shard_windows,
+      hierarchy, range_config, 2);
+  const auto short_router = navigamer::load_sharded_seed_router(
+      short_bundle.string(), short_manifest);
+  const auto short_shards = navigamer::load_sharded_index(
+      short_bundle.string(), short_manifest);
+  for (size_t source_pos : {size_t{0}, size_t{98}, size_t{300}}) {
+    std::string sequence = reference.substr(source_pos, 150);
+    for (size_t mutation : {size_t{3}, size_t{45}, size_t{87},
+                            size_t{129}, size_t{147}}) {
+      sequence[mutation] = sequence[mutation] == 'A' ? 'C' : 'A';
+    }
+    const auto route = short_router.select(sequence, 5);
+    assert(route.enabled);
+    assert(!route.shard_ids.empty());
+    navigamer::BioSequence query(
+        "router_150_" + std::to_string(source_pos), sequence);
+    assert(matching_occurrences(short_shards, query, 5) ==
+           matching_occurrences(
+               short_shards, query, 5, &route.shard_ids));
   }
 
   const std::string exact = reference.substr(98, window);

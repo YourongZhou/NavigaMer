@@ -277,8 +277,8 @@ A v11 `.navshard` bundle stores the common v40 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
-has multiple shards and windows of at least 32 bases, a memory-mapped
-`.route` sidecar. The router uses 16-mer minimizers from 32- to 64-base seeds
+has multiple shards and windows of at least 25 bases, a memory-mapped
+`.route` sidecar. The router uses 16-mer minimizers from 25- to 64-base seeds
 in `d + 1` disjoint query blocks. Its keys are 32-bit arrays and the parallel
 shard IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
 within edit distance `d` must contain one whole block exactly, so omitting
