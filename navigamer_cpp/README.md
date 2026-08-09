@@ -298,7 +298,9 @@ in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed
 parts, with oversized routed selections split at the same 64-shard cap. Any
 fallback query conservatively searches every part without mapping
-the whole human index at once. Bundle query
+the whole human index at once. Batch planning and active-engine lookup use
+only the sorted IDs in the current bounded group, with no bitmap or reverse
+map proportional to the total shard count. Bundle query
 loading validates signatures, counts, mapped pack bounds, layer ranges, shard coordinates, and
 the bundle checksum without an O(total nodes) rescan; build/restart reuse still
 performs full part validation. Path tracing is not supported for a bundle

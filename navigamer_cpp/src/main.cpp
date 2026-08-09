@@ -18,6 +18,7 @@
 #include "index_persistence.hpp"
 #include "sharded_index.hpp"
 #include "candidate_verifier.hpp"
+#include <array>
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -1753,14 +1754,9 @@ void run_query_index_batch(const std::string& index_path,
     constexpr size_t kMaxResidentQueryShards = 64;
     constexpr size_t kMaxFullScanQueriesPerBatch = 64;
     std::vector<ShardQueryBatch> shard_query_batches;
-    std::vector<uint8_t> batch_shard_bits(
-        shard_manifest.shards.size(), uint8_t{0});
     ShardQueryBatch batch;
     const auto flush_batch = [&]() {
       if (batch.empty()) return;
-      for (uint32_t shard_id : batch.shard_ids) {
-        batch_shard_bits[shard_id] = 0;
-      }
       shard_query_batches.push_back(std::move(batch));
       batch = ShardQueryBatch{};
     };
@@ -1780,6 +1776,8 @@ void run_query_index_batch(const std::string& index_path,
       full_scan_batch.full_scan = true;
       shard_query_batches.push_back(std::move(full_scan_batch));
     };
+    std::array<uint32_t, 2 * kMaxResidentQueryShards>
+        merged_shard_ids;
     for (size_t query_idx = 0; query_idx < queries.size();
          ++query_idx) {
       if (!query_is_routed(query_idx)) {
@@ -1803,24 +1801,22 @@ void run_query_index_batch(const std::string& index_path,
         shard_query_batches.push_back(std::move(oversized_batch));
         continue;
       }
-      size_t new_shard_count = 0;
-      for (size_t route_idx = route_begin; route_idx < route_end;
-           ++route_idx) {
-        const uint32_t shard_id = query_route_shard_ids[route_idx];
-        if (!batch_shard_bits[shard_id]) ++new_shard_count;
-      }
+      const auto merged_end = std::set_union(
+          batch.shard_ids.begin(), batch.shard_ids.end(),
+          query_route_shard_ids.begin() + route_begin,
+          query_route_shard_ids.begin() + route_end,
+          merged_shard_ids.begin());
+      const size_t merged_shard_count = static_cast<size_t>(
+          merged_end - merged_shard_ids.begin());
       if (!batch.empty() &&
-          batch.shard_ids.size() + new_shard_count >
-              kMaxResidentQueryShards) {
+          merged_shard_count > kMaxResidentQueryShards) {
         flush_batch();
-      }
-      for (size_t route_idx = route_begin; route_idx < route_end;
-           ++route_idx) {
-        const uint32_t shard_id = query_route_shard_ids[route_idx];
-        if (!batch_shard_bits[shard_id]) {
-          batch_shard_bits[shard_id] = 1;
-          batch.shard_ids.push_back(shard_id);
-        }
+        batch.shard_ids.assign(
+            query_route_shard_ids.begin() + route_begin,
+            query_route_shard_ids.begin() + route_end);
+      } else {
+        batch.shard_ids.assign(
+            merged_shard_ids.begin(), merged_end);
       }
       if (batch.empty()) batch.query_begin = query_idx;
       batch.query_end = query_idx + 1;
@@ -1952,8 +1948,6 @@ void run_query_index_batch(const std::string& index_path,
       std::unordered_multimap<size_t, size_t> hit_by_hash;
       double search_ms = 0.0;
     };
-    std::vector<uint32_t> shard_to_loaded(
-        shard_manifest.shards.size(), UINT32_MAX);
     for (const auto& shard_batch : shard_query_batches) {
       if (shard_batch.full_scan ||
           shard_batch.oversized_route_scan) {
@@ -2116,11 +2110,6 @@ void run_query_index_batch(const std::string& index_path,
           index_path, shard_manifest, shard_batch.shard_ids);
       peak_loaded_shards = std::max(
           peak_loaded_shards, loaded_shards.size());
-      for (size_t loaded_idx = 0;
-           loaded_idx < shard_batch.shard_ids.size(); ++loaded_idx) {
-        shard_to_loaded[shard_batch.shard_ids[loaded_idx]] =
-            static_cast<uint32_t>(loaded_idx);
-      }
       std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
       engines.reserve(loaded_shards.size());
       for (auto& shard : loaded_shards) {
@@ -2142,16 +2131,22 @@ void run_query_index_batch(const std::string& index_path,
           route_enabled ? route_end - route_begin : engines.size();
       active_engine_ids.resize(active_shard_count);
       if (route_enabled) {
+        size_t loaded_idx = 0;
         for (size_t active_idx = 0; active_idx < active_shard_count;
              ++active_idx) {
           const uint32_t shard_id =
               query_route_shard_ids[route_begin + active_idx];
-          const uint32_t loaded_idx = shard_to_loaded[shard_id];
-          if (loaded_idx == UINT32_MAX) {
+          while (loaded_idx < shard_batch.shard_ids.size() &&
+                 shard_batch.shard_ids[loaded_idx] < shard_id) {
+            ++loaded_idx;
+          }
+          if (loaded_idx == shard_batch.shard_ids.size() ||
+              shard_batch.shard_ids[loaded_idx] != shard_id) {
             throw std::runtime_error(
                 "routed shard was not selected for loading");
           }
-          active_engine_ids[active_idx] = loaded_idx;
+          active_engine_ids[active_idx] =
+              static_cast<uint32_t>(loaded_idx);
         }
       } else {
         std::iota(active_engine_ids.begin(), active_engine_ids.end(),
@@ -2241,9 +2236,6 @@ void run_query_index_batch(const std::string& index_path,
         }
       }
       emit_query_hits(read, combined, combined_hits, query_time_ms);
-      }
-      for (uint32_t shard_id : shard_batch.shard_ids) {
-        shard_to_loaded[shard_id] = UINT32_MAX;
       }
     }
     std::cerr << "Loaded sharded index: " << index_path
