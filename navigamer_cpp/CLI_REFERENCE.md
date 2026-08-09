@@ -538,7 +538,7 @@ Safety constraints: every read must be exactly 150 bp, reference and reads must 
 
 ### `benchmark`
 
-Slices the reference into windows of length `--window` with stride `--stride`; each window is one indexed sequence with coordinates. Query sequences come from `--reads`. Uses **adaptive** search; TSV includes search statistics.
+Slices the reference into windows of length `--window` with stride `--stride`; each indexed leaf is a reference-backed `LeafId` with coordinates, rather than a copied window string. Query sequences come from `--reads`. Uses **adaptive** search; TSV includes search statistics.
 
 **Required:** `--ref`, `--reads` (queries)
 

@@ -1302,12 +1302,15 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
     std::cerr << "Reference too short for window_size=" << window_size << "\n";
     return;
   }
-  std::vector<std::shared_ptr<BioSequence>> index_seqs =
-      build_reference_windows(ref_id, ref_seq, window_size, stride);
-  std::cerr << "Index: " << index_seqs.size() << " windows from reference\n";
+  const size_t window_count =
+      1 + (ref_seq.size() - static_cast<size_t>(window_size)) /
+              static_cast<size_t>(stride);
+  std::cerr << "Index: " << window_count << " windows from reference\n";
 
   BioGeometryIndexBuilder builder(config, range_config);
-  builder.build(std::move(index_seqs));
+  builder.build_reference_windows(
+      ref_id, std::move(ref_seq), static_cast<size_t>(window_size),
+      static_cast<size_t>(stride));
   BioGeometrySearchEngine engine(builder, search_config);
   const auto& sequence_store = builder.sequence_store();
 
@@ -1548,9 +1551,35 @@ void run_benchmark(const std::string& ref_input, const std::string& query_input,
       per_query_rows[qi].push_back(std::move(row));
     } else {
       for (LeafId hit_id : res) {
-        const auto& hit = sequence_store.at(hit_id);
-        int ed = compute_distance(read->seq, hit.seq);
-        auto rows = search_results_to_tsv_rows(read->id, read->seq, 0, hit, ed);
+        const std::string_view hit_sequence = sequence_store.sequence(hit_id);
+        const int ed = compute_distance(read->seq, hit_sequence);
+        BioSequence materialized_hit;
+        const BioSequence* output_hit = nullptr;
+        if (sequence_store.reference_backed) {
+          materialized_hit = sequence_store.materialize(hit_id);
+          sequence_store.for_each_occurrence(
+              hit_id, [&](uint32_t occurrence) {
+                const auto& contig =
+                    sequence_store.contig_for_position(occurrence);
+                const size_t local_start =
+                    static_cast<size_t>(contig.source_begin) + occurrence -
+                    contig.begin;
+                if (local_start >
+                    static_cast<size_t>(std::numeric_limits<int>::max()) -
+                        hit_sequence.size()) {
+                  throw std::runtime_error(
+                      "reference occurrence exceeds RefPosition integer range");
+                }
+                materialized_hit.add_occurrence(
+                    contig.id, static_cast<int>(local_start),
+                    static_cast<int>(local_start + hit_sequence.size()), "+");
+              });
+          output_hit = &materialized_hit;
+        } else {
+          output_hit = &sequence_store.at(hit_id);
+        }
+        auto rows = search_results_to_tsv_rows(
+            read->id, read->seq, 0, *output_hit, ed);
         for (const auto& r : rows) {
           std::vector<std::string> row = {
               r.query_id, r.hit_id, r.distance_str, r.ref_positions_json,
