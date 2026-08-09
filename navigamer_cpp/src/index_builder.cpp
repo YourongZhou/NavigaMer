@@ -397,10 +397,54 @@ class ReferencePositionEncoder {
   std::vector<uint8_t> payload_;
 };
 
-uint32_t reference_sequence_hash(std::string_view sequence) {
-  return static_cast<uint32_t>(
-      std::hash<std::string_view>{}(sequence));
-}
+// A rolling hash only chooses the probe slot in ReferenceSequenceTable.  The
+// table always confirms equality against the shared reference, so a collision
+// cannot merge sequences or affect recall.
+class ReferenceWindowRollingHash {
+ public:
+  ReferenceWindowRollingHash(std::string_view reference, size_t begin,
+                             size_t length)
+      : length_(length) {
+    if (length == 0 || begin > reference.size() ||
+        length > reference.size() - begin) {
+      throw std::out_of_range("reference window hash is out of bounds");
+    }
+    for (size_t offset = 0; offset < length; ++offset) {
+      hash_ = hash_ * kBase + byte_at(reference, begin + offset);
+      if (offset + 1 < length) multiplier_ *= kBase;
+    }
+  }
+
+  uint32_t value() const {
+    return static_cast<uint32_t>(hash_ ^ (hash_ >> 32));
+  }
+
+  void advance(std::string_view reference, size_t begin, size_t step) {
+    if (step == 0 || begin > reference.size() ||
+        length_ > reference.size() - begin ||
+        step > reference.size() - begin - length_) {
+      throw std::out_of_range(
+          "reference window hash advance is out of bounds");
+    }
+    for (size_t offset = 0; offset < step; ++offset) {
+      const uint64_t outgoing = byte_at(reference, begin + offset);
+      const uint64_t incoming =
+          byte_at(reference, begin + length_ + offset);
+      hash_ = (hash_ - outgoing * multiplier_) * kBase + incoming;
+    }
+  }
+
+ private:
+  static constexpr uint64_t kBase = 1315423911ULL;
+
+  static uint64_t byte_at(std::string_view reference, size_t position) {
+    return static_cast<unsigned char>(reference[position]) + 1;
+  }
+
+  size_t length_ = 0;
+  uint64_t multiplier_ = 1;
+  uint64_t hash_ = 0;
+};
 
 // Build-only exact dictionary for fixed-length reference windows. The hash is
 // only a probe hint: equal hashes are confirmed against the shared reference,
@@ -2902,6 +2946,8 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
       const size_t contig_begin = contig.begin;
       const size_t contig_end = contig.end;
       if (contig_end - contig_begin < window_length) continue;
+      ReferenceWindowRollingHash window_hash(
+          store.reference_sequence, contig_begin, window_length);
       size_t next_invalid = contig_begin;
       for (size_t start = contig_begin;
            start + window_length <= contig_end;
@@ -2918,7 +2964,7 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
         } else {
           const std::string_view sequence(
               store.reference_sequence.data() + start, window_length);
-          const uint32_t hash = reference_sequence_hash(sequence);
+          const uint32_t hash = window_hash.value();
           const auto lookup = sequence_ids.find(
               hash, sequence, reference, position_of);
           if (lookup.id != INVALID_LEAF_ID) {
@@ -2932,6 +2978,9 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
                 position_encoder.append(static_cast<uint32_t>(start));
             sequence_ids.insert(lookup, hash, sequence_id);
           }
+        }
+        if (stride <= contig_end - start - window_length) {
+          window_hash.advance(store.reference_sequence, start, stride);
         }
         if (progress &&
             (processed_windows % 65536 == 0 ||
@@ -2955,6 +3004,8 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
         const size_t contig_begin = contig.begin;
         const size_t contig_end = contig.end;
         if (contig_end - contig_begin < window_length) continue;
+        ReferenceWindowRollingHash window_hash(
+            store.reference_sequence, contig_begin, window_length);
         size_t next_invalid = contig_begin;
         for (size_t start = contig_begin;
              start + window_length <= contig_end; ++start) {
@@ -2963,16 +3014,20 @@ void BioGeometryIndexBuilder::initialize_reference_sequence_store(
                  is_acgt(store.reference_sequence[next_invalid])) {
             next_invalid++;
           }
-          if (next_invalid < start + window_length) continue;
-          const std::string_view sequence(
-              store.reference_sequence.data() + start, window_length);
-          const uint32_t hash = reference_sequence_hash(sequence);
-          const auto lookup = sequence_ids.find(
-              hash, sequence, reference, position_of);
-          if (lookup.id == INVALID_LEAF_ID) continue;
-          if (position_encoder.position(lookup.id) != start) {
-            additional_occurrences.push_back(
-                {lookup.id, static_cast<uint32_t>(start)});
+          if (next_invalid >= start + window_length) {
+            const std::string_view sequence(
+                store.reference_sequence.data() + start, window_length);
+            const uint32_t hash = window_hash.value();
+            const auto lookup = sequence_ids.find(
+                hash, sequence, reference, position_of);
+            if (lookup.id != INVALID_LEAF_ID &&
+                position_encoder.position(lookup.id) != start) {
+              additional_occurrences.push_back(
+                  {lookup.id, static_cast<uint32_t>(start)});
+            }
+          }
+          if (start + window_length < contig_end) {
+            window_hash.advance(store.reference_sequence, start, 1);
           }
         }
       }
