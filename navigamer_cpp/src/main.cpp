@@ -1054,94 +1054,122 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
       }
       BioSequence query("query", query_seq);
       const auto route = shard_router.select(query.seq, tolerance);
-      std::vector<uint32_t> active_shard_ids;
-      if (route.enabled) {
-        active_shard_ids = route.shard_ids;
-      } else {
-        active_shard_ids.resize(manifest.shards.size());
-        std::iota(
-            active_shard_ids.begin(), active_shard_ids.end(),
-            uint32_t{0});
-      }
-      auto shards = load_sharded_index(
-          index_path, manifest, active_shard_ids);
-      std::cerr << "Loaded sharded index: " << index_path
-                << " shards=" << shards.size()
-                << "/" << manifest.shards.size()
-                << " sequences=" << manifest.total_sequence_count
-                << " world_nodes="
-                << manifest.total_world_node_count << "\n";
-
-      std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
-      engines.reserve(shards.size());
-      for (auto& shard : shards) {
-        engines.push_back(
-            std::make_unique<BioGeometrySearchEngine>(
-                shard.builder, search_config));
-      }
-      const size_t active_shard_count = shards.size();
-      std::vector<std::pair<SearchResult, SearchStats>>
-          shard_results(active_shard_count);
-      std::vector<std::exception_ptr> shard_errors(active_shard_count);
-      const auto query_start =
-          std::chrono::high_resolution_clock::now();
-#pragma omp parallel for schedule(static) if(active_shard_count > 1)
-      for (size_t active_idx = 0;
-           active_idx < active_shard_count; ++active_idx) {
-        try {
-          if (mode == "greedy") {
-            shard_results[active_idx] =
-                engines[active_idx]->search_greedy(
-                    query, tolerance);
-          } else if (mode == "exhaustive") {
-            shard_results[active_idx] =
-                engines[active_idx]->search_exhaustive(
-                    query, tolerance);
-          } else {
-            shard_results[active_idx] =
-                engines[active_idx]->search_adaptive(
-                    query, tolerance);
-          }
-        } catch (...) {
-          shard_errors[active_idx] =
-              std::current_exception();
-        }
-      }
-      for (const auto& error : shard_errors) {
-        if (error) std::rethrow_exception(error);
-      }
-      const auto query_end =
-          std::chrono::high_resolution_clock::now();
-
       struct DisplayHit {
         std::string id;
         std::string sequence;
       };
       std::vector<DisplayHit> hits;
-      std::unordered_map<std::string, size_t> hit_by_sequence;
+      std::unordered_multimap<size_t, size_t> hit_by_hash;
       size_t distance_calculations = 0;
-      for (size_t active_idx = 0;
-           active_idx < shard_results.size(); ++active_idx) {
-        distance_calculations +=
-            shard_results[active_idx].second.dist_calc_count;
-        const auto& store =
-            shards[active_idx].builder.sequence_store();
-        for (LeafId hit_id :
-             shard_results[active_idx].first) {
-          std::string sequence(store.sequence(hit_id));
-          auto inserted = hit_by_sequence.emplace(
-              sequence, hits.size());
-          if (inserted.second) {
-            hits.push_back(
-                {store.identifier(hit_id),
-                 std::move(sequence)});
+      double query_time_ms = 0.0;
+      constexpr size_t kMaxResidentQueryShards = 64;
+      const size_t active_shard_count =
+          route.enabled ? route.shard_ids.size()
+                        : manifest.shards.size();
+      size_t peak_loaded_shards = 0;
+      std::vector<uint32_t> shard_group_ids;
+      shard_group_ids.reserve(kMaxResidentQueryShards);
+      for (size_t shard_begin = 0;
+           shard_begin < active_shard_count;
+           shard_begin += kMaxResidentQueryShards) {
+        const size_t shard_end = std::min(
+            shard_begin + kMaxResidentQueryShards,
+            active_shard_count);
+        shard_group_ids.resize(shard_end - shard_begin);
+        if (route.enabled) {
+          std::copy(
+              route.shard_ids.begin() + shard_begin,
+              route.shard_ids.begin() + shard_end,
+              shard_group_ids.begin());
+        } else {
+          std::iota(
+              shard_group_ids.begin(), shard_group_ids.end(),
+              static_cast<uint32_t>(shard_begin));
+        }
+        auto shards = load_sharded_index(
+            index_path, manifest, shard_group_ids);
+        peak_loaded_shards = std::max(
+            peak_loaded_shards, shards.size());
+        std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
+        engines.reserve(shards.size());
+        for (auto& shard : shards) {
+          engines.push_back(
+              std::make_unique<BioGeometrySearchEngine>(
+                  shard.builder, search_config));
+        }
+        std::vector<std::pair<SearchResult, SearchStats>>
+            shard_results(engines.size());
+        std::vector<std::exception_ptr> shard_errors(engines.size());
+        const auto query_start =
+            std::chrono::high_resolution_clock::now();
+#pragma omp parallel for schedule(static) if(engines.size() > 1)
+        for (size_t active_idx = 0;
+             active_idx < engines.size(); ++active_idx) {
+          try {
+            if (mode == "greedy") {
+              shard_results[active_idx] =
+                  engines[active_idx]->search_greedy(
+                      query, tolerance);
+            } else if (mode == "exhaustive") {
+              shard_results[active_idx] =
+                  engines[active_idx]->search_exhaustive(
+                      query, tolerance);
+            } else {
+              shard_results[active_idx] =
+                  engines[active_idx]->search_adaptive(
+                      query, tolerance);
+            }
+          } catch (...) {
+            shard_errors[active_idx] =
+                std::current_exception();
+          }
+        }
+        for (const auto& error : shard_errors) {
+          if (error) std::rethrow_exception(error);
+        }
+        query_time_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() -
+                query_start)
+                .count();
+
+        for (size_t active_idx = 0;
+             active_idx < shard_results.size(); ++active_idx) {
+          distance_calculations +=
+              shard_results[active_idx].second.dist_calc_count;
+          const auto& store =
+              shards[active_idx].builder.sequence_store();
+          for (LeafId hit_id : shard_results[active_idx].first) {
+            const std::string_view sequence = store.sequence(hit_id);
+            const size_t sequence_hash =
+                std::hash<std::string_view>{}(sequence);
+            const auto hash_range =
+                hit_by_hash.equal_range(sequence_hash);
+            bool found = false;
+            for (auto hit_it = hash_range.first;
+                 hit_it != hash_range.second; ++hit_it) {
+              if (std::string_view(hits[hit_it->second].sequence) ==
+                  sequence) {
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              const size_t combined_idx = hits.size();
+              hits.push_back(
+                  {store.identifier(hit_id), std::string(sequence)});
+              hit_by_hash.emplace(sequence_hash, combined_idx);
+            }
           }
         }
       }
-      const double query_time_ms =
-          std::chrono::duration<double, std::milli>(
-              query_end - query_start)
-              .count();
+      std::cerr << "Loaded sharded index: " << index_path
+                << " shards=" << active_shard_count
+                << "/" << manifest.shards.size()
+                << " peak_shards=" << peak_loaded_shards
+                << " sequences=" << manifest.total_sequence_count
+                << " world_nodes="
+                << manifest.total_world_node_count << "\n";
       const char* mode_label =
           mode == "greedy"
               ? "Greedy"
@@ -1686,7 +1714,6 @@ void run_query_index_batch(const std::string& index_path,
     std::vector<float> query_route_ms;
     query_route_ms.reserve(queries.size());
     size_t routed_queries = 0;
-    bool has_unrouted_query = false;
     for (size_t query_idx = 0; query_idx < queries.size(); ++query_idx) {
       const auto& query = queries[query_idx];
       const auto route_start =
@@ -1703,8 +1730,6 @@ void run_query_index_batch(const std::string& index_path,
         ++routed_queries;
         query_routed_bits[query_idx >> 3] |= static_cast<uint8_t>(
             uint8_t{1} << (query_idx & 7));
-      } else {
-        has_unrouted_query = true;
       }
       query_route_offsets.push_back(query_route_shard_ids.size());
     }
@@ -1717,6 +1742,8 @@ void run_query_index_batch(const std::string& index_path,
       size_t query_begin = 0;
       size_t query_end = 0;
       std::vector<uint32_t> shard_ids;
+      bool full_scan = false;
+      bool oversized_route_scan = false;
 
       bool empty() const { return query_begin == query_end; }
     };
@@ -1724,6 +1751,7 @@ void run_query_index_batch(const std::string& index_path,
     // shards. Keep only one bounded union resident while preserving input
     // order and every exact router-selected shard for each query.
     constexpr size_t kMaxResidentQueryShards = 64;
+    constexpr size_t kMaxFullScanQueriesPerBatch = 64;
     std::vector<ShardQueryBatch> shard_query_batches;
     std::vector<uint8_t> batch_shard_bits(
         shard_manifest.shards.size(), uint8_t{0});
@@ -1736,42 +1764,68 @@ void run_query_index_batch(const std::string& index_path,
       shard_query_batches.push_back(std::move(batch));
       batch = ShardQueryBatch{};
     };
-    if (has_unrouted_query) {
-      batch.query_begin = 0;
-      batch.query_end = queries.size();
-      batch.shard_ids.resize(shard_manifest.shards.size());
-      std::iota(batch.shard_ids.begin(), batch.shard_ids.end(),
-                uint32_t{0});
-      shard_query_batches.push_back(std::move(batch));
-    } else {
-      for (size_t query_idx = 0; query_idx < queries.size();
-           ++query_idx) {
-        const size_t route_begin = query_route_offsets[query_idx];
-        const size_t route_end = query_route_offsets[query_idx + 1];
-        size_t new_shard_count = 0;
-        for (size_t route_idx = route_begin; route_idx < route_end;
-             ++route_idx) {
-          const uint32_t shard_id = query_route_shard_ids[route_idx];
-          if (!batch_shard_bits[shard_id]) ++new_shard_count;
+    const auto append_full_scan_query = [&](size_t query_idx) {
+      if (!shard_query_batches.empty()) {
+        auto& previous = shard_query_batches.back();
+        if (previous.full_scan && previous.query_end == query_idx &&
+            previous.query_end - previous.query_begin <
+                kMaxFullScanQueriesPerBatch) {
+          previous.query_end = query_idx + 1;
+          return;
         }
-        if (!batch.empty() &&
-            batch.shard_ids.size() + new_shard_count >
-                kMaxResidentQueryShards) {
-          flush_batch();
-        }
-        for (size_t route_idx = route_begin; route_idx < route_end;
-             ++route_idx) {
-          const uint32_t shard_id = query_route_shard_ids[route_idx];
-          if (!batch_shard_bits[shard_id]) {
-            batch_shard_bits[shard_id] = 1;
-            batch.shard_ids.push_back(shard_id);
-          }
-        }
-        if (batch.empty()) batch.query_begin = query_idx;
-        batch.query_end = query_idx + 1;
       }
-      flush_batch();
+      ShardQueryBatch full_scan_batch;
+      full_scan_batch.query_begin = query_idx;
+      full_scan_batch.query_end = query_idx + 1;
+      full_scan_batch.full_scan = true;
+      shard_query_batches.push_back(std::move(full_scan_batch));
+    };
+    for (size_t query_idx = 0; query_idx < queries.size();
+         ++query_idx) {
+      if (!query_is_routed(query_idx)) {
+        flush_batch();
+        append_full_scan_query(query_idx);
+        continue;
+      }
+      const size_t route_begin = query_route_offsets[query_idx];
+      const size_t route_end = query_route_offsets[query_idx + 1];
+      if (route_end - route_begin == shard_manifest.shards.size()) {
+        flush_batch();
+        append_full_scan_query(query_idx);
+        continue;
+      }
+      if (route_end - route_begin > kMaxResidentQueryShards) {
+        flush_batch();
+        ShardQueryBatch oversized_batch;
+        oversized_batch.query_begin = query_idx;
+        oversized_batch.query_end = query_idx + 1;
+        oversized_batch.oversized_route_scan = true;
+        shard_query_batches.push_back(std::move(oversized_batch));
+        continue;
+      }
+      size_t new_shard_count = 0;
+      for (size_t route_idx = route_begin; route_idx < route_end;
+           ++route_idx) {
+        const uint32_t shard_id = query_route_shard_ids[route_idx];
+        if (!batch_shard_bits[shard_id]) ++new_shard_count;
+      }
+      if (!batch.empty() &&
+          batch.shard_ids.size() + new_shard_count >
+              kMaxResidentQueryShards) {
+        flush_batch();
+      }
+      for (size_t route_idx = route_begin; route_idx < route_end;
+           ++route_idx) {
+        const uint32_t shard_id = query_route_shard_ids[route_idx];
+        if (!batch_shard_bits[shard_id]) {
+          batch_shard_bits[shard_id] = 1;
+          batch.shard_ids.push_back(shard_id);
+        }
+      }
+      if (batch.empty()) batch.query_begin = query_idx;
+      batch.query_end = query_idx + 1;
     }
+    flush_batch();
     if (shard_query_batches.empty()) {
       throw std::runtime_error("sharded query batch has no work");
     }
@@ -1803,9 +1857,261 @@ void run_query_index_batch(const std::string& index_path,
       if (tsv_writer) tsv_writer->write_row(row);
       ++output_row_count;
     };
+    const auto accumulate_search_stats = [](
+        SearchStats& combined, const SearchStats& stats) {
+      combined.search_qgram_prefilter_enabled =
+          combined.search_qgram_prefilter_enabled ||
+          stats.search_qgram_prefilter_enabled;
+      combined.search_prefetch_enabled =
+          combined.search_prefetch_enabled ||
+          stats.search_prefetch_enabled;
+      if (stats.search_qgram_prefilter_enabled) {
+        combined.search_qgram_q = stats.search_qgram_q;
+      }
+      combined.dist_calc_count += stats.dist_calc_count;
+      combined.leaf_verify_count += stats.leaf_verify_count;
+      combined.candidate_count_for_prune +=
+          stats.candidate_count_for_prune;
+      combined.beacon_prune_count += stats.beacon_prune_count;
+      combined.mbb_scan_child_checks += stats.mbb_scan_child_checks;
+      combined.mbb_rect_index_queries += stats.mbb_rect_index_queries;
+      combined.mbb_rect_candidate_children +=
+          stats.mbb_rect_candidate_children;
+      combined.mbb_rect_fallback_count +=
+          stats.mbb_rect_fallback_count;
+      combined.mbb_surviving_child_count +=
+          stats.mbb_surviving_child_count;
+      combined.path_contained_step_count +=
+          stats.path_contained_step_count;
+      combined.path_overlap_step_count += stats.path_overlap_step_count;
+      combined.path_uncovered_step_count +=
+          stats.path_uncovered_step_count;
+    };
+    const auto emit_query_hits = [&](const QuerySequence& read,
+                                     SearchStats& combined,
+                                     const auto& combined_hits,
+                                     double query_time_ms) {
+      combined.result_count = combined_hits.size();
+      const std::vector<std::string> search_stats = {
+          mbb_filter_mode_name(search_config.mbb_filter_mode),
+          std::to_string(combined.mbb_scan_child_checks),
+          std::to_string(combined.mbb_rect_index_queries),
+          std::to_string(combined.mbb_rect_candidate_children),
+          std::to_string(combined.mbb_rect_fallback_count),
+          std::to_string(combined.mbb_surviving_child_count),
+          combined.query_path_class(),
+          std::to_string(combined.path_contained_step_count),
+          std::to_string(combined.path_overlap_step_count),
+          std::to_string(combined.path_uncovered_step_count),
+          combined.search_qgram_prefilter_enabled ? "true" : "false",
+          combined.search_prefetch_enabled ? "true" : "false",
+          std::to_string(combined.search_qgram_q),
+          std::to_string(combined.result_count),
+          format_double(query_time_ms)};
+
+      for (const auto& materialized_hit : combined_hits) {
+        const int ed = compute_distance(read.seq, materialized_hit.seq);
+        const auto rows = search_results_to_tsv_rows(
+            read.id, read.seq, 0, materialized_hit, ed);
+        for (const auto& result : rows) {
+          std::vector<std::string> row = {
+              result.query_id, result.hit_id,
+              result.distance_str,
+              result.ref_positions_json, result.read_id,
+              result.read_len, result.ref_id, result.strand,
+              result.query_start, result.reference_start,
+              result.aligned_length, result.score,
+              result.edit_distance, result.query_fragment,
+              result.reference_fragment, result.bwt_start,
+              result.bwt_end,
+              std::to_string(combined.dist_calc_count),
+              std::to_string(combined.leaf_verify_count),
+              std::to_string(combined.candidate_count_for_prune),
+              std::to_string(combined.beacon_prune_count)};
+          row.insert(row.end(), search_stats.begin(), search_stats.end());
+          emit_row(row);
+        }
+      }
+      if (combined_hits.empty()) {
+        std::vector<std::string> row = {
+            read.id, "", "", "", read.id,
+            std::to_string(static_cast<int>(read.seq.size())),
+            "", "+", "0", "0", "0", "0", "", read.seq,
+            "", "-1", "-1",
+            std::to_string(combined.dist_calc_count),
+            std::to_string(combined.leaf_verify_count),
+            std::to_string(combined.candidate_count_for_prune),
+            std::to_string(combined.beacon_prune_count)};
+        row.insert(row.end(), search_stats.begin(), search_stats.end());
+        emit_row(row);
+      }
+    };
+    struct FallbackQueryAggregate {
+      SearchStats stats;
+      std::vector<BioSequence> hits;
+      std::unordered_multimap<size_t, size_t> hit_by_hash;
+      double search_ms = 0.0;
+    };
     std::vector<uint32_t> shard_to_loaded(
         shard_manifest.shards.size(), UINT32_MAX);
     for (const auto& shard_batch : shard_query_batches) {
+      if (shard_batch.full_scan ||
+          shard_batch.oversized_route_scan) {
+        const size_t query_count =
+            shard_batch.query_end - shard_batch.query_begin;
+        const size_t route_begin =
+            query_route_offsets[shard_batch.query_begin];
+        const size_t selected_shard_count =
+            shard_batch.oversized_route_scan
+                ? query_route_offsets[shard_batch.query_end] -
+                      route_begin
+                : shard_manifest.shards.size();
+        std::vector<FallbackQueryAggregate> aggregates(query_count);
+        std::vector<uint32_t> fallback_shard_ids;
+        fallback_shard_ids.reserve(kMaxResidentQueryShards);
+        std::vector<std::pair<SearchResult, SearchStats>> shard_results;
+        std::vector<std::exception_ptr> shard_errors;
+
+        for (size_t selected_begin = 0;
+             selected_begin < selected_shard_count;
+             selected_begin += kMaxResidentQueryShards) {
+          const size_t selected_end = std::min(
+              selected_begin + kMaxResidentQueryShards,
+              selected_shard_count);
+          fallback_shard_ids.resize(selected_end - selected_begin);
+          if (shard_batch.oversized_route_scan) {
+            std::copy(
+                query_route_shard_ids.begin() + route_begin +
+                    selected_begin,
+                query_route_shard_ids.begin() + route_begin +
+                    selected_end,
+                fallback_shard_ids.begin());
+          } else {
+            std::iota(
+                fallback_shard_ids.begin(), fallback_shard_ids.end(),
+                static_cast<uint32_t>(selected_begin));
+          }
+          auto loaded_shards = load_sharded_index(
+              index_path, shard_manifest, fallback_shard_ids);
+          peak_loaded_shards = std::max(
+              peak_loaded_shards, loaded_shards.size());
+          std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
+          engines.reserve(loaded_shards.size());
+          for (auto& shard : loaded_shards) {
+            engines.push_back(std::make_unique<BioGeometrySearchEngine>(
+                shard.builder, search_config));
+          }
+
+          shard_results.resize(engines.size());
+          shard_errors.resize(engines.size());
+          for (size_t query_offset = 0;
+               query_offset < query_count; ++query_offset) {
+            const auto& read =
+                queries[shard_batch.query_begin + query_offset];
+            std::fill(shard_errors.begin(), shard_errors.end(),
+                      std::exception_ptr{});
+            const auto search_start =
+                std::chrono::high_resolution_clock::now();
+#pragma omp parallel for schedule(static) if(engines.size() > 1)
+            for (size_t engine_idx = 0;
+                 engine_idx < engines.size(); ++engine_idx) {
+              try {
+                shard_results[engine_idx] =
+                    engines[engine_idx]->search_adaptive(
+                        std::string_view(read.seq), tolerance);
+              } catch (...) {
+                shard_errors[engine_idx] = std::current_exception();
+              }
+            }
+            for (const auto& error : shard_errors) {
+              if (error) std::rethrow_exception(error);
+            }
+            const auto search_end =
+                std::chrono::high_resolution_clock::now();
+            auto& aggregate = aggregates[query_offset];
+            aggregate.search_ms +=
+                std::chrono::duration<double, std::milli>(
+                    search_end - search_start)
+                    .count();
+            searched_shards += engines.size();
+
+            for (size_t engine_idx = 0;
+                 engine_idx < shard_results.size(); ++engine_idx) {
+              const auto& shard_result = shard_results[engine_idx];
+              accumulate_search_stats(
+                  aggregate.stats, shard_result.second);
+              const auto& sequence_store =
+                  loaded_shards[engine_idx].builder.sequence_store();
+              for (LeafId hit_id : shard_result.first) {
+                const std::string_view hit_sequence =
+                    sequence_store.sequence(hit_id);
+                const size_t hit_hash =
+                    std::hash<std::string_view>{}(hit_sequence);
+                const auto hash_range =
+                    aggregate.hit_by_hash.equal_range(hit_hash);
+                size_t combined_idx =
+                    std::numeric_limits<size_t>::max();
+                for (auto hit_it = hash_range.first;
+                     hit_it != hash_range.second; ++hit_it) {
+                  if (std::string_view(
+                          aggregate.hits[hit_it->second].seq) ==
+                      hit_sequence) {
+                    combined_idx = hit_it->second;
+                    break;
+                  }
+                }
+                if (combined_idx ==
+                    std::numeric_limits<size_t>::max()) {
+                  combined_idx = aggregate.hits.size();
+                  aggregate.hits.push_back(
+                      sequence_store.materialize(hit_id));
+                  aggregate.hit_by_hash.emplace(
+                      hit_hash, combined_idx);
+                }
+                BioSequence& materialized_hit =
+                    aggregate.hits[combined_idx];
+                const auto add_occurrence =
+                    [&](uint32_t occurrence) {
+                      const auto& contig =
+                          sequence_store.contig_for_position(
+                              occurrence);
+                      const size_t local_start =
+                          static_cast<size_t>(
+                              contig.source_begin) +
+                          occurrence - contig.begin;
+                      if (local_start >
+                          static_cast<size_t>(
+                              std::numeric_limits<int>::max()) -
+                              hit_sequence.size()) {
+                        throw std::runtime_error(
+                            "reference occurrence exceeds "
+                            "RefPosition integer range");
+                      }
+                      materialized_hit.add_occurrence(
+                          contig.id,
+                          static_cast<int>(local_start),
+                          static_cast<int>(
+                              local_start + hit_sequence.size()),
+                          "+");
+                    };
+                sequence_store.for_each_occurrence(
+                    hit_id, add_occurrence);
+              }
+            }
+          }
+        }
+
+        for (size_t query_offset = 0;
+             query_offset < query_count; ++query_offset) {
+          const size_t query_idx =
+              shard_batch.query_begin + query_offset;
+          auto& aggregate = aggregates[query_offset];
+          emit_query_hits(
+              queries[query_idx], aggregate.stats, aggregate.hits,
+              aggregate.search_ms + query_route_ms[query_idx]);
+        }
+        continue;
+      }
       auto loaded_shards = load_sharded_index(
           index_path, shard_manifest, shard_batch.shard_ids);
       peak_loaded_shards = std::max(
@@ -1880,37 +2186,7 @@ void run_query_index_batch(const std::string& index_path,
 
       SearchStats combined;
       for (const auto& shard_result : shard_results) {
-        const auto& stats = shard_result.second;
-        combined.search_qgram_prefilter_enabled =
-            combined.search_qgram_prefilter_enabled ||
-            stats.search_qgram_prefilter_enabled;
-        combined.search_prefetch_enabled =
-            combined.search_prefetch_enabled ||
-            stats.search_prefetch_enabled;
-        if (stats.search_qgram_prefilter_enabled) {
-          combined.search_qgram_q = stats.search_qgram_q;
-        }
-        combined.dist_calc_count += stats.dist_calc_count;
-        combined.leaf_verify_count += stats.leaf_verify_count;
-        combined.candidate_count_for_prune +=
-            stats.candidate_count_for_prune;
-        combined.beacon_prune_count += stats.beacon_prune_count;
-        combined.mbb_scan_child_checks +=
-            stats.mbb_scan_child_checks;
-        combined.mbb_rect_index_queries +=
-            stats.mbb_rect_index_queries;
-        combined.mbb_rect_candidate_children +=
-            stats.mbb_rect_candidate_children;
-        combined.mbb_rect_fallback_count +=
-            stats.mbb_rect_fallback_count;
-        combined.mbb_surviving_child_count +=
-            stats.mbb_surviving_child_count;
-        combined.path_contained_step_count +=
-            stats.path_contained_step_count;
-        combined.path_overlap_step_count +=
-            stats.path_overlap_step_count;
-        combined.path_uncovered_step_count +=
-            stats.path_uncovered_step_count;
+        accumulate_search_stats(combined, shard_result.second);
       }
 
       size_t raw_hit_count = 0;
@@ -1964,68 +2240,7 @@ void run_query_index_batch(const std::string& index_path,
               hit_id, add_occurrence);
         }
       }
-      combined.result_count = combined_hits.size();
-      const std::vector<std::string> search_stats = {
-          mbb_filter_mode_name(search_config.mbb_filter_mode),
-          std::to_string(combined.mbb_scan_child_checks),
-          std::to_string(combined.mbb_rect_index_queries),
-          std::to_string(combined.mbb_rect_candidate_children),
-          std::to_string(combined.mbb_rect_fallback_count),
-          std::to_string(combined.mbb_surviving_child_count),
-          combined.query_path_class(),
-          std::to_string(combined.path_contained_step_count),
-          std::to_string(combined.path_overlap_step_count),
-          std::to_string(combined.path_uncovered_step_count),
-          combined.search_qgram_prefilter_enabled ? "true" : "false",
-          combined.search_prefetch_enabled ? "true" : "false",
-          std::to_string(combined.search_qgram_q),
-          std::to_string(combined.result_count),
-          format_double(query_time_ms)};
-
-      for (const auto& materialized_hit : combined_hits) {
-        const int ed =
-            compute_distance(read.seq, materialized_hit.seq);
-        const auto rows = search_results_to_tsv_rows(
-            read.id, read.seq, 0, materialized_hit, ed);
-        for (const auto& result : rows) {
-          std::vector<std::string> row = {
-              result.query_id, result.hit_id,
-              result.distance_str,
-              result.ref_positions_json, result.read_id,
-              result.read_len, result.ref_id, result.strand,
-              result.query_start, result.reference_start,
-              result.aligned_length, result.score,
-              result.edit_distance, result.query_fragment,
-              result.reference_fragment, result.bwt_start,
-              result.bwt_end,
-              std::to_string(combined.dist_calc_count),
-              std::to_string(combined.leaf_verify_count),
-              std::to_string(
-                  combined.candidate_count_for_prune),
-              std::to_string(combined.beacon_prune_count)};
-          row.insert(
-              row.end(), search_stats.begin(),
-              search_stats.end());
-          emit_row(row);
-        }
-      }
-      if (combined_hits.empty()) {
-        std::vector<std::string> row = {
-            read.id, "", "", "", read.id,
-            std::to_string(
-                static_cast<int>(read.seq.size())),
-            "", "+", "0", "0", "0", "0", "", read.seq,
-            "", "-1", "-1",
-            std::to_string(combined.dist_calc_count),
-            std::to_string(combined.leaf_verify_count),
-            std::to_string(
-                combined.candidate_count_for_prune),
-            std::to_string(combined.beacon_prune_count)};
-        row.insert(
-            row.end(), search_stats.begin(),
-            search_stats.end());
-        emit_row(row);
-      }
+      emit_query_hits(read, combined, combined_hits, query_time_ms);
       }
       for (uint32_t shard_id : shard_batch.shard_ids) {
         shard_to_loaded[shard_id] = UINT32_MAX;

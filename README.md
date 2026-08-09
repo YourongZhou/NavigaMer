@@ -319,18 +319,20 @@ minimum shard-local bit width with exact constant-time decoding instead of one
 Queries mmap only selected byte ranges, so packing removes millions of
 filesystem entries without coarsening the logical shards or increasing search
 work. Contig names and pack paths are interned once; each in-memory shard
-descriptor is a fixed 48-byte numeric record. The sidecar stores sorted
+descriptor is a fixed 40-byte numeric record. The sidecar stores sorted
 32-bit minimizers plus shard IDs at exactly `ceil(log2(shard_count))` bits per
 entry. For a query at tolerance `d`, the router takes one seed of 32 to 64
 bases from each of `d + 1` disjoint query blocks and searches only shards
 containing at least one seed minimizer. The pigeonhole principle makes this a
 necessary condition for an edit-distance
 hit, not a heuristic. Short or ambiguous unsupported queries, and missing or
-invalid router sidecars, conservatively search every shard. `query-index` and
+invalid router sidecars, conservatively search every shard in groups of at
+most 64 resident shards. `query-index` and
 `query-index-batch` load only the routed shard or the union required by the
 batch, search those parts in parallel, and merge identical sequences and all
-of their occurrences before reporting results. A fallback query loads every
-shard to preserve recall.
+of their occurrences before reporting results. Routed selections larger than
+64 shards use the same bounded groups. A fallback query searches every
+shard to preserve recall without mapping the complete human index at once.
 
 For human-scale stride-1 builds, start with `--shard-windows 10000` and tune
 from measurements. Logical shards are cheap because 1,024 share one pack file.

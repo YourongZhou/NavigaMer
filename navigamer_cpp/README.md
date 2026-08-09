@@ -289,14 +289,16 @@ shard IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
 within edit distance `d` must contain one whole block exactly, so omitting
 shards without any of those minimizers is no-FN-safe.
 Pack paths and contig names are interned once in the manifest; logical-shard
-descriptors contain only fixed-width numeric fields and occupy 48 bytes in
+descriptors contain only fixed-width numeric fields and occupy 40 bytes in
 memory on the supported 64-bit build. Unsupported short/ambiguous queries or
-an unavailable sidecar fall
-back to every part. Selected ranges are memory-mapped directly rather than loading
+an unavailable sidecar fall back to an exact scan of every part in groups of
+at most 64 resident shards. Selected ranges are memory-mapped directly rather than loading
 their whole pack. `query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed
-parts. Any fallback query conservatively loads every part. Bundle query
+parts, with oversized routed selections split at the same 64-shard cap. Any
+fallback query conservatively searches every part without mapping
+the whole human index at once. Bundle query
 loading validates signatures, counts, mapped pack bounds, layer ranges, shard coordinates, and
 the bundle checksum without an O(total nodes) rescan; build/restart reuse still
 performs full part validation. Path tracing is not supported for a bundle
