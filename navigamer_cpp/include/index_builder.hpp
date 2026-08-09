@@ -1733,6 +1733,12 @@ struct SearchGraphView {
   bool implicit_child_mbb_widths = false;
   uint8_t implicit_child_mbb_exception_bits = 0;
   FinalArray<uint8_t> child_mbb_width_exceptions;
+  // Dense child nodes may store one byte-sized code in their node record.
+  // Each code resolves both the exact child count and interned MBB payload
+  // begin from this small shard-local table, replacing the wider repeated
+  // pair without changing either relationship or pruning data.
+  uint8_t compact_child_descriptor_mbb_begin_bits = 0;
+  FinalArray<uint16_t> compact_child_descriptors;
 
   // Exact child MBB payloads with identical dimensions are interned within a
   // shard. Node records continue to point directly at their shared payload,
@@ -2373,6 +2379,36 @@ struct SearchGraphView {
     return node_count_overflows[
         node.inline_link_count_or_overflow_index()].link_count;
   }
+  bool has_compact_child_descriptors() const {
+    return compact_child_descriptor_mbb_begin_bits != 0;
+  }
+  uint16_t compact_child_descriptor(
+      const PackedWorldNodeRecordRef& node) const {
+    const uint32_t code = node.inline_link_count_or_overflow_index();
+    if (code >= compact_child_descriptors.size()) {
+      throw std::runtime_error("compact child descriptor code is invalid");
+    }
+    return compact_child_descriptors[code];
+  }
+  uint32_t compact_child_descriptor_count(
+      const PackedWorldNodeRecordRef& node) const {
+    return compact_child_descriptor(node) >>
+           compact_child_descriptor_mbb_begin_bits;
+  }
+  uint32_t child_mbb_begin(
+      NodeId node_id, const PackedWorldNodeRecordRef& node) const {
+    if (has_compact_child_descriptors() &&
+        node_id < node_records.finest_node_begin()) {
+      const uint32_t bits = compact_child_descriptor_mbb_begin_bits;
+      return compact_child_descriptor(node) &
+             ((uint32_t{1} << bits) - 1);
+    }
+    return node.child_mbb_begin();
+  }
+  uint32_t child_mbb_begin(NodeId node_id) const {
+    const auto node = node_records[node_id];
+    return child_mbb_begin(node_id, node);
+  }
   uint32_t implicit_consecutive_leaf_count(LeafId center) const {
     if (center >= sequences.size()) {
       throw std::out_of_range("implicit leaf center is outside sequences");
@@ -2420,6 +2456,10 @@ struct SearchGraphView {
   uint32_t link_count(NodeId node_id,
                       const PackedWorldNodeRecordRef& node,
                       LeafId center) const {
+    if (has_compact_child_descriptors() &&
+        node_id < node_records.finest_node_begin()) {
+      return compact_child_descriptor_count(node);
+    }
     if (node_records.leaf_layout().has_implicit_dense_leaf_fields() &&
         node_id >= node_records.finest_node_begin()) {
       if (!implicit_consecutive_leaf_ids || !dense_leaf_mbb_ternary) {
@@ -2432,6 +2472,10 @@ struct SearchGraphView {
   }
   uint32_t link_count(NodeId node_id,
                       const PackedWorldNodeRecordRef& node) const {
+    if (has_compact_child_descriptors() &&
+        node_id < node_records.finest_node_begin()) {
+      return compact_child_descriptor_count(node);
+    }
     if (node_records.leaf_layout().has_implicit_dense_leaf_fields() &&
         node_id >= node_records.finest_node_begin()) {
       return link_count(node_id, node, center_sequence_id(node_id));
@@ -2734,7 +2778,7 @@ struct SearchGraphView {
   }
   size_t packed_child_byte_count(NodeId node_id) const {
     const auto node = node_records[node_id];
-    return packed_child_byte_count(node, link_count(node));
+    return packed_child_byte_count(node, link_count(node_id, node));
   }
   void set_child_ids_base_delta8(NodeId node_id) {
     node_records[node_id].set_link_storage(
@@ -2768,7 +2812,8 @@ struct SearchGraphView {
         const size_t base_bytes = child_base_byte_count();
         const NodeId base = child_base_id(node_id, segment, base_bytes);
         if (node.packed_child_bits() == CONTIGUOUS_CHILD_RANGE_BITS &&
-            link_count(node) <= CONTIGUOUS_CHILD_OFFSET_TABLE_SIZE) {
+            link_count(node_id, node) <=
+                CONTIGUOUS_CHILD_OFFSET_TABLE_SIZE) {
           return {base, nullptr, contiguous_child_offset_table.data(),
                   nullptr, nullptr, 0};
         }
@@ -2878,7 +2923,7 @@ struct SearchGraphView {
       uint32_t bits_per_child = (beacon_count_value & 1) ? 4 : 0;
       for (size_t pair = 0; pair < full_pairs; ++pair) {
         bits_per_child += metric_pair_rank_bits(
-            child_beacon_dists[node.child_mbb_begin() + pair],
+            child_beacon_dists[child_mbb_begin(node_id, node) + pair],
             bin_width);
       }
       return full_pairs + static_cast<size_t>(
@@ -2895,12 +2940,12 @@ struct SearchGraphView {
   size_t child_mbb_byte_count(NodeId node_id) const {
     const auto node = node_records[node_id];
     return child_mbb_byte_count(
-        node_id, node, link_count(node), beacon_count(node));
+        node_id, node, link_count(node_id, node), beacon_count(node));
   }
   bool child_mbb_range_valid(
       NodeId node_id, const PackedWorldNodeRecordRef& node,
       uint32_t child_count_value, uint32_t beacon_count_value) const {
-    const uint32_t begin = node.child_mbb_begin();
+    const uint32_t begin = child_mbb_begin(node_id, node);
     if (begin > child_beacon_dists.size()) return false;
     if (child_mbb_bits(node_id, node) ==
             PAIRED_BASE11_CHILD_MBB_BITS &&
@@ -2915,7 +2960,7 @@ struct SearchGraphView {
   bool child_mbb_range_valid(NodeId node_id) const {
     const auto node = node_records[node_id];
     return child_mbb_range_valid(
-        node_id, node, link_count(node), beacon_count(node));
+        node_id, node, link_count(node_id, node), beacon_count(node));
   }
   uint8_t child_beacon_distance(
       NodeId node_id, size_t cell_offset) const {
@@ -2935,7 +2980,8 @@ struct SearchGraphView {
       uint32_t bin_width) const {
     const auto node = node_records[node_id];
     return child_beacon_distance_unchecked(
-        node.child_mbb_begin(), link_count(node), beacon_count(node),
+        child_mbb_begin(node_id, node), link_count(node_id, node),
+        beacon_count(node),
         cell_offset, bits, bin_width);
   }
   uint8_t child_beacon_distance_unchecked(

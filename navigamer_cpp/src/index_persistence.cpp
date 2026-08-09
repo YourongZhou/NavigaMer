@@ -25,9 +25,9 @@ namespace navigamer {
 
 namespace {
 
-constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '4', '1'};
+constexpr std::array<char, 8> kMagic = {'N', 'G', 'I', 'D', 'X', '0', '4', '2'};
 constexpr std::array<char, 8> kPayloadMagic = {
-    'N', 'G', 'P', 'A', 'Y', 'L', '0', '2'};
+    'N', 'G', 'P', 'A', 'Y', 'L', '0', '3'};
 constexpr size_t kMaxStoredInputDescriptor = 4096;
 constexpr size_t kMappedArrayAlignment = 64;
 
@@ -303,7 +303,7 @@ void refresh_signature(IndexBuildManifest& manifest) {
 
 void validate_manifest_signature(
     const IndexBuildManifest& manifest) {
-  if (manifest.format_version != 62) {
+  if (manifest.format_version != 63) {
     throw std::runtime_error(
         "unsupported NavigaMer index version; rebuild the array index");
   }
@@ -379,7 +379,7 @@ void write_manifest(std::ostream& out, const IndexBuildManifest& manifest) {
 IndexBuildManifest read_manifest(std::istream& in) {
   IndexBuildManifest manifest;
   manifest.format_version = read_pod<uint32_t>(in, "format_version");
-  if (manifest.format_version != 62) {
+  if (manifest.format_version != 63) {
     throw std::runtime_error("unsupported NavigaMer index format version");
   }
   manifest.signature = read_string(in, "signature");
@@ -675,6 +675,12 @@ enum class PersistedBeaconPatternMode : uint8_t {
   None = 0,
   Dense = 1,
   Wide = 2,
+};
+
+enum class PersistedChildMbbMode : uint8_t {
+  Explicit = 0,
+  ImplicitWidth = 1,
+  CompactDescriptor = 2,
 };
 
 bool reference_is_two_bit_dna(std::string_view reference) {
@@ -1106,10 +1112,27 @@ void write_search_graph_view(std::ostream& out,
   write_final_array(
       out, view.child_id_deltas16, "child_id_deltas16");
   write_final_array(out, view.child_ids, "child_ids");
-  write_bool(out, view.implicit_child_mbb_widths);
-  write_pod<uint8_t>(out, view.implicit_child_mbb_exception_bits);
-  write_final_array(
-      out, view.child_mbb_width_exceptions, "child_mbb_width_exceptions");
+  const auto child_mbb_mode = view.has_compact_child_descriptors()
+      ? PersistedChildMbbMode::CompactDescriptor
+      : view.implicit_child_mbb_widths
+          ? PersistedChildMbbMode::ImplicitWidth
+          : PersistedChildMbbMode::Explicit;
+  write_pod<uint8_t>(out, static_cast<uint8_t>(child_mbb_mode));
+  if (child_mbb_mode != PersistedChildMbbMode::Explicit) {
+    write_pod<uint8_t>(out, view.implicit_child_mbb_exception_bits);
+    if (view.implicit_child_mbb_exception_bits != 0) {
+      write_final_array(
+          out, view.child_mbb_width_exceptions,
+          "child_mbb_width_exceptions");
+    }
+  }
+  if (child_mbb_mode == PersistedChildMbbMode::CompactDescriptor) {
+    write_pod<uint8_t>(
+        out, view.compact_child_descriptor_mbb_begin_bits);
+    write_final_array(
+        out, view.compact_child_descriptors,
+        "compact_child_descriptors");
+  }
   write_final_array(
       out, view.leaf_id_deltas8, "leaf_id_deltas8");
   write_final_array(
@@ -1229,13 +1252,32 @@ SearchGraphView read_search_graph_view(
           in, mapping, "child_id_deltas16");
   view.child_ids =
       read_final_array<NodeId>(in, mapping, "child_ids");
+  const auto child_mbb_mode = static_cast<PersistedChildMbbMode>(
+      read_pod<uint8_t>(in, "child_mbb_mode"));
+  if (child_mbb_mode != PersistedChildMbbMode::Explicit &&
+      child_mbb_mode != PersistedChildMbbMode::ImplicitWidth &&
+      child_mbb_mode != PersistedChildMbbMode::CompactDescriptor) {
+    throw std::runtime_error("child MBB mode is invalid");
+  }
   view.implicit_child_mbb_widths =
-      read_bool(in, "implicit_child_mbb_widths");
-  view.implicit_child_mbb_exception_bits =
-      read_pod<uint8_t>(in, "implicit_child_mbb_exception_bits");
-  view.child_mbb_width_exceptions =
-      read_final_array<uint8_t>(
-          in, mapping, "child_mbb_width_exceptions");
+      child_mbb_mode != PersistedChildMbbMode::Explicit;
+  if (view.implicit_child_mbb_widths) {
+    view.implicit_child_mbb_exception_bits =
+        read_pod<uint8_t>(in, "implicit_child_mbb_exception_bits");
+    if (view.implicit_child_mbb_exception_bits != 0) {
+      view.child_mbb_width_exceptions =
+          read_final_array<uint8_t>(
+              in, mapping, "child_mbb_width_exceptions");
+    }
+  }
+  if (child_mbb_mode == PersistedChildMbbMode::CompactDescriptor) {
+    view.compact_child_descriptor_mbb_begin_bits =
+        read_pod<uint8_t>(
+            in, "compact_child_descriptor_mbb_begin_bits");
+    view.compact_child_descriptors =
+        read_final_array<uint16_t>(
+            in, mapping, "compact_child_descriptors");
+  }
   view.leaf_id_deltas8 =
       read_final_array<int8_t>(in, mapping, "leaf_id_deltas8");
   view.leaf_id_deltas16 =
@@ -1461,7 +1503,7 @@ void save_index(const std::string& path,
   const auto& view = builder.search_graph_view();
 
   IndexBuildManifest stored = manifest;
-  stored.format_version = 62;
+  stored.format_version = 63;
   stored.sequence_count = builder.num_sequences();
   stored.world_node_count = builder.num_world_nodes();
   stored.edge_count = view.edge_count();

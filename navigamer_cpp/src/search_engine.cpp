@@ -1549,7 +1549,7 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
     throw std::out_of_range("array node id is outside index");
   }
   const auto node = view.node_records[node_id];
-  const uint32_t child_count = view.link_count(node);
+  const uint32_t child_count = view.link_count(node_id, node);
   const uint32_t beacon_count = view.beacon_count(node);
   const auto children = view.child_ids_for(node_id, node);
   const auto child_at = [&](uint32_t offset) {
@@ -1575,7 +1575,7 @@ BioGeometrySearchEngine::safe_child_router_candidate_indices_view(
     std::vector<uint32_t> candidates;
     candidates.reserve(child_count);
     const uint32_t mbb_bits = view.child_mbb_bits(node_id, node);
-    const uint32_t mbb_begin = node.child_mbb_begin();
+    const uint32_t mbb_begin = view.child_mbb_begin(node_id, node);
     const uint32_t quantization_bin_width =
         view.child_mbb_bin_width(node_id);
     const uint32_t quantization_error =
@@ -2082,7 +2082,7 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_local_router_vi
     return candidates;
   }
 
-  const uint32_t child_count = view.link_count(node);
+  const uint32_t child_count = view.link_count(node_id, node);
   const uint32_t beacon_count = view.beacon_count(node);
   const auto children = view.child_ids_for(node_id, node);
   const size_t max_anchors =
@@ -2099,7 +2099,7 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_local_router_vi
     return candidates;
   }
   const uint32_t mbb_bits = view.child_mbb_bits(node_id, node);
-  const uint32_t mbb_begin = node.child_mbb_begin();
+  const uint32_t mbb_begin = view.child_mbb_begin(node_id, node);
   const uint32_t quantization_bin_width =
       view.child_mbb_bin_width(node_id);
   const uint32_t quantization_error =
@@ -2443,7 +2443,7 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_best_first_view
                           &stats.best_first_queue_ms);
   stats.best_first_enabled_count++;
   stats.best_first_invoked_count++;
-  const uint32_t child_count = view.link_count(node);
+  const uint32_t child_count = view.link_count(node_id, node);
   const uint32_t beacon_count = view.beacon_count(node);
   const auto children = view.child_ids_for(node_id, node);
   const bool mbb_ready =
@@ -2453,7 +2453,7 @@ std::vector<NodeId> BioGeometrySearchEngine::rank_child_ids_with_best_first_view
           node_id, node, child_count, beacon_count);
   if (candidates.size() < 2 || !mbb_ready) return candidates;
   const uint32_t mbb_bits = view.child_mbb_bits(node_id, node);
-  const uint32_t mbb_begin = node.child_mbb_begin();
+  const uint32_t mbb_begin = view.child_mbb_begin(node_id, node);
   const uint32_t quantization_bin_width =
       view.child_mbb_bin_width(node_id);
   const uint32_t quantization_error =
@@ -3419,7 +3419,16 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
   }
   const auto node = view.node_records[node_id];
   stats.mbb_filter_parent_count++;
-  const uint32_t child_count = view.link_count(node);
+  uint32_t child_count = view.link_count(node);
+  size_t mbb_begin = node.child_mbb_begin();
+#if defined(__GNUC__) || defined(__clang__)
+  if (__builtin_expect(view.has_compact_child_descriptors(), 0)) {
+#else
+  if (view.has_compact_child_descriptors()) {
+#endif
+    child_count = view.link_count(node_id, node);
+    mbb_begin = view.child_mbb_begin(node_id, node);
+  }
   const uint32_t dim = view.beacon_count(node);
 
   const bool rect_requested =
@@ -3443,7 +3452,6 @@ std::vector<NodeId> BioGeometrySearchEngine::get_mbb_surviving_child_ids_view(
     return children.address(offset);
   };
   stats.child_edge_considered_count += child_count;
-  const size_t mbb_begin = node.child_mbb_begin();
   const bool mbb_ok =
       !query_beacon_dists.empty() &&
       query_beacon_dists.size() == dim &&
@@ -3530,7 +3538,16 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
     throw std::out_of_range("view node id is outside search graph view");
   }
   const auto node = view.node_records[node_id];
-  const uint32_t child_count = view.link_count(node);
+  uint32_t child_count = view.link_count(node);
+  uint32_t mbb_begin = node.child_mbb_begin();
+#if defined(__GNUC__) || defined(__clang__)
+  if (__builtin_expect(view.has_compact_child_descriptors(), 0)) {
+#else
+  if (view.has_compact_child_descriptors()) {
+#endif
+    child_count = view.link_count(node_id, node);
+    mbb_begin = view.child_mbb_begin(node_id, node);
+  }
   const uint32_t dim = view.beacon_count(node);
   const auto children = view.child_ids_for(node_id, node);
   const auto child_at = [&](size_t offset) {
@@ -3558,7 +3575,6 @@ std::vector<NodeId> BioGeometrySearchEngine::scan_mbb_surviving_child_ids_view(
   } else {
     ScopedSearchTimer timer(stats.query_profile_enabled, &stats.mbb_filter_ms);
     const uint32_t mbb_bits = view.child_mbb_bits(node_id, node);
-    const uint32_t mbb_begin = node.child_mbb_begin();
     const uint32_t quantization_bin_width =
         view.child_mbb_bin_width(node_id);
     const uint32_t quantization_error =

@@ -1118,6 +1118,36 @@ void assert_dense_child_mbb_widths_are_exact() {
   assert(view.node_records.bytes().size() == 6);
 }
 
+void assert_compact_child_descriptors_are_exact() {
+  const auto child_layout = navigamer::PackedWorldNodeLayout::compact(
+      0, 0, 1, true, true, 16, false, true, false, true, 7);
+  const auto leaf_layout =
+      navigamer::PackedWorldNodeLayout::compact(0, 0, 1);
+  navigamer::SearchGraphView view;
+  view.node_records.initialize(3, child_layout, leaf_layout, 2);
+  view.compact_child_descriptor_mbb_begin_bits = 10;
+  view.compact_child_descriptors.set_owned(
+      std::vector<uint16_t>{
+          static_cast<uint16_t>(35U | (14U << 10)),
+          static_cast<uint16_t>(700U | (17U << 10))});
+  for (uint32_t node_id = 0; node_id < 2; ++node_id) {
+    auto node = view.node_records[node_id];
+    node.set_link_storage(
+        navigamer::WorldNodeRecord::LinkStorage::PackedDelta);
+    node.set_packed_child_layout(0, 16);
+    node.set_inline_counts(
+        node_id, 3,
+        navigamer::WorldNodeRecord::BeaconStorage::PackedDelta);
+    node.set_child_mbb_layout(0, 7);
+  }
+  assert(view.node_records[0].inline_link_count_or_overflow_index() == 0);
+  assert(view.node_records[1].inline_link_count_or_overflow_index() == 1);
+  assert(view.link_count(0, view.node_records[0]) == 14);
+  assert(view.link_count(1, view.node_records[1]) == 17);
+  assert(view.child_mbb_begin(0, view.node_records[0]) == 35);
+  assert(view.child_mbb_begin(1, view.node_records[1]) == 700);
+}
+
 void assert_compact_child_base_blocks_are_exact() {
   const auto layout = navigamer::PackedWorldNodeLayout::compact(
       0, 0, 1, false, true,
@@ -1232,6 +1262,7 @@ int main() {
   assert_dense_beacon_patterns_are_exact();
   assert_wide_beacon_patterns_are_exact();
   assert_dense_child_mbb_widths_are_exact();
+  assert_compact_child_descriptors_are_exact();
   assert_compact_child_base_blocks_are_exact();
   assert_child_and_leaf_node_layouts_are_independent();
   assert_all_beacon_begin_widths_are_exact();

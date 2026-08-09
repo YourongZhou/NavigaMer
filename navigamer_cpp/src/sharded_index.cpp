@@ -34,13 +34,13 @@ namespace navigamer {
 namespace {
 
 constexpr std::array<char, 8> kShardMagic = {
-    'N', 'G', 'S', 'H', 'R', 'D', '1', '1'};
+    'N', 'G', 'S', 'H', 'R', 'D', '1', '2'};
 constexpr std::array<char, 8> kShardPackMagic = {
-    'N', 'G', 'P', 'A', 'C', 'K', '1', '0'};
+    'N', 'G', 'P', 'A', 'C', 'K', '1', '1'};
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '4'};
-constexpr uint32_t kShardFormatVersion = 17;
-constexpr uint32_t kShardPackFormatVersion = 10;
+constexpr uint32_t kShardFormatVersion = 18;
+constexpr uint32_t kShardPackFormatVersion = 11;
 constexpr uint32_t kRouterFormatVersion = 5;
 constexpr size_t kRouterHeaderBytes = 80;
 constexpr std::streamoff kRouterCodePayloadSizeOffset = 60;
@@ -1040,7 +1040,7 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
     throw std::runtime_error(
         "sharded index has invalid window configuration");
   }
-  if (manifest.part_manifest.format_version != 62 ||
+  if (manifest.part_manifest.format_version != 63 ||
       manifest.part_manifest.signature.empty() ||
       manifest.part_manifest.sequence_count != 0 ||
       manifest.part_manifest.world_node_count != 0 ||

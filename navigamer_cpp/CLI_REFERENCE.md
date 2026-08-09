@@ -310,13 +310,13 @@ relative to the original contig.
 
 Each logical part is an independently mmap-decodable graph payload. Up to
 1,024 payloads are stored in one `.navpack` container with a checked
-offset/length directory. The common v62 construction manifest is stored once
+offset/length directory. The common v63 construction manifest is stored once
 at bundle scope instead of once per logical part. A completed pack is reused
 only after every selected payload's construction signature, reference slice,
 contig, and source coordinates validate. Damaged
 or incompatible packs are rebuilt one atomic group at a time; only that group's
 temporary pack exists during construction because payloads are written directly
-into it. The final v17 `.navshard`
+into it. The final v18 `.navshard`
 manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric

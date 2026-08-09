@@ -2509,7 +2509,8 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
   }
   const auto& child_layout = view.node_records.child_layout();
   const auto& leaf_layout = view.node_records.leaf_layout();
-  if (child_layout.mbb_begin_bits == 0 ||
+  if ((child_layout.mbb_begin_bits == 0) !=
+          view.has_compact_child_descriptors() ||
       view.implicit_leaf_mbb_offsets !=
           (leaf_layout.mbb_begin_bits == 0) ||
       child_layout.has_implicit_packed_link_fields() !=
@@ -2542,6 +2543,20 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
     }
   } else if (view.implicit_child_mbb_exception_bits != 0 ||
              !view.child_mbb_width_exceptions.empty()) {
+    return false;
+  }
+  if (view.has_compact_child_descriptors()) {
+    if (!view.interned_child_mbb_payloads ||
+        !view.implicit_child_mbb_widths ||
+        view.compact_child_descriptor_mbb_begin_bits > 15 ||
+        view.compact_child_descriptors.empty() ||
+        view.compact_child_descriptors.size() > 256 ||
+        child_layout.link_count_bits !=
+            PackedWorldNodeLayout::bits_for_value(
+                view.compact_child_descriptors.size() - 1)) {
+      return false;
+    }
+  } else if (!view.compact_child_descriptors.empty()) {
     return false;
   }
   if (!view.leaf_link_begins_valid() ||
@@ -2668,7 +2683,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
            node.link_storage() !=
                WorldNodeRecord::LinkStorage::PackedDelta) ||
           (!view.interned_child_mbb_payloads &&
-           node.child_mbb_begin() != expected_mbb_begin) ||
+           view.child_mbb_begin(node_id, node) != expected_mbb_begin) ||
           !view.child_mbb_range_valid(
               node_id, node, link_count, beacon_count)) {
         return false;
@@ -5800,12 +5815,71 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       implicit_child_mbb_exception_bits = 0;
     }
   }
-  view.interned_child_mbb_payloads = interned_child_mbb_payloads;
-  view.implicit_leaf_mbb_offsets = implicit_leaf_mbb_offsets;
-  view.implicit_child_mbb_widths = implicit_child_mbb_widths;
-  view.implicit_child_mbb_exception_bits =
-      implicit_child_mbb_exception_bits;
-  const PackedWorldNodeLayout child_node_layout =
+  std::vector<uint8_t> compact_child_descriptor_codes(
+      non_finest_world_count, uint8_t{0});
+  std::vector<uint16_t> compact_child_descriptors;
+  uint8_t compact_child_descriptor_mbb_begin_bits = 0;
+  bool use_compact_child_descriptors =
+      implicit_child_mbb_widths && interned_child_mbb_payloads;
+  if (use_compact_child_descriptors) {
+    compact_child_descriptor_mbb_begin_bits =
+        PackedWorldNodeLayout::bits_for_value(maximum_child_mbb_begin);
+    if (compact_child_descriptor_mbb_begin_bits > 15) {
+      use_compact_child_descriptors = false;
+    }
+  }
+  if (use_compact_child_descriptors) {
+    std::unordered_map<uint16_t, uint8_t> descriptor_codes;
+    descriptor_codes.reserve(256);
+    for (size_t layer_idx = 0;
+         layer_idx + 1 < primary_layers_.size(); ++layer_idx) {
+      for (NodeId node_id : primary_layers_[layer_idx]) {
+        const auto& node = build_nodes_[node_id];
+        const auto& geometry =
+            build_node_geometry_[node.geometry_index];
+        if (geometry.beacon_ids.size() >=
+            WorldNodeRecord::COUNT_OVERFLOW_CODE) {
+          use_compact_child_descriptors = false;
+          break;
+        }
+        const uint8_t bits =
+            build_geometry_mbb_bits_[node.geometry_index];
+        const auto entry = child_mbb_payload_offsets.find(
+            child_mbb_payload_key(
+                bits, node.child_or_leaf_ids.size(),
+                geometry.beacon_ids.size(),
+                geometry.link_beacon_dists));
+        if (entry == child_mbb_payload_offsets.end()) {
+          throw std::runtime_error(
+              "compact child descriptor payload is missing");
+        }
+        const uint64_t descriptor64 =
+            static_cast<uint64_t>(entry->second) |
+            (static_cast<uint64_t>(node.child_or_leaf_ids.size()) <<
+             compact_child_descriptor_mbb_begin_bits);
+        if (descriptor64 > std::numeric_limits<uint16_t>::max()) {
+          use_compact_child_descriptors = false;
+          break;
+        }
+        const uint16_t descriptor =
+            static_cast<uint16_t>(descriptor64);
+        auto found = descriptor_codes.find(descriptor);
+        if (found == descriptor_codes.end()) {
+          if (compact_child_descriptors.size() == 256) {
+            use_compact_child_descriptors = false;
+            break;
+          }
+          const uint8_t code = static_cast<uint8_t>(
+              compact_child_descriptors.size());
+          found = descriptor_codes.emplace(descriptor, code).first;
+          compact_child_descriptors.push_back(descriptor);
+        }
+        compact_child_descriptor_codes[node_id] = found->second;
+      }
+      if (!use_compact_child_descriptors) break;
+    }
+  }
+  PackedWorldNodeLayout child_node_layout =
       implicit_child_mbb_widths
           ? PackedWorldNodeLayout::compact(
                 maximum_child_link_begin, maximum_child_mbb_begin,
@@ -5815,6 +5889,44 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
                 implicit_contiguous_child_ranges, false, true,
                 implicit_child_mbb_bits)
           : ordinary_child_node_layout;
+  if (use_compact_child_descriptors) {
+    const PackedWorldNodeLayout descriptor_layout =
+        PackedWorldNodeLayout::compact(
+            maximum_child_link_begin, 0,
+            compact_child_descriptors.size() - 1, true,
+            implicit_contiguous_child_ranges,
+            SearchGraphView::CONTIGUOUS_CHILD_RANGE_BITS, false,
+            implicit_contiguous_child_ranges, false, true,
+            implicit_child_mbb_bits);
+    const size_t descriptor_bytes =
+        compact_child_descriptors.size() * sizeof(uint16_t);
+    const size_t descriptor_total_bytes =
+        static_cast<size_t>(descriptor_layout.record_bytes) *
+            non_finest_world_count +
+        descriptor_bytes;
+    const size_t current_total_bytes =
+        static_cast<size_t>(child_node_layout.record_bytes) *
+            non_finest_world_count;
+    if (descriptor_total_bytes < current_total_bytes) {
+      child_node_layout = descriptor_layout;
+    } else {
+      use_compact_child_descriptors = false;
+    }
+  }
+  if (!use_compact_child_descriptors) {
+    compact_child_descriptor_codes.clear();
+    compact_child_descriptors.clear();
+    compact_child_descriptor_mbb_begin_bits = 0;
+  }
+  view.interned_child_mbb_payloads = interned_child_mbb_payloads;
+  view.implicit_leaf_mbb_offsets = implicit_leaf_mbb_offsets;
+  view.implicit_child_mbb_widths = implicit_child_mbb_widths;
+  view.implicit_child_mbb_exception_bits =
+      implicit_child_mbb_exception_bits;
+  view.compact_child_descriptor_mbb_begin_bits =
+      compact_child_descriptor_mbb_begin_bits;
+  view.compact_child_descriptors.set_owned(
+      std::move(compact_child_descriptors));
   const bool implicit_dense_leaf_fields =
       dense_leaf_mbb_ternary_ && implicit_consecutive_leaf_ids &&
       implicit_leaf_packed_fields && implicit_leaf_one_beacon_count &&
@@ -6359,8 +6471,14 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
               node_id, beacon_begin, final_beacon_block_base);
         }
       }
-      view.set_node_counts(
-          node_id, link_count, beacon_count, storage);
+      if (!is_finest && view.has_compact_child_descriptors()) {
+        record.set_inline_counts(
+            compact_child_descriptor_codes[node_id],
+            beacon_count, storage);
+      } else {
+        view.set_node_counts(
+            node_id, link_count, beacon_count, storage);
+      }
 
       if (is_finest) {
         const uint8_t leaf_mbb_bits = plan_bits(
@@ -6453,7 +6571,9 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
           }
           mbb_begin = entry->second;
         }
-        record.set_child_mbb_layout(mbb_begin, mbb_bits);
+        record.set_child_mbb_layout(
+            view.has_compact_child_descriptors() ? 0 : mbb_begin,
+            mbb_bits);
         if (view.implicit_child_mbb_widths) {
           const uint8_t default_bits =
               view.node_records.child_layout().implicit_child_mbb_bits;
