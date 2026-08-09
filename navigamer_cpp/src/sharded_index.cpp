@@ -321,12 +321,16 @@ int dna_code(char base) {
   }
 }
 
-std::vector<uint32_t> reference_minimizers(
-    std::string_view sequence, uint32_t k, uint32_t window) {
-  std::vector<uint32_t> minimizers;
+void reference_minimizers(
+    std::string_view sequence, uint32_t k, uint32_t window,
+    std::vector<uint32_t>* minimizers) {
+  if (!minimizers) {
+    throw std::invalid_argument("router minimizer output must not be null");
+  }
+  minimizers->clear();
   if (k == 0 || k > 16 || window < k ||
       sequence.size() < window) {
-    return minimizers;
+    return;
   }
   const size_t qmers_per_window = window - k + 1;
   const uint64_t mask =
@@ -361,16 +365,15 @@ std::vector<uint32_t> reference_minimizers(
       minimum_queue.pop_front();
     }
     if (valid_bases >= window &&
-        (minimizers.empty() ||
-         minimizers.back() != minimum_queue.front().second)) {
-      minimizers.push_back(minimum_queue.front().second);
+        (minimizers->empty() ||
+         minimizers->back() != minimum_queue.front().second)) {
+      minimizers->push_back(minimum_queue.front().second);
     }
   }
-  std::sort(minimizers.begin(), minimizers.end());
-  minimizers.erase(
-      std::unique(minimizers.begin(), minimizers.end()),
-      minimizers.end());
-  return minimizers;
+  std::sort(minimizers->begin(), minimizers->end());
+  minimizers->erase(
+      std::unique(minimizers->begin(), minimizers->end()),
+      minimizers->end());
 }
 
 std::filesystem::path shard_output_path(
@@ -878,36 +881,37 @@ RouterBuildData build_router_data(
     throw std::runtime_error("unable to create shard router code spool");
   }
   size_t spool_position = 0;
+  std::vector<uint32_t> minimizer_scratch;
   for (const auto& descriptor : descriptors) {
     // Keep lists contiguous. Page-aligning millions of small shards would
     // add one mostly empty 4 KiB page per shard and fault it during merge.
     data.shard_offsets.push_back(spool_position);
     const auto slice = load_slice(descriptor);
-    const auto minimizers = reference_minimizers(slice, k, window);
-    if (minimizers.size() > std::numeric_limits<uint32_t>::max()) {
+    reference_minimizers(slice, k, window, &minimizer_scratch);
+    if (minimizer_scratch.size() > std::numeric_limits<uint32_t>::max()) {
       throw std::runtime_error(
           "one shard has too many router minimizers");
     }
-    if (minimizers.size() >
+    if (minimizer_scratch.size() >
         std::numeric_limits<size_t>::max() - data.entry_count) {
       throw std::runtime_error("shard router entry count overflow");
     }
-    if (minimizers.size() >
+    if (minimizer_scratch.size() >
         (std::numeric_limits<size_t>::max() - spool_position) /
             sizeof(uint32_t)) {
       throw std::runtime_error("shard router spool size overflow");
     }
     data.shard_counts.push_back(
-        static_cast<uint32_t>(minimizers.size()));
-    if (!minimizers.empty()) {
+        static_cast<uint32_t>(minimizer_scratch.size()));
+    if (!minimizer_scratch.empty()) {
       const size_t byte_count =
-          minimizers.size() * sizeof(uint32_t);
+          minimizer_scratch.size() * sizeof(uint32_t);
       spool.write(
-          reinterpret_cast<const char*>(minimizers.data()),
+          reinterpret_cast<const char*>(minimizer_scratch.data()),
           static_cast<std::streamsize>(byte_count));
       spool_position += byte_count;
     }
-    data.entry_count += minimizers.size();
+    data.entry_count += minimizer_scratch.size();
   }
   spool.close();
   if (!spool) {
