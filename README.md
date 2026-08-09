@@ -47,7 +47,7 @@ distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
 Its periodic lower-bound exit rejects a batch only when every lane is proven
 to exceed the tolerance, so the optimization cannot remove a valid edge.
 Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
-edit distance fits in one byte. Persisted format version 58 stores an all-ACGT
+edit distance fits in one byte. Persisted format version 59 stores an all-ACGT
 shared reference in 2-bit form and restores one contiguous byte view per
 loaded shard, so edit-distance query kernels retain direct character access;
 references containing other IUPAC characters are kept losslessly as raw bytes.
@@ -61,6 +61,9 @@ per-node bit-padded distance data; all other leaf payloads retain exact packing.
 When every leaf list in a shard is exactly one center-relative consecutive
 interval (with both reference endpoints clipped), leaf IDs decode from the
 center and one shard-wide radius, omitting the otherwise redundant ID stream.
+When both layouts apply, the link count is also the exact clipped interval
+length; all remaining finest-node fields are shard-wide constants, so finest
+nodes require no node-record bytes.
 When every non-leaf world uses one of at most 16 exact center-relative
 three-beacon patterns, the index stores one 4-bit pattern code per world and
 the shard-local pattern table, omitting both beacon payload offsets and the
@@ -303,7 +306,7 @@ Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
 During a rebuild only the current group's atomic temporary pack exists; shard
-payloads are written directly into it, without per-shard temporary files. The final v11
+payloads are written directly into it, without per-shard temporary files. The final v13
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
 router sidecar. Pack entries contain only independently decodable graph

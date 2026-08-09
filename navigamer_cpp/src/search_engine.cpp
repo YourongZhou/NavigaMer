@@ -2767,8 +2767,10 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
   }
   const auto node = view.node_records[node_id];
 
+  const LeafId center_id = view.center_sequence_id(
+      node_id, view.layer_begin.size() - 1);
   const uint32_t leaf_begin = view.leaf_link_begin(node_id, node);
-  const uint32_t leaf_count = view.link_count(node);
+  const uint32_t leaf_count = view.link_count(node_id, node, center_id);
   const uint32_t beacon_count = view.beacon_count(node);
   const auto prefetch_leaf_code = [&](size_t leaf_offset) {
     switch (node.link_storage()) {
@@ -2917,8 +2919,6 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     case WorldNodeRecord::LinkStorage::Delta8: {
       const int8_t* deltas =
           view.leaf_id_deltas8.data() + leaf_begin;
-      const LeafId center_id = view.center_sequence_id(
-          node_id, view.layer_begin.size() - 1);
       verify_survivors([&](uint32_t offset) {
         return center_id + deltas[offset];
       });
@@ -2927,8 +2927,6 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
     case WorldNodeRecord::LinkStorage::Delta16: {
       const int16_t* deltas =
           view.leaf_id_deltas16.data() + leaf_begin;
-      const LeafId center_id = view.center_sequence_id(
-          node_id, view.layer_begin.size() - 1);
       verify_survivors([&](uint32_t offset) {
         return center_id + deltas[offset];
       });
@@ -2941,8 +2939,6 @@ void BioGeometrySearchEngine::verify_leaf_candidates_view(
       break;
     }
     case WorldNodeRecord::LinkStorage::PackedDelta: {
-      const LeafId center_id = view.center_sequence_id(
-          node_id, view.layer_begin.size() - 1);
       verify_survivors([&](uint32_t offset) {
         return view.packed_leaf_id(node_id, node, center_id, offset);
       });

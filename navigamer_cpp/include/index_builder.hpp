@@ -743,6 +743,11 @@ struct PackedWorldNodeLayout {
   // packed beacons, and one shared child-MBB width.  The width may be
   // overridden by SearchGraphView's exact one-bit exception map.
   static constexpr uint8_t IMPLICIT_DENSE_CHILD_FIELDS = 16;
+  // A consecutive finest layer with dense ternary leaf MBBs derives every
+  // leaf count from the center/radius interval. Link storage, link begin,
+  // beacon metadata, MBB begin, and MBB width are then all shard-wide facts,
+  // so finest nodes require no record bytes at all.
+  static constexpr uint8_t IMPLICIT_DENSE_LEAF_FIELDS = 32;
 
   uint8_t link_begin_bits = WorldNodeRecord::PACKED_CHILD_BEGIN_BITS;
   uint8_t mbb_begin_bits = WorldNodeRecord::CHILD_MBB_BEGIN_BITS;
@@ -768,7 +773,8 @@ struct PackedWorldNodeLayout {
                                        bool omit_link_begin = false,
                                        bool omit_beacon_count = false,
                                        bool omit_dense_child_fields = false,
-                                       uint8_t implicit_child_mbb_bits = 0) {
+                                       uint8_t implicit_child_mbb_bits = 0,
+                                       bool omit_dense_leaf_fields = false) {
     if (omit_mbb_begin && maximum_mbb_begin != 0) {
       throw std::invalid_argument(
           "cannot omit a nonzero world node MBB offset");
@@ -793,6 +799,27 @@ struct PackedWorldNodeLayout {
          implicit_child_mbb_bits == 0 || implicit_child_mbb_bits > 8)) {
       throw std::invalid_argument(
           "dense child fields require implicit packed child links and MBB width");
+    }
+    if (omit_dense_leaf_fields) {
+      if (!omit_mbb_begin || !omit_packed_link_fields ||
+          !omit_center_beacon_storage || !omit_beacon_count ||
+          omit_dense_child_fields || maximum_link_begin != 0 ||
+          maximum_mbb_begin != 0) {
+        throw std::invalid_argument(
+            "dense leaf fields require implicit leaf links, beacons, and MBBs");
+      }
+      PackedWorldNodeLayout layout;
+      layout.link_begin_bits = 0;
+      layout.mbb_begin_bits = 0;
+      layout.link_count_bits = 0;
+      layout.record_bytes = 0;
+      layout.flags = IMPLICIT_DENSE_LEAF_FIELDS;
+      layout.implicit_packed_link_bits = implicit_packed_link_bits;
+      layout.implicit_child_mbb_bits = 0;
+      if (!layout.valid()) {
+        throw std::invalid_argument("invalid dense leaf node layout");
+      }
+      return layout;
     }
     PackedWorldNodeLayout layout;
     layout.link_begin_bits =
@@ -842,6 +869,14 @@ struct PackedWorldNodeLayout {
     return !(*this == other);
   }
   bool valid() const {
+    if (has_implicit_dense_leaf_fields()) {
+      return link_begin_bits == 0 && mbb_begin_bits == 0 &&
+             link_count_bits == 0 && record_bytes == 0 &&
+             flags == IMPLICIT_DENSE_LEAF_FIELDS &&
+             implicit_packed_link_bits != 0 &&
+             implicit_packed_link_bits <= 16 &&
+             implicit_child_mbb_bits == 0;
+    }
     if (link_begin_bits > WorldNodeRecord::PACKED_CHILD_BEGIN_BITS ||
         (link_begin_bits == 0 && !has_implicit_link_begin()) ||
         mbb_begin_bits > WorldNodeRecord::CHILD_MBB_BEGIN_BITS ||
@@ -851,7 +886,8 @@ struct PackedWorldNodeLayout {
                    IMPLICIT_CENTER_BEACON_STORAGE |
                    IMPLICIT_LINK_BEGIN |
                    IMPLICIT_ONE_BEACON_COUNT |
-                   IMPLICIT_DENSE_CHILD_FIELDS)) != 0 ||
+                   IMPLICIT_DENSE_CHILD_FIELDS |
+                   IMPLICIT_DENSE_LEAF_FIELDS)) != 0 ||
         ((flags & IMPLICIT_PACKED_LINK_FIELDS) != 0 &&
          (implicit_packed_link_bits == 0 ||
           implicit_packed_link_bits > 16)) ||
@@ -888,19 +924,25 @@ struct PackedWorldNodeLayout {
     return record_bytes == (total_bits + 7) / 8;
   }
   bool has_implicit_packed_link_fields() const {
-    return (flags & IMPLICIT_PACKED_LINK_FIELDS) != 0;
+    return (flags & IMPLICIT_PACKED_LINK_FIELDS) != 0 ||
+           has_implicit_dense_leaf_fields();
   }
   bool has_implicit_center_beacon_storage() const {
-    return (flags & IMPLICIT_CENTER_BEACON_STORAGE) != 0;
+    return (flags & IMPLICIT_CENTER_BEACON_STORAGE) != 0 ||
+           has_implicit_dense_leaf_fields();
   }
   bool has_implicit_link_begin() const {
     return (flags & IMPLICIT_LINK_BEGIN) != 0;
   }
   bool has_implicit_one_beacon_count() const {
-    return (flags & IMPLICIT_ONE_BEACON_COUNT) != 0;
+    return (flags & IMPLICIT_ONE_BEACON_COUNT) != 0 ||
+           has_implicit_dense_leaf_fields();
   }
   bool has_implicit_dense_child_fields() const {
     return (flags & IMPLICIT_DENSE_CHILD_FIELDS) != 0;
+  }
+  bool has_implicit_dense_leaf_fields() const {
+    return (flags & IMPLICIT_DENSE_LEAF_FIELDS) != 0;
   }
 };
 static_assert(sizeof(PackedWorldNodeLayout) == 7,
@@ -921,6 +963,7 @@ class PackedWorldNodeRecordRef {
   void reload() {
     low_ = 0;
     high_ = 0;
+    if (layout_->record_bytes == 0) return;
     if (layout_->record_bytes == 9) {
       std::memcpy(&low_, data_, sizeof(low_));
       high_ = data_[sizeof(low_)];
@@ -968,6 +1011,7 @@ class PackedWorldNodeRecordRef {
     set_packed_link_layout(begin, bits, "leaf");
   }
   uint32_t mbb_begin_value() const {
+    if (layout_->has_implicit_dense_leaf_fields()) return 0;
     if (layout_->mbb_begin_bits == 0) return 0;
     return read(mbb_begin_shift(), layout_->mbb_begin_bits);
   }
@@ -985,6 +1029,7 @@ class PackedWorldNodeRecordRef {
   uint32_t child_mbb_begin() const { return mbb_begin_value(); }
   uint32_t leaf_mbb_begin() const { return mbb_begin_value(); }
   uint32_t child_mbb_bits() const {
+    if (layout_->has_implicit_dense_leaf_fields()) return 1;
     if (layout_->has_implicit_dense_child_fields()) {
       return layout_->implicit_child_mbb_bits;
     }
@@ -998,6 +1043,7 @@ class PackedWorldNodeRecordRef {
     set_mbb_layout(begin, bits, "leaf");
   }
   bool counts_overflow() const {
+    if (layout_->has_implicit_dense_leaf_fields()) return false;
     if (layout_->has_implicit_one_beacon_count() ||
         layout_->has_implicit_dense_child_fields()) {
       return false;
@@ -1006,9 +1052,13 @@ class PackedWorldNodeRecordRef {
            WorldNodeRecord::COUNT_OVERFLOW_CODE;
   }
   uint32_t inline_link_count_or_overflow_index() const {
+    if (layout_->has_implicit_dense_leaf_fields()) return 0;
     return read(link_count_shift(), layout_->link_count_bits);
   }
   uint32_t inline_link_count_mask() const {
+    if (layout_->has_implicit_dense_leaf_fields()) {
+      return WorldNodeRecord::LINK_COUNT_MASK;
+    }
     return mask(layout_->link_count_bits);
   }
   uint32_t inline_beacon_count() const {
@@ -1045,6 +1095,14 @@ class PackedWorldNodeRecordRef {
   }
   void set_inline_counts(uint32_t link_count, uint32_t beacon_count,
                          BeaconStorage storage) {
+    if (layout_->has_implicit_dense_leaf_fields()) {
+      if (link_count > WorldNodeRecord::LINK_COUNT_MASK ||
+          beacon_count != 1 || storage != BeaconStorage::ImplicitCenter) {
+        throw std::invalid_argument(
+            "implicit dense leaf metadata does not match node");
+      }
+      return;
+    }
     if (link_count > inline_link_count_mask() ||
         beacon_count >= WorldNodeRecord::COUNT_OVERFLOW_CODE) {
       throw std::length_error("node counts exceed inline packed range");
@@ -1222,6 +1280,13 @@ class PackedWorldNodeRecordRef {
       throw std::invalid_argument(
           std::string(kind) + " MBB bit width must be 1..8");
     }
+    if (layout_->has_implicit_dense_leaf_fields()) {
+      if (begin != 0 || bits != 1) {
+        throw std::invalid_argument(
+            "implicit dense leaf MBB layout must be one bit at offset zero");
+      }
+      return;
+    }
     set_mbb_begin_value(begin);
     if (layout_->has_implicit_dense_child_fields()) return;
     write(mbb_width_shift(), 3, bits - 1, "MBB width");
@@ -1253,10 +1318,16 @@ class PackedWorldNodeArray {
 
   PackedWorldNodeRecordRef operator[](size_t index) const {
     if (index < finest_node_begin_) {
+      if (child_layout_.record_bytes == 0) {
+        return PackedWorldNodeRecordRef(nullptr, &child_layout_);
+      }
       return PackedWorldNodeRecordRef(
           const_cast<uint8_t*>(bytes_.data()) +
               index * child_layout_.record_bytes,
           &child_layout_);
+    }
+    if (leaf_layout_.record_bytes == 0) {
+      return PackedWorldNodeRecordRef(nullptr, &leaf_layout_);
     }
     return PackedWorldNodeRecordRef(
         const_cast<uint8_t*>(bytes_.data()) + child_record_bytes() +
@@ -1269,8 +1340,10 @@ class PackedWorldNodeArray {
   }
   const uint8_t* record_data(size_t index) const {
     if (index < finest_node_begin_) {
+      if (child_layout_.record_bytes == 0) return nullptr;
       return bytes_.data() + index * child_layout_.record_bytes;
     }
+    if (leaf_layout_.record_bytes == 0) return nullptr;
     return bytes_.data() + child_record_bytes() +
            (index - finest_node_begin_) * leaf_layout_.record_bytes;
   }
@@ -1331,9 +1404,10 @@ class PackedWorldNodeArray {
             child_layout_.record_bytes) {
       throw std::length_error("packed child node array is too large");
     }
-    if (leaf_count >
-        (std::numeric_limits<size_t>::max() - child_bytes) /
-            leaf_layout_.record_bytes) {
+    if (leaf_layout_.record_bytes != 0 &&
+        leaf_count >
+            (std::numeric_limits<size_t>::max() - child_bytes) /
+                leaf_layout_.record_bytes) {
       throw std::length_error("packed leaf node array is too large");
     }
     return child_bytes + leaf_count * leaf_layout_.record_bytes;
@@ -2024,9 +2098,43 @@ struct SearchGraphView {
     return node_count_overflows[
         node.inline_link_count_or_overflow_index()].link_count;
   }
+  uint32_t implicit_consecutive_leaf_count(LeafId center) const {
+    if (center >= sequences.size()) {
+      throw std::out_of_range("implicit leaf center is outside sequences");
+    }
+    const LeafId begin =
+        center > implicit_consecutive_leaf_radius
+            ? center - implicit_consecutive_leaf_radius
+            : 0;
+    const uint64_t end = std::min<uint64_t>(
+        sequences.size(), static_cast<uint64_t>(center) +
+                              implicit_consecutive_leaf_radius + 1);
+    return static_cast<uint32_t>(end - begin);
+  }
+  uint32_t link_count(NodeId node_id,
+                      const PackedWorldNodeRecordRef& node,
+                      LeafId center) const {
+    if (node_records.leaf_layout().has_implicit_dense_leaf_fields() &&
+        node_id >= node_records.finest_node_begin()) {
+      if (!implicit_consecutive_leaf_ids || !dense_leaf_mbb_ternary) {
+        throw std::runtime_error(
+            "implicit dense leaf counts require consecutive ternary leaves");
+      }
+      return implicit_consecutive_leaf_count(center);
+    }
+    return link_count(node);
+  }
+  uint32_t link_count(NodeId node_id,
+                      const PackedWorldNodeRecordRef& node) const {
+    if (node_records.leaf_layout().has_implicit_dense_leaf_fields() &&
+        node_id >= node_records.finest_node_begin()) {
+      return link_count(node_id, node, center_sequence_id(node_id));
+    }
+    return link_count(node);
+  }
   uint32_t link_count(NodeId node_id) const {
     const auto node = node_records[node_id];
-    return link_count(node);
+    return link_count(node_id, node);
   }
 
   LeafId center_sequence_id(NodeId node_id, size_t layer) const {
@@ -2094,6 +2202,18 @@ struct SearchGraphView {
                        uint32_t beacon_count_value,
                        WorldNodeRecord::BeaconStorage storage) {
     auto node = node_records[node_id];
+    if (node_records.leaf_layout().has_implicit_dense_leaf_fields() &&
+        node_id >= node_records.finest_node_begin()) {
+      const uint32_t expected = implicit_consecutive_leaf_count(
+          center_sequence_id(node_id));
+      if (link_count_value != expected) {
+        throw std::invalid_argument(
+            "implicit dense leaf count does not match center interval");
+      }
+      node.set_inline_counts(
+          link_count_value, beacon_count_value, storage);
+      return;
+    }
     if (link_count_value <= node.inline_link_count_mask() &&
         beacon_count_value < WorldNodeRecord::COUNT_OVERFLOW_CODE) {
       node.set_inline_counts(
@@ -2602,7 +2722,7 @@ struct SearchGraphView {
   size_t leaf_mbb_byte_count(NodeId node_id) const {
     const auto node = node_records[node_id];
     return leaf_mbb_byte_count(
-        node_id, node, link_count(node), beacon_count(node));
+        node_id, node, link_count(node_id, node), beacon_count(node));
   }
   uint32_t leaf_mbb_begin(
       NodeId node_id, const PackedWorldNodeRecordRef& node) const {
@@ -2638,7 +2758,7 @@ struct SearchGraphView {
   bool leaf_mbb_range_valid(NodeId node_id) const {
     const auto node = node_records[node_id];
     return leaf_mbb_range_valid(
-        node_id, node, link_count(node), beacon_count(node));
+        node_id, node, link_count(node_id, node), beacon_count(node));
   }
   uint8_t leaf_beacon_distance(
       NodeId node_id, size_t cell_offset) const {
@@ -2693,7 +2813,7 @@ struct SearchGraphView {
   }
   size_t packed_leaf_byte_count(NodeId node_id) const {
     const auto node = node_records[node_id];
-    return packed_leaf_byte_count(node, link_count(node));
+    return packed_leaf_byte_count(node, link_count(node_id, node));
   }
 #if defined(__GNUC__) || defined(__clang__)
   __attribute__((always_inline))
@@ -2708,7 +2828,7 @@ struct SearchGraphView {
       NodeId node_id, const PackedWorldNodeRecordRef& node, LeafId center,
       uint32_t leaf_offset) const {
     if (implicit_consecutive_leaf_ids) {
-      if (leaf_offset >= link_count(node)) {
+      if (leaf_offset >= link_count(node_id, node, center)) {
         throw std::out_of_range("implicit consecutive leaf offset is invalid");
       }
       const LeafId begin =

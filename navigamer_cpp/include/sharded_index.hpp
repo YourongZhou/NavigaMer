@@ -29,7 +29,7 @@ static_assert(sizeof(IndexShardDescriptor) == 40,
               "shard descriptors must remain compact");
 
 struct ShardedIndexManifest {
-  uint32_t format_version = 12;
+  uint32_t format_version = 13;
   size_t window_length = 0;
   size_t stride = 0;
   size_t total_window_count = 0;

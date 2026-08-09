@@ -2263,7 +2263,7 @@ bool BioGeometryIndexBuilder::validate_integer_ids() const {
              view.node_count_overflows.size())) {
       return false;
     }
-    const uint32_t link_count = view.link_count(node);
+    const uint32_t link_count = view.link_count(node_id, node, center_id);
     if (node_id < finest_begin) {
       if (view.implicit_contiguous_child_ranges &&
           (node.link_storage() !=
@@ -2403,7 +2403,7 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
               view.node_count_overflows.size()) {
         return false;
       }
-      const uint32_t link_count = view.link_count(node);
+      const uint32_t link_count = view.link_count(node_id, node);
       const uint32_t beacon_count = view.beacon_count(node);
       if (layer + 1 == view.layer_begin.size()) {
         size_t leaf_array_size = 0;
@@ -2584,9 +2584,9 @@ bool BioGeometryIndexBuilder::validate_search_graph_view() const {
       }
       ++expected_count_overflow;
     }
-    const uint32_t link_count = view.link_count(node);
-    const uint32_t beacon_count = view.beacon_count(node);
     const LeafId center_id = view.center_sequence_id(node_id);
+    const uint32_t link_count = view.link_count(node_id, node, center_id);
+    const uint32_t beacon_count = view.beacon_count(node);
     if (center_id >= sequence_count_) {
       return false;
     }
@@ -5713,13 +5713,19 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
                 implicit_contiguous_child_ranges, false, true,
                 implicit_child_mbb_bits)
           : ordinary_child_node_layout;
+  const bool implicit_dense_leaf_fields =
+      dense_leaf_mbb_ternary_ && implicit_consecutive_leaf_ids &&
+      implicit_leaf_packed_fields && implicit_leaf_one_beacon_count &&
+      implicit_leaf_mbb_offsets && maximum_leaf_link_begin == 0 &&
+      maximum_leaf_mbb_begin == 0;
   const PackedWorldNodeLayout leaf_node_layout =
       PackedWorldNodeLayout::compact(
           maximum_leaf_link_begin, maximum_leaf_mbb_begin,
           maximum_leaf_count_field, implicit_leaf_mbb_offsets,
           implicit_leaf_packed_fields, implicit_leaf_packed_bits,
           implicit_leaf_packed_fields, implicit_leaf_link_begins,
-          implicit_leaf_one_beacon_count);
+          implicit_leaf_one_beacon_count, false, 0,
+          implicit_dense_leaf_fields);
   view.node_records.initialize(
       world_node_count_, child_node_layout, leaf_node_layout,
       finest_node_begin);

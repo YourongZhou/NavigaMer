@@ -55,6 +55,32 @@ std::set<std::string> matching_sequences(
   return result;
 }
 
+bool verify_implicit_dense_leaf_layout(
+    const std::vector<navigamer::LoadedIndex>& shards) {
+  bool saw_layout = false;
+  for (const auto& shard : shards) {
+    const auto& view = shard.builder.search_graph_view();
+    if (!view.node_records.leaf_layout()
+             .has_implicit_dense_leaf_fields()) {
+      continue;
+    }
+    saw_layout = true;
+    assert(view.dense_leaf_mbb_ternary);
+    assert(view.implicit_consecutive_leaf_ids);
+    assert(view.node_records.leaf_layout().record_bytes == 0);
+    for (navigamer::NodeId node_id =
+             view.node_records.finest_node_begin();
+         node_id < view.node_records.size(); ++node_id) {
+      const auto node = view.node_records[node_id];
+      const navigamer::LeafId center =
+          view.center_sequence_id(node_id);
+      assert(view.link_count(node_id, node, center) ==
+             view.implicit_consecutive_leaf_count(center));
+    }
+  }
+  return saw_layout;
+}
+
 std::set<Occurrence> matching_occurrences(
     const std::vector<navigamer::LoadedIndex>& shards,
     const navigamer::BioSequence& query,
@@ -354,7 +380,7 @@ void test_sharded_round_trip_and_no_false_negatives() {
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
   assert(reloaded_manifest.window_length == window);
-  assert(reloaded_manifest.format_version == 12);
+  assert(reloaded_manifest.format_version == 13);
   assert(reloaded_manifest.stride == stride);
   assert(reloaded_manifest.shards.size() ==
          manifest.shards.size());
@@ -662,6 +688,65 @@ void test_seed_router_no_false_negatives() {
   std::filesystem::remove_all(directory);
 }
 
+void test_implicit_dense_leaf_fields() {
+  constexpr size_t window = 250;
+  constexpr size_t shard_windows = 5000;
+  const std::string reference = deterministic_dna(
+      shard_windows + window - 1);
+  const std::vector<navigamer::ReferenceContig> contigs = {
+      {"chrDense", 0, static_cast<uint32_t>(reference.size()), 0}};
+  navigamer::HierarchyConfig hierarchy({30, 15, 5});
+  navigamer::BuildRangeConfig range_config;
+  range_config.emit_build_output = false;
+
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("navigamer-dense-leaf-test-" +
+       std::to_string(static_cast<unsigned long long>(::getpid())));
+  std::filesystem::create_directories(directory);
+  const auto bundle = directory / "reference.navshard";
+  const auto manifest = navigamer::build_sharded_reference_index(
+      bundle.string(), "dense-leaf-reference", "chrDense",
+      reference, contigs, window, 1, shard_windows,
+      hierarchy, range_config, 1);
+  const auto shards = navigamer::load_sharded_index(
+      bundle.string(), manifest);
+  assert(shards.size() == 1);
+  assert(verify_implicit_dense_leaf_layout(shards));
+
+  const auto& builder = shards.front().builder;
+  const auto& view = builder.search_graph_view();
+  assert(view.node_records.bytes().size() ==
+         static_cast<size_t>(view.node_records.finest_node_begin()) *
+             view.node_records.child_layout().record_bytes);
+  assert(view.node_records.record_data(
+             view.node_records.finest_node_begin()) == nullptr);
+  navigamer::BioGeometrySearchEngine engine(builder);
+  for (size_t source_pos : {size_t{0}, size_t{2000}, size_t{4999}}) {
+    std::string query_sequence = reference.substr(source_pos, window);
+    for (size_t mutation = 0; mutation < 2; ++mutation) {
+      if (mutation != 0) {
+        query_sequence[73] =
+            query_sequence[73] == 'A' ? 'C' : 'A';
+      }
+      navigamer::BioSequence query(
+          "dense_" + std::to_string(source_pos) + "_" +
+              std::to_string(mutation),
+          query_sequence);
+      const auto [adaptive, adaptive_stats] =
+          engine.search_adaptive(query, 1);
+      const auto [brute_force, brute_stats] =
+          engine.search_brute_force(query, 1);
+      (void)adaptive_stats;
+      (void)brute_stats;
+      assert(std::set<navigamer::LeafId>(adaptive.begin(), adaptive.end()) ==
+             std::set<navigamer::LeafId>(
+                 brute_force.begin(), brute_force.end()));
+    }
+  }
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -670,6 +755,7 @@ int main() {
   test_router_merges_sorted_code_ranges();
   test_sharded_round_trip_and_no_false_negatives();
   test_seed_router_no_false_negatives();
+  test_implicit_dense_leaf_fields();
   std::cout << "sharded index tests passed\n";
   return 0;
 }

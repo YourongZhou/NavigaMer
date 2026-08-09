@@ -255,7 +255,7 @@ quality-audit time only.
 `--index <file>`. The binary file stores a manifest signature derived from input
 fingerprints and construction parameters, followed by the sequence store, node
 records, layer ranges, child/leaf/beacon IDs, MBB rows, and leaf-beacon rows.
-Format v40 bit-packs each node to the minimum whole-byte width supported by
+Format v59 bit-packs each node to the minimum whole-byte width supported by
 that shard's actual offset and count ranges (9 bytes per node in the 100k-window
 reference benchmark, with wider automatic fallbacks). Base-relative child
 payloads store a minimum whole-byte forward base delta from `node_id + 1`.
@@ -263,7 +263,7 @@ When a parent's child IDs form one exact consecutive range, the base is the
 entire representation and child `i` is decoded as `base + i`; otherwise the
 smallest exact delta encoding is used. Finalized arrays load directly. Older
 files must be rebuilt.
-Center sequence IDs use aligned 16-node blocks within each layer. Each block
+Center sequence IDs use aligned eight-node blocks within each layer. Each block
 stores one exact 32-bit base and fixed-width exact deltas using the minimum
 width required by that layer; lookup is constant-time and reconstructs the
 same `LeafId` without approximation.
@@ -281,7 +281,7 @@ Explicit beacon IDs use exact ZigZag deltas with one shard-wide 1..32-bit
 width chosen by evaluating every width. Direct signed bytes and absolute IDs
 remain available per node; choosing 16 bits can exactly match the former
 8/16/32-bit payload, so the optimizer never makes this array larger.
-A v11 `.navshard` bundle stores the common v40 construction manifest once and
+A v13 `.navshard` bundle stores the common v59 construction manifest once and
 points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
@@ -419,7 +419,7 @@ high-tolerance distances per Myers kernel and falls back to scalar Edlib on
 unsupported inputs. A periodic edit-distance lower bound exits only when all
 four candidates are provably outside the threshold, preserving every edge.
 Indexed sequences and reference windows are limited to 255 bases. Therefore
-every exact sequence-to-beacon edit distance fits in 8 bits. Format version 58
+every exact sequence-to-beacon edit distance fits in 8 bits. Format version 59
 stores an all-ACGT shared reference in 2-bit form and restores one contiguous
 byte view per loaded shard, so edit-distance query kernels retain direct
 character access; references containing other IUPAC characters are kept
@@ -431,7 +431,10 @@ alphabet has at most three values and every world has at most five leaves;
 otherwise it retains the normal exact bit packing. It keeps
 leaf IDs implicit whenever every leaf list is an exact center-relative
 consecutive interval, including endpoint clipping; the shard-wide interval
-radius reconstructs every ID without a leaf-ID payload. It keeps
+radius reconstructs every ID without a leaf-ID payload. When both this layout
+and the dense ternary leaf-MBB layout apply, the clipped interval also implies
+the exact leaf count and every other finest-node field is shard-wide, so the
+finest layer needs no node-record bytes. It keeps
 non-leaf beacons as one 4-bit shard-local pattern code per world whenever at
 most 16 exact three-ID center-relative patterns cover the shard, eliminating
 both their payload offsets and repeated beacon IDs. It keeps
