@@ -300,7 +300,12 @@ parts, with oversized routed selections split at the same 64-shard cap. Any
 fallback query conservatively searches every part without mapping
 the whole human index at once. Batch planning and active-engine lookup use
 only the sorted IDs in the current bounded group, with no bitmap or reverse
-map proportional to the total shard count. Bundle query
+map proportional to the total shard count. FASTQ records and route plans are
+streamed in blocks of at most 8,192 queries; unchanged resident shard groups
+are reused across block boundaries, so memory is independent of total FASTQ
+record count. Single-shard results bypass cross-shard hash merging. Non-sharded
+queries stream one record at a time, and path tracing retains only the previous
+query trace needed for overlap statistics. Bundle query
 loading validates signatures, counts, mapped pack bounds, layer ranges, shard coordinates, and
 the bundle checksum without an O(total nodes) rescan; build/restart reuse still
 performs full part validation. Path tracing is not supported for a bundle

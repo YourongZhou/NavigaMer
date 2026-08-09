@@ -1698,136 +1698,14 @@ void run_query_index_batch(const std::string& index_path,
                 << " (searching all shards)\n";
     }
 
-    auto queries = load_query_sequences(query_input);
-    if (queries.empty()) {
+    constexpr size_t kQueryBlockRecords = 8192;
+    QuerySequenceReader query_reader(query_input);
+    std::vector<QuerySequence> queries;
+    queries.reserve(kQueryBlockRecords);
+    if (query_reader.read_block(kQueryBlockRecords, &queries) == 0) {
       std::cerr << "No query reads loaded.\n";
       return;
     }
-    std::cerr << "Queries: " << queries.size() << "\n";
-
-    std::vector<size_t> query_route_offsets;
-    query_route_offsets.reserve(queries.size() + 1);
-    query_route_offsets.push_back(0);
-    std::vector<uint32_t> query_route_shard_ids;
-    query_route_shard_ids.reserve(queries.size());
-    std::vector<uint8_t> query_routed_bits(
-        (queries.size() + 7) / 8, uint8_t{0});
-    std::vector<float> query_route_ms;
-    query_route_ms.reserve(queries.size());
-    size_t routed_queries = 0;
-    for (size_t query_idx = 0; query_idx < queries.size(); ++query_idx) {
-      const auto& query = queries[query_idx];
-      const auto route_start =
-          std::chrono::high_resolution_clock::now();
-      const bool routed = shard_router.append_selected_shards(
-          query.seq, tolerance, &query_route_shard_ids);
-      const auto route_end =
-          std::chrono::high_resolution_clock::now();
-      query_route_ms.push_back(static_cast<float>(
-          std::chrono::duration<double, std::milli>(
-              route_end - route_start)
-              .count()));
-      if (routed) {
-        ++routed_queries;
-        query_routed_bits[query_idx >> 3] |= static_cast<uint8_t>(
-            uint8_t{1} << (query_idx & 7));
-      }
-      query_route_offsets.push_back(query_route_shard_ids.size());
-    }
-    const auto query_is_routed = [&](size_t query_idx) {
-      return (query_routed_bits[query_idx >> 3] &
-              static_cast<uint8_t>(uint8_t{1} << (query_idx & 7))) != 0;
-    };
-
-    struct ShardQueryBatch {
-      size_t query_begin = 0;
-      size_t query_end = 0;
-      std::vector<uint32_t> shard_ids;
-      bool full_scan = false;
-      bool oversized_route_scan = false;
-
-      bool empty() const { return query_begin == query_end; }
-    };
-    // A large random human-read batch can touch thousands of 10k-window
-    // shards. Keep only one bounded union resident while preserving input
-    // order and every exact router-selected shard for each query.
-    constexpr size_t kMaxResidentQueryShards = 64;
-    constexpr size_t kMaxFullScanQueriesPerBatch = 64;
-    std::vector<ShardQueryBatch> shard_query_batches;
-    ShardQueryBatch batch;
-    const auto flush_batch = [&]() {
-      if (batch.empty()) return;
-      shard_query_batches.push_back(std::move(batch));
-      batch = ShardQueryBatch{};
-    };
-    const auto append_full_scan_query = [&](size_t query_idx) {
-      if (!shard_query_batches.empty()) {
-        auto& previous = shard_query_batches.back();
-        if (previous.full_scan && previous.query_end == query_idx &&
-            previous.query_end - previous.query_begin <
-                kMaxFullScanQueriesPerBatch) {
-          previous.query_end = query_idx + 1;
-          return;
-        }
-      }
-      ShardQueryBatch full_scan_batch;
-      full_scan_batch.query_begin = query_idx;
-      full_scan_batch.query_end = query_idx + 1;
-      full_scan_batch.full_scan = true;
-      shard_query_batches.push_back(std::move(full_scan_batch));
-    };
-    std::array<uint32_t, 2 * kMaxResidentQueryShards>
-        merged_shard_ids;
-    for (size_t query_idx = 0; query_idx < queries.size();
-         ++query_idx) {
-      if (!query_is_routed(query_idx)) {
-        flush_batch();
-        append_full_scan_query(query_idx);
-        continue;
-      }
-      const size_t route_begin = query_route_offsets[query_idx];
-      const size_t route_end = query_route_offsets[query_idx + 1];
-      if (route_end - route_begin == shard_manifest.shards.size()) {
-        flush_batch();
-        append_full_scan_query(query_idx);
-        continue;
-      }
-      if (route_end - route_begin > kMaxResidentQueryShards) {
-        flush_batch();
-        ShardQueryBatch oversized_batch;
-        oversized_batch.query_begin = query_idx;
-        oversized_batch.query_end = query_idx + 1;
-        oversized_batch.oversized_route_scan = true;
-        shard_query_batches.push_back(std::move(oversized_batch));
-        continue;
-      }
-      const auto merged_end = std::set_union(
-          batch.shard_ids.begin(), batch.shard_ids.end(),
-          query_route_shard_ids.begin() + route_begin,
-          query_route_shard_ids.begin() + route_end,
-          merged_shard_ids.begin());
-      const size_t merged_shard_count = static_cast<size_t>(
-          merged_end - merged_shard_ids.begin());
-      if (!batch.empty() &&
-          merged_shard_count > kMaxResidentQueryShards) {
-        flush_batch();
-        batch.shard_ids.assign(
-            query_route_shard_ids.begin() + route_begin,
-            query_route_shard_ids.begin() + route_end);
-      } else {
-        batch.shard_ids.assign(
-            merged_shard_ids.begin(), merged_end);
-      }
-      if (batch.empty()) batch.query_begin = query_idx;
-      batch.query_end = query_idx + 1;
-    }
-    flush_batch();
-    if (shard_query_batches.empty()) {
-      throw std::runtime_error("sharded query batch has no work");
-    }
-
-    size_t searched_shards = 0;
-    size_t peak_loaded_shards = 0;
 
     const std::vector<std::string> columns = {
         "query_id", "hit_id", "distance", "ref_positions", "read_id",
@@ -1948,9 +1826,146 @@ void run_query_index_batch(const std::string& index_path,
       std::unordered_multimap<size_t, size_t> hit_by_hash;
       double search_ms = 0.0;
     };
+    size_t total_query_count = 0;
+    size_t total_batch_count = 0;
+    size_t routed_queries = 0;
+    size_t searched_shards = 0;
+    size_t peak_loaded_shards = 0;
+    std::vector<uint32_t> cached_shard_ids;
+    std::vector<LoadedIndex> cached_loaded_shards;
+    std::vector<std::unique_ptr<BioGeometrySearchEngine>> cached_engines;
+    const auto clear_shard_cache = [&]() {
+      cached_engines.clear();
+      cached_loaded_shards.clear();
+      cached_shard_ids.clear();
+    };
+
+    do {
+
+    std::vector<size_t> query_route_offsets;
+    query_route_offsets.reserve(queries.size() + 1);
+    query_route_offsets.push_back(0);
+    std::vector<uint32_t> query_route_shard_ids;
+    query_route_shard_ids.reserve(queries.size());
+    std::vector<uint8_t> query_routed_bits(
+        (queries.size() + 7) / 8, uint8_t{0});
+    std::vector<float> query_route_ms;
+    query_route_ms.reserve(queries.size());
+    for (size_t query_idx = 0; query_idx < queries.size(); ++query_idx) {
+      const auto& query = queries[query_idx];
+      const auto route_start =
+          std::chrono::high_resolution_clock::now();
+      const bool routed = shard_router.append_selected_shards(
+          query.seq, tolerance, &query_route_shard_ids);
+      const auto route_end =
+          std::chrono::high_resolution_clock::now();
+      query_route_ms.push_back(static_cast<float>(
+          std::chrono::duration<double, std::milli>(
+              route_end - route_start)
+              .count()));
+      if (routed) {
+        ++routed_queries;
+        query_routed_bits[query_idx >> 3] |= static_cast<uint8_t>(
+            uint8_t{1} << (query_idx & 7));
+      }
+      query_route_offsets.push_back(query_route_shard_ids.size());
+    }
+    const auto query_is_routed = [&](size_t query_idx) {
+      return (query_routed_bits[query_idx >> 3] &
+              static_cast<uint8_t>(uint8_t{1} << (query_idx & 7))) != 0;
+    };
+
+    struct ShardQueryBatch {
+      size_t query_begin = 0;
+      size_t query_end = 0;
+      std::vector<uint32_t> shard_ids;
+      bool full_scan = false;
+      bool oversized_route_scan = false;
+
+      bool empty() const { return query_begin == query_end; }
+    };
+    // A large random human-read batch can touch thousands of 10k-window
+    // shards. Keep only one bounded union resident while preserving input
+    // order and every exact router-selected shard for each query.
+    constexpr size_t kMaxResidentQueryShards = 64;
+    constexpr size_t kMaxFullScanQueriesPerBatch = 64;
+    std::vector<ShardQueryBatch> shard_query_batches;
+    ShardQueryBatch batch;
+    const auto flush_batch = [&]() {
+      if (batch.empty()) return;
+      shard_query_batches.push_back(std::move(batch));
+      batch = ShardQueryBatch{};
+    };
+    const auto append_full_scan_query = [&](size_t query_idx) {
+      if (!shard_query_batches.empty()) {
+        auto& previous = shard_query_batches.back();
+        if (previous.full_scan && previous.query_end == query_idx &&
+            previous.query_end - previous.query_begin <
+                kMaxFullScanQueriesPerBatch) {
+          previous.query_end = query_idx + 1;
+          return;
+        }
+      }
+      ShardQueryBatch full_scan_batch;
+      full_scan_batch.query_begin = query_idx;
+      full_scan_batch.query_end = query_idx + 1;
+      full_scan_batch.full_scan = true;
+      shard_query_batches.push_back(std::move(full_scan_batch));
+    };
+    std::array<uint32_t, 2 * kMaxResidentQueryShards>
+        merged_shard_ids;
+    for (size_t query_idx = 0; query_idx < queries.size();
+         ++query_idx) {
+      if (!query_is_routed(query_idx)) {
+        flush_batch();
+        append_full_scan_query(query_idx);
+        continue;
+      }
+      const size_t route_begin = query_route_offsets[query_idx];
+      const size_t route_end = query_route_offsets[query_idx + 1];
+      if (route_end - route_begin == shard_manifest.shards.size()) {
+        flush_batch();
+        append_full_scan_query(query_idx);
+        continue;
+      }
+      if (route_end - route_begin > kMaxResidentQueryShards) {
+        flush_batch();
+        ShardQueryBatch oversized_batch;
+        oversized_batch.query_begin = query_idx;
+        oversized_batch.query_end = query_idx + 1;
+        oversized_batch.oversized_route_scan = true;
+        shard_query_batches.push_back(std::move(oversized_batch));
+        continue;
+      }
+      const auto merged_end = std::set_union(
+          batch.shard_ids.begin(), batch.shard_ids.end(),
+          query_route_shard_ids.begin() + route_begin,
+          query_route_shard_ids.begin() + route_end,
+          merged_shard_ids.begin());
+      const size_t merged_shard_count = static_cast<size_t>(
+          merged_end - merged_shard_ids.begin());
+      if (!batch.empty() &&
+          merged_shard_count > kMaxResidentQueryShards) {
+        flush_batch();
+        batch.shard_ids.assign(
+            query_route_shard_ids.begin() + route_begin,
+            query_route_shard_ids.begin() + route_end);
+      } else {
+        batch.shard_ids.assign(
+            merged_shard_ids.begin(), merged_end);
+      }
+      if (batch.empty()) batch.query_begin = query_idx;
+      batch.query_end = query_idx + 1;
+    }
+    flush_batch();
+    if (shard_query_batches.empty()) {
+      throw std::runtime_error("sharded query batch has no work");
+    }
+
     for (const auto& shard_batch : shard_query_batches) {
       if (shard_batch.full_scan ||
           shard_batch.oversized_route_scan) {
+        clear_shard_cache();
         const size_t query_count =
             shard_batch.query_end - shard_batch.query_begin;
         const size_t route_begin =
@@ -2106,16 +2121,20 @@ void run_query_index_batch(const std::string& index_path,
         }
         continue;
       }
-      auto loaded_shards = load_sharded_index(
-          index_path, shard_manifest, shard_batch.shard_ids);
-      peak_loaded_shards = std::max(
-          peak_loaded_shards, loaded_shards.size());
-      std::vector<std::unique_ptr<BioGeometrySearchEngine>> engines;
-      engines.reserve(loaded_shards.size());
-      for (auto& shard : loaded_shards) {
-        engines.push_back(std::make_unique<BioGeometrySearchEngine>(
-            shard.builder, search_config));
+      if (cached_shard_ids != shard_batch.shard_ids) {
+        clear_shard_cache();
+        cached_loaded_shards = load_sharded_index(
+            index_path, shard_manifest, shard_batch.shard_ids);
+        cached_shard_ids = shard_batch.shard_ids;
+        cached_engines.reserve(cached_loaded_shards.size());
+        for (auto& shard : cached_loaded_shards) {
+          cached_engines.push_back(
+              std::make_unique<BioGeometrySearchEngine>(
+                  shard.builder, search_config));
+        }
       }
+      peak_loaded_shards = std::max(
+          peak_loaded_shards, cached_loaded_shards.size());
       std::vector<uint32_t> active_engine_ids;
       std::vector<std::pair<SearchResult, SearchStats>> shard_results;
       std::vector<std::exception_ptr> shard_errors;
@@ -2128,7 +2147,8 @@ void run_query_index_batch(const std::string& index_path,
       const size_t route_begin = query_route_offsets[query_idx];
       const size_t route_end = query_route_offsets[query_idx + 1];
       const size_t active_shard_count =
-          route_enabled ? route_end - route_begin : engines.size();
+          route_enabled ? route_end - route_begin
+                        : cached_engines.size();
       active_engine_ids.resize(active_shard_count);
       if (route_enabled) {
         size_t loaded_idx = 0;
@@ -2163,7 +2183,7 @@ void run_query_index_batch(const std::string& index_path,
         const size_t shard_idx = active_engine_ids[active_idx];
         try {
           shard_results[active_idx] =
-              engines[shard_idx]->search_adaptive(
+              cached_engines[shard_idx]->search_adaptive(
                   std::string_view(read.seq), tolerance);
         } catch (...) {
           shard_errors[active_idx] = std::current_exception();
@@ -2190,58 +2210,78 @@ void run_query_index_batch(const std::string& index_path,
       }
       std::vector<BioSequence> combined_hits;
       combined_hits.reserve(raw_hit_count);
-      std::unordered_map<std::string_view, size_t> hit_by_sequence;
-      hit_by_sequence.reserve(raw_hit_count);
-      for (size_t active_idx = 0;
-           active_idx < shard_results.size(); ++active_idx) {
-        const size_t shard_idx = active_engine_ids[active_idx];
+      const auto append_occurrences = [](
+          const auto& sequence_store, LeafId hit_id,
+          std::string_view hit_sequence,
+          BioSequence* materialized_hit) {
+        const auto add_occurrence = [&](uint32_t occurrence) {
+          const auto& contig =
+              sequence_store.contig_for_position(occurrence);
+          const size_t local_start =
+              static_cast<size_t>(contig.source_begin) +
+              occurrence - contig.begin;
+          if (local_start >
+              static_cast<size_t>(
+                  std::numeric_limits<int>::max()) -
+                  hit_sequence.size()) {
+            throw std::runtime_error(
+                "reference occurrence exceeds RefPosition integer range");
+          }
+          materialized_hit->add_occurrence(
+              contig.id, static_cast<int>(local_start),
+              static_cast<int>(local_start + hit_sequence.size()), "+");
+        };
+        sequence_store.for_each_occurrence(hit_id, add_occurrence);
+      };
+      if (shard_results.size() == 1) {
         const auto& sequence_store =
-            loaded_shards[shard_idx].builder.sequence_store();
-        for (LeafId hit_id : shard_results[active_idx].first) {
+            cached_loaded_shards[active_engine_ids.front()]
+                .builder.sequence_store();
+        for (LeafId hit_id : shard_results.front().first) {
           const std::string_view hit_sequence =
               sequence_store.sequence(hit_id);
-          auto inserted = hit_by_sequence.emplace(
-              hit_sequence, combined_hits.size());
-          if (inserted.second) {
-            combined_hits.push_back(
-                sequence_store.materialize(hit_id));
+          combined_hits.push_back(sequence_store.materialize(hit_id));
+          append_occurrences(
+              sequence_store, hit_id, hit_sequence,
+              &combined_hits.back());
+        }
+      } else {
+        std::unordered_map<std::string_view, size_t> hit_by_sequence;
+        hit_by_sequence.reserve(raw_hit_count);
+        for (size_t active_idx = 0;
+             active_idx < shard_results.size(); ++active_idx) {
+          const size_t shard_idx = active_engine_ids[active_idx];
+          const auto& sequence_store =
+              cached_loaded_shards[shard_idx]
+                  .builder.sequence_store();
+          for (LeafId hit_id : shard_results[active_idx].first) {
+            const std::string_view hit_sequence =
+                sequence_store.sequence(hit_id);
+            auto inserted = hit_by_sequence.emplace(
+                hit_sequence, combined_hits.size());
+            if (inserted.second) {
+              combined_hits.push_back(
+                  sequence_store.materialize(hit_id));
+            }
+            append_occurrences(
+                sequence_store, hit_id, hit_sequence,
+                &combined_hits[inserted.first->second]);
           }
-          BioSequence& materialized_hit =
-              combined_hits[inserted.first->second];
-          const auto add_occurrence =
-              [&](uint32_t occurrence) {
-                const auto& contig =
-                    sequence_store.contig_for_position(
-                        occurrence);
-                const size_t local_start =
-                    static_cast<size_t>(contig.source_begin) +
-                    occurrence - contig.begin;
-                if (local_start >
-                    static_cast<size_t>(
-                        std::numeric_limits<int>::max()) -
-                        hit_sequence.size()) {
-                  throw std::runtime_error(
-                      "reference occurrence exceeds "
-                      "RefPosition integer range");
-                }
-                materialized_hit.add_occurrence(
-                    contig.id,
-                    static_cast<int>(local_start),
-                    static_cast<int>(
-                        local_start + hit_sequence.size()),
-                    "+");
-              };
-          sequence_store.for_each_occurrence(
-              hit_id, add_occurrence);
         }
       }
       emit_query_hits(read, combined, combined_hits, query_time_ms);
       }
     }
+    total_query_count += queries.size();
+    total_batch_count += shard_query_batches.size();
+    } while (query_reader.read_block(
+                 kQueryBlockRecords, &queries) != 0);
+
+    std::cerr << "Queries: " << total_query_count << "\n";
     std::cerr << "Loaded sharded index: " << index_path
               << " peak_shards=" << peak_loaded_shards
               << "/" << shard_manifest.shards.size()
-              << " batches=" << shard_query_batches.size()
+              << " batches=" << total_batch_count
               << " sequences="
               << shard_manifest.total_sequence_count
               << " world_nodes="
@@ -2249,10 +2289,10 @@ void run_query_index_batch(const std::string& index_path,
     if (tsv_writer) tsv_writer->close();
     std::cerr << "Batch query rows: " << output_row_count
               << " routed_queries=" << routed_queries
-              << "/" << queries.size()
+              << "/" << total_query_count
               << " searched_shards=" << searched_shards
               << "/" <<
-                  queries.size() * shard_manifest.shards.size()
+                  total_query_count * shard_manifest.shards.size()
               << "\n";
     return;
   }
@@ -2263,12 +2303,12 @@ void run_query_index_batch(const std::string& index_path,
             << " sequences=" << loaded.manifest.sequence_count
             << " world_nodes=" << loaded.manifest.world_node_count << "\n";
 
-  auto queries = load_query_sequences(query_input);
-  if (queries.empty()) {
+  QuerySequenceReader query_reader(query_input);
+  QuerySequence read;
+  if (!query_reader.next(&read)) {
     std::cerr << "No query reads loaded.\n";
     return;
   }
-  std::cerr << "Queries: " << queries.size() << "\n";
 
   BioGeometrySearchEngine engine(loaded.builder, search_config);
   const std::vector<std::string> columns = {
@@ -2294,10 +2334,22 @@ void run_query_index_batch(const std::string& index_path,
     if (tsv_writer) tsv_writer->write_row(row);
     ++output_row_count;
   };
-  std::vector<SearchStats> per_query_stats(queries.size());
+  const std::vector<std::string> trace_columns = {
+      "query_id", "query_ordinal", "world_visit_count",
+      "leaf_visit_count", "world_unique_count", "leaf_unique_count",
+      "prev_world_jaccard", "prev_leaf_jaccard",
+      "prev_world_overlap_count", "prev_leaf_overlap_count",
+      "world_path", "leaf_path"};
+  std::unique_ptr<TsvWriter> trace_writer;
+  if (!path_trace_tsv.empty()) {
+    trace_writer = std::make_unique<TsvWriter>(
+        path_trace_tsv, trace_columns);
+  }
+  SearchStats previous_stats;
+  bool has_previous_stats = false;
+  size_t query_count = 0;
   const auto& sequence_store = loaded.builder.sequence_store();
-  for (size_t qi = 0; qi < queries.size(); ++qi) {
-    const auto& read = queries[qi];
+  do {
     auto query_start = std::chrono::high_resolution_clock::now();
     auto [res, st] = engine.search_adaptive(
         std::string_view(read.seq), tolerance);
@@ -2382,48 +2434,40 @@ void run_query_index_batch(const std::string& index_path,
         }
       }
     }
-    per_query_stats[qi] = std::move(st);
-  }
-
-  if (tsv_writer) tsv_writer->close();
-  if (!path_trace_tsv.empty()) {
-    const std::vector<std::string> trace_columns = {
-        "query_id", "query_ordinal", "world_visit_count", "leaf_visit_count",
-        "world_unique_count", "leaf_unique_count", "prev_world_jaccard",
-        "prev_leaf_jaccard", "prev_world_overlap_count",
-        "prev_leaf_overlap_count", "world_path", "leaf_path"};
-    std::vector<std::vector<std::string>> trace_rows;
-    trace_rows.reserve(queries.size());
-    for (size_t qi = 0; qi < queries.size(); ++qi) {
-      const auto& stats = per_query_stats[qi];
-      const bool has_previous = qi > 0;
+    if (trace_writer) {
       const auto world_overlap = previous_overlap_summary(
-          stats.world_trace,
-          has_previous ? per_query_stats[qi - 1].world_trace
-                       : stats.world_trace,
-          has_previous);
+          st.world_trace,
+          has_previous_stats ? previous_stats.world_trace
+                             : st.world_trace,
+          has_previous_stats);
       const auto leaf_overlap = previous_overlap_summary(
-          stats.leaf_trace,
-          has_previous ? per_query_stats[qi - 1].leaf_trace
-                       : stats.leaf_trace,
-          has_previous);
-      trace_rows.push_back({
-          queries[qi].id,
-          std::to_string(qi),
-          std::to_string(stats.world_trace.size()),
-          std::to_string(stats.leaf_trace.size()),
-          std::to_string(unique_count(stats.world_trace)),
-          std::to_string(unique_count(stats.leaf_trace)),
+          st.leaf_trace,
+          has_previous_stats ? previous_stats.leaf_trace
+                             : st.leaf_trace,
+          has_previous_stats);
+      trace_writer->write_row({
+          read.id,
+          std::to_string(query_count),
+          std::to_string(st.world_trace.size()),
+          std::to_string(st.leaf_trace.size()),
+          std::to_string(unique_count(st.world_trace)),
+          std::to_string(unique_count(st.leaf_trace)),
           world_overlap.first,
           leaf_overlap.first,
           world_overlap.second,
           leaf_overlap.second,
-          join_id_path(stats.world_trace),
-          join_id_path(stats.leaf_trace),
+          join_id_path(st.world_trace),
+          join_id_path(st.leaf_trace),
       });
+      previous_stats = std::move(st);
+      has_previous_stats = true;
     }
-    write_tsv(path_trace_tsv, trace_columns, trace_rows);
-  }
+    ++query_count;
+  } while (query_reader.next(&read));
+
+  std::cerr << "Queries: " << query_count << "\n";
+  if (tsv_writer) tsv_writer->close();
+  if (trace_writer) trace_writer->close();
   std::cerr << "Batch query rows: " << output_row_count << "\n";
 }
 

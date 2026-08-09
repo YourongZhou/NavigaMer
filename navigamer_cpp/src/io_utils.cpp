@@ -464,15 +464,73 @@ std::vector<std::shared_ptr<BioSequence>> load_reads(
   return reads;
 }
 
-std::vector<QuerySequence> load_query_sequences(
-    const std::string& path_or_string) {
-  std::vector<QuerySequence> reads;
-  load_read_records(
-      path_or_string,
-      [&](std::string id, std::string sequence, bool, size_t) {
-        reads.push_back({std::move(id), std::move(sequence)});
-      });
-  return reads;
+QuerySequenceReader::QuerySequenceReader(
+    const std::string& path_or_string)
+    : input_(path_or_string) {
+  if (input_) return;
+  literal_ = path_or_string;
+  while (!literal_.empty() &&
+         std::isspace(static_cast<unsigned char>(literal_.back()))) {
+    literal_.pop_back();
+  }
+  size_t first = 0;
+  while (first < literal_.size() &&
+         std::isspace(static_cast<unsigned char>(literal_[first]))) {
+    ++first;
+  }
+  if (first != 0) literal_.erase(0, first);
+  literal_pending_ = true;
+}
+
+bool QuerySequenceReader::next(QuerySequence* query) {
+  if (!query) {
+    throw std::invalid_argument("query output must not be null");
+  }
+  if (literal_pending_) {
+    query->id = "query_0";
+    query->seq = std::move(literal_);
+    literal_pending_ = false;
+    return true;
+  }
+  while (std::getline(input_, line_)) {
+    while (!line_.empty() &&
+           (line_.back() == '\r' || line_.back() == '\n')) {
+      line_.pop_back();
+    }
+    if (line_.empty() || line_[0] != '@') continue;
+    std::string sequence_id = line_.substr(1);
+    const size_t separator = sequence_id.find_first_of(" \t");
+    if (separator != std::string::npos) {
+      sequence_id.resize(separator);
+    }
+    if (!std::getline(input_, query->seq)) return false;
+    while (!query->seq.empty() &&
+           (query->seq.back() == '\r' || query->seq.back() == '\n')) {
+      query->seq.pop_back();
+    }
+    std::getline(input_, line_);  // +
+    std::getline(input_, line_);  // quality
+    if (query->seq.empty()) continue;
+    query->id = std::move(sequence_id);
+    return true;
+  }
+  return false;
+}
+
+size_t QuerySequenceReader::read_block(
+    size_t max_records, std::vector<QuerySequence>* queries) {
+  if (!queries) {
+    throw std::invalid_argument("query block output must not be null");
+  }
+  if (max_records == 0) {
+    throw std::invalid_argument("query block size must be positive");
+  }
+  queries->clear();
+  QuerySequence query;
+  while (queries->size() < max_records && next(&query)) {
+    queries->push_back(std::move(query));
+  }
+  return queries->size();
 }
 
 TsvWriter::TsvWriter(const std::string& output_path,

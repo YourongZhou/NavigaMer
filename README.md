@@ -335,7 +335,13 @@ of their occurrences before reporting results. Routed selections larger than
 shard to preserve recall without mapping the complete human index at once.
 Batch planning and active-engine lookup use only the sorted IDs in the
 current 64-shard group; they do not allocate a bitmap or reverse map sized to
-the total logical shard count.
+the total logical shard count. FASTQ records and their route plans are
+streamed in blocks of at most 8,192 queries, while an unchanged resident
+shard group is reused across block boundaries. Thus query memory does not
+grow with total FASTQ record count. A one-shard hit path bypasses cross-shard
+hash merging without changing the exact verifier or reported occurrences.
+Non-sharded bundle queries consume one record at a time; optional path traces
+retain only the immediately preceding query needed for overlap statistics.
 
 For human-scale stride-1 builds, start with `--shard-windows 10000` and tune
 from measurements. Logical shards are cheap because 1,024 share one pack file.

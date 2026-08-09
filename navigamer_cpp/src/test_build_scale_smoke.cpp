@@ -540,6 +540,62 @@ int main() {
            std::string::npos);
   }
 
+  // Query input, routing tables, and batch plans are streamed in bounded
+  // blocks. Cross the block boundary and verify every input record is still
+  // emitted once and in order.
+  const std::string streaming_reads =
+      "/tmp/navigamer_streaming_queries.fq";
+  const std::string streaming_tsv =
+      "/tmp/navigamer_streaming_queries.tsv";
+  constexpr size_t streaming_query_count = 8193;
+  {
+    std::ofstream reads(streaming_reads);
+    assert(reads.good());
+    const std::string sequence(150, 'C');
+    const std::string quality(150, 'I');
+    for (size_t query_idx = 0;
+         query_idx < streaming_query_count; ++query_idx) {
+      reads << "@stream_" << query_idx << '\n'
+            << sequence << "\n+\n" << quality << '\n';
+    }
+  }
+  const std::string streaming_query_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index-batch --index " +
+      fallback_index + " --reads " + streaming_reads +
+      " --tolerance 0 --out " + streaming_tsv +
+      " >/tmp/navigamer_streaming_query.stdout "
+      "2>/tmp/navigamer_streaming_query.stderr";
+  assert(std::system(streaming_query_command.c_str()) == 0);
+  {
+    std::ifstream stderr_in(
+        "/tmp/navigamer_streaming_query.stderr");
+    assert(stderr_in.good());
+    const std::string stderr_text(
+        (std::istreambuf_iterator<char>(stderr_in)),
+        std::istreambuf_iterator<char>());
+    assert(stderr_text.find("Queries: 8193") != std::string::npos);
+    assert(stderr_text.find("batches=2") != std::string::npos);
+  }
+  {
+    std::ifstream tsv(streaming_tsv);
+    assert(tsv.good());
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    size_t row_count = 0;
+    std::string first_query_id;
+    std::string last_query_id;
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      if (row_count == 0) first_query_id = row.front();
+      last_query_id = row.front();
+      ++row_count;
+    }
+    assert(row_count == streaming_query_count);
+    assert(first_query_id == "stream_0");
+    assert(last_query_id == "stream_8192");
+  }
+
   std::cout << "build-scale smoke tests passed\n";
   return 0;
 }
