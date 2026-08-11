@@ -26,12 +26,8 @@ std::vector<SequencePtr> make_sequences() {
   };
 }
 
-std::set<std::string> ids(const std::vector<SequencePtr>& hits) {
-  std::set<std::string> out;
-  for (const auto& hit : hits) {
-    if (hit) out.insert(hit->id);
-  }
-  return out;
+std::set<navigamer::LeafId> ids(const navigamer::SearchResult& hits) {
+  return {hits.begin(), hits.end()};
 }
 
 navigamer::SearchConfig baseline_config() {

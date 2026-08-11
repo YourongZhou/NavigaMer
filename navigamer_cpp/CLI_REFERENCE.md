@@ -21,30 +21,30 @@ Used by all pipelines that build the index:
 | `--link-mode` | `indexed` | Phase-2 rebinding: `full` or exact `indexed` range join |
 | `--leaf-attach-mode` | `indexed` | Leaf attachment: `full` or exact `indexed` range join |
 | `--leaf-attach-direction` | `auto` | Indexed leaf attachment direction: `auto`, `seq-to-world`, or `world-to-seq`; `auto` uses `world-to-seq` when finest worlds are fewer than unique sequences |
-| `--leaf-qgram-postfilter` | `on` | Safe q-gram L1 postfilter for indexed leaf attachment candidates before bounded exact verification |
+| `--leaf-qgram-postfilter` | `off` | Optional safe q-gram L1 postfilter for indexed leaf attachment candidates before bounded exact verification |
 | `--range-min-seed-length` | `8` | Full-scan fallback below this adaptive seed length |
 | `--range-max-seed-length` | `20` | Maximum adaptive pigeonhole seed length |
-| `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full` |
+| `--range-candidate-mode` | `auto` | Indexed construction candidates: `auto`, `pigeonhole`, `qgram`, `hybrid`, or `full`; auto uses count-selected pigeonhole/q-gram in Phase 2 and pigeonhole-only leaf attachment |
 | `--qgram-q` | `5` | Positive q-gram length used by q-gram and hybrid candidate generation |
 | `--auto-pigeonhole-max-candidates` | `4096` | Auto accepts pigeonhole when its candidate count is at most this value |
 | `--auto-pigeonhole-max-ratio` | `0.25` | Compatibility no-op; parsed and validated, but auto no longer computes or uses a candidate ratio |
 | `--auto-hybrid-on-large-candidates` | `true` | Compatibility flag; normal auto early-aborts oversized seed unions and uses q-gram safe fallback |
-| `--build-distance-mode` | `edlib` | Index construction edit-distance backend: default `edlib`, reference `dp`, or conservative `auto` (currently DP) |
+| `--build-distance-mode` | `edlib` | Index construction edit-distance backend: default `edlib`, reference `dp`, or `auto` (Myers when supported, otherwise Edlib) |
 | `--min-rect-index-fanout` | `64` | Minimum child-world fanout required to build an exact MBB rectangle index |
-| `--phase1-metric-min-fanout` | `64` | Minimum Phase1 parent-local candidate fanout before building/querying the metric helper instead of scanning |
-| `--phase1-qgram-min-fanout` | `64` | Minimum Phase1 parent-local candidate fanout before using the q-gram helper instead of the metric helper |
+| `--phase1-metric-min-fanout` | `12` | Minimum Phase1 parent-local candidate fanout before building/querying the metric helper instead of scanning |
+| `--phase1-qgram-min-fanout` | `12` | Minimum Phase1 parent-local candidate fanout before using the q-gram helper instead of the metric helper |
 | `--phase1-qgram-max-touched` | `250000` | Maximum Phase1 q-gram touched/candidate set size before conservatively falling back |
 | `--progress-interval-seconds` | `600` | Timestamped build heartbeat interval on stderr; `0` disables periodic heartbeats but keeps phase-boundary reports |
 | `--mbb-filter-mode` | `scan` | Adaptive child-MBB filtering: original `scan` or exact `rect` lookup |
 | `--visited-mode` | `epoch` | Adaptive visited tracking: legacy per-query `string` set or integer-ID `epoch` array |
-| `--graph-view` | `flat` | Adaptive graph traversal storage: existing pointer-vector `original` or continuous query `flat` view |
+| `--graph-view` | `flat` | Array traversal mode; `original` is accepted as a compatibility alias for `flat` |
 | `--simd-mode` | `auto` | Flat child-MBB and leaf-beacon filter backend: `auto`, `scalar`, `avx2`, or `avx512`; unsupported SIMD falls back to scalar |
-| `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or conservative `auto` (currently DP) |
+| `--distance-mode` | `myers` | Adaptive bounded child-center distance backend: default Myers through 256bp ACGT shorter-input length, optional `edlib`, reference `dp`, or `auto` (Myers when supported, otherwise Edlib) |
 | `--search-prefetch` | `off` | Best-effort adaptive traversal prefetch hints: `off` or `on`; affects only memory-access hints, not pruning or verification semantics |
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 | `--query-profile` | `0` | Enable (`1`) or disable (`0`) per-query profiling timers in adaptive search; counters remain available either way |
-| `--path-reuse` | `0` | Enable (`1`) or disable (`0`) thread-local warm-start caches and query-derived batch scheduling hints |
+| `--path-reuse` | `1` | Enable (`1`) or disable (`0`) thread-local warm-start caches and query-derived batch scheduling hints |
 | `--router-hints` | `0` | Enable (`1`) or disable (`0`) q-gram/minimizer/pigeonhole router hints before local-router / best-first ordering |
 | `--router-hint-qgram-q` | `5` | Router-hint q-gram length used for cached child-center signatures and parent-local range hints |
 | `--router-hint-minimizer-k` | `4` | Router-hint minimizer k-mer length |
@@ -68,7 +68,7 @@ Used by all pipelines that build the index:
 | `--planner-allow-direct-qgram-verify` | `1` | Reserved switch for future direct q-gram verification planning; current implementation remains exact traversal only |
 | `--proximal-oracle` | `0` | Enable (`1`) or disable (`0`) query-benchmark proximal-anchor oracle diagnostics; instrumentation only |
 | `--proximal-oracle-k` | `1,2,4` | Comma-separated k values recorded in query-benchmark configuration; TSV currently emits k1/k2/k4 envelope columns |
-| `--index` | *(none)* | Persisted NavigaMer index path for `build`, single-prefix `build-scale`, `query`, and `query-index` |
+| `--index` | *(none)* | Persisted NavigaMer index or shard-manifest path for `build`, single-prefix `build-scale`, `build-sharded`, `query`, and `query-index` |
 
 If `--primary-radii` is present, it takes precedence and the legacy three-radius flags are ignored. The implementation automatically inserts one auxiliary tier between each adjacent pair of primary layers during build and collapses those auxiliary tiers into beacons + MBB rows before query-time navigation.
 
@@ -81,17 +81,20 @@ pigeonhole and q-gram safe candidate supersets. Auto runs pigeonhole when its
 seed is long enough, accepting it when candidate count is at most the
 configured maximum. If the seed union grows beyond the maximum, auto stops
 collecting pigeonhole candidates immediately and invokes q-gram as a safe
-fallback. It does not full-scan all length-compatible targets to compute a
-candidate ratio; `--auto-pigeonhole-max-ratio` is retained only so older
-command lines still parse. Full candidate mode returns every
-length-compatible item.
+fallback during Phase 2. Auto leaf attachment instead consumes the complete
+pigeonhole candidate superset, preventing a single fallback from allocating a
+q-gram index over the full finest tier. It does not full-scan all
+length-compatible targets to compute a candidate ratio;
+`--auto-pigeonhole-max-ratio` is retained only so older command lines still
+parse. Explicit q-gram and hybrid modes retain their stated behavior. Full
+candidate mode returns every length-compatible item.
 
-Indexed leaf attachment additionally applies `--leaf-qgram-postfilter on` by
-default after range candidate generation and before bounded exact verification.
-It uses the same no-false-negative q-gram L1 condition and only reduces exact
-distance calls; accepted leaf links are still determined by bounded edit
-distance. Use `--leaf-qgram-postfilter off` to reproduce the earlier direct
-verify-after-candidate behavior.
+Indexed leaf attachment directly verifies range candidates by default. With
+`--leaf-qgram-postfilter on`, it applies the same no-false-negative q-gram L1
+condition before bounded exact verification. This can reduce exact calls for
+unusually broad candidate sets, but its signature-building overhead is slower
+on the default prepared-DNA distance path. Accepted leaf links are determined
+by bounded edit distance in either mode.
 
 Old seed-length-only auto behavior can be reproduced with a permissive
 candidate-count threshold such as
@@ -230,10 +233,31 @@ Synthetic reference (~50 kb) and reads (length 20, zero mutation rate). Compares
 ### `build`
 
 Deduplicates, builds the index, and prints layer sizes. If `--index <file>` is
-provided, writes a persisted binary index with a manifest signature, build
-parameters, input fingerprints, unique sequences, `ref_positions`, optional
-BWT/SA intervals, collapsed DAG links, beacons, MBB rows, leaf links, and
-leaf-beacon distance rows.
+provided, writes an array-format v38 binary index with a manifest signature,
+build parameters, input fingerprints, sequence records, layer ranges,
+child/leaf/beacon ID arrays, MBB rows, and leaf-beacon distance rows. Older
+pointer-graph index formats are rejected and must be rebuilt.
+The in-memory construction path also uses node arrays and integer IDs; it does
+not construct an intermediate `WorldNode` pointer graph. Node records use a
+per-index bit layout derived from the shard's actual maximum offsets and counts,
+rounded only to whole bytes and widened automatically when required.
+Center sequence IDs use exact, layer-aligned 16-node base/delta blocks with a
+layer-local minimum bit width and constant-time decoding.
+Base-relative child payloads store a minimum whole-byte forward base delta from
+`node_id + 1` immediately before their local child offsets, preserving cache
+locality while avoiding a fixed 32-bit base.
+Fully contiguous shards may instead interleave one minimum-width forward base
+and 32 exact byte offsets in one directly addressable parent block.
+Paired child-MBB bins are stored as metric ranks: the exact distance between
+the two beacons selects the triangle-inequality-feasible codebook, and each
+child stores only its rank in that codebook. Decoding is exact with respect to
+the previous conservative quantized bins, so this changes storage rather than
+pruning semantics.
+Beacon offsets are also packed to the minimum shard-local bit width and retain
+exact constant-time random access.
+Beacon IDs use exact shard-wide 1..32-bit ZigZag deltas when that is smaller
+than direct signed bytes or absolute IDs. The selected width minimizes stored
+bytes without approximating any ID.
 
 **Required:** `--ref`, `--reads`
 
@@ -253,6 +277,13 @@ summary.
 Builds one index per requested reference prefix and writes construction timing
 plus construction counters to CSV. With `--index <file>`, exactly one prefix
 must be requested and the resulting reference-window index is serialized.
+Reference windows use one stored reference sequence plus representative
+offsets; they are not materialized as independent `std::string` objects.
+FASTA contig boundaries are retained, cross-contig windows are never created,
+and windows containing characters outside A/C/G/T are counted as invalid and
+skipped. Repeated valid windows use a sparse occurrence array for direct
+contig-local output-coordinate lookup; occurrences between stride-selected
+window starts are retained as well.
 
 **Required:** `--ref`, `--prefix-lengths`, `--out`
 
@@ -270,6 +301,71 @@ candidate/exact reduction percentages for Phase2 and leaf attachment.
 Heartbeat lines include timestamp, phase, completed/total work items,
 percentage, elapsed time, observed rate, and ETA. Progress output never changes
 the CSV shape or persisted-index signature.
+
+### `build-sharded`
+
+Builds a lossless reference-window bundle for inputs that would exceed one
+index's 32-bit node, relationship, or MBB-array limits. Each window start is
+assigned to exactly one part. Adjacent parts store only the reference overlap
+needed to materialize boundary windows, and every emitted coordinate remains
+relative to the original contig.
+
+Each logical part is an independently mmap-decodable graph payload. Up to
+1,024 payloads are stored in one `.navpack` container with a checked
+offset/length directory. The common v65 construction manifest is stored once
+at bundle scope instead of once per logical part. A completed pack is reused
+only after every selected payload's construction signature, reference slice,
+contig, and source coordinates validate. Damaged
+or incompatible packs are rebuilt one atomic group at a time; only that group's
+temporary pack exists during construction because payloads are written directly
+into it. The final v20 `.navshard`
+manifest stores pack IDs and byte ranges and is written only after all parts
+are valid. Query loading mmaps only the selected ranges, not whole packs.
+Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
+descriptor per logical shard in memory.
+Multi-part bundles with
+windows of at least 24 bases also store a memory-mapped `.route` sidecar of
+exact 16-mer minimizers. Sorted minimizers use exact 16-entry blocks with one
+32-bit base and minimum-width packed adjacent deltas; parallel shard IDs use
+exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
+24- to 64-base seed is taken from each of `d + 1` disjoint query blocks; only
+shards containing at least one seed minimizer are searched. This is a pigeonhole
+necessary condition for an exact edit-distance hit. Unsupported
+short/ambiguous queries or an unavailable
+sidecar conservatively search all parts.
+`query-index` loads only the routed parts. `query-index-batch` loads the union
+of routed parts required by the input reads; if any read cannot be routed, it
+loads all parts for the no-FN fallback.
+Router construction writes each completed shard's sorted 32-bit minimizer list
+contiguously to a temporary spool, then memory-maps and k-way merges the lists
+directly into the sidecar. The spool uses exactly four bytes per minimizer and
+has no per-shard page padding; offsets are 64-bit and counts are 32-bit. This
+changes build storage and peak memory, not query-time layout.
+
+Within each shard, reference-window deduplication uses a contiguous 64-bit-slot
+open-addressed table at no more than 7/8 load instead of a node-allocated
+`string_view` hash map. Hash matches are confirmed byte-for-byte against the
+shared reference, so 32-bit hash collisions do not affect correctness or recall.
+The temporary table is released before repeated-occurrence sorting.
+
+Dense q-gram postings remain 4-byte `16-bit item + 16-bit count` words through
+65,536 items. Larger short-sequence indexes use a lossless 4-byte
+`24-bit item + 8-bit count` word for up to 16,777,216 items; larger item IDs or
+q-gram counts fall back to the wide representation.
+When `query_total + maximum_compatible_item_total <= 2*q*tau`, the q-gram L1
+condition cannot prune any item. Deferred construction then returns the exact
+length-compatible candidate superset without allocating a q-gram posting index.
+
+**Required:** `--ref`, `--index`, `--shard-windows`
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--window` | `200` | Reference-window length |
+| `--stride` | `1` | Step between window starts |
+| `--shard-windows` | *(required)* | Maximum window starts per logical shard; `5000` is the recommended human stride-1 starting point when construction time/RAM matter (`10000` trades that for fewer logical shards), then benchmark nearby sizes |
+| `--shard-build-jobs` | auto | Maximum concurrently built parts; auto uses one below 8 OpenMP threads, two at 8--15, up to 20 for parts of at most 8,192 windows, up to 16 through 16,384 windows, otherwise up to four; it divides the thread budget among internal teams |
+| `--index` | *(required)* | Output `.navshard` manifest; packed part containers are created beside it |
+| `--progress-interval-seconds` | `600` | Periodic progress interval for a serial shard build; parallel shard builds suppress per-part diagnostics and retain only the outer summary |
 
 ### `query`
 
@@ -291,9 +387,10 @@ that path. With `--index` and no `--reads`, `query` loads the index directly.
 
 ### `query-index`
 
-Loads a persisted index and searches `--query`. This command never rebuilds and
-does not accept `--reads`; use `query --reads ... --index ...` for automatic
-reuse-or-rebuild behavior.
+Loads a persisted index or `.navshard` bundle and searches `--query`. Selected
+bundle parts are searched in parallel and identical hit sequences are merged.
+This command never rebuilds and does not accept `--reads`; use
+`query --reads ... --index ...` for automatic reuse-or-rebuild behavior.
 
 **Required:** `--index`, `--query`
 
@@ -304,20 +401,24 @@ reuse-or-rebuild behavior.
 
 ### `query-index-batch`
 
-Loads one persisted index and searches every record in `--reads` without
-reloading or rebuilding the index between queries. This is the warm-load batch
-entry point used for source-sorted, duplicated-read, and near-repeat locality
+Loads one persisted index or `.navshard` bundle and searches every record in
+`--reads` without reloading or rebuilding between queries. Bundle parts are
+searched in parallel; identical sequences and all of their original-contig
+occurrences are merged before TSV output. This is the warm-load batch entry
+point used for source-sorted, duplicated-read, and near-repeat locality
 experiments. It currently supports `--mode adaptive` only; every emitted hit is
 still produced by final bounded exact edit-distance verification.
+Bundle loading checks manifests, mapped pack ranges, compact layer layout, shard
+coordinates, and checksums without touching every persisted node and edge.
 
-**Required:** `--index`, `--reads`, `--out`
+**Required:** `--index`, `--reads`
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--tolerance` | `2` | Max edit distance |
 | `--mode` | `adaptive` | Currently only `adaptive` is accepted |
-| `--out` | required | Per-query hit/stat TSV |
-| `--path-trace-out` | *(none)* | Optional locality trace TSV with world/leaf paths and adjacent-query overlap summaries |
+| `--out` | *(none)* | Optional per-query hit/stat TSV |
+| `--path-trace-out` | *(none)* | Optional locality trace TSV for one `.navidx`; rejected for `.navshard` because node IDs are shard-local |
 
 The main TSV includes query latency, result counts, adaptive work counters,
 `search_prefetch_enabled`, and path-class counters such as
@@ -352,7 +453,7 @@ show whether local routing and safe child routing actually fired.
 | `--scenarios` / `--scenario` | *(unset)* | Comma-separated scenario presets: `low-fanout`, `high-fanout`, `repeat`, `batch-locality`, `oracle`, or `all`; when set, these override `--locality-datasets` |
 | `--locality-profiles` | `baseline,path_reuse,optimized` | Comma-separated profiles to run; use `baseline,path_reuse` to isolate path reuse before testing the full optimized stack |
 | `--locality-datasets` | `same_template,nearby_windows,random_windows` | Comma-separated query streams; use `same_template,nearby_windows` for larger clustered-query runs |
-| `--batch-schedules` | `original` | Comma-separated internal query schedules: `original`, `random`, `minimizer`, `qgram-signature`, `router-signature`, or `source-oracle`; `source-oracle` is an upper-bound diagnostic only |
+| `--batch-schedules` | `source-oracle` | Comma-separated internal query schedules: `original`, `random`, `minimizer`, `qgram-signature`, `router-signature`, or `source-oracle`; `source-oracle` is an upper-bound diagnostic only |
 | `--query-fastq-out` | *(unset)* | Optional FASTQ export of the generated locality queries, with `source_pos=` in each read header, for matched external baseline runs |
 
 Scenario presets are implemented as deterministic query-stream selections:
@@ -395,8 +496,9 @@ and writes a small report bundle:
 - `summary.json`: machine-readable rows and gate status
 - `report.md`: compact Markdown table for review
 
-If `--index` is omitted, the command builds reference windows from `--ref` and
-saves `query_locality.navidx` in `--out-dir` before running query-only
+If `--index` is omitted, the command reuses a manifest-compatible
+`query_locality.navidx` in `--out-dir` or builds reference windows from `--ref`
+and saves that file when it is missing or stale before running query-only
 measurement. `source-oracle` batch scheduling remains an upper-bound diagnostic
 only.
 
@@ -432,14 +534,14 @@ Fixed-length mapper path for 150 bp reads. Builds an in-memory index from all fo
 | ---- | ------- | ----------- |
 | `--tolerance` | `2` | Final edit-distance threshold; the candidate search uses `2 * tolerance` |
 | `--mode` | `adaptive` | Currently only `adaptive` is accepted |
-| `--locator` | `refpos` | `refpos` uses stored reference-window positions; `seqan` requires optional SeqAn3 support |
+| `--locator` | `refpos` | `refpos` uses the shared reference-backed leaf-position store (no per-150-mer strings); `seqan` requires optional SeqAn3 support |
 | `--out` | *(required)* | Output TSV path; header is written even when there are no hits |
 
 Safety constraints: every read must be exactly 150 bp, reference and reads must contain only A/C/G/T, and the finest primary radius must be greater than `2 * tolerance`.
 
 ### `benchmark`
 
-Slices the reference into windows of length `--window` with stride `--stride`; each window is one indexed sequence with coordinates. Query sequences come from `--reads`. Uses **adaptive** search; TSV includes search statistics.
+Slices the reference into windows of length `--window` with stride `--stride`; each indexed leaf is a reference-backed `LeafId` with coordinates, rather than a copied window string. Query sequences come from `--reads`. Uses **adaptive** search; TSV includes search statistics.
 
 **Required:** `--ref`, `--reads` (queries)
 
@@ -458,9 +560,14 @@ Builds one shared in-memory index, deterministically generates six query
 classes (`random_region`, `ordinary_region`, `low_complexity_region`,
 `no_hit`, `single_hit`, and `multi_hit`), and compares:
 
-- baseline: fixed `scan` MBB filtering, legacy `string` visited mode,
-  `original` graph traversal, scalar MBB filtering, `dp` distance mode, and
-  search q-gram disabled, `best-first` disabled
+For an A/C/G/T-only reference, the benchmark index uses the shared
+reference-backed leaf store rather than copied window strings. Inputs with
+ambiguous bases retain the generic path so their prior semantics are unchanged.
+
+- baseline: fixed `scan` MBB filtering, legacy `string` visited mode, the
+  `original` compatibility label (same canonical array traversal), scalar MBB
+  filtering, `dp` distance mode, search q-gram disabled, and `best-first`
+  disabled
 - optimized: `--mbb-filter-mode`, `--visited-mode`, `--graph-view`,
   `--simd-mode`, `--distance-mode`, `--search-qgram-prefilter`,
   `--search-qgram-q`, `--router-hints`, `--local-router`,
@@ -661,7 +768,7 @@ For `map150 --locator refpos`, `bwt_start` and `bwt_end` are `-1`. With the opti
 `length`, `stride_mode`, `num_index_seqs`, `error_rate`, `error_edits`, `tolerance_rate`, `tolerance_edits`, `query_count`, `source_recovery_rate`, `any_hit_rate`, `avg_hit_count`, `avg_dist_calcs`, `avg_leaf_verify_count`, `avg_candidate_count_for_prune`, `avg_beacon_prune_count`, `avg_pruning_rate`, `bf_sample_count`, `bf_source_recovery_rate`, `bf_agreement_rate`, `bf_source_mismatch_count`
 
 **`build-scale`:**
-`prefix_len`, `window_count`, `unique_count`, `world_node_count`,
+`prefix_len`, `window_count`, `invalid_window_count`, `unique_count`, `world_node_count`,
 `finest_world_count`, `total_build_ms`, `phase0_dedup_ms`,
 `phase1_sketch_ms`, `phase2_rebinding_ms`, `phase2_index_build_ms`,
 `phase2_candidate_query_ms`, `phase2_exact_verify_ms`,
@@ -711,6 +818,7 @@ rebinding.
 | `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_build_timing_stats` | Construction timing field and summary smoke checks |
 | `test_build_scale_smoke` | `build-scale` CSV timing smoke check |
+| `test_sharded_index_bin` | Monolithic/sharded window and coordinate equivalence, restart/repair, substitution/indel router no-FN checks, and conservative fallback |
 | `test_build_progress_bin` | Timestamped build progress formatting, forced boundaries, and periodic heartbeat |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |

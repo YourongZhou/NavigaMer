@@ -45,10 +45,8 @@ std::vector<SequencePtr> make_sequences() {
   return sequences;
 }
 
-std::set<std::string> ids(const std::vector<SequencePtr>& hits) {
-  std::set<std::string> out;
-  for (const auto& hit : hits) out.insert(hit->id);
-  return out;
+std::set<navigamer::LeafId> ids(const navigamer::SearchResult& hits) {
+  return {hits.begin(), hits.end()};
 }
 
 navigamer::SearchConfig config(
@@ -58,17 +56,6 @@ navigamer::SearchConfig config(
   out.search_qgram_prefilter = qgram_enabled;
   out.search_qgram_q = q;
   return out;
-}
-
-void disable_mbb_pruning(navigamer::BioGeometryIndexBuilder& builder) {
-  for (int layer = 0; layer < builder.finest_primary_layer_index(); ++layer) {
-    for (const auto& parent : builder.primary_layer(layer)) {
-      parent->child_nodes = builder.primary_layer(layer + 1);
-      parent->beacons.clear();
-      parent->child_beacon_mbbs.clear();
-      parent->mbb_rect_index.reset();
-    }
-  }
 }
 
 void assert_four_modes_equal(
@@ -144,16 +131,13 @@ int main() {
     assert_four_modes_equal(builder, query, 2, false, true, &saw_pruning);
   }
 
-  disable_mbb_pruning(builder);
   for (size_t i = 0; i < 12; ++i) {
     navigamer::BioSequence query("q_" + std::to_string(i), sequences[i]->seq);
-    assert_four_modes_equal(builder, query, 2, false, false, &saw_pruning);
+    assert_four_modes_equal(builder, query, 2, false, true, &saw_pruning);
   }
-  assert(saw_pruning);
-
   navigamer::BioSequence ambiguous("ambiguous", sequences[0]->seq);
   ambiguous.seq[10] = 'N';
-  assert_four_modes_equal(builder, ambiguous, 2, true, false, &saw_pruning);
+  assert_four_modes_equal(builder, ambiguous, 2, true, true, &saw_pruning);
 
   navigamer::BioGeometrySearchEngine disabled_q_engine(
       builder, config(navigamer::MBBFilterMode::Scan, true, 0));

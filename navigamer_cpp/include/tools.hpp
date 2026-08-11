@@ -2,9 +2,12 @@
 #define NAVIGAMER_TOOLS_HPP
 
 #include "structure.hpp"
-#include <vector>
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace navigamer {
 
@@ -19,21 +22,82 @@ enum class DistanceMode {
 const char* distance_mode_name(DistanceMode mode);
 DistanceMode parse_distance_mode(const std::string& value);
 
-int compute_distance(const std::string& a, const std::string& b);
+int compute_distance(std::string_view a, std::string_view b);
 int compute_distance(const BioSequence& a, const BioSequence& b);
-int compute_distance_bounded_dp(const std::string& a, const std::string& b,
+int compute_distance_bounded_dp(std::string_view a, std::string_view b,
                                 int tau);
-int compute_distance_edlib(const std::string& a, const std::string& b);
-int compute_distance_bounded_edlib(const std::string& a, const std::string& b,
+int compute_distance_edlib(std::string_view a, std::string_view b);
+int compute_distance_bounded_edlib(std::string_view a, std::string_view b,
                                    int tau);
-bool compute_distance_bounded_myers_supported(const std::string& a,
-                                              const std::string& b);
-int compute_distance_bounded_myers(const std::string& a, const std::string& b,
+
+struct PreparedEdlibDnaPattern {
+  std::string pattern;
+  void* handle = nullptr;
+
+  PreparedEdlibDnaPattern() = default;
+  ~PreparedEdlibDnaPattern();
+  PreparedEdlibDnaPattern(PreparedEdlibDnaPattern&& other) noexcept;
+  PreparedEdlibDnaPattern& operator=(
+      PreparedEdlibDnaPattern&& other) noexcept;
+  PreparedEdlibDnaPattern(const PreparedEdlibDnaPattern&) = delete;
+  PreparedEdlibDnaPattern& operator=(
+      const PreparedEdlibDnaPattern&) = delete;
+};
+
+PreparedEdlibDnaPattern prepare_edlib_dna_pattern(
+    std::string_view pattern);
+int compute_distance_bounded_edlib_prepared(
+    const PreparedEdlibDnaPattern& pattern,
+    std::string_view text,
+    int tau);
+int compute_distance_edlib_prepared(
+    const PreparedEdlibDnaPattern& pattern,
+    std::string_view text);
+bool compute_distance_bounded_myers_supported(std::string_view a,
+                                              std::string_view b);
+int compute_distance_bounded_myers(std::string_view a, std::string_view b,
                                    int tau);
-int compute_distance_bounded_with_mode(const std::string& a,
-                                       const std::string& b, int tau,
+
+struct PreparedMyersDnaPattern {
+  std::array<std::array<uint64_t, 4>, 4> peq{};
+  std::array<uint64_t, 4> masks{};
+  size_t pattern_length = 0;
+  size_t block_count = 0;
+  bool supported = false;
+};
+
+struct PreparedMyersPattern {
+  std::string pattern;
+  std::array<std::array<uint64_t, 4>, 4> peq{};
+  std::array<uint64_t, 4> masks{};
+  size_t block_count = 0;
+  bool supported = false;
+};
+
+// Build-only trusted ACGT batch paths need only the bit masks and length, so
+// this preparation avoids owning a second copy of the reference window.
+PreparedMyersDnaPattern prepare_myers_dna_pattern(
+    std::string_view pattern);
+PreparedMyersPattern prepare_myers_pattern(std::string_view pattern);
+int compute_distance_bounded_myers_prepared(
+    const PreparedMyersPattern& pattern,
+    std::string_view text,
+    int tau);
+bool myers_batch4_avx2_runtime_supported();
+// Computes four exact bounded distances. The caller guarantees that the
+// shared pattern and all texts contain only uppercase A/C/G/T. Returns false
+// when AVX2 or the equal-length <=256 bp shape is unavailable, in which case
+// callers must use the scalar verifier.
+bool compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+    const PreparedMyersDnaPattern& pattern,
+    const std::array<std::string_view, 4>& texts,
+    int tau,
+    std::array<int, 4>& distances);
+
+int compute_distance_bounded_with_mode(std::string_view a,
+                                       std::string_view b, int tau,
                                        DistanceMode mode);
-int compute_distance_bounded(const std::string& a, const std::string& b, int tau);
+int compute_distance_bounded(std::string_view a, std::string_view b, int tau);
 
 // Farthest Point Sampling: choose k dispersed candidates.
 std::vector<size_t> farthest_point_sampling(

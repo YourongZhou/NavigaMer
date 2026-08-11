@@ -78,7 +78,7 @@ struct LocalityBenchmarkConfig {
   std::vector<std::string> datasets = {
       "same_template", "nearby_windows", "random_windows"};
   std::vector<std::string> scenarios;
-  std::vector<std::string> batch_schedules = {"original"};
+  std::vector<std::string> batch_schedules = {"source-oracle"};
   std::string out_tsv_path;
   std::string query_fastq_out_path;
 };
@@ -199,6 +199,13 @@ ProximalAnchorSetDiagnostics compute_proximal_anchor_set_diagnostics(
 std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
     const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
     const std::vector<std::shared_ptr<BioSequence>>& unique_sequences,
+    int query_length,
+    int tolerance,
+    unsigned seed,
+    size_t queries_per_class);
+std::vector<GeneratedBenchmarkQuery> generate_benchmark_queries(
+    const std::vector<std::shared_ptr<BioSequence>>& index_sequences,
+    const SequenceStore& unique_sequences,
     int query_length,
     int tolerance,
     unsigned seed,

@@ -5,13 +5,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
 namespace navigamer {
 
 struct IndexBuildManifest {
-  uint32_t format_version = 2;
+  uint32_t format_version = 65;
   std::string signature;
   std::string ref_input;
   std::string reads_input;
@@ -25,18 +26,18 @@ struct IndexBuildManifest {
   std::string build_distance_mode;
   std::string phase1_candidate_mode;
   std::string range_candidate_mode;
-  int range_min_seed_len = 8;
+  int range_min_seed_len = 6;
   int range_max_seed_len = 20;
   int qgram_q = 5;
   size_t auto_pigeonhole_max_candidates = 4096;
   double auto_pigeonhole_max_ratio = 0.25;
   bool auto_hybrid_on_large_candidates = true;
   size_t min_rect_index_fanout = 64;
-  size_t phase1_metric_min_fanout = 64;
-  size_t phase1_qgram_min_fanout = 64;
+  size_t phase1_metric_min_fanout = 12;
+  size_t phase1_qgram_min_fanout = 12;
   size_t phase1_qgram_max_touched = 250000;
   bool phase2_qgram_postfilter = false;
-  bool leaf_qgram_postfilter = true;
+  bool leaf_qgram_postfilter = false;
   size_t sequence_count = 0;
   size_t world_node_count = 0;
   size_t edge_count = 0;
@@ -46,6 +47,11 @@ struct IndexBuildManifest {
 struct LoadedIndex {
   BioGeometryIndexBuilder builder;
   IndexBuildManifest manifest;
+};
+
+enum class IndexLoadValidation {
+  Full,
+  Structural,
 };
 
 IndexBuildManifest make_index_manifest(
@@ -64,6 +70,12 @@ IndexBuildManifest make_reference_window_index_manifest(
 
 IndexBuildManifest read_index_manifest(const std::string& path);
 
+// Embed one validated build manifest in a container format. Sharded indexes
+// use this once at bundle scope instead of repeating it in every graph image.
+void write_index_build_manifest(
+    std::ostream& out, const IndexBuildManifest& manifest);
+IndexBuildManifest read_index_build_manifest(std::istream& in);
+
 bool index_matches_manifest(
     const std::string& path,
     const IndexBuildManifest& expected,
@@ -74,7 +86,41 @@ void save_index(const std::string& path,
                 const BioGeometryIndexBuilder& builder,
                 const IndexBuildManifest& manifest);
 
-LoadedIndex load_index(const std::string& path);
+// Persist only the independently mmap-decodable graph payload. The shared
+// build manifest is supplied by the containing sharded index.
+void write_index_payload(
+    std::ostream& out, const BioGeometryIndexBuilder& builder);
+void save_index_payload(
+    const std::string& path,
+    const BioGeometryIndexBuilder& builder);
+
+LoadedIndex load_index(
+    const std::string& path,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
+
+// Load one complete .navidx image embedded at a 64-byte-aligned range in a
+// larger file. Only the requested byte range is mapped.
+LoadedIndex load_index_range(
+    const std::string& path,
+    uint64_t offset,
+    uint64_t length,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
+
+LoadedIndex load_index_payload(
+    const std::string& path,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
+
+LoadedIndex load_index_payload_range(
+    const std::string& path,
+    uint64_t offset,
+    uint64_t length,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
 
 }  // namespace navigamer
 

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -136,6 +137,111 @@ void test_far_seed_occurrences_are_filtered_by_position() {
                              result.candidate_indices.end(), size_t{1}));
 }
 
+void test_fixed_layout_sparse_postings_are_recall_safe() {
+  constexpr size_t sequence_length = 250;
+  constexpr int tau = 5;
+  std::mt19937 gen(17191);
+  const std::string query = random_dna(sequence_length, gen);
+  std::vector<std::string> candidates;
+  candidates.reserve(260);
+  candidates.push_back(query);
+
+  std::string substitutions = query;
+  for (size_t idx : {size_t{0}, size_t{41}, size_t{82},
+                     size_t{164}, size_t{249}}) {
+    substitutions[idx] = substitutions[idx] == 'A' ? 'C' : 'A';
+  }
+  candidates.push_back(std::move(substitutions));
+
+  std::string balanced_indels = query;
+  balanced_indels.erase(17, 1);
+  balanced_indels.insert(211, 1, 'A');
+  candidates.push_back(std::move(balanced_indels));
+  for (size_t idx = candidates.size(); idx < 260; ++idx) {
+    candidates.push_back(random_dna(sequence_length, gen));
+  }
+
+  navigamer::IncrementalPigeonholeIndex index(
+      {8, 20, sequence_length, tau});
+  for (size_t idx = 0; idx < candidates.size(); ++idx) {
+    index.append(idx, candidates[idx]);
+  }
+  assert_contains_all_matches(index, candidates, query, tau);
+  assert_contains_all_matches(index, candidates, query, tau - 1);
+  assert(!index.query(query, tau + 1).safe);
+  assert(!index.query(query.substr(1), tau).safe);
+}
+
+void test_fixed_layout_matches_dense_candidate_sets() {
+  constexpr size_t sequence_length = 250;
+  constexpr int maximum_tau = 30;
+  std::mt19937 gen(44109);
+  std::vector<std::string> candidates;
+  candidates.reserve(320);
+  for (size_t idx = 0; idx < 320; ++idx) {
+    candidates.push_back(random_dna(sequence_length, gen));
+  }
+
+  navigamer::IncrementalPigeonholeIndex dense({8, 20});
+  navigamer::IncrementalPigeonholeIndex compact(
+      {8, 20, sequence_length, maximum_tau});
+  for (size_t idx = 0; idx < candidates.size(); ++idx) {
+    dense.append(idx, candidates[idx]);
+    compact.append(idx, candidates[idx]);
+  }
+
+  for (int tau : {0, 1, 4, 5, 10, 15, 22, 30}) {
+    for (size_t query_idx = 0; query_idx < 12; ++query_idx) {
+      const std::string query = mutate_with_indels(
+          candidates[(query_idx * 23 + static_cast<size_t>(tau)) %
+                     candidates.size()],
+          0, gen);
+      const auto dense_result = dense.query(query, tau);
+      const auto compact_result = compact.query(query, tau);
+      assert(dense_result.safe);
+      assert(compact_result.safe);
+      assert(dense_result.candidate_indices ==
+             compact_result.candidate_indices);
+    }
+  }
+  assert(compact.posting_entry_count() <
+         dense.posting_entry_count());
+}
+
+void test_packed_postings_promote_without_losing_candidates() {
+  navigamer::IncrementalPigeonholeIndex packed_items({4, 4});
+  const std::string short_sequence = "ACGT";
+  for (size_t idx = 0; idx < 300; ++idx) {
+    packed_items.append(idx, short_sequence);
+  }
+  const auto packed_result = packed_items.query(short_sequence, 0);
+  assert(packed_result.safe);
+  assert(packed_result.candidate_indices.size() == 300);
+
+  // A 21-mer all-T code exceeds 40 bits. This exercises the exact wide-key
+  // head-table fallback and then the Compact24 -> Packed32 posting promotion.
+  navigamer::IncrementalPigeonholeIndex many_items({21, 21});
+  const std::string wide_key_sequence(21, 'T');
+  constexpr size_t item_count =
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 2;
+  for (size_t idx = 0; idx < item_count; ++idx) {
+    many_items.append(idx, wide_key_sequence);
+  }
+  const auto many_result = many_items.query(wide_key_sequence, 0);
+  assert(many_result.safe);
+  assert(many_result.candidate_indices.size() == item_count);
+  assert(many_result.candidate_indices.front() == 0);
+  assert(many_result.candidate_indices.back() == item_count - 1);
+
+  navigamer::IncrementalPigeonholeIndex long_position({4, 4});
+  const std::string long_sequence(
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 8, 'A');
+  long_position.append(0, long_sequence);
+  const auto long_result = long_position.query(long_sequence, 0);
+  assert(long_result.safe);
+  assert((long_result.candidate_indices == std::vector<size_t>{0}));
+}
+
 }  // namespace
 
 int main() {
@@ -143,6 +249,9 @@ int main() {
   test_unindexable_candidates_are_not_dropped();
   test_unsafe_queries_request_fallback();
   test_far_seed_occurrences_are_filtered_by_position();
+  test_fixed_layout_sparse_postings_are_recall_safe();
+  test_fixed_layout_matches_dense_candidate_sets();
+  test_packed_postings_promote_without_losing_candidates();
   std::cout << "phase1 seed index tests passed\n";
   return 0;
 }

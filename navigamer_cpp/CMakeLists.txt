@@ -23,19 +23,22 @@ set(NAVIGAMER_EDLIB_INCLUDE
 
 # NavigaMer v8 C++ reference implementation.
 add_executable(navigamer
-  src/main.cpp
   src/structure.cpp
   src/tools.cpp
+  src/search_engine.cpp
   src/qgram_filter.cpp
   src/range_join.cpp
   src/mbb_rect_index.cpp
   src/index_builder.cpp
-  src/search_engine.cpp
   src/io_utils.cpp
   src/experiment_utils.cpp
   src/map150.cpp
   src/query_benchmark.cpp
   src/index_persistence.cpp
+  src/sharded_index.cpp
+  src/shard_router.cpp
+  src/candidate_verifier.cpp
+  src/main.cpp
 )
 
 target_include_directories(navigamer PRIVATE
@@ -297,6 +300,10 @@ foreach(target navigamer test_recall test_distance_bound test_hierarchy_config t
   target_sources(${target} PRIVATE src/build_progress.cpp)
 endforeach()
 
+foreach(target test_build_distance_mode test_query_benchmark_gate test_epoch_visited test_search_graph_view test_build_timing_stats)
+  target_sources(${target} PRIVATE src/index_persistence.cpp)
+endforeach()
+
 add_executable(test_simd_mbb_filter
   src/test_simd_mbb_filter.cpp
   src/simd_mbb_filter.cpp
@@ -327,7 +334,29 @@ add_executable(test_index_persistence
   src/build_progress.cpp
 )
 
-foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_bounded_myers test_qgram_filter test_range_join test_phase1_seed_index test_build_range_equivalence test_build_distance_mode test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode test_build_timing_stats test_index_persistence)
+add_executable(test_sharded_index
+  src/test_sharded_index.cpp
+  src/structure.cpp
+  src/tools.cpp
+  src/qgram_filter.cpp
+  src/range_join.cpp
+  src/mbb_rect_index.cpp
+  src/simd_mbb_filter.cpp
+  src/index_builder.cpp
+  src/search_engine.cpp
+  src/io_utils.cpp
+  src/experiment_utils.cpp
+  src/map150.cpp
+  src/query_benchmark.cpp
+  src/index_persistence.cpp
+  src/sharded_index.cpp
+  src/shard_router.cpp
+  src/phase1_seed_index.cpp
+  src/phase2_distance_verifier.cpp
+  src/build_progress.cpp
+)
+
+foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_bounded_myers test_qgram_filter test_range_join test_phase1_seed_index test_build_range_equivalence test_build_distance_mode test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode test_build_timing_stats test_index_persistence test_sharded_index)
   target_sources(${target} PRIVATE ${NAVIGAMER_EDLIB_SOURCE})
   target_include_directories(${target} PRIVATE ${NAVIGAMER_EDLIB_INCLUDE})
 endforeach()
@@ -431,9 +460,13 @@ target_include_directories(test_index_persistence PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(test_index_persistence PRIVATE OpenMP::OpenMP_CXX)
+target_include_directories(test_sharded_index PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_sharded_index PRIVATE OpenMP::OpenMP_CXX)
 
 if(NAVIGAMER_WITH_SEQAN3)
-  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_bounded_myers test_qgram_filter test_range_join test_phase1_seed_index test_phase2_distance_verifier test_build_range_equivalence test_build_distance_mode test_mbb_rect_index test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode test_build_timing_stats test_build_scale_smoke test_simd_mbb_filter test_simd_leaf_beacon_filter test_index_persistence)
+  foreach(target navigamer test_recall test_distance_bound test_hierarchy_config test_search_stats_bin test_map150_recall test_bounded_edit_distance test_bounded_myers test_qgram_filter test_range_join test_phase1_seed_index test_phase2_distance_verifier test_build_range_equivalence test_build_distance_mode test_mbb_rect_index test_mbb_filter_equivalence test_search_qgram_prefilter test_query_benchmark_gate test_epoch_visited test_search_graph_view test_search_distance_mode test_build_timing_stats test_build_scale_smoke test_simd_mbb_filter test_simd_leaf_beacon_filter test_index_persistence test_sharded_index)
     target_compile_definitions(${target} PRIVATE NAVIGAMER_WITH_SEQAN3)
     target_link_libraries(${target} PRIVATE seqan3::seqan3)
   endforeach()
@@ -471,4 +504,5 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   target_compile_options(test_simd_mbb_filter PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_simd_leaf_beacon_filter PRIVATE -O3 -DNDEBUG)
   target_compile_options(test_index_persistence PRIVATE -O3 -DNDEBUG)
+  target_compile_options(test_sharded_index PRIVATE -O3 -DNDEBUG)
 endif()

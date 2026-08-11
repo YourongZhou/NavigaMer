@@ -53,6 +53,29 @@ bool has_hit(const std::vector<navigamer::Map150Result>& hits,
   });
 }
 
+bool same_mapping_results(const std::vector<navigamer::Map150Result>& left,
+                          const std::vector<navigamer::Map150Result>& right) {
+  if (left.size() != right.size()) return false;
+  for (size_t i = 0; i < left.size(); ++i) {
+    const auto& a = left[i];
+    const auto& b = right[i];
+    if (a.query_id != b.query_id || a.hit_id != b.hit_id ||
+        a.ref_id != b.ref_id || a.strand != b.strand ||
+        a.query_start != b.query_start ||
+        a.reference_start != b.reference_start ||
+        a.reference_end != b.reference_end ||
+        a.aligned_length != b.aligned_length || a.score != b.score ||
+        a.edit_distance != b.edit_distance ||
+        a.query_fragment != b.query_fragment ||
+        a.reference_fragment != b.reference_fragment ||
+        a.sa_interval.start != b.sa_interval.start ||
+        a.sa_interval.end != b.sa_interval.end) {
+      return false;
+    }
+  }
+  return true;
+}
+
 int min_window_distance_near(const std::string& ref,
                              const std::string& query,
                              int true_start,
@@ -131,6 +154,34 @@ void test_substitution_duplicate_reverse_nohit_and_false_positive_filtering() {
   assert(map_one(two_sub, query).empty());
 }
 
+void test_reference_backed_refpos_matches_generic_windows() {
+  const std::string query = repeated_pattern(navigamer::MAP150_READ_LEN);
+  const std::string substituted = mutate_base(query, 42);
+  const std::string ref = substituted + "GGGGGGGGGG" + substituted;
+  std::vector<std::shared_ptr<navigamer::BioSequence>> reads = {
+      std::make_shared<navigamer::BioSequence>("read0", query)};
+
+  navigamer::BioGeometryIndexBuilder generic_builder(kMapperHierarchy);
+  generic_builder.build(
+      navigamer::build_map150_reference_windows("ref", ref));
+  navigamer::RefPositionLocator locator;
+  const auto generic_results = navigamer::map150_reads_with_locator(
+      "ref", ref, reads, 1, "adaptive", kMapperHierarchy, locator,
+      generic_builder);
+
+  navigamer::BioGeometryIndexBuilder reference_builder(kMapperHierarchy);
+  reference_builder.build_reference_windows(
+      "ref", ref, navigamer::MAP150_READ_LEN, 1);
+  const auto& store = reference_builder.sequence_store();
+  assert(store.reference_backed);
+  assert(store.records.empty());
+  const auto reference_results = navigamer::map150_reads_with_locator(
+      "ref", ref, reads, 1, "adaptive", kMapperHierarchy, locator,
+      reference_builder);
+
+  assert(same_mapping_results(generic_results, reference_results));
+}
+
 void test_validation_rejects_wrong_read_length_and_non_acgt() {
   std::vector<std::shared_ptr<navigamer::BioSequence>> short_read = {
       std::make_shared<navigamer::BioSequence>("short", repeated_pattern(149))};
@@ -164,11 +215,11 @@ std::vector<std::shared_ptr<navigamer::BioSequence>> build_windows_and_index(
   return windows;
 }
 
-std::shared_ptr<navigamer::BioSequence> find_sequence(
+const navigamer::BioSequence* find_sequence(
     const navigamer::BioGeometryIndexBuilder& builder,
     const std::string& seq) {
-  for (const auto& entry : builder.unique_sequences) {
-    if (entry.second && entry.second->seq == seq) return entry.second;
+  for (const auto& sequence : builder.sequence_store().records) {
+    if (sequence.seq == seq) return &sequence;
   }
   return nullptr;
 }
@@ -222,6 +273,7 @@ int main() {
   test_deletion_span_149_is_recovered_even_when_150mer_distance_is_two();
   test_insertion_span_151_is_recovered_even_when_150mer_distance_is_two();
   test_substitution_duplicate_reverse_nohit_and_false_positive_filtering();
+  test_reference_backed_refpos_matches_generic_windows();
   test_validation_rejects_wrong_read_length_and_non_acgt();
 #ifdef NAVIGAMER_WITH_SEQAN3
   test_seqan_locator_uses_sa_interval_not_hit_sequence();

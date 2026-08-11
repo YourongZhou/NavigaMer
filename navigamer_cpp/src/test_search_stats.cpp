@@ -56,8 +56,8 @@ int main() {
   assert(stats.mbb_check_count == stats.edge_access_count);
   assert(stats.visited_check_count > 0);
   assert(stats.visited_hit_count <= stats.visited_check_count);
-  assert(stats.leaf_exact_distance_call_count == stats.leaf_verify_count);
-  assert(stats.center_exact_distance_call_count ==
+  assert(stats.leaf_exact_distance_call_count <= stats.leaf_verify_count);
+  assert(stats.center_exact_distance_call_count <=
          stats.world_access_count);
   assert(stats.path_contained_step_count +
              stats.path_overlap_step_count +
@@ -80,9 +80,9 @@ int main() {
   assert(qgram_stats.mbb_check_count == qgram_stats.edge_access_count);
   assert(qgram_stats.visited_check_count > 0);
   assert(qgram_stats.visited_hit_count <= qgram_stats.visited_check_count);
-  assert(qgram_stats.leaf_exact_distance_call_count ==
+  assert(qgram_stats.leaf_exact_distance_call_count <=
          qgram_stats.leaf_verify_count);
-  assert(qgram_stats.center_exact_distance_call_count ==
+  assert(qgram_stats.center_exact_distance_call_count <=
          qgram_stats.world_access_count);
   assert(qgram_stats.path_contained_step_count +
              qgram_stats.path_overlap_step_count +

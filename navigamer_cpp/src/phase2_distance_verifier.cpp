@@ -1,5 +1,7 @@
 #include "phase2_distance_verifier.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace navigamer {
@@ -12,11 +14,37 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
       : distance_mode_(distance_mode) {}
 
   Phase2DistanceBatchResult verify(
-      const std::vector<std::string>& parent_sequences,
-      const std::vector<std::string>& child_sequences,
-      const std::vector<Phase2DistancePair>& pairs) override {
+      const std::vector<std::string_view>& parent_sequences,
+      const std::vector<std::string_view>& child_sequences,
+      const std::vector<Phase2DistancePair>& pairs,
+      int tau) override {
+    if (tau < 0) {
+      throw std::invalid_argument(
+          "phase2 distance threshold must be non-negative");
+    }
+    if (pairs.size() >
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+      throw std::length_error(
+          "phase2 distance batch exceeds compact result capacity");
+    }
     Phase2DistanceBatchResult result;
-    result.accepted_pair_indices.reserve(pairs.size());
+    result.accepted_pair_indices.reserve(
+        std::min<size_t>(pairs.size(), 1024));
+
+    bool prepare_parent = false;
+    if (distance_mode_ == DistanceMode::Edlib && !pairs.empty()) {
+      size_t parent_runs = 1;
+      size_t child_runs = 1;
+      for (size_t pair_idx = 1; pair_idx < pairs.size(); ++pair_idx) {
+        parent_runs +=
+            pairs[pair_idx].parent_idx != pairs[pair_idx - 1].parent_idx;
+        child_runs +=
+            pairs[pair_idx].child_idx != pairs[pair_idx - 1].child_idx;
+      }
+      prepare_parent = parent_runs <= child_runs;
+    }
+    size_t prepared_idx = std::numeric_limits<size_t>::max();
+    PreparedEdlibDnaPattern prepared;
 
     for (size_t pair_idx = 0; pair_idx < pairs.size(); ++pair_idx) {
       const auto& pair = pairs[pair_idx];
@@ -24,12 +52,32 @@ class CpuPhase2DistanceVerifier final : public Phase2DistanceVerifier {
           pair.child_idx >= child_sequences.size()) {
         throw std::out_of_range("phase2 distance pair index out of range");
       }
-      const int dist = compute_distance_bounded_with_mode(
-          parent_sequences[pair.parent_idx],
-          child_sequences[pair.child_idx],
-          pair.tau,
-          distance_mode_);
-      if (dist <= pair.tau) result.accepted_pair_indices.push_back(pair_idx);
+      int dist = 0;
+      if (distance_mode_ == DistanceMode::Edlib) {
+        const size_t pattern_idx =
+            prepare_parent ? pair.parent_idx : pair.child_idx;
+        if (pattern_idx != prepared_idx) {
+          prepared = prepare_edlib_dna_pattern(
+              prepare_parent ? parent_sequences[pair.parent_idx]
+                             : child_sequences[pair.child_idx]);
+          prepared_idx = pattern_idx;
+        }
+        dist = compute_distance_bounded_edlib_prepared(
+            prepared,
+            prepare_parent ? child_sequences[pair.child_idx]
+                           : parent_sequences[pair.parent_idx],
+            tau);
+      } else {
+        dist = compute_distance_bounded_with_mode(
+            parent_sequences[pair.parent_idx],
+            child_sequences[pair.child_idx],
+            tau,
+            distance_mode_);
+      }
+      if (dist <= tau) {
+        result.accepted_pair_indices.push_back(
+            static_cast<uint32_t>(pair_idx));
+      }
     }
     return result;
   }

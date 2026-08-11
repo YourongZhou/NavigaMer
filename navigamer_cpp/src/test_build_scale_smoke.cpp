@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -62,6 +63,7 @@ int main() {
 
   for (const std::string& required : {
            "prefix_len",
+           "invalid_window_count",
            "total_build_ms",
            "phase0_dedup_ms",
            "phase2_candidate_query_ms",
@@ -103,6 +105,7 @@ int main() {
     assert(phase2_verify_worker_ms >= 0.0);
     assert(phase3_distance_ms >= 0.0);
     assert(leaf_beacon_ms >= 0.0);
+    assert(row[column.at("invalid_window_count")] == "0");
     assert(row[column.at("leaf_attach_direction_used")] == "world_to_seq");
     row_count++;
   }
@@ -195,13 +198,18 @@ int main() {
   std::string batch_row;
   bool saw_read0 = false;
   bool saw_read1 = false;
+  size_t read0_rows = 0;
   while (std::getline(batch_in, batch_row)) {
-    if (batch_row.find("read0\t") == 0) saw_read0 = true;
+    if (batch_row.find("read0\t") == 0) {
+      saw_read0 = true;
+      read0_rows++;
+    }
     if (batch_row.find("read1\t") == 0) saw_read1 = true;
     assert(batch_row.find("\ttrue\t") != std::string::npos);
   }
   assert(saw_read0);
   assert(saw_read1);
+  assert(read0_rows == 7);
 
   std::ifstream trace_in(batch_trace);
   assert(trace_in.good());
@@ -293,6 +301,365 @@ int main() {
       std::istreambuf_iterator<char>());
   assert(rejected_text.find("--index requires exactly one prefix length") !=
          std::string::npos);
+
+  const std::string multicontig_fasta =
+      "/tmp/navigamer_build_scale_multicontig.fa";
+  const std::string multicontig_index =
+      "/tmp/navigamer_build_scale_multicontig.navidx";
+  const std::string multicontig_csv =
+      "/tmp/navigamer_build_scale_multicontig.csv";
+  const std::string multicontig_reads =
+      "/tmp/navigamer_build_scale_multicontig.fq";
+  const std::string multicontig_tsv =
+      "/tmp/navigamer_build_scale_multicontig.tsv";
+  {
+    std::ofstream fasta(multicontig_fasta);
+    fasta << ">chr1\nAAAACCCC\n>chr2\nAAAANAAAA\n";
+    std::ofstream reads(multicontig_reads);
+    reads << "@exact\nAAAA\n+\nIIII\n";
+  }
+  const std::string multicontig_build_command =
+      "./navigamer build-scale --ref " + multicontig_fasta +
+      " --window 4 --stride 1 --prefix-lengths 17 "
+      "--primary-radii 8,4,2 --progress-interval-seconds 0 "
+      "--index " + multicontig_index + " --out " + multicontig_csv +
+      " >/tmp/navigamer_multicontig_build.stdout "
+      "2>/tmp/navigamer_multicontig_build.stderr";
+  assert(std::system(multicontig_build_command.c_str()) == 0);
+  {
+    std::ifstream csv(multicontig_csv);
+    std::string multicontig_header_line;
+    std::string multicontig_row_line;
+    assert(static_cast<bool>(std::getline(csv, multicontig_header_line)));
+    assert(static_cast<bool>(std::getline(csv, multicontig_row_line)));
+    const auto multicontig_header =
+        split_csv_line(multicontig_header_line);
+    const auto multicontig_row = split_csv_line(multicontig_row_line);
+    std::map<std::string, size_t> multicontig_columns;
+    for (size_t i = 0; i < multicontig_header.size(); ++i) {
+      multicontig_columns[multicontig_header[i]] = i;
+    }
+    assert(multicontig_row[
+               multicontig_columns.at("invalid_window_count")] == "4");
+  }
+  const std::string multicontig_query_command =
+      "./navigamer query-index-batch --index " + multicontig_index +
+      " --reads " + multicontig_reads +
+      " --tolerance 0 --out " + multicontig_tsv +
+      " >/tmp/navigamer_multicontig_query.stdout "
+      "2>/tmp/navigamer_multicontig_query.stderr";
+  assert(std::system(multicontig_query_command.c_str()) == 0);
+  {
+    std::ifstream tsv(multicontig_tsv);
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    const auto output_header = split_tsv_line(line);
+    std::map<std::string, size_t> output_columns;
+    for (size_t i = 0; i < output_header.size(); ++i) {
+      output_columns[output_header[i]] = i;
+    }
+    std::vector<std::string> locations;
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      locations.push_back(
+          row[output_columns.at("ref_id")] + ":" +
+          row[output_columns.at("reference_start")]);
+    }
+    assert(locations ==
+           std::vector<std::string>(
+               {"chr1:0", "chr2:0", "chr2:5"}));
+  }
+
+  const std::string sharded_index =
+      "/tmp/navigamer_build_scale_multicontig.navshard";
+  const std::string sharded_tsv =
+      "/tmp/navigamer_build_scale_multicontig_sharded.tsv";
+  const std::string sharded_build_command =
+      "./navigamer build-sharded --ref " + multicontig_fasta +
+      " --window 4 --stride 1 --shard-windows 2 "
+      "--primary-radii 8,4,2 --progress-interval-seconds 0 "
+      "--index " + sharded_index +
+      " >/tmp/navigamer_sharded_build.stdout "
+      "2>/tmp/navigamer_sharded_build.stderr";
+  assert(std::system(sharded_build_command.c_str()) == 0);
+  const std::string sharded_query_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index-batch --index " +
+      sharded_index + " --reads " + multicontig_reads +
+      " --tolerance 0 --out " + sharded_tsv +
+      " >/tmp/navigamer_sharded_query.stdout "
+      "2>/tmp/navigamer_sharded_query.stderr";
+  assert(std::system(sharded_query_command.c_str()) == 0);
+  {
+    std::ifstream tsv(sharded_tsv);
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    const auto output_header = split_tsv_line(line);
+    std::map<std::string, size_t> output_columns;
+    for (size_t i = 0; i < output_header.size(); ++i) {
+      output_columns[output_header[i]] = i;
+    }
+    std::vector<std::string> locations;
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      assert(row[output_columns.at("hit_id")] == "chr1_0");
+      assert(row[output_columns.at("result_count")] == "1");
+      locations.push_back(
+          row[output_columns.at("ref_id")] + ":" +
+          row[output_columns.at("reference_start")]);
+    }
+    assert(locations ==
+           std::vector<std::string>(
+               {"chr1:0", "chr2:0", "chr2:5"}));
+  }
+
+  // An ambiguous query must conservatively scan every shard, but the CLI
+  // must never make all human-scale shards resident at once. Use enough tiny
+  // shards to cross the fixed residency cap and verify a true hit survives
+  // the chunked exact fallback.
+  const std::string fallback_fasta =
+      "/tmp/navigamer_bounded_fallback.fa";
+  const std::string fallback_reads =
+      "/tmp/navigamer_bounded_fallback.fq";
+  const std::string fallback_index =
+      "/tmp/navigamer_bounded_fallback.navshard";
+  const std::string fallback_tsv =
+      "/tmp/navigamer_bounded_fallback.tsv";
+  std::string fallback_reference;
+  fallback_reference.reserve(3000);
+  uint64_t fallback_state = 0x9e3779b97f4a7c15ULL;
+  constexpr char fallback_bases[] = {'A', 'C', 'G', 'T'};
+  for (size_t idx = 0; idx < 3000; ++idx) {
+    fallback_state =
+        fallback_state * 6364136223846793005ULL + 1;
+    fallback_reference.push_back(
+        fallback_bases[(fallback_state >> 62) & 3]);
+  }
+  for (size_t motif_begin = 0;
+       motif_begin + 16 <= fallback_reference.size();
+       motif_begin += 100) {
+    fallback_reference.replace(motif_begin, 16, 16, 'A');
+  }
+  {
+    std::ofstream fasta(fallback_fasta);
+    assert(fasta.good());
+    fasta << ">fallback_ref\n" << fallback_reference << '\n';
+  }
+  std::string fallback_query = fallback_reference.substr(123, 150);
+  fallback_query[12] = 'N';
+  {
+    std::ofstream reads(fallback_reads);
+    assert(reads.good());
+    reads << "@fallback_read\n" << fallback_query
+          << "\n+\n" << std::string(150, 'I') << '\n';
+    reads << "@oversized_route_read\n"
+          << fallback_reference.substr(123, 150)
+          << "\n+\n" << std::string(150, 'I') << '\n';
+  }
+  const std::string fallback_build_command =
+      "OMP_NUM_THREADS=4 ./navigamer build-sharded --ref " +
+      fallback_fasta +
+      " --window 150 --stride 1 --shard-windows 8 "
+      "--shard-build-jobs 4 --primary-radii 30,15,5 "
+      "--progress-interval-seconds 0 --index " + fallback_index +
+      " >/tmp/navigamer_bounded_fallback_build.stdout "
+      "2>/tmp/navigamer_bounded_fallback_build.stderr";
+  assert(std::system(fallback_build_command.c_str()) == 0);
+  const std::string fallback_query_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index-batch --index " +
+      fallback_index + " --reads " + fallback_reads +
+      " --tolerance 5 --out " + fallback_tsv +
+      " >/tmp/navigamer_bounded_fallback_query.stdout "
+      "2>/tmp/navigamer_bounded_fallback_query.stderr";
+  assert(std::system(fallback_query_command.c_str()) == 0);
+  {
+    std::ifstream stderr_in(
+        "/tmp/navigamer_bounded_fallback_query.stderr");
+    assert(stderr_in.good());
+    const std::string stderr_text(
+        (std::istreambuf_iterator<char>(stderr_in)),
+        std::istreambuf_iterator<char>());
+    assert(stderr_text.find("peak_shards=64/") != std::string::npos);
+    assert(stderr_text.find("routed_queries=1/2") != std::string::npos);
+  }
+  {
+    std::ifstream tsv(fallback_tsv);
+    assert(tsv.good());
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    const auto output_header = split_tsv_line(line);
+    std::map<std::string, size_t> output_columns;
+    for (size_t idx = 0; idx < output_header.size(); ++idx) {
+      output_columns[output_header[idx]] = idx;
+    }
+    bool recovered_fallback_source = false;
+    bool recovered_oversized_route_source = false;
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      if (row[output_columns.at("query_id")] == "fallback_read" &&
+          row[output_columns.at("reference_start")] == "123" &&
+          std::stoi(row[output_columns.at("edit_distance")]) <= 5) {
+        recovered_fallback_source = true;
+      }
+      if (row[output_columns.at("query_id")] ==
+              "oversized_route_read" &&
+          row[output_columns.at("reference_start")] == "123" &&
+          std::stoi(row[output_columns.at("edit_distance")]) == 0) {
+        recovered_oversized_route_source = true;
+      }
+    }
+    assert(recovered_fallback_source);
+    assert(recovered_oversized_route_source);
+  }
+  const std::string route_budget_reads =
+      "/tmp/navigamer_route_budget_queries.fq";
+  const std::string route_budget_tsv =
+      "/tmp/navigamer_route_budget_queries.tsv";
+  constexpr size_t route_budget_query_count = 185;
+  {
+    std::ofstream reads(route_budget_reads);
+    assert(reads.good());
+    const std::string sequence = fallback_reference.substr(123, 150);
+    const std::string quality(150, 'I');
+    for (size_t query_idx = 0;
+         query_idx < route_budget_query_count; ++query_idx) {
+      reads << "@route_budget_" << query_idx << '\n'
+            << sequence << "\n+\n" << quality << '\n';
+    }
+  }
+  const std::string route_budget_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index-batch --index " +
+      fallback_index + " --reads " + route_budget_reads +
+      " --tolerance 5 --out " + route_budget_tsv +
+      " >/tmp/navigamer_route_budget.stdout "
+      "2>/tmp/navigamer_route_budget.stderr";
+  assert(std::system(route_budget_command.c_str()) == 0);
+  {
+    std::ifstream stderr_in(
+        "/tmp/navigamer_route_budget.stderr");
+    assert(stderr_in.good());
+    const std::string stderr_text(
+        (std::istreambuf_iterator<char>(stderr_in)),
+        std::istreambuf_iterator<char>());
+    assert(stderr_text.find("Queries: 185") != std::string::npos);
+    assert(stderr_text.find("peak_route_ids=65688") !=
+           std::string::npos);
+    assert(stderr_text.find("routed_queries=185/185") !=
+           std::string::npos);
+  }
+  {
+    std::ifstream tsv(route_budget_tsv);
+    assert(tsv.good());
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    const auto output_header = split_tsv_line(line);
+    std::map<std::string, size_t> output_columns;
+    for (size_t idx = 0; idx < output_header.size(); ++idx) {
+      output_columns[output_header[idx]] = idx;
+    }
+    std::vector<uint8_t> recovered(route_budget_query_count, uint8_t{0});
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      if (row[output_columns.at("reference_start")] != "123" ||
+          row[output_columns.at("edit_distance")] != "0") {
+        continue;
+      }
+      const std::string& query_id = row[output_columns.at("query_id")];
+      const std::string prefix = "route_budget_";
+      if (query_id.compare(0, prefix.size(), prefix) != 0) continue;
+      const size_t query_idx = std::stoul(query_id.substr(prefix.size()));
+      assert(query_idx < recovered.size());
+      recovered[query_idx] = 1;
+    }
+    for (uint8_t was_recovered : recovered) {
+      assert(was_recovered != 0);
+    }
+  }
+  const std::string fallback_single_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index --index " +
+      fallback_index + " --query " + fallback_query +
+      " --tolerance 5 "
+      ">/tmp/navigamer_bounded_fallback_single.stdout "
+      "2>/tmp/navigamer_bounded_fallback_single.stderr";
+  assert(std::system(fallback_single_command.c_str()) == 0);
+  {
+    std::ifstream stderr_in(
+        "/tmp/navigamer_bounded_fallback_single.stderr");
+    assert(stderr_in.good());
+    const std::string stderr_text(
+        (std::istreambuf_iterator<char>(stderr_in)),
+        std::istreambuf_iterator<char>());
+    assert(stderr_text.find("peak_shards=64") != std::string::npos);
+  }
+  {
+    std::ifstream stdout_in(
+        "/tmp/navigamer_bounded_fallback_single.stdout");
+    assert(stdout_in.good());
+    const std::string stdout_text(
+        (std::istreambuf_iterator<char>(stdout_in)),
+        std::istreambuf_iterator<char>());
+    assert(stdout_text.find("fallback_ref_123 dist=1") !=
+           std::string::npos);
+  }
+
+  // Query input, routing tables, and batch plans are streamed in bounded
+  // blocks. Cross the block boundary and verify every input record is still
+  // emitted once and in order.
+  const std::string streaming_reads =
+      "/tmp/navigamer_streaming_queries.fq";
+  const std::string streaming_tsv =
+      "/tmp/navigamer_streaming_queries.tsv";
+  constexpr size_t streaming_query_count = 8193;
+  {
+    std::ofstream reads(streaming_reads);
+    assert(reads.good());
+    const std::string sequence(150, 'C');
+    const std::string quality(150, 'I');
+    for (size_t query_idx = 0;
+         query_idx < streaming_query_count; ++query_idx) {
+      reads << "@stream_" << query_idx << '\n'
+            << sequence << "\n+\n" << quality << '\n';
+    }
+  }
+  const std::string streaming_query_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index-batch --index " +
+      fallback_index + " --reads " + streaming_reads +
+      " --tolerance 0 --out " + streaming_tsv +
+      " >/tmp/navigamer_streaming_query.stdout "
+      "2>/tmp/navigamer_streaming_query.stderr";
+  assert(std::system(streaming_query_command.c_str()) == 0);
+  {
+    std::ifstream stderr_in(
+        "/tmp/navigamer_streaming_query.stderr");
+    assert(stderr_in.good());
+    const std::string stderr_text(
+        (std::istreambuf_iterator<char>(stderr_in)),
+        std::istreambuf_iterator<char>());
+    assert(stderr_text.find("Queries: 8193") != std::string::npos);
+    assert(stderr_text.find("batches=2") != std::string::npos);
+  }
+  {
+    std::ifstream tsv(streaming_tsv);
+    assert(tsv.good());
+    std::string line;
+    assert(static_cast<bool>(std::getline(tsv, line)));
+    size_t row_count = 0;
+    std::string first_query_id;
+    std::string last_query_id;
+    while (std::getline(tsv, line)) {
+      if (line.empty()) continue;
+      const auto row = split_tsv_line(line);
+      if (row_count == 0) first_query_id = row.front();
+      last_query_id = row.front();
+      ++row_count;
+    }
+    assert(row_count == streaming_query_count);
+    assert(first_query_id == "stream_0");
+    assert(last_query_id == "stream_8192");
+  }
 
   std::cout << "build-scale smoke tests passed\n";
   return 0;

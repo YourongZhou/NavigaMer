@@ -113,9 +113,6 @@ TestResult run_test(const TestConfig& cfg) {
 
   navigamer::BioGeometrySearchEngine engine(builder);
 
-  std::vector<std::shared_ptr<navigamer::BioSequence>> unique_list;
-  for (const auto& p : builder.unique_sequences) unique_list.push_back(p.second);
-
   // Generate queries by mutating randomly selected indexed sequences.
   std::vector<navigamer::BioSequence> queries;
   std::uniform_int_distribution<size_t> seq_pick(0, seqs.size() - 1);
@@ -133,18 +130,18 @@ TestResult run_test(const TestConfig& cfg) {
   result.total_queries = queries.size();
 
   for (const auto& q : queries) {
-    auto [bf_res, bf_st] = engine.search_brute_force(q, cfg.tolerance, unique_list);
+    auto [bf_res, bf_st] = engine.search_brute_force(q, cfg.tolerance);
     auto [ad_res, ad_st] = engine.search_adaptive(q, cfg.tolerance);
 
-    std::unordered_set<std::string> ad_ids;
-    for (const auto& h : ad_res) ad_ids.insert(h->id);
+    std::unordered_set<navigamer::LeafId> ad_ids(
+        ad_res.begin(), ad_res.end());
 
     result.total_bf_hits += bf_res.size();
     result.total_adaptive_hits += ad_res.size();
 
     size_t missed = 0;
-    for (const auto& h : bf_res) {
-      if (ad_ids.find(h->id) == ad_ids.end()) {
+    for (navigamer::LeafId h : bf_res) {
+      if (ad_ids.find(h) == ad_ids.end()) {
         missed++;
       }
     }
@@ -153,6 +150,76 @@ TestResult run_test(const TestConfig& cfg) {
   }
 
   result.passed = (result.total_missed_hits == 0);
+  return result;
+}
+
+TestResult run_reference_backed_test() {
+  constexpr size_t kSequenceLength = 20;
+  constexpr int kTolerance = 2;
+  constexpr size_t kQueryCount = 100;
+  std::mt19937 gen(8128);
+  const std::string contig1 = random_dna(380, gen);
+  std::string contig2 = random_dna(340, gen);
+  contig2.replace(117, 6, "NNNNNN");
+  const std::string reference = contig1 + contig2;
+  const std::vector<navigamer::ReferenceContig> contigs = {
+      {"contig1", 0, static_cast<uint32_t>(contig1.size())},
+      {"contig2", static_cast<uint32_t>(contig1.size()),
+       static_cast<uint32_t>(reference.size())}};
+
+  navigamer::BioGeometryIndexBuilder builder(
+      navigamer::HierarchyConfig({12, 6, 3}));
+  builder.build_reference_windows(
+      "contig1", reference, kSequenceLength, 1, contigs);
+  assert(builder.sequence_store().reference_backed);
+  assert(builder.sequence_store().records.empty());
+  assert(builder.sequence_store().reference_positions_global_linear ||
+         !builder.sequence_store().reference_position_blocks.empty());
+  assert(builder.get_statistics().invalid_reference_windows > 0);
+  for (size_t sequence_idx = 0;
+       sequence_idx < builder.sequence_store().size(); ++sequence_idx) {
+    const auto sequence_id =
+        static_cast<navigamer::LeafId>(sequence_idx);
+    const auto sequence = builder.sequence_store().sequence(sequence_id);
+    assert(sequence.find('N') == std::string_view::npos);
+    const size_t start =
+        builder.sequence_store().source_position(sequence_id);
+    const auto& contig =
+        builder.sequence_store().contig_for_position(start);
+    assert(start + kSequenceLength <= contig.end);
+  }
+
+  navigamer::BioGeometrySearchEngine engine(builder);
+  std::uniform_int_distribution<size_t> sequence_pick(
+      0, builder.sequence_store().size() - 1);
+  TestResult result{};
+  result.total_queries = kQueryCount;
+  for (size_t query_idx = 0; query_idx < kQueryCount; ++query_idx) {
+    const auto sequence_id = static_cast<navigamer::LeafId>(
+        sequence_pick(gen));
+    navigamer::BioSequence query(
+        "reference_query_" + std::to_string(query_idx),
+        mutate(std::string(builder.sequence_store().sequence(sequence_id)),
+               kTolerance, gen));
+    const auto [bf_res, bf_stats] =
+        engine.search_brute_force(query, kTolerance);
+    const auto [adaptive_res, adaptive_stats] =
+        engine.search_adaptive(query, kTolerance);
+    (void)bf_stats;
+    (void)adaptive_stats;
+
+    std::unordered_set<navigamer::LeafId> adaptive_ids(
+        adaptive_res.begin(), adaptive_res.end());
+    result.total_bf_hits += bf_res.size();
+    result.total_adaptive_hits += adaptive_res.size();
+    size_t missed = 0;
+    for (navigamer::LeafId hit : bf_res) {
+      if (!adaptive_ids.count(hit)) missed++;
+    }
+    result.total_missed_hits += missed;
+    if (missed != 0) result.fn_queries++;
+  }
+  result.passed = result.total_missed_hits == 0;
   return result;
 }
 
@@ -214,6 +281,23 @@ int main() {
               << " fn_queries=" << result.fn_queries
               << "/" << result.total_queries << ")\n";
   }
+
+  std::cerr << "Test " << (configs.size() + 1) << "/"
+            << (configs.size() + 1)
+            << ": multi-contig reference-backed valid windows ... ";
+  const auto reference_result = run_reference_backed_test();
+  if (reference_result.passed) {
+    std::cerr << "PASS";
+    pass_count++;
+  } else {
+    std::cerr << "FAIL";
+    fail_count++;
+  }
+  std::cerr << " (bf_hits=" << reference_result.total_bf_hits
+            << " adaptive_hits=" << reference_result.total_adaptive_hits
+            << " missed=" << reference_result.total_missed_hits
+            << " fn_queries=" << reference_result.fn_queries
+            << "/" << reference_result.total_queries << ")\n";
 
   std::cerr << "\n=== Summary: " << pass_count << " passed, "
             << fail_count << " failed ===\n";

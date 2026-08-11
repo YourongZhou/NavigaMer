@@ -67,11 +67,17 @@ using OrderedLinkMap = std::map<std::string, std::vector<std::string>>;
 
 LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
   LinkMap edges;
+  const auto& view = builder.search_graph_view();
   for (int layer_idx = 0; layer_idx + 1 < builder.num_primary_layers(); ++layer_idx) {
-    for (const auto& parent : builder.primary_layer(layer_idx)) {
-      auto& children = edges[parent->get_center_sequence()];
-      for (const auto& child : parent->child_nodes) {
-        children.insert(child->get_center_sequence());
+    const size_t layer = static_cast<size_t>(layer_idx);
+    for (uint32_t parent_id = view.layer_begin[layer];
+         parent_id < view.layer_end[layer]; ++parent_id) {
+      auto& children =
+          edges[view.sequences[view.center_sequence_id(parent_id)].seq];
+      for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
+        const auto child_id = view.child_id(parent_id, offset);
+        children.insert(
+            view.sequences[view.center_sequence_id(child_id)].seq);
       }
     }
   }
@@ -81,14 +87,20 @@ LinkMap primary_edges(const navigamer::BioGeometryIndexBuilder& builder) {
 OrderedLinkMap ordered_primary_edges(
     const navigamer::BioGeometryIndexBuilder& builder) {
   OrderedLinkMap edges;
+  const auto& view = builder.search_graph_view();
   for (int layer_idx = 0; layer_idx + 1 < builder.num_primary_layers();
        ++layer_idx) {
-    for (const auto& parent : builder.primary_layer(layer_idx)) {
+    const size_t layer = static_cast<size_t>(layer_idx);
+    for (uint32_t parent_id = view.layer_begin[layer];
+         parent_id < view.layer_end[layer]; ++parent_id) {
       std::string key =
-          std::to_string(layer_idx) + ":" + parent->get_center_sequence();
+          std::to_string(layer_idx) + ":" +
+          view.sequences[view.center_sequence_id(parent_id)].seq;
       auto& children = edges[key];
-      for (const auto& child : parent->child_nodes) {
-        children.push_back(child->get_center_sequence());
+      for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
+        const auto child_id = view.child_id(parent_id, offset);
+        children.push_back(
+            view.sequences[view.center_sequence_id(child_id)].seq);
       }
     }
   }
@@ -97,10 +109,17 @@ OrderedLinkMap ordered_primary_edges(
 
 LinkMap leaf_links(const navigamer::BioGeometryIndexBuilder& builder) {
   LinkMap links;
-  for (const auto& world :
-       builder.primary_layer(builder.finest_primary_layer_index())) {
-    auto& leaves = links[world->get_center_sequence()];
-    for (const auto& leaf : world->child_leaves) leaves.insert(leaf->seq);
+  const auto& view = builder.search_graph_view();
+  const size_t layer =
+      static_cast<size_t>(builder.finest_primary_layer_index());
+  for (uint32_t world_id = view.layer_begin[layer];
+       world_id < view.layer_end[layer]; ++world_id) {
+    auto& leaves =
+        links[view.sequences[view.center_sequence_id(world_id)].seq];
+    for (uint32_t offset = 0; offset < view.leaf_count(world_id); ++offset) {
+      leaves.insert(
+          view.sequences[view.leaf_id(world_id, offset)].seq);
+    }
   }
   return links;
 }
@@ -111,7 +130,9 @@ std::set<std::string> hit_sequences(
   navigamer::BioGeometrySearchEngine engine(builder);
   auto [hits, stats] = engine.search_adaptive(query, tau);
   std::set<std::string> result;
-  for (const auto& hit : hits) result.insert(hit->seq);
+  for (navigamer::LeafId hit : hits) {
+    result.insert(std::string(builder.sequence_store().sequence(hit)));
+  }
   return result;
 }
 
@@ -183,27 +204,52 @@ Phase3BuildResult build_and_collect_phase3(
 
   Phase3BuildResult result;
   result.stats = builder.get_statistics();
+  const auto& view = builder.search_graph_view();
   for (int layer_idx = 0; layer_idx < builder.num_primary_layers();
        ++layer_idx) {
-    for (const auto& parent : builder.primary_layer(layer_idx)) {
+    const size_t layer = static_cast<size_t>(layer_idx);
+    for (uint32_t parent_id = view.layer_begin[layer];
+         parent_id < view.layer_end[layer]; ++parent_id) {
+      const bool is_finest =
+          layer_idx + 1 == builder.num_primary_layers();
       std::ostringstream row;
-      row << layer_idx << ':' << parent->get_center_sequence() << "|b=";
-      for (const auto& beacon : parent->beacons) {
-        row << (beacon ? beacon->seq : std::string("<null>")) << ';';
-      }
-      row << "|c=";
-      for (const auto& child : parent->child_nodes) {
-        row << (child ? child->get_center_sequence() : std::string("<null>"))
+      row << layer_idx << ':'
+          << view.sequences[view.center_sequence_id(parent_id)].seq
+          << "|b=";
+      for (uint32_t offset = 0; offset < view.beacon_count(parent_id); ++offset) {
+        row << view.sequences[
+                   view.beacon_sequence_id(parent_id, offset)]
+                   .seq
             << ';';
       }
-      row << "|m=";
-      for (const auto& mbb_row : parent->child_beacon_mbbs) {
-        for (const auto& mbb : mbb_row) {
-          row << mbb.min_dist << ',' << mbb.max_dist << ';';
+      row << "|c=";
+      if (!is_finest) {
+        for (uint32_t offset = 0; offset < view.child_count(parent_id); ++offset) {
+          const auto child_id = view.child_id(parent_id, offset);
+          row << view.sequences[view.center_sequence_id(child_id)].seq
+              << ';';
         }
-        row << '/';
       }
-      row << "|r=" << (parent->mbb_rect_index ? 1 : 0);
+      row << "|m=";
+      if (!is_finest) {
+        for (uint32_t child = 0; child < view.child_count(parent_id); ++child) {
+          for (uint32_t dim = 0; dim < view.beacon_count(parent_id); ++dim) {
+            const size_t cell =
+                static_cast<size_t>(dim) *
+                    view.child_count(parent_id) +
+                child;
+            row << static_cast<int>(
+                       view.child_beacon_distance(parent_id, cell))
+                << ';';
+          }
+          row << '/';
+        }
+      }
+      row << "|r="
+          << (!is_finest &&
+                      view.child_count(parent_id) >= config.min_rect_index_fanout
+                  ? 1
+                  : 0);
       result.signature.push_back(row.str());
     }
   }
@@ -378,12 +424,13 @@ int main() {
   assert(auto_stats.phase2_auto_hybrid_invoked == 0);
   assert(auto_stats.phase2_auto_final_candidate_pairs ==
          auto_stats.phase2_candidate_pairs);
-  assert(auto_stats.leaf_auto_pigeonhole_rejected_large_candidates > 0);
-  assert(auto_stats.leaf_auto_qgram_invoked > 0);
-  assert(auto_stats.leaf_pigeonhole_early_abort_count > 0);
+  assert(auto_stats.leaf_pigeonhole_queries > 0);
+  assert(auto_stats.leaf_qgram_queries == 0);
+  assert(auto_stats.leaf_auto_pigeonhole_rejected_large_candidates == 0);
+  assert(auto_stats.leaf_auto_qgram_invoked == 0);
+  assert(auto_stats.leaf_pigeonhole_early_abort_count == 0);
   assert(auto_stats.leaf_auto_hybrid_invoked == 0);
-  assert(auto_stats.leaf_auto_final_candidate_pairs ==
-         auto_stats.leaf_candidate_pairs);
+  assert(auto_stats.leaf_auto_final_candidate_pairs == 0);
   assert(auto_stats.leaf_seed_candidate_pairs_before_length_filter > 0);
   assert(auto_stats.leaf_range_final_candidate_pairs ==
          auto_stats.leaf_candidate_pairs);

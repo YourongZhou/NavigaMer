@@ -18,7 +18,165 @@
 | **Leaf beacon refinement** | `BioGeometryIndexBuilder::attach_leaves()` precomputes finest-layer leaf-to-beacon distances; `BioGeometrySearchEngine::verify_leaf_candidates()` applies the final local beacon sieve before exact verification |
 | **Hierarchical multilateration search** | `BioGeometrySearchEngine::search_adaptive()` — `navigamer_cpp/src/search_engine.cpp` (MBB-based pruning plus finest-layer leaf refinement via triangle inequality) |
 
-Data structures (`WorldNode`, `MBB`, `BioSequence`) are in `navigamer_cpp/include/structure.hpp`. Edit distance is in `navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in `navigamer_cpp/src/io_utils.cpp`.
+The finalized index uses `SequenceStore`, `WorldNodeRecord`, and flat ID/data
+arrays declared in `navigamer_cpp/include/index_builder.hpp`. Construction also
+uses an array of `BuildWorldNodeRecord` values and integer relationships; it
+does not allocate a temporary `WorldNode` pointer graph. Build-node radii and
+tier identities are implicit in the layer arrays. Only primary nodes receive a
+separate geometry record, whose distance vector is reused for child MBB cells
+or finest-layer leaf distances. Edit distance is in
+`navigamer_cpp/src/tools.cpp`; FASTA/FASTQ/TSV I/O is in
+`navigamer_cpp/src/io_utils.cpp`.
+
+Reference-window builds flatten the input while retaining contig boundaries.
+Only all-ACGT windows contained entirely in one contig are indexed; windows
+containing ambiguous bases and cross-contig windows are excluded. The store
+keeps one reference string plus a block-compressed monotone mapping from
+`LeafId` to its representative source offset. Regular 256-window blocks store
+only one 16-byte base/step record; irregular blocks choose an exact local
+bitset or 8/16/32-bit values. Repeated windows add only sorted 8-byte
+`(LeafId, source offset)`
+entries after their representative occurrence, including occurrences between
+stride-selected starts, so query output resolves every contig-local coordinate
+without rescanning the reference. No per-window
+`BioSequence`, identifier, occurrence vector, or sequence string is allocated.
+Search returns 32-bit `LeafId` values, and distance, q-gram, seed-index, and
+range-join code read non-owning sequence views into the shared reference.
+Reference-backed Phase 2 construction batches four exact high-tolerance
+distances in one AVX2 Myers kernel when supported, with scalar Edlib fallback.
+Its periodic lower-bound exit rejects a batch only when every lane is proven
+to exceed the tolerance, so the optimization cannot remove a valid edge.
+Indexed sequences are limited to 255 bases, so every exact sequence-to-beacon
+edit distance fits in one byte. Persisted format version 65 stores an all-ACGT
+shared reference in 2-bit form and restores one contiguous byte view per
+loaded shard, so edit-distance query kernels retain direct character access;
+references containing other IUPAC characters are kept losslessly as raw bytes.
+When all representative window positions form one exact arithmetic progression,
+their per-256-position table is omitted and positions decode directly as
+`base + LeafId * stride`; every irregular reference keeps the existing exact
+block encoding.
+Center IDs whose adjacent deltas repeat exactly within a layer store one
+verified byte-offset cycle; query reconstructs each ID arithmetically and
+irregular layers retain the exact block-base/delta representation.
+For leaf worlds with at most five links and at most three distinct exact
+leaf-to-center distances, the index uses one base-3 byte per world rather than
+per-node bit-padded distance data; all other leaf payloads retain exact packing.
+When every leaf list in a shard is exactly one center-relative consecutive
+interval (with both reference endpoints clipped), leaf IDs decode from the
+center and one shard-wide radius, omitting the otherwise redundant ID stream.
+When both layouts apply, the link count is also the exact clipped interval
+length; all remaining finest-node fields are shard-wide constants, so finest
+nodes require no node-record bytes.
+If every exact leaf distance also equals twice its consecutive-ID displacement
+from the center, the builder verifies every row and derives the same ternary
+MBB code at query time, omitting the finest-layer MBB array as well.
+When every non-leaf world uses one of at most 16 exact center-relative
+three-beacon patterns, the index stores one 4-bit pattern code per world and
+the shard-local pattern table, omitting both beacon payload offsets and the
+repeated three IDs.
+Shards with more than 16 patterns use the same exact representation whenever
+the pattern count fits in 16 bits and every center-relative delta fits in a
+signed 16-bit value: the pattern code uses only
+`ceil(log2(pattern_count))` bits and the shard-local table stores signed
+16-bit deltas. The common 4-bit/signed-byte query path is unchanged.
+For that same dense non-leaf layout, it stores the dominant MBB bit width once
+per shard and uses an exact one-bit-per-node map only for the alternate width.
+When its interned child-MBB payloads yield at most 256 exact
+`(child count, payload begin)` pairs, each non-leaf node stores one byte-sized
+descriptor code and a shard-local 16-bit descriptor table instead of repeating
+both fields. Shards that do not save space retain the direct node fields.
+When the bases of 32 consecutive contiguous child ranges differ by at most
+255, one interleaved block stores the minimum-width forward base and exact
+byte offsets for all 32 nodes, with direct O(1) decoding.
+The index keeps long literal inputs in the manifest only as content
+fingerprints. It
+also omits redundant child-payload offsets when a shard's child ranges are
+fully contiguous and interns byte-identical child MBB distance blocks.
+When packed leaf-ID and leaf-MBB streams have identical per-node byte starts,
+it derives the latter from the former and omits the redundant leaf-MBB offset;
+the builder checks this equality for every leaf node before enabling it.
+If every leaf in a shard also uses packed IDs, center-only beacons, and one
+shared packed-ID width, those three repeated fields are recorded once in the
+leaf layout rather than per node; unsupported shards retain the general layout.
+For that same uniform leaf layout, one exact byte offset per eight leaf nodes
+replaces the absolute offset formerly stored in every leaf record; bounded
+in-block accumulation restores it without changing leaf IDs or MBB pruning.
+The same layout also records its guaranteed single center beacon once, instead
+of repeating the value one in every leaf node record.
+When every non-leaf node has an exact contiguous child range, its packed-link
+kind and fixed width are likewise recorded once in the child layout.
+Center-ID block bases use exact 16-bit values whenever a shard's sequence IDs
+fit, with an automatic 32-bit fallback for larger indexes. Eight-node blocks
+minimize the exact base-plus-packed-delta representation on the target shards.
+Beacon-offset blocks are selected from 2/4/8/16/32 entries per shard by exact
+payload size; each stored offset is unchanged.
+It stores layer-monotone center IDs in aligned 16-node blocks: one exact 32-bit
+base plus fixed-width exact deltas, with an independently chosen width per
+layer. Center lookup remains constant-time and reconstructs the original
+`LeafId` exactly. It
+stores one child-center-to-beacon distance per MBB cell instead of separate
+lower and upper bounds. Non-finest parents use at most 10 deterministic
+beacons; reducing the sampling cap only relaxes pruning, so it cannot introduce
+false negatives. Beacon sequence IDs use exact ZigZag deltas at the
+file-size-minimizing shard-wide width selected from 1..32 bits; the 16-bit
+candidate reproduces the former delta representation, so this selection can
+never enlarge the beacon payload. Child-center distances use twelve-base integer bins in coarse
+layers and six-base bins in the last transition into the finest world layer,
+where pruning precision matters most. Search decodes each bin midpoint and
+widens the metric bound by the matching maximum reconstruction error (six or
+three), so quantization can retain extra children but cannot prune a true result.
+Each parent uses the exact
+minimum integer bit width required by its largest quantized value; nodes remain
+independently byte-addressable. Non-finest and finest nodes use separate
+shard-local record layouts, so both regions keep exact absolute MBB offsets at
+their own minimum bit widths. A shard may contain up to 512 MiB
+of packed child-MBB data. Search reconstructs a conservative interval from the
+child-layer radius and the layer-specific quantization error. Leaf distances
+remain exact because they participate in the final leaf sieve, but each finest
+node packs them at the minimum 1..8-bit width required by its largest value.
+The width shares the node field with its exact MBB byte offset, and
+each node begins on a byte boundary for constant-time decoding. Finest-layer
+leaf IDs use exact ZigZag deltas from the world center and the
+smallest profitable per-node 1..16-bit width; the width shares the leaf offset
+field and requires no side array. Each
+parent's child IDs use the smallest exact constant-time representation: a
+32-bit minimum ID plus fixed-width 1..16-bit offsets, a base plus byte offsets,
+16-bit forward deltas, or full 32-bit IDs. The packed width shares the child
+offset field in the node record, so it needs no side array. Finest-layer nodes
+reuse their cleared child buffer for leaf IDs.
+Finalized nodes are cache-friendly 16-byte records containing the center ID,
+the two hot shared-array offsets, and one packed count/encoding word. The
+common case stores a 24-bit child-or-leaf count, a 4-bit beacon count, the
+2-bit beacon-ID encoding, and the 2-bit link encoding inline; an exact side
+table handles the rare count
+overflow instead of imposing a build limit. Layer arrays imply both the layer
+ID and its radii. Parent beacon IDs
+use the narrowest exact per-node representation: signed 8-bit or 16-bit deltas
+from the node center, with full 32-bit IDs only when needed. A finest-layer
+node's sole beacon is its center and occupies no side-array element. Explicit
+beacon offsets live in a dense side array indexed only by the non-finest NodeId
+prefix, instead of wasting a zero offset in every finest node. No
+per-edge distance vector is allocated before finalization.
+Parent-child link encodings are selected independently per parent and change
+neither node IDs nor graph connectivity; no edge is truncated.
+Leaf IDs likewise use signed 8-bit or 16-bit deltas from the node center when
+the complete leaf list fits, with an exact 32-bit fallback.
+Repeated reference positions use one pair for a singleton duplicate, while
+larger duplicate groups share one group offset and a flat 32-bit position
+array.
+All finalized node, edge, beacon, MBB, leaf, reference-record, and repeated
+occurrence arrays are aligned in the persisted file and loaded as read-only
+memory mappings. Loading an index does not allocate or copy those arrays; only
+pages reached by validation and queries need to become resident.
+Finest-layer leaf ranges and non-finest child ranges share one offset/count
+pair. Together with packed counts, this reduces every finalized world-node
+record from 32 to 16 bytes without adding a range tag; ordinary nodes take the
+inline-count path and overflow nodes retain full 32-bit counts.
+Within one query, exact edit distances already computed for a sequence ID are
+reused across beacon, center, and leaf checks. The cache is a fixed 16 KiB per
+thread, does not scale with index size, and stores only exact values; bounded
+results above their threshold are not cached, so pruning and recall semantics
+are unchanged.
 
 ## Installation
 
@@ -51,6 +209,8 @@ cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
 ./navigamer build --ref ref --reads ACGTACGTACGTACGT --index /tmp/navigamer.navidx
 ./navigamer query-index --index /tmp/navigamer.navidx --query ACGTACGTACGTACGT --tolerance 2
+./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000 --index /tmp/human.navshard
+./navigamer query-index-batch --index /tmp/human.navshard --reads reads.fastq --tolerance 2 --out /tmp/hits.tsv
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
 ./navigamer demo --primary-radii 30,15,5
@@ -124,10 +284,10 @@ loads that persisted `.navidx` once and calls `navigamer query-index-batch`;
 without it, the bridge falls back to `navigamer benchmark` on reference windows.
 
 The C++ `build` and `query` commands support explicit persisted indexes with
-`--index <file>`. The index file stores a manifest with input fingerprints and
-construction parameters plus the collapsed primary DAG, unique sequences,
-reference positions, optional BWT/SA intervals, beacons, MBB rows, leaf links,
-and leaf-beacon distances. `query --index <file> --query <seq>` and
+`--index <file>`. The v65 index file stores a manifest with input fingerprints
+and construction parameters plus the canonical sequence, node, child, leaf,
+beacon, MBB, and leaf-beacon arrays. Older pointer-graph index files must be
+rebuilt. `query --index <file> --query <seq>` and
 `query-index --index <file> --query <seq>` load the index directly. When
 `query` is given both `--reads` and `--index`, it compares the requested build
 manifest with the stored manifest and reuses the file only on an exact
@@ -144,6 +304,113 @@ phase progress to stderr every 600 seconds by default; use
 `--progress-interval-seconds N` to change the interval or `0` to disable
 periodic heartbeats while retaining phase-boundary reports.
 
+For references that exceed one index's 32-bit array limits,
+`build-sharded` assigns each valid window start to exactly one shard. Adjacent
+shards retain only the reference overlap required to materialize their last
+windows, so neither windows nor original contig coordinates are lost.
+File-backed builds choose sparse FASTA byte-offset checkpoints at the shard
+source span, bounded to 4 KiB--1 MiB. This bounds redundant text decoding per
+part without retaining the normalized reference in memory.
+Independent parts build concurrently. The automatic policy uses one part
+below 8 OpenMP threads, two parts at 8--15 threads, and for default small
+(at most 16,384-window) parts up to 16 concurrent builders with at least four
+threads each; larger parts remain capped at four builders to contain peak
+memory. `--shard-build-jobs N` sets an explicit concurrency limit. The product
+of part jobs and their internal worker teams never exceeds the OpenMP thread
+limit, while peak build memory is bounded by the number of concurrent parts.
+Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
+Each container has a checked offset/length directory, and completed containers
+are content- and parameter-validated and reused after an interrupted build.
+During a rebuild only the current group's atomic temporary pack exists; shard
+payloads are written directly into it, without per-shard temporary files. The final v20
+`.navshard` manifest stores the common construction manifest once, then each
+logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
+router sidecar. Pack entries contain only independently decodable graph
+payloads, rather than repeating the common manifest for every logical shard.
+Paired child-MBB coordinates are ranked only among quantized states permitted
+by their exact beacon-pair distance. This reconstructs the same conservative
+distance bins while using fewer than the former fixed seven bits whenever the
+triangle inequality excludes states.
+Non-finest beacon payload begins are stored in four-node blocks: one absolute
+base plus three exact local deltas. This retains constant-time decoding while
+removing the former independent packed offset for every node. Explicit beacon
+IDs of every storage mode share one contiguous byte payload, so those begins
+are monotone and block-compressible. The packed-delta beacon-ID form uses the
+minimum shard-local bit width with exact constant-time decoding instead of one
+32-bit ID per beacon.
+Queries mmap only selected byte ranges, so packing removes millions of
+filesystem entries without coarsening the logical shards or increasing search
+work. Contig names and pack paths are interned once; each in-memory shard
+descriptor is a fixed 40-byte numeric record. The sidecar stores sorted
+minimizers in exact 16-entry blocks: one 32-bit base followed by the
+minimum-width packed adjacent deltas. Shard IDs use exactly
+`ceil(log2(shard_count))` bits per entry. During construction, per-shard
+minimizer lists are contiguous in the
+spool, so their starts are implicit prefix sums and only one 32-bit count is
+retained per shard. For a query at tolerance `d`, the router takes one seed of
+32 to 64 bases from each of `d + 1` disjoint query blocks and searches only
+shards containing at least one seed minimizer. The pigeonhole principle makes
+this a necessary condition for an edit-distance
+hit, not a heuristic. Short or ambiguous unsupported queries, and missing or
+invalid router sidecars, conservatively search every shard in groups of at
+most 64 resident shards. `query-index` and
+`query-index-batch` load only the routed shard or the union required by the
+batch, search those parts in parallel, and merge identical sequences and all
+of their occurrences before reporting results. Routed selections larger than
+64 shards use the same bounded groups. A fallback query searches every
+shard to preserve recall without mapping the complete human index at once.
+Large per-minimizer shard ranges are already sorted, so routing merges them
+directly into the final unique ID list. A small-sort fast path retains at most
+4,096 expanded IDs (16 KiB), bounding temporary route memory by the selected
+shard count plus that constant allowance.
+Batch planning and active-engine lookup use only the sorted IDs in the
+current 64-shard group; they do not allocate a bitmap or reverse map sized to
+the total logical shard count. FASTQ records and their route plans are
+streamed in blocks of at most 8,192 queries, while an unchanged resident
+shard group is reused across block boundaries. Thus query memory does not
+grow with total FASTQ record count. Within each input block, planning stops
+after at least 65,536 selected shard IDs and executes that subplan before
+routing more records. One query is never split, so the route-table bound is
+the 65,536-ID budget plus one complete query route; `peak_route_ids` reports
+the observed maximum. A one-shard hit path bypasses cross-shard
+hash merging without changing the exact verifier or reported occurrences.
+Non-sharded bundle queries consume one record at a time; optional path traces
+retain only the immediately preceding query needed for overlap statistics.
+
+For human-scale stride-1 builds, start with `--shard-windows 10000` and tune
+from measurements. Logical shards are cheap because 1,024 share one pack file.
+Large logical shards widen packed offsets and amplify the high-tolerance
+Phase-2 join; they also make every routed query traverse a larger graph. In a
+1 Mb stride-1 build, 10k-window shards preserved the identical hit set while
+cutting peak build memory from 280 MB to 93 MB and batch-query wall time from
+11.2 s to 1.5 s relative to 100k-window shards. This controlled comparison is
+a scaling diagnostic, not a universal constant, so production data should still
+benchmark nearby shard sizes.
+Router construction writes each completed shard's sorted 32-bit minimizer list
+contiguously to a temporary spool, then memory-maps and k-way merges the lists
+directly into the sidecar. There is no per-shard page padding: the spool is
+exactly four bytes per minimizer, which avoids a 4 KiB penalty for each tiny
+logical shard. Offsets are 64-bit and counts are 32-bit. The final query-time
+layout is unchanged.
+Reference-window deduplication likewise uses one contiguous 64-bit open-addressed
+slot per table bucket instead of a node-allocated `string_view` hash map. Its
+32-bit hash is only a lookup hint: every match is confirmed byte-for-byte against
+the shared reference, so hash collisions cannot merge leaves or reduce recall.
+The table is released before repeated-occurrence sorting.
+For q-gram candidate generation, shards above 65,536 items no longer promote
+every short-sequence posting from 4 to 8 bytes: up to 24 bits encode the item
+index and 8 bits encode the exact q-gram count in one 32-bit word. Wider or
+longer inputs retain the lossless fallback representation.
+Deferred q-gram indexes are not materialized when the exact L1 threshold is
+non-positive even for the longest length-compatible item. In that case q-gram
+filtering is mathematically unable to remove a candidate, so construction emits
+the identical length-compatible superset directly without allocating postings.
+Query loading validates signatures, counts, pack ranges, layer ranges, shard
+coordinates, and the bundle checksum without rescanning every mapped node or
+edge; completed or resumed builds perform the full per-part validation.
+Path traces are unavailable for a shard bundle because node IDs are local to
+each part.
+
 Indexed construction supports exact `auto`, `pigeonhole`, `qgram`, `hybrid`,
 and `full` candidate modes. Q-gram filtering uses the necessary condition
 `qgram_l1(a,b) <= 2*q*tau`; hybrid intersects the pigeonhole and q-gram safe
@@ -157,14 +424,19 @@ the q-gram helper, and `--phase1-qgram-max-touched` controls conservative
 fallback when q-gram candidate expansion is too broad. These knobs do not skip
 bounded exact verification.
 
-Indexed leaf attachment also uses `--leaf-qgram-postfilter on` by default. It
-runs a safe q-gram L1 postfilter after range candidate generation and before
-bounded exact verification, reducing leaf exact distance calls without changing
-accepted links.
+Indexed leaf attachment directly verifies range candidates by default. The
+optional `--leaf-qgram-postfilter on` applies a safe q-gram L1 condition before
+bounded exact verification. It can reduce exact calls for unusually broad
+candidate sets, but its signature-building overhead is slower on the default
+prepared-DNA distance path. Either setting is no-false-negative: accepted links
+are still determined by bounded exact edit distance.
 
-Auto construction accepts pigeonhole candidates when their count is at most
-`4096`; if the seed union grows beyond that threshold, it early-aborts the
-pigeonhole collection and invokes the q-gram safe fallback. The legacy
+During Phase 2, auto construction accepts pigeonhole candidates when their
+count is at most `4096`; if the seed union grows beyond that threshold, it
+early-aborts the pigeonhole collection and invokes the q-gram safe fallback.
+Indexed leaf attachment keeps the recall-safe pigeonhole result instead of
+materializing a tier-wide q-gram index for an occasional oversized query;
+explicit `qgram` and `hybrid` modes remain available. The legacy
 `--auto-pigeonhole-max-ratio` flag is parsed for command compatibility but no
 longer drives auto selection, so normal pigeonhole queries do not full-scan all
 length-compatible targets just to compute a ratio.
@@ -206,7 +478,7 @@ calls, center distance calls, and raw candidate counts. The `benchmark` and
 `query-benchmark` commands surface these values in TSV output and print query
 time/world-access summaries to stderr.
 
-Adaptive path reuse supports `--path-reuse 0|1` (default `0`). When enabled,
+Adaptive path reuse supports `--path-reuse 0|1` (default `1`). When enabled,
 adaptive search keeps thread-local warm-start caches for exact per-parent
 anchor-distance vectors on repeated queries and cached child shortlists keyed by
 query-derived fingerprints. These caches affect ordering or exact memoization
@@ -214,9 +486,10 @@ only, never become a pruning reason, and record counters such as
 `path_reuse_attempt_count`, `path_reuse_hit_count`,
 `anchor_cache_hit_count`, `child_shortlist_reuse_hit_count`,
 `safe_child_candidate_cache_hit_count`, and
-`productive_world_reuse_hit_count`. Batch commands also group queries by a
-cheap query-derived fingerprint while preserving output order so related
-queries are more likely to hit the same thread-local warm cache.
+`productive_world_reuse_hit_count`. Batch commands also group queries by
+`source_pos=` FASTQ annotations when present, otherwise by a cheap query-derived
+fingerprint, while preserving output order so related queries are more likely to
+hit the same thread-local warm cache.
 
 Adaptive local routing accepts `--local-router 0|1`,
 `--local-router-max-anchors N`, `--local-router-max-children N`, and
@@ -283,7 +556,7 @@ Query-side optimization work follows this safety contract:
 
 Adaptive child-world traversal also supports the optional
 `--search-prefetch on`, which issues best-effort lookahead prefetch hints for
-flat child/MBB/leaf data without changing pruning or verification semantics.
+array child/MBB/leaf data without changing pruning or verification semantics.
 It is experimental and intended for locality A/B measurements. It also supports
 `query-index-batch --path-trace-out <tsv>` for locality diagnostics: the trace
 TSV records per-input-read world node IDs evaluated, leaf sequence IDs exactly
@@ -328,9 +601,10 @@ the actual loaded-index fanout distribution plus router/local-router/safe-child
 router invocation ratios, path-reuse hit ratio, and aggregate reuse counters
 including `anchor_cache_hit_count`, `child_shortlist_cache_hit_count`,
 `safe_child_candidate_cache_hit_count`, and
-`productive_world_reuse_hit_count`. `--batch-schedules` compares internal query
-orders such as original, random, minimizer, qgram-signature, router-signature,
-and source-oracle; source-oracle is reported only as an upper-bound diagnostic.
+`productive_world_reuse_hit_count`. `--batch-schedules` defaults to
+source-oracle for locality benchmarks and can compare internal query orders such
+as original, random, minimizer, qgram-signature, router-signature, and
+source-oracle; source-oracle is reported only as an upper-bound diagnostic.
 `--query-fastq-out` exports the generated query stream with `source_pos=` read
 header annotations so external candidate baselines can be run on the same
 reads. `candidate-verify` consumes those FASTQ records plus external seed
@@ -344,8 +618,9 @@ persisted index.
 
 `query-locality-report --ref <fasta|sequence> --out-dir <dir>` wraps the
 persisted locality benchmark and writes `summary.tsv`, `summary.json`, and
-`report.md`. If `--index` is omitted, it first builds and saves
-`query_locality.navidx` in the report directory. The same locality profiles,
+`report.md`. If `--index` is omitted, it reuses a manifest-compatible
+`query_locality.navidx` in the report directory or builds it when missing or
+stale. The same locality profiles,
 scenario presets, datasets, and batch schedules are supported.
 
 The default CLI path still uses the legacy three primary layers (`LW/MW/SW`) via `--r-lw`, `--r-mw`, and `--r-sw`, but the C++ implementation now also supports any number of primary layers `K >= 2` through `--primary-radii coarse,...,fine`. One auxiliary tier is inserted automatically between each adjacent pair of primary layers during index construction and collapsed away before query-time navigation.

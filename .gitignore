@@ -9,6 +9,7 @@ methods/
 
 # Ad-hoc outputs
 results/
+.codex_logs/
 
 # Root-level experiment / demo artifacts
 benchmark_result.png
@@ -36,6 +37,7 @@ navigamer_cpp/third_party/edlib/src/*.d
 navigamer_cpp/build/
 navigamer_cpp/.tmp_experiments/
 navigamer_cpp/build_scale*.csv
+experiments/ecoli_1p1m/candidate_tool
 .tmp_experiments/
 
 # VSCode settings

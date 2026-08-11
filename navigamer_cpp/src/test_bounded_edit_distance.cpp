@@ -20,10 +20,19 @@ std::string random_string(size_t length, const std::string& alphabet,
 void check_pair(const std::string& a, const std::string& b, int tau) {
   int full = navigamer::compute_distance(a, b);
   int bounded = navigamer::compute_distance_bounded(a, b, tau);
+  int edlib = navigamer::compute_distance_bounded_edlib(a, b, tau);
+  auto prepared = navigamer::prepare_edlib_dna_pattern(a);
+  int prepared_edlib =
+      navigamer::compute_distance_bounded_edlib_prepared(prepared, b, tau);
+  assert(navigamer::compute_distance_edlib_prepared(prepared, b) == full);
   if (full <= tau) {
     assert(bounded == full);
+    assert(edlib == full);
+    assert(prepared_edlib == full);
   } else {
     assert(bounded > tau);
+    assert(edlib > tau);
+    assert(prepared_edlib > tau);
   }
 }
 
@@ -36,6 +45,8 @@ int main() {
     check_pair("ACGT", "", tau);
     check_pair("ACGT", "ACGT", tau);
     check_pair("ACGT", "TGCA", tau);
+    check_pair("ACNT", "ACGT", tau);
+    check_pair("ACGT", "ACNT", tau);
   }
 
   std::mt19937 gen(20260613);

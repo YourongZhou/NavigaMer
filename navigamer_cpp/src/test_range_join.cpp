@@ -51,13 +51,14 @@ std::string mutate_with_indels(std::string value, int edits, std::mt19937& gen) 
   return value;
 }
 
-bool contains(const std::vector<size_t>& ids, size_t id) {
+bool contains(const std::vector<navigamer::RangeJoinItemId>& ids, size_t id) {
   return std::binary_search(ids.begin(), ids.end(), id);
 }
 
-std::vector<size_t> intersection(
-    const std::vector<size_t>& lhs, const std::vector<size_t>& rhs) {
-  std::vector<size_t> out;
+std::vector<navigamer::RangeJoinItemId> intersection(
+    const std::vector<navigamer::RangeJoinItemId>& lhs,
+    const std::vector<navigamer::RangeJoinItemId>& rhs) {
+  std::vector<navigamer::RangeJoinItemId> out;
   std::set_intersection(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
                         std::back_inserter(out));
   return out;
@@ -107,13 +108,13 @@ void test_parallel_range_join_queries_are_deterministic() {
   std::vector<std::string> queries = bases;
   queries.push_back("ACGTACGTACGTACGTACGTACGTACGTAAAA");
 
-  std::vector<std::vector<size_t>> serial;
+  std::vector<std::vector<navigamer::RangeJoinItemId>> serial;
   for (const auto& query : queries) {
     navigamer::RangeJoinQueryWorkspace workspace;
     serial.push_back(index.query(query, 3, &workspace).candidate_item_ids);
   }
 
-  std::vector<std::vector<size_t>> parallel(queries.size());
+  std::vector<std::vector<navigamer::RangeJoinItemId>> parallel(queries.size());
 #pragma omp parallel for schedule(dynamic, 1)
   for (size_t i = 0; i < queries.size(); ++i) {
     navigamer::RangeJoinQueryWorkspace workspace;
@@ -123,6 +124,333 @@ void test_parallel_range_join_queries_are_deterministic() {
   assert(serial == parallel);
 }
 
+void test_seed_and_qgram_queries_share_workspace_safely() {
+  std::vector<navigamer::RangeJoinItem> items = {
+      {0, "ACGTACGTACGTACGTACGTACGTACGTACGT"},
+      {1, "ACGTACGTACGTACGTACGTACGTACGTTCGT"},
+      {2, "TTTTACGTACGTACGTACGTACGTACGTACGA"},
+      {3, "GGGGACGTACGTACGTACGTACGTACGTACCC"},
+  };
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode = navigamer::RangeCandidateMode::Auto;
+  config.min_seed_len = 4;
+  config.max_seed_len = 12;
+  config.qgram_q = 4;
+
+  navigamer::ExactRangeJoinIndex index(config);
+  index.build(items);
+  index.prepare_seed_lengths({12});
+  navigamer::RangeJoinQueryWorkspace shared_workspace;
+  const auto compact_seed =
+      index.query(items[0].sequence, 1, &shared_workspace);
+  assert(!compact_seed.candidate_item_ids.empty());
+  assert(shared_workspace.seed_touched.empty());
+  assert(!shared_workspace.seed_touched16.empty());
+  for (int tau : {1, 10, 1, 10}) {
+    const auto reused =
+        index.query(items[0].sequence, tau, &shared_workspace);
+    const auto fresh = index.query(items[0].sequence, tau);
+    assert(reused.candidate_item_ids == fresh.candidate_item_ids);
+    assert(reused.mode_used == fresh.mode_used);
+  }
+
+  shared_workspace.reset_seed(
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 2);
+  assert(shared_workspace.seed_touched16.empty());
+}
+
+void test_vacuous_qgram_bound_skips_deferred_postings() {
+  std::vector<navigamer::RangeJoinItem> items = {
+      {10, std::string(100, 'A')},
+      {20, std::string(100, 'C')},
+      {30, std::string(100, 'G')},
+      {40, std::string(100, 'T')},
+  };
+  auto config = config_for(navigamer::RangeCandidateMode::QGramOnly);
+  navigamer::ExactRangeJoinIndex index(config, true);
+  index.build(items);
+
+  navigamer::RangeJoinQueryWorkspace workspace;
+  const auto vacuous = index.query(items[0].sequence, 20, &workspace);
+  assert(vacuous.mode_used == navigamer::RangeCandidateMode::QGramOnly);
+  assert(!vacuous.used_full_scan);
+  assert(vacuous.candidate_item_ids ==
+      (std::vector<navigamer::RangeJoinItemId>{10, 20, 30, 40}));
+  assert(vacuous.required_shared_nonpositive == items.size());
+  assert(workspace.qgram.shared.empty());
+  assert(workspace.qgram.shared_compact.empty());
+  assert(workspace.qgram.seen_epoch.empty());
+  assert(workspace.qgram.seen_epoch16.empty());
+
+  const auto selective = index.query(items[0].sequence, 0, &workspace);
+  assert(selective.candidate_item_ids ==
+         (std::vector<navigamer::RangeJoinItemId>{10}));
+  assert(!workspace.qgram.shared_compact.empty());
+  assert(!workspace.qgram.seen_epoch16.empty());
+
+  const auto unsafe = index.query(std::string(100, 'N'), 0);
+  assert(unsafe.used_full_scan);
+  assert(unsafe.candidate_item_ids ==
+      (std::vector<navigamer::RangeJoinItemId>{10, 20, 30, 40}));
+}
+
+void test_external_views_preserve_sparse_item_ids() {
+  const std::vector<std::string> sequences = {
+      std::string(32, 'A'),
+      std::string(32, 'C'),
+      std::string(32, 'G'),
+  };
+  std::vector<navigamer::RangeJoinItemView> views = {
+      {90, sequences[0]},
+      {7, sequences[1]},
+      {42, sequences[2]},
+  };
+  auto config = config_for(navigamer::RangeCandidateMode::QGramOnly);
+  config.qgram_q = 4;
+  navigamer::ExactRangeJoinIndex index(config, true);
+  index.build_views(std::move(views));
+
+  const auto selective = index.query(sequences[1], 0);
+  assert(selective.candidate_item_ids ==
+         (std::vector<navigamer::RangeJoinItemId>{7}));
+  const auto vacuous = index.query(sequences[1], 8);
+  assert(vacuous.candidate_item_ids ==
+      (std::vector<navigamer::RangeJoinItemId>{7, 42, 90}));
+
+  navigamer::ExactRangeJoinIndex copied = index;
+  assert(copied.query(sequences[1], 0).candidate_item_ids ==
+         selective.candidate_item_ids);
+}
+
+void test_shifted_window_postings_match_standard_index() {
+  const std::string reference =
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      "ACGTGCACTGATCGTACCGTATGCTAGCATGC"
+      "TTTTTTTTTTTTTTTTACGACGTAGCTAGCTA";
+  constexpr size_t kWindow = 32;
+  std::vector<navigamer::RangeJoinItem> items;
+  for (size_t start = 0; start + kWindow <= reference.size(); ++start) {
+    items.push_back(
+        {1000 + start, reference.substr(start, kWindow)});
+  }
+  items.insert(items.begin() + 17, {9999, std::string(kWindow, 'C')});
+
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode = navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 12;
+  config.qgram_q = 4;
+
+  navigamer::ExactRangeJoinIndex standard(config, true, false);
+  navigamer::ExactRangeJoinIndex shifted(config, true, true);
+  standard.build(items);
+  shifted.build(items);
+  standard.prepare_seed_lengths({4, 6, 8, 10, 12});
+  shifted.prepare_seed_lengths({4, 6, 8, 10, 12});
+
+  for (int tau : {0, 1, 2, 3, 5}) {
+    for (size_t query_idx = 0; query_idx < items.size();
+         query_idx += 7) {
+      auto standard_result =
+          standard.query(items[query_idx].sequence, tau);
+      auto shifted_result =
+          shifted.query(items[query_idx].sequence, tau);
+      assert(shifted_result.candidate_item_ids ==
+             standard_result.candidate_item_ids);
+    }
+  }
+}
+
+void test_positional_postings_are_recall_safe() {
+  std::mt19937 gen(881);
+  std::vector<navigamer::RangeJoinItem> items;
+  for (size_t idx = 0; idx < 160; ++idx) {
+    items.push_back({idx, random_dna(100, gen)});
+  }
+
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 20;
+  config.qgram_q = 5;
+  navigamer::ExactRangeJoinIndex standard(
+      config, true, false, false);
+  navigamer::ExactRangeJoinIndex positional(
+      config, true, false, true);
+  standard.build(items);
+  positional.build(items);
+
+  for (int tau : {0, 1, 2, 5, 10}) {
+    for (size_t query_idx = 0; query_idx < 32; ++query_idx) {
+      const std::string query = mutate_with_indels(
+          items[query_idx].sequence, tau, gen);
+      const auto standard_result = standard.query(query, tau);
+      const auto positional_result = positional.query(query, tau);
+      for (size_t item_id : positional_result.candidate_item_ids) {
+        assert(contains(standard_result.candidate_item_ids, item_id));
+      }
+      for (const auto& item : items) {
+        if (navigamer::compute_distance(query, item.sequence) <= tau) {
+          assert(contains(
+              positional_result.candidate_item_ids, item.item_id));
+        }
+      }
+    }
+  }
+
+  const std::string long_sequence(
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 8, 'A');
+  navigamer::RangeJoinConfig long_config;
+  long_config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  long_config.min_seed_len = 4;
+  long_config.max_seed_len = 4;
+  navigamer::ExactRangeJoinIndex long_index(
+      long_config, true, false, true);
+  long_index.build({{7, long_sequence}});
+  const auto long_result = long_index.query(long_sequence, 0);
+  assert((long_result.candidate_item_ids ==
+          std::vector<navigamer::RangeJoinItemId>{7}));
+}
+
+void test_shared_reference_positional_postings_match_per_item_index() {
+  std::mt19937 gen(1907);
+  std::string reference = random_dna(900, gen);
+  reference[470] = 'N';
+  constexpr size_t sequence_length = 80;
+  std::vector<uint32_t> starts = {
+      320, 0,   145, 64,  430, 208, 16,  512,
+      96,  384, 256, 32,  560, 176, 448, 128};
+
+  std::vector<navigamer::RangeJoinItemView> item_views;
+  std::vector<const char*> sequence_data;
+  item_views.reserve(starts.size());
+  sequence_data.reserve(starts.size());
+  for (size_t item_idx = 0; item_idx < starts.size(); ++item_idx) {
+    const char* data = reference.data() + starts[item_idx];
+    item_views.push_back(
+        {item_idx, std::string_view(data, sequence_length)});
+    sequence_data.push_back(data);
+  }
+
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 20;
+  navigamer::ExactRangeJoinIndex per_item(config, true, false, true);
+  navigamer::ExactRangeJoinIndex shared_reference(
+      config, true, false, true);
+  navigamer::ExactRangeJoinIndex offset_reference(
+      config, true, false, true);
+  per_item.build_views(std::move(item_views));
+  shared_reference.build_uniform_identity_views(
+      std::move(sequence_data), sequence_length);
+  offset_reference.build_uniform_identity_offsets(
+      starts, reference.data(), reference.size(), sequence_length);
+
+  for (int tau : {0, 1, 2, 5, 9}) {
+    for (size_t query_idx : {size_t{1}, size_t{5}, size_t{8}}) {
+      const std::string query = mutate_with_indels(
+          std::string(reference.data() + starts[query_idx],
+                      sequence_length),
+          tau, gen);
+      const auto expected = per_item.query(query, tau);
+      const auto actual = shared_reference.query(query, tau);
+      const auto offset_actual = offset_reference.query(query, tau);
+      assert(actual.candidate_item_ids == expected.candidate_item_ids);
+      assert(offset_actual.candidate_item_ids == expected.candidate_item_ids);
+    }
+  }
+}
+
+void test_compact_postings_support_extreme_codes_and_copy() {
+  std::vector<navigamer::RangeJoinItem> items = {
+      {0, std::string(32, 'A')},
+      {1, std::string(32, 'T')},
+      {2, "ACGTACGTACGTACGTACGTACGTACGTACGT"},
+  };
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 32;
+  config.max_seed_len = 32;
+  navigamer::ExactRangeJoinIndex index(config, true);
+  index.build(items);
+  index.prepare_seed_lengths({32});
+  navigamer::ExactRangeJoinIndex copied = index;
+
+  for (const auto& item : items) {
+    const auto original = index.query(item.sequence, 0);
+    const auto restored = copied.query(item.sequence, 0);
+    assert(original.candidate_item_ids ==
+           (std::vector<navigamer::RangeJoinItemId>{
+               static_cast<navigamer::RangeJoinItemId>(item.item_id)}));
+    assert(restored.candidate_item_ids == original.candidate_item_ids);
+  }
+}
+
+void test_run_encoded_postings_expand_exactly() {
+  std::vector<navigamer::RangeJoinItem> items;
+  std::vector<navigamer::RangeJoinItemId> expected;
+  for (uint32_t item_id = 0; item_id < 64; ++item_id) {
+    items.push_back({item_id, std::string(32, 'A')});
+    expected.push_back(item_id);
+  }
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 4;
+
+  for (bool positional : {false, true}) {
+    navigamer::ExactRangeJoinIndex index(
+        config, true, false, positional);
+    index.build(items);
+    const auto result = index.query(std::string(32, 'A'), 0);
+    assert(result.candidate_item_ids == expected);
+  }
+}
+
+void test_compact_slot_supports_16bit_boundary_and_overflow() {
+  const std::string sequence(4, 'A');
+  navigamer::RangeJoinConfig config;
+  config.candidate_mode =
+      navigamer::RangeCandidateMode::PigeonholeOnly;
+  config.min_seed_len = 4;
+  config.max_seed_len = 4;
+  const size_t boundary =
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
+  for (size_t item_count : {boundary, boundary + 1}) {
+    for (bool positional : {false, true}) {
+      std::vector<const char*> sequence_data(item_count, sequence.data());
+      navigamer::ExactRangeJoinIndex index(
+          config, true, false, positional);
+      index.build_uniform_identity_views(
+          std::move(sequence_data), sequence.size());
+
+      const auto result = index.query(sequence, 0);
+      assert(result.candidate_item_ids.size() == item_count);
+      assert(result.candidate_item_ids.front() == 0);
+      assert(result.candidate_item_ids.back() == item_count - 1);
+    }
+  }
+
+  std::vector<navigamer::RangeJoinItemView> views(
+      boundary + 1, {0, sequence});
+  for (size_t item_idx = 0; item_idx < views.size(); ++item_idx) {
+    views[item_idx].item_id = item_idx;
+  }
+  const std::string ambiguous(4, 'N');
+  views.back().sequence = ambiguous;
+  navigamer::ExactRangeJoinIndex positional(config, true, false, true);
+  positional.build_views(std::move(views));
+  const auto ambiguous_result = positional.query(sequence, 0);
+  assert(ambiguous_result.candidate_item_ids.size() == boundary + 1);
+  assert(ambiguous_result.candidate_item_ids.back() == boundary);
+}
+
 }  // namespace
 
 int main() {
@@ -130,8 +458,18 @@ int main() {
   using navigamer::RangeCandidateMode;
   using navigamer::RangeJoinConfig;
   using navigamer::RangeJoinItem;
+  using navigamer::RangeJoinItemView;
 
   test_parallel_range_join_queries_are_deterministic();
+  test_seed_and_qgram_queries_share_workspace_safely();
+  test_vacuous_qgram_bound_skips_deferred_postings();
+  test_external_views_preserve_sparse_item_ids();
+  test_shifted_window_postings_match_standard_index();
+  test_positional_postings_are_recall_safe();
+  test_shared_reference_positional_postings_match_per_item_index();
+  test_compact_postings_support_extreme_codes_and_copy();
+  test_run_encoded_postings_expand_exactly();
+  test_compact_slot_supports_16bit_boundary_and_overflow();
 
   std::mt19937 gen(42);
   std::vector<RangeJoinItem> items;
@@ -139,6 +477,34 @@ int main() {
 
   ExactRangeJoinIndex index(config_for(RangeCandidateMode::Auto));
   index.build(items);
+  ExactRangeJoinIndex copied_index = index;
+  std::vector<RangeJoinItemView> item_views;
+  item_views.reserve(items.size());
+  for (const auto& item : items) {
+    item_views.push_back({item.item_id, item.sequence});
+  }
+  ExactRangeJoinIndex view_index(config_for(RangeCandidateMode::Auto));
+  view_index.build_views(std::move(item_views));
+  ExactRangeJoinIndex uniform_identity_view_index(
+      config_for(RangeCandidateMode::Auto));
+  std::string uniform_reference;
+  std::vector<uint32_t> uniform_identity_offsets;
+  uniform_reference.reserve(items.size() * items.front().sequence.size());
+  uniform_identity_offsets.reserve(items.size());
+  for (const auto& item : items) {
+    uniform_identity_offsets.push_back(
+        static_cast<uint32_t>(uniform_reference.size()));
+    uniform_reference.append(item.sequence);
+  }
+  std::vector<const char*> uniform_identity_views;
+  uniform_identity_views.reserve(uniform_identity_offsets.size());
+  for (uint32_t offset : uniform_identity_offsets) {
+    uniform_identity_views.push_back(uniform_reference.data() + offset);
+  }
+  uniform_identity_view_index.build_uniform_identity_views(
+      std::move(uniform_identity_views), items.front().sequence.size());
+  ExactRangeJoinIndex copied_uniform_identity_view_index =
+      uniform_identity_view_index;
 
   auto adaptive = index.query(items[0].sequence, 2);
   assert(!adaptive.used_full_scan);
@@ -184,6 +550,12 @@ int main() {
     for (size_t q_idx = 0; q_idx < 40; ++q_idx) {
       std::string query = mutate(items[q_idx].sequence, std::min(tau, 5), gen);
       auto result = index.query(query, tau);
+      auto copied_result = copied_index.query(query, tau);
+      auto view_result = view_index.query(query, tau);
+      auto uniform_identity_view_result =
+          uniform_identity_view_index.query(query, tau);
+      auto copied_uniform_identity_view_result =
+          copied_uniform_identity_view_index.query(query, tau);
       auto pigeonhole = pigeonhole_index.query(query, tau);
       auto qgram = qgram_index.query(query, tau);
       auto hybrid = hybrid_index.query(query, tau);
@@ -191,6 +563,17 @@ int main() {
       assert(hybrid.candidate_item_ids ==
              intersection(pigeonhole.candidate_item_ids,
                           qgram.candidate_item_ids));
+      assert(view_result.candidate_item_ids == result.candidate_item_ids);
+      assert(view_result.mode_used == result.mode_used);
+      assert(uniform_identity_view_result.candidate_item_ids ==
+             result.candidate_item_ids);
+      assert(uniform_identity_view_result.mode_used == result.mode_used);
+      assert(copied_uniform_identity_view_result.candidate_item_ids ==
+             uniform_identity_view_result.candidate_item_ids);
+      assert(copied_uniform_identity_view_result.mode_used ==
+             uniform_identity_view_result.mode_used);
+      assert(copied_result.candidate_item_ids == result.candidate_item_ids);
+      assert(copied_result.mode_used == result.mode_used);
       assert(full.mode_used == RangeCandidateMode::FullScan);
       assert(qgram.mode_used == RangeCandidateMode::QGramOnly);
       assert(hybrid.mode_used == RangeCandidateMode::Hybrid);
@@ -323,6 +706,26 @@ int main() {
   assert(selected_pigeonhole.auto_pigeonhole_accepted == 1);
   assert(selected_pigeonhole.auto_qgram_invoked == 0);
   assert(selected_pigeonhole.auto_hybrid_invoked == 0);
+
+  bool rejected_wide_id = false;
+  try {
+    ExactRangeJoinIndex wide_id_index;
+    wide_id_index.build({{
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1,
+        "ACGTACGT"}});
+  } catch (const std::length_error&) {
+    rejected_wide_id = true;
+  }
+  assert(rejected_wide_id);
+
+  bool rejected_null_sequence = false;
+  try {
+    ExactRangeJoinIndex null_sequence_index;
+    null_sequence_index.build_uniform_identity_views({nullptr}, 5);
+  } catch (const std::invalid_argument&) {
+    rejected_null_sequence = true;
+  }
+  assert(rejected_null_sequence);
 
   std::cout << "range join tests passed\n";
   return 0;

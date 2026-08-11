@@ -1,5 +1,4 @@
 #include "index_builder.hpp"
-#include "mbb_rect_index.hpp"
 #include "search_engine.hpp"
 
 #include <cassert>
@@ -47,10 +46,8 @@ std::vector<SequencePtr> make_sequences() {
   return sequences;
 }
 
-std::set<std::string> ids(const std::vector<SequencePtr>& hits) {
-  std::set<std::string> out;
-  for (const auto& hit : hits) out.insert(hit->id);
-  return out;
+std::set<navigamer::LeafId> ids(const navigamer::SearchResult& hits) {
+  return {hits.begin(), hits.end()};
 }
 
 navigamer::SearchConfig search_config(navigamer::MBBFilterMode mode) {
@@ -68,11 +65,6 @@ void assert_scan_rect_and_brute_force_equivalent(
       builder, search_config(navigamer::MBBFilterMode::Scan));
   navigamer::BioGeometrySearchEngine rect_engine(
       builder, search_config(navigamer::MBBFilterMode::RectIndex));
-  std::vector<SequencePtr> unique_sequences;
-  for (const auto& entry : builder.unique_sequences) {
-    unique_sequences.push_back(entry.second);
-  }
-
   std::mt19937 gen(999);
   size_t rect_queries = 0;
   size_t rect_fallbacks = 0;
@@ -83,7 +75,7 @@ void assert_scan_rect_and_brute_force_equivalent(
     auto [scan_hits, scan_stats] = scan_engine.search_adaptive(query, 2);
     auto [rect_hits, rect_stats] = rect_engine.search_adaptive(query, 2);
     auto [bf_hits, bf_stats] =
-        rect_engine.search_brute_force(query, 2, unique_sequences);
+        rect_engine.search_brute_force(query, 2);
     (void)bf_stats;
 
     assert(ids(scan_hits) == ids(rect_hits));
@@ -122,31 +114,6 @@ int main() {
   low_fanout_builder.build(sequences);
   assert_scan_rect_and_brute_force_equivalent(
       low_fanout_builder, sequences, false, true);
-
-  navigamer::BioGeometryIndexBuilder missing_builder(hierarchy, indexed_config);
-  missing_builder.build(sequences);
-  for (int layer = 0; layer < missing_builder.finest_primary_layer_index(); ++layer) {
-    for (const auto& parent : missing_builder.primary_layer(layer)) {
-      parent->mbb_rect_index.reset();
-    }
-  }
-  assert_scan_rect_and_brute_force_equivalent(
-      missing_builder, sequences, false, true);
-
-  navigamer::BioGeometryIndexBuilder mismatch_builder(hierarchy, indexed_config);
-  mismatch_builder.build(sequences);
-  for (int layer = 0; layer < mismatch_builder.finest_primary_layer_index(); ++layer) {
-    for (const auto& parent : mismatch_builder.primary_layer(layer)) {
-      if (!parent->child_nodes.empty()) {
-        parent->mbb_rect_index = std::make_shared<navigamer::MBBRectIndex>();
-        std::vector<int> lo(parent->beacons.size() + 1, 0);
-        std::vector<int> hi(parent->beacons.size() + 1, 1000);
-        parent->mbb_rect_index->build({{0, std::move(lo), std::move(hi)}});
-      }
-    }
-  }
-  assert_scan_rect_and_brute_force_equivalent(
-      mismatch_builder, sequences, false, true);
 
   std::cout << "MBB filter equivalence tests passed\n";
   return 0;

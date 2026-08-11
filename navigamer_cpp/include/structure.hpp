@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <cstddef>
 #include "mbb_rect_index.hpp"
 
 namespace navigamer {
@@ -36,11 +37,24 @@ struct BwtInterval {
   bool valid() const { return start >= 0 && end >= start; }
 };
 
+// One contig embedded in a flattened reference string. Coordinates are
+// half-open global offsets into SequenceStore::reference_view().
+struct ReferenceContig {
+  std::string id;
+  uint32_t begin = 0;
+  uint32_t end = 0;
+  // Coordinate of `begin` in the original contig. Zero for an unsharded
+  // reference; non-zero for a stored shard slice.
+  uint32_t source_begin = 0;
+};
+
 // The atomic database object indexed by NavigaMer.
 struct BioSequence {
   std::string id;
   std::string seq;
   LeafId sequence_id = INVALID_LEAF_ID;
+  bool has_source_pos = false;
+  size_t source_pos = 0;
   std::vector<RefPosition> ref_positions;
   BwtInterval bwt_interval;
 

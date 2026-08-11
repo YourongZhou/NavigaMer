@@ -7,11 +7,14 @@
 #include "structure.hpp"
 #include "tools.hpp"
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace navigamer {
+
+using SearchResult = std::vector<LeafId>;
 
 enum class MBBFilterMode {
   Scan,
@@ -105,6 +108,8 @@ struct SearchStats {
   size_t frontier_max_size = 0;
   size_t frontier_total_pushed = 0;
   size_t contained_fastpath_count = 0;
+  size_t contained_path_reuse_attempt_count = 0;
+  size_t contained_path_reuse_hit_count = 0;
   size_t overlap_fallback_count = 0;
   size_t leaf_world_count = 0;
   size_t raw_candidate_count = 0;
@@ -267,24 +272,33 @@ struct SearchScratch {
   bool mark_visited(NodeId id);
 };
 
+struct SearchQueryView {
+  std::string_view seq;
+
+  SearchQueryView(const BioSequence& sequence) : seq(sequence.seq) {}
+  explicit SearchQueryView(std::string_view sequence) : seq(sequence) {}
+};
+
 class BioGeometrySearchEngine {
  public:
   explicit BioGeometrySearchEngine(
       const BioGeometryIndexBuilder& index,
       const SearchConfig& config = SearchConfig{});
 
-  std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
+  std::pair<SearchResult, SearchStats>
   search_adaptive(const BioSequence& query_seq, int tolerance);
 
-  std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
+  std::pair<SearchResult, SearchStats>
+  search_adaptive(std::string_view query_seq, int tolerance);
+
+  std::pair<SearchResult, SearchStats>
   search_greedy(const BioSequence& query_seq, int tolerance);
 
-  std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
+  std::pair<SearchResult, SearchStats>
   search_exhaustive(const BioSequence& query_seq, int tolerance);
 
-  std::pair<std::vector<std::shared_ptr<BioSequence>>, SearchStats>
-  search_brute_force(const BioSequence& query_seq, int tolerance,
-                     const std::vector<std::shared_ptr<BioSequence>>& all_sequences);
+  std::pair<SearchResult, SearchStats>
+  search_brute_force(const BioSequence& query_seq, int tolerance);
 
   std::vector<std::string> debug_safe_child_router_candidate_ids(
       const std::string& parent_node_id,
@@ -293,6 +307,9 @@ class BioGeometrySearchEngine {
       bool* used_router) const;
 
  private:
+  std::pair<SearchResult, SearchStats>
+  search_adaptive(const SearchQueryView& query_seq, int tolerance);
+
   struct ParentRouterHintIndex {
     ExactRangeJoinIndex range_index;
     std::unordered_map<std::string, size_t> child_item_ids_by_node_id;
@@ -310,8 +327,6 @@ class BioGeometrySearchEngine {
 
   const BioGeometryIndexBuilder& index_;
   SearchConfig config_;
-  std::unordered_map<int, std::unordered_map<std::string, QGramSignature>>
-      world_qgram_signatures_by_q_;
   std::unordered_map<std::string, std::vector<uint64_t>>
       world_minimizer_signatures_;
   std::unordered_map<std::string, ParentRouterHintIndex>
@@ -320,6 +335,9 @@ class BioGeometrySearchEngine {
       parent_safe_child_router_indexes_;
   double safe_child_router_build_ms_ = 0.0;
 
+  const QGramSignature* active_query_qgram_signature(
+      NodeId node_id, int q, SearchStats& stats) const;
+
   bool mbb_prunable_row(const std::vector<MBB>& row, const std::vector<int>& V_Q,
                         int tolerance) const;
   bool leaf_beacon_prunable_row(const std::vector<int>& row,
@@ -327,7 +345,12 @@ class BioGeometrySearchEngine {
                                 int tolerance) const;
   std::vector<int> compute_query_beacon_distances(
       const std::shared_ptr<WorldNode>& node,
-      const BioSequence& query_seq,
+      const SearchQueryView& query_seq,
+      SearchStats& stats) const;
+  std::vector<int> compute_query_beacon_distances_view(
+      NodeId node_id,
+      size_t layer,
+      const SearchQueryView& query_seq,
       SearchStats& stats) const;
   std::vector<std::shared_ptr<WorldNode>> scan_mbb_surviving_children(
       const std::shared_ptr<WorldNode>& node,
@@ -339,23 +362,31 @@ class BioGeometrySearchEngine {
       const std::vector<int>& query_beacon_dists,
       int tolerance,
       SearchStats& stats) const;
-  std::vector<size_t> safe_child_router_candidate_indices(
+  std::vector<uint32_t> safe_child_router_candidate_indices(
       const std::shared_ptr<WorldNode>& node,
-      const BioSequence& query_seq,
+      const SearchQueryView& query_seq,
       const std::vector<int>& query_beacon_dists,
+      int tolerance,
+      SearchStats& stats,
+      bool* used_router) const;
+  std::vector<uint32_t> safe_child_router_candidate_indices_view(
+      NodeId node_id,
+      const SearchQueryView& query_seq,
+      const std::vector<int>& query_beacon_dists,
+      int child_radius,
       int tolerance,
       SearchStats& stats,
       bool* used_router) const;
   std::vector<std::shared_ptr<WorldNode>> scan_mbb_surviving_child_indices(
       const std::shared_ptr<WorldNode>& node,
-      const std::vector<size_t>& child_indices,
+      const std::vector<uint32_t>& child_indices,
       const std::vector<int>& query_beacon_dists,
       int tolerance,
       SearchStats& stats) const;
   std::vector<std::shared_ptr<WorldNode>> rank_children_with_router_hints(
       const std::shared_ptr<WorldNode>& node,
       const std::vector<std::shared_ptr<WorldNode>>& candidates,
-      const BioSequence& query_seq,
+      const SearchQueryView& query_seq,
       int tolerance,
       SearchStats& stats,
       const QGramSignature* router_qgram_signature,
@@ -377,20 +408,20 @@ class BioGeometrySearchEngine {
       SearchStats& stats) const;
   void verify_leaf_candidates(
       const std::shared_ptr<WorldNode>& node,
-      const BioSequence& query_seq,
+      const SearchQueryView& query_seq,
       int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       SearchStats& stats) const;
   void verify_leaf_candidates_view(
       NodeId node_id,
-      const BioSequence& query_seq,
+      const SearchQueryView& query_seq,
       int tolerance,
-      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      std::unordered_set<LeafId>& unique_results,
       SearchStats& stats) const;
 
   void process_node_adaptive(
       const std::shared_ptr<WorldNode>& node, int current_layer,
-      const BioSequence& query_seq, int tolerance,
+      const SearchQueryView& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       std::unordered_set<std::string>& visited_nodes,
       SearchStats& stats,
@@ -399,7 +430,7 @@ class BioGeometrySearchEngine {
       const std::vector<uint64_t>* router_minimizers) const;
   void process_node_adaptive_epoch(
       const std::shared_ptr<WorldNode>& node, int current_layer,
-      const BioSequence& query_seq, int tolerance,
+      const SearchQueryView& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       SearchScratch& scratch,
       SearchStats& stats,
@@ -409,24 +440,26 @@ class BioGeometrySearchEngine {
 
   void search_layer_adaptive(
       const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
-      const BioSequence& query_seq, int tolerance,
+      const SearchQueryView& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       std::unordered_set<std::string>& visited_nodes,
       SearchStats& stats,
       bool after_mbb_filter,
       const QGramSignature* query_qgram_signature,
       const QGramSignature* router_qgram_signature,
-      const std::vector<uint64_t>* router_minimizers) const;
+      const std::vector<uint64_t>* router_minimizers,
+      const std::string& contained_parent_key) const;
   void search_layer_adaptive_epoch(
       const std::vector<std::shared_ptr<WorldNode>>& candidates, int layer_id,
-      const BioSequence& query_seq, int tolerance,
+      const SearchQueryView& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       SearchScratch& scratch,
       SearchStats& stats,
       bool after_mbb_filter,
       const QGramSignature* query_qgram_signature,
       const QGramSignature* router_qgram_signature,
-      const std::vector<uint64_t>* router_minimizers) const;
+      const std::vector<uint64_t>* router_minimizers,
+      const std::string& contained_parent_key) const;
 
   bool flat_is_visited(
       NodeId node_id,
@@ -439,18 +472,20 @@ class BioGeometrySearchEngine {
   std::vector<NodeId> get_mbb_surviving_child_ids_view(
       NodeId node_id,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       int tolerance,
       SearchStats& stats) const;
   std::vector<NodeId> scan_mbb_surviving_child_ids_view(
       NodeId node_id,
-      const std::vector<size_t>& child_offsets,
+      const std::vector<uint32_t>& child_offsets,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       int tolerance,
       SearchStats& stats) const;
   std::vector<NodeId> rank_child_ids_with_router_hints_view(
       NodeId node_id,
       const std::vector<NodeId>& candidates,
-      const BioSequence& query_seq,
+      const SearchQueryView& query_seq,
       int tolerance,
       SearchStats& stats,
       const QGramSignature* router_qgram_signature,
@@ -459,11 +494,13 @@ class BioGeometrySearchEngine {
       NodeId node_id,
       const std::vector<NodeId>& candidates,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       SearchStats& stats) const;
   std::vector<NodeId> rank_child_ids_with_best_first_view(
       NodeId node_id,
       const std::vector<NodeId>& candidates,
       const std::vector<int>& query_beacon_dists,
+      int child_radius,
       int tolerance,
       SearchStats& stats) const;
   std::vector<NodeId> apply_path_reuse_order_view(
@@ -475,15 +512,17 @@ class BioGeometrySearchEngine {
       int tau,
       SearchStats& stats) const;
   int compute_center_distance_for_search(
-      const BioSequence& query_seq,
+      const SearchQueryView& query_seq,
       const std::string& node_id,
-      const std::string& center_sequence,
+      LeafId center_sequence_id,
+      std::string_view center_sequence,
       int tau,
-      bool after_mbb_filter) const;
+      bool after_mbb_filter,
+      bool* cache_hit = nullptr) const;
   void process_node_adaptive_view(
       NodeId node_id, int current_layer,
-      const BioSequence& query_seq, int tolerance,
-      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      const SearchQueryView& query_seq, int tolerance,
+      std::unordered_set<LeafId>& unique_results,
       std::unordered_set<std::string>* visited_nodes,
       SearchScratch* scratch,
       SearchStats& stats,
@@ -492,21 +531,28 @@ class BioGeometrySearchEngine {
       const std::vector<uint64_t>* router_minimizers) const;
   void search_layer_adaptive_view(
       const std::vector<NodeId>& candidates, int layer_id,
-      const BioSequence& query_seq, int tolerance,
-      std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
+      const SearchQueryView& query_seq, int tolerance,
+      std::unordered_set<LeafId>& unique_results,
       std::unordered_set<std::string>* visited_nodes,
       SearchScratch* scratch,
       SearchStats& stats,
       bool after_mbb_filter,
       const QGramSignature* query_qgram_signature,
       const QGramSignature* router_qgram_signature,
-      const std::vector<uint64_t>* router_minimizers) const;
+      const std::vector<uint64_t>* router_minimizers,
+      const std::string& contained_parent_key) const;
 
   void traverse_exhaustive(
       const std::shared_ptr<WorldNode>& node, int current_layer,
-      const BioSequence& query_seq, int tolerance,
+      const SearchQueryView& query_seq, int tolerance,
       std::unordered_map<std::string, std::shared_ptr<BioSequence>>& unique_results,
       std::unordered_set<std::string>& visited_nodes,
+      SearchStats& stats) const;
+  void traverse_exhaustive_view(
+      NodeId node_id, int current_layer,
+      const SearchQueryView& query_seq, int tolerance,
+      std::unordered_set<LeafId>& unique_results,
+      std::vector<uint8_t>& visited_nodes,
       SearchStats& stats) const;
 };
 

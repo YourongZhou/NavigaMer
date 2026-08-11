@@ -32,6 +32,30 @@ void expect_invalid_config(const std::vector<int>& primary_radii) {
   assert(threw && "expected invalid hierarchy config to throw");
 }
 
+void expect_long_sequence_rejected() {
+  bool threw = false;
+  try {
+    BioGeometryIndexBuilder builder{HierarchyConfig({20, 8})};
+    builder.build({
+        std::make_shared<BioSequence>(
+            "too_long", std::string(256, 'A')),
+    });
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw && "expected a sequence longer than 255 to throw");
+
+  threw = false;
+  try {
+    BioGeometryIndexBuilder builder{HierarchyConfig({20, 8})};
+    builder.build_reference_windows(
+        "ref", std::string(300, 'A'), 256, 1);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  assert(threw && "expected a reference window longer than 255 to throw");
+}
+
 void validate_primary_layout(const std::vector<int>& primary_radii) {
   BioGeometryIndexBuilder builder{HierarchyConfig(primary_radii)};
   builder.build(toy_sequences());
@@ -42,20 +66,19 @@ void validate_primary_layout(const std::vector<int>& primary_radii) {
   assert(builder.finest_primary_layer_index() == static_cast<int>(primary_radii.size() - 1));
 
   for (int i = 0; i < builder.num_primary_layers(); ++i) {
-    const auto& layer = builder.primary_layer(i);
+    const auto& view = builder.search_graph_view();
+    const size_t layer = static_cast<size_t>(i);
     if (i == builder.finest_primary_layer_index()) {
-      for (const auto& node : layer) {
-        assert(node->child_nodes.empty());
-        assert(!node->child_leaves.empty());
+      for (uint32_t node_id = view.layer_begin[layer];
+           node_id < view.layer_end[layer]; ++node_id) {
+        assert(view.leaf_count(node_id) > 0);
       }
     } else {
       bool saw_child = false;
-      for (const auto& node : layer) {
-        assert(node->is_primary);
-        assert(node->primary_layer_index == i);
-        assert(!node->beacons.empty());
-        assert(node->child_nodes.size() == node->child_beacon_mbbs.size());
-        if (!node->child_nodes.empty()) saw_child = true;
+      for (uint32_t node_id = view.layer_begin[layer];
+           node_id < view.layer_end[layer]; ++node_id) {
+        assert(view.beacon_count(node_id) > 0);
+        if (view.child_count(node_id) > 0) saw_child = true;
       }
       assert(saw_child && "expected at least one folded child edge in non-finest layer");
     }
@@ -71,6 +94,8 @@ int main() {
   expect_invalid_config({10});
   expect_invalid_config({10, 10});
   expect_invalid_config({8, 12});
+  expect_invalid_config({65536, 1});
+  expect_long_sequence_rejected();
 
   validate_primary_layout({20, 8});
   validate_primary_layout({30, 15, 5});

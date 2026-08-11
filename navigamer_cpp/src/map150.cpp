@@ -60,8 +60,10 @@ void keep_best(std::unordered_map<std::string, Map150Result>& unique,
 void verify_occurrence(const std::string& read_id,
                        const std::string& original_query,
                        const std::string& oriented_query,
-                       const std::string& ref_seq,
-                       const BioSequence& hit,
+                       std::string_view ref_seq,
+                       const SequenceStore& sequence_store,
+                       LeafId hit_id,
+                       const BioSequence* record,
                        const RefPosition& occurrence,
                        const std::string& strand,
                        int tolerance,
@@ -77,14 +79,14 @@ void verify_occurrence(const std::string& read_id,
     for (int len = min_len; len <= max_len; ++len) {
       int end = start + len;
       if (end > pad_end) continue;
-      std::string fragment =
-          ref_seq.substr(static_cast<size_t>(start), static_cast<size_t>(len));
+      std::string fragment(
+          ref_seq.substr(static_cast<size_t>(start), static_cast<size_t>(len)));
       int ed = compute_distance(oriented_query, fragment);
       if (ed > tolerance) continue;
 
       Map150Result result;
       result.query_id = read_id;
-      result.hit_id = hit.id;
+      result.hit_id = record ? record->id : sequence_store.identifier(hit_id);
       result.ref_id = occurrence.ref_id;
       result.strand = strand;
       result.query_start = 0;
@@ -95,14 +97,14 @@ void verify_occurrence(const std::string& read_id,
       result.edit_distance = ed;
       result.query_fragment = original_query;
       result.reference_fragment = fragment;
-      result.sa_interval = hit.bwt_interval;
+      result.sa_interval = record ? record->bwt_interval : BwtInterval{};
       result.stats = stats;
       keep_best(unique_results, std::move(result));
     }
   }
 }
 
-std::vector<std::shared_ptr<BioSequence>> search_candidates(
+SearchResult search_candidates(
     BioGeometrySearchEngine& engine,
     const BioSequence& query,
     int candidate_tolerance,
@@ -116,9 +118,10 @@ void map_orientation(const BioSequence& read,
                      const std::string& original_query,
                      const std::string& oriented_query,
                      const std::string& strand,
-                     const std::string& ref_seq,
+                     std::string_view ref_seq,
                      int tolerance,
                      BioGeometrySearchEngine& engine,
+                     const SequenceStore& sequence_store,
                      const OccurrenceLocator& locator,
                      std::unordered_map<std::string, Map150Result>& unique_results) {
   BioSequence query(read.id + "/" + strand, oriented_query);
@@ -126,10 +129,36 @@ void map_orientation(const BioSequence& read,
   auto candidates = search_candidates(
       engine, query, map150_candidate_tolerance(tolerance), stats);
 
-  for (const auto& candidate : candidates) {
-    for (const auto& occurrence : locator.locate(*candidate)) {
-      verify_occurrence(read.id, original_query, oriented_query, ref_seq, *candidate,
-                        occurrence, strand, tolerance, stats, unique_results);
+  for (LeafId candidate_id : candidates) {
+    if (sequence_store.reference_backed) {
+      if (locator.name() != "refpos") {
+        throw std::runtime_error(
+            "reference-backed map150 requires the refpos locator");
+      }
+      sequence_store.for_each_occurrence(
+          candidate_id, [&](uint32_t source_pos) {
+            const auto& contig = sequence_store.contig_for_position(source_pos);
+            const size_t start = sequence_store.contig_source_position(source_pos);
+            if (start > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+                start + MAP150_READ_LEN >
+                    static_cast<size_t>(std::numeric_limits<int>::max())) {
+              throw std::runtime_error(
+                  "reference-backed map150 occurrence exceeds int coordinates");
+            }
+            const RefPosition occurrence{
+                contig.id, static_cast<int>(start),
+                static_cast<int>(start + MAP150_READ_LEN), "+"};
+            verify_occurrence(read.id, original_query, oriented_query, ref_seq,
+                              sequence_store, candidate_id, nullptr, occurrence,
+                              strand, tolerance, stats, unique_results);
+          });
+      continue;
+    }
+    const auto& candidate = sequence_store.at(candidate_id);
+    for (const auto& occurrence : locator.locate(candidate)) {
+      verify_occurrence(read.id, original_query, oriented_query, ref_seq,
+                        sequence_store, candidate_id, &candidate, occurrence,
+                        strand, tolerance, stats, unique_results);
     }
   }
 }
@@ -194,25 +223,26 @@ class SeqanFmLocator final : public OccurrenceLocator {
       : ref_id_(std::move(ref_id)),
         genome_(to_dna4_vector(ref_seq)),
         index_(genome_) {
-    for (auto& entry : builder.unique_sequences) {
-      auto& seq = entry.second;
+    for (auto& seq : builder.sequence_store().records) {
       auto cursor = index_.cursor();
-      if (!cursor.extend_right(to_dna4_vector(seq->seq))) {
-        throw std::runtime_error("SeqAn FM-index could not locate indexed 150-mer: " + seq->id);
+      if (!cursor.extend_right(to_dna4_vector(seq.seq))) {
+        throw std::runtime_error("SeqAn FM-index could not locate indexed 150-mer: " + seq.id);
       }
 
       auto interval = cursor.suffix_array_interval();
-      seq->set_sa_interval(static_cast<int64_t>(interval.begin_position),
-                           static_cast<int64_t>(interval.end_position));
+      seq.set_sa_interval(static_cast<int64_t>(interval.begin_position),
+                          static_cast<int64_t>(interval.end_position));
 
       std::vector<RefPosition> positions;
       for (auto const& pos : cursor.locate()) {
         if (pos.first != 0) continue;
         int start = static_cast<int>(pos.second);
-        positions.push_back({ref_id_, start, start + static_cast<int>(seq->seq.size()), "+"});
+        positions.push_back(
+            {ref_id_, start, start + static_cast<int>(seq.seq.size()), "+"});
       }
       sort_and_deduplicate_positions(positions);
-      interval_occurrences_[interval_key(seq->bwt_interval)] = std::move(positions);
+      interval_occurrences_[interval_key(seq.bwt_interval)] =
+          std::move(positions);
     }
   }
 
@@ -306,7 +336,7 @@ std::vector<std::shared_ptr<BioSequence>> build_map150_reference_windows(
 
 std::vector<Map150Result> map150_reads_with_locator(
     const std::string& ref_id,
-    const std::string& ref_seq,
+    std::string_view ref_seq,
     const std::vector<std::shared_ptr<BioSequence>>& reads,
     int tolerance,
     const std::string& mode,
@@ -317,8 +347,16 @@ std::vector<Map150Result> map150_reads_with_locator(
   (void)ref_id;
   validate_mode(mode);
   validate_mapper_config(config, tolerance);
-  std::string normalized_ref = normalize_acgt_sequence(ref_seq, "reference");
-  if (normalized_ref.size() < static_cast<size_t>(MAP150_READ_LEN)) {
+  const auto& sequence_store = builder.sequence_store();
+  std::string normalized_ref;
+  const std::string_view mapping_reference = [&]() {
+    if (sequence_store.reference_backed) {
+      return sequence_store.reference_view();
+    }
+    normalized_ref = normalize_acgt_sequence(std::string(ref_seq), "reference");
+    return std::string_view(normalized_ref);
+  }();
+  if (mapping_reference.size() < static_cast<size_t>(MAP150_READ_LEN)) {
     throw std::runtime_error("map150 reference must be at least 150 bp");
   }
 
@@ -331,10 +369,12 @@ std::vector<Map150Result> map150_reads_with_locator(
     if (normalized_read.size() != static_cast<size_t>(MAP150_READ_LEN)) {
       throw std::runtime_error("map150 supports only 150 bp reads");
     }
-    map_orientation(*read, normalized_read, normalized_read, "+", normalized_ref,
-                    tolerance, engine, locator, unique_results);
+    map_orientation(*read, normalized_read, normalized_read, "+", mapping_reference,
+                    tolerance, engine, sequence_store, locator,
+                    unique_results);
     map_orientation(*read, normalized_read, reverse_complement(normalized_read), "-",
-                    normalized_ref, tolerance, engine, locator, unique_results);
+                    mapping_reference, tolerance, engine, sequence_store,
+                    locator, unique_results);
   }
 
   std::vector<Map150Result> out;
@@ -357,9 +397,10 @@ std::vector<Map150Result> map150_reads_refpos(
     int tolerance,
     const std::string& mode,
     const HierarchyConfig& config) {
-  auto windows = build_map150_reference_windows(ref_id, ref_seq);
+  std::string normalized_ref = normalize_acgt_sequence(ref_seq, "reference");
   BioGeometryIndexBuilder builder(config);
-  builder.build(windows);
+  builder.build_reference_windows(
+      ref_id, std::move(normalized_ref), MAP150_READ_LEN, 1);
   RefPositionLocator locator;
   return map150_reads_with_locator(ref_id, ref_seq, reads, tolerance, mode,
                                    config, locator, builder);

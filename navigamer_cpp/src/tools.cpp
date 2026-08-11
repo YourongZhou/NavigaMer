@@ -7,8 +7,23 @@
 #include <limits>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
+
+#if (defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#define NAVIGAMER_HAS_MYERS_BATCH4_AVX2 1
+#else
+#define NAVIGAMER_HAS_MYERS_BATCH4_AVX2 0
+#endif
 
 namespace navigamer {
+
+#if defined(__GNUC__) || defined(__clang__)
+#define NAVIGAMER_DISTANCE_HOT_ALIGN __attribute__((aligned(128)))
+#else
+#define NAVIGAMER_DISTANCE_HOT_ALIGN
+#endif
 
 const char* distance_mode_name(DistanceMode mode) {
   switch (mode) {
@@ -32,7 +47,8 @@ DistanceMode parse_distance_mode(const std::string& value) {
   throw std::invalid_argument("distance mode must be dp, myers, edlib, or auto");
 }
 
-int compute_distance(const std::string& a, const std::string& b) {
+NAVIGAMER_DISTANCE_HOT_ALIGN
+int compute_distance(std::string_view a, std::string_view b) {
   const size_t m = a.size();
   const size_t n = b.size();
   if (m == 0) return static_cast<int>(n);
@@ -57,7 +73,7 @@ int compute_distance(const BioSequence& a, const BioSequence& b) {
   return compute_distance(a.seq, b.seq);
 }
 
-int compute_distance_bounded_dp(const std::string& a, const std::string& b,
+int compute_distance_bounded_dp(std::string_view a, std::string_view b,
                                 int tau) {
   if (tau < 0) throw std::invalid_argument("edit-distance threshold must be non-negative");
 
@@ -97,7 +113,7 @@ int compute_distance_bounded_dp(const std::string& a, const std::string& b,
              : tau + 1;
 }
 
-int compute_distance_edlib(const std::string& a, const std::string& b) {
+int compute_distance_edlib(std::string_view a, std::string_view b) {
   EdlibAlignConfig config =
       edlibNewAlignConfig(-1, EDLIB_MODE_NW, EDLIB_TASK_DISTANCE, nullptr, 0);
   EdlibAlignResult result =
@@ -112,7 +128,7 @@ int compute_distance_edlib(const std::string& a, const std::string& b) {
   return distance;
 }
 
-int compute_distance_bounded_edlib(const std::string& a, const std::string& b,
+int compute_distance_bounded_edlib(std::string_view a, std::string_view b,
                                    int tau) {
   if (tau < 0) throw std::invalid_argument("edit-distance threshold must be non-negative");
   const int m = static_cast<int>(a.size());
@@ -130,6 +146,75 @@ int compute_distance_bounded_edlib(const std::string& a, const std::string& b,
   const int distance = result.editDistance < 0 ? tau + 1 : result.editDistance;
   edlibFreeAlignResult(result);
   return distance <= tau ? distance : tau + 1;
+}
+
+PreparedEdlibDnaPattern::~PreparedEdlibDnaPattern() {
+  if (handle) {
+    edlibDnaPreparedFree(static_cast<EdlibDnaPrepared*>(handle));
+  }
+}
+
+PreparedEdlibDnaPattern::PreparedEdlibDnaPattern(
+    PreparedEdlibDnaPattern&& other) noexcept
+    : pattern(std::move(other.pattern)), handle(other.handle) {
+  other.handle = nullptr;
+}
+
+PreparedEdlibDnaPattern& PreparedEdlibDnaPattern::operator=(
+    PreparedEdlibDnaPattern&& other) noexcept {
+  if (this == &other) return *this;
+  if (handle) {
+    edlibDnaPreparedFree(static_cast<EdlibDnaPrepared*>(handle));
+  }
+  pattern = std::move(other.pattern);
+  handle = other.handle;
+  other.handle = nullptr;
+  return *this;
+}
+
+PreparedEdlibDnaPattern prepare_edlib_dna_pattern(
+    std::string_view pattern) {
+  PreparedEdlibDnaPattern prepared;
+  prepared.pattern.assign(pattern.data(), pattern.size());
+  EdlibDnaPrepared* handle = edlibDnaPrepare(
+      prepared.pattern.data(), static_cast<int>(prepared.pattern.size()));
+  if (handle) {
+    prepared.handle = handle;
+  }
+  return prepared;
+}
+
+int compute_distance_bounded_edlib_prepared(
+    const PreparedEdlibDnaPattern& pattern,
+    std::string_view text,
+    int tau) {
+  if (tau < 0) {
+    throw std::invalid_argument(
+        "edit-distance threshold must be non-negative");
+  }
+  if (!pattern.handle) {
+    return compute_distance_bounded_edlib(pattern.pattern, text, tau);
+  }
+  const int distance = edlibDnaPreparedBoundedDistance(
+      static_cast<const EdlibDnaPrepared*>(pattern.handle),
+      text.data(), static_cast<int>(text.size()), tau);
+  if (distance >= 0) return distance;
+  if (distance == -1) return tau + 1;
+  return compute_distance_bounded_edlib(pattern.pattern, text, tau);
+}
+
+int compute_distance_edlib_prepared(
+    const PreparedEdlibDnaPattern& pattern,
+    std::string_view text) {
+  if (!pattern.handle) {
+    return compute_distance_edlib(pattern.pattern, text);
+  }
+  const int distance = edlibDnaPreparedDistance(
+      static_cast<const EdlibDnaPrepared*>(pattern.handle),
+      text.data(), static_cast<int>(text.size()));
+  return distance >= 0
+             ? distance
+             : compute_distance_edlib(pattern.pattern, text);
 }
 
 namespace {
@@ -151,7 +236,7 @@ int dna_base_index(char c) {
   }
 }
 
-bool is_acgt_string(const std::string& value) {
+bool is_acgt_string(std::string_view value) {
   for (char c : value) {
     if (dna_base_index(c) < 0) return false;
   }
@@ -166,24 +251,52 @@ uint64_t valid_block_mask(size_t block, size_t pattern_length) {
   return (uint64_t{1} << tail_bits) - 1;
 }
 
-int compute_distance_bounded_myers_single_word(const std::string& pattern,
-                                               const std::string& text,
-                                               int tau) {
+template <typename PreparedPattern>
+void prepare_myers_pattern_bits(
+    std::string_view pattern, PreparedPattern& prepared) {
   const size_t m = pattern.size();
-  std::array<uint64_t, 4> peq = {0, 0, 0, 0};
-  for (size_t i = 0; i < m; ++i) {
-    const int base = dna_base_index(pattern[i]);
-    peq[static_cast<size_t>(base)] |= (uint64_t{1} << i);
+  if (m > kMyersMaxPatternBits) return;
+  prepared.block_count = (m + 63) / 64;
+  for (size_t block = 0; block < prepared.block_count; ++block) {
+    prepared.masks[block] = valid_block_mask(block, m);
   }
+  for (size_t i = 0; i < m; ++i) {
+    const size_t block = i / 64;
+    const size_t bit = i % 64;
+    const int base = dna_base_index(pattern[i]);
+    if (base < 0) return;
+    prepared.peq[block][static_cast<size_t>(base)] |=
+        (uint64_t{1} << bit);
+  }
+  prepared.supported = true;
+}
 
-  const uint64_t valid_mask = m == 64 ? ~uint64_t{0} : ((uint64_t{1} << m) - 1);
+PreparedMyersPattern prepare_myers_pattern_impl(
+    std::string_view pattern) {
+  PreparedMyersPattern prepared;
+  prepared.pattern.assign(pattern.data(), pattern.size());
+  prepare_myers_pattern_bits(pattern, prepared);
+  return prepared;
+}
+
+int compute_distance_bounded_myers_single_word(
+    const PreparedMyersPattern& pattern,
+    std::string_view text,
+    int tau) {
+  const size_t m = pattern.pattern.size();
+  const uint64_t valid_mask = pattern.masks[0];
   const uint64_t top_bit = uint64_t{1} << (m - 1);
   uint64_t vp = valid_mask;
   uint64_t vn = 0;
   int score = static_cast<int>(m);
 
   for (char c : text) {
-    const uint64_t eq = peq[static_cast<size_t>(dna_base_index(c))];
+    const int base = dna_base_index(c);
+    if (base < 0) {
+      return compute_distance_bounded_dp(pattern.pattern, text, tau);
+    }
+    const uint64_t eq =
+        pattern.peq[0][static_cast<size_t>(base)];
     const uint64_t x = eq | vn;
     const uint64_t d0 = (((x & vp) + vp) ^ vp) | x;
     uint64_t hp = vn | ~(d0 | vp);
@@ -206,13 +319,12 @@ int compute_distance_bounded_myers_single_word(const std::string& pattern,
   return score <= tau ? score : tau + 1;
 }
 
-int compute_distance_bounded_myers_multiword(const std::string& pattern,
-                                             const std::string& text,
-                                             int tau) {
-  const size_t m = pattern.size();
-  const size_t block_count = (m + 63) / 64;
-  std::array<std::array<uint64_t, 4>, 4> peq = {};
-  std::array<uint64_t, 4> masks = {};
+int compute_distance_bounded_myers_multiword(
+    const PreparedMyersPattern& pattern,
+    std::string_view text,
+    int tau) {
+  const size_t m = pattern.pattern.size();
+  const size_t block_count = pattern.block_count;
   std::array<uint64_t, 4> pv = {};
   std::array<uint64_t, 4> mv = {};
   std::array<uint64_t, 4> xv = {};
@@ -221,14 +333,7 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
   std::array<uint64_t, 4> mh = {};
 
   for (size_t block = 0; block < block_count; ++block) {
-    masks[block] = valid_block_mask(block, m);
-    pv[block] = masks[block];
-  }
-  for (size_t i = 0; i < m; ++i) {
-    const size_t block = i / 64;
-    const size_t bit = i % 64;
-    const int base = dna_base_index(pattern[i]);
-    peq[block][static_cast<size_t>(base)] |= (uint64_t{1} << bit);
+    pv[block] = pattern.masks[block];
   }
 
   const size_t last_block = block_count - 1;
@@ -236,10 +341,14 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
   int score = static_cast<int>(m);
 
   for (char c : text) {
-    const size_t base = static_cast<size_t>(dna_base_index(c));
+    const int base_index = dna_base_index(c);
+    if (base_index < 0) {
+      return compute_distance_bounded_dp(pattern.pattern, text, tau);
+    }
+    const size_t base = static_cast<size_t>(base_index);
     uint64_t carry = 0;
     for (size_t block = 0; block < block_count; ++block) {
-      xv[block] = peq[block][base] | mv[block];
+      xv[block] = pattern.peq[block][base] | mv[block];
       const uint64_t addend = xv[block] & pv[block];
       const unsigned __int128 sum =
           static_cast<unsigned __int128>(addend) + pv[block] + carry;
@@ -249,9 +358,10 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
 
     for (size_t block = 0; block < block_count; ++block) {
       const uint64_t xh = ((sum_words[block] ^ pv[block]) | xv[block]) &
-                          masks[block];
-      ph[block] = (mv[block] | ~(xh | pv[block])) & masks[block];
-      mh[block] = (pv[block] & xh) & masks[block];
+                          pattern.masks[block];
+      ph[block] =
+          (mv[block] | ~(xh | pv[block])) & pattern.masks[block];
+      mh[block] = (pv[block] & xh) & pattern.masks[block];
     }
 
     if (ph[last_block] & top_bit) {
@@ -265,15 +375,19 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
     for (size_t block = 0; block < block_count; ++block) {
       const uint64_t next_ph_carry = ph[block] >> 63;
       const uint64_t next_mh_carry = mh[block] >> 63;
-      ph[block] = ((ph[block] << 1) | ph_carry) & masks[block];
-      mh[block] = ((mh[block] << 1) | mh_carry) & masks[block];
+      ph[block] =
+          ((ph[block] << 1) | ph_carry) & pattern.masks[block];
+      mh[block] =
+          ((mh[block] << 1) | mh_carry) & pattern.masks[block];
       ph_carry = next_ph_carry;
       mh_carry = next_mh_carry;
     }
 
     for (size_t block = 0; block < block_count; ++block) {
-      mv[block] = (ph[block] & xv[block]) & masks[block];
-      pv[block] = (mh[block] | ~(ph[block] | xv[block])) & masks[block];
+      mv[block] =
+          (ph[block] & xv[block]) & pattern.masks[block];
+      pv[block] =
+          (mh[block] | ~(ph[block] | xv[block])) & pattern.masks[block];
     }
   }
 
@@ -282,15 +396,240 @@ int compute_distance_bounded_myers_multiword(const std::string& pattern,
 
 }  // namespace
 
-bool compute_distance_bounded_myers_supported(const std::string& a,
-                                              const std::string& b) {
+PreparedMyersPattern prepare_myers_pattern(std::string_view pattern) {
+  return prepare_myers_pattern_impl(pattern);
+}
+
+PreparedMyersDnaPattern prepare_myers_dna_pattern(
+    std::string_view pattern) {
+  PreparedMyersDnaPattern prepared;
+  prepared.pattern_length = pattern.size();
+  prepare_myers_pattern_bits(pattern, prepared);
+  return prepared;
+}
+
+int compute_distance_bounded_myers_prepared(
+    const PreparedMyersPattern& pattern,
+    std::string_view text,
+    int tau) {
+  if (tau < 0) {
+    throw std::invalid_argument(
+        "edit-distance threshold must be non-negative");
+  }
+
+  const int m = static_cast<int>(pattern.pattern.size());
+  const int n = static_cast<int>(text.size());
+  if (std::abs(m - n) > tau) return tau + 1;
+  if (m == 0) return n <= tau ? n : tau + 1;
+  if (n == 0) return m <= tau ? m : tau + 1;
+  if (!pattern.supported) {
+    return compute_distance_bounded_dp(pattern.pattern, text, tau);
+  }
+  if (pattern.pattern.size() <= 64) {
+    return compute_distance_bounded_myers_single_word(pattern, text, tau);
+  }
+  return compute_distance_bounded_myers_multiword(pattern, text, tau);
+}
+
+#if NAVIGAMER_HAS_MYERS_BATCH4_AVX2
+__attribute__((target("avx2")))
+bool compute_distance_bounded_myers_prepared_batch4_avx2(
+    const PreparedMyersDnaPattern& pattern,
+    const std::array<std::string_view, 4>& texts,
+    int tau,
+    std::array<int, 4>& distances) {
+  const size_t pattern_length = pattern.pattern_length;
+  const size_t block_count = pattern.block_count;
+  const size_t text_length = texts[0].size();
+  const __m256i zero = _mm256_setzero_si256();
+  const __m256i one = _mm256_set1_epi64x(1);
+  const __m256i sign = _mm256_set1_epi64x(
+      static_cast<long long>(uint64_t{1} << 63));
+  const __m256i all_ones = _mm256_set1_epi64x(-1);
+  __m256i pv[4] = {};
+  __m256i mv[4] = {};
+  __m256i xv[4] = {};
+  __m256i ph[4] = {};
+  __m256i mh[4] = {};
+  __m256i masks[4] = {};
+  for (size_t block = 0; block < block_count; ++block) {
+    masks[block] = _mm256_set1_epi64x(
+        static_cast<long long>(pattern.masks[block]));
+    pv[block] = masks[block];
+    mv[block] = zero;
+  }
+
+  __m256i scores = _mm256_set1_epi64x(
+      static_cast<long long>(pattern_length));
+  const size_t last_block = block_count - 1;
+  const __m256i top_bit = _mm256_set1_epi64x(
+      static_cast<long long>(
+          uint64_t{1} << ((pattern_length - 1) % 64)));
+
+  for (size_t text_idx = 0; text_idx < text_length; ++text_idx) {
+    const auto code = [&](size_t lane) -> size_t {
+      const unsigned char base =
+          static_cast<unsigned char>(texts[lane][text_idx]);
+      return static_cast<size_t>(((base >> 1) ^ (base >> 2)) & 3);
+    };
+    const size_t code0 = code(0);
+    const size_t code1 = code(1);
+    const size_t code2 = code(2);
+    const size_t code3 = code(3);
+
+    __m256i carry = zero;
+    for (size_t block = 0; block < block_count; ++block) {
+      const __m256i eq = _mm256_set_epi64x(
+          static_cast<long long>(pattern.peq[block][code3]),
+          static_cast<long long>(pattern.peq[block][code2]),
+          static_cast<long long>(pattern.peq[block][code1]),
+          static_cast<long long>(pattern.peq[block][code0]));
+      xv[block] = _mm256_or_si256(eq, mv[block]);
+      const __m256i addend = _mm256_and_si256(xv[block], pv[block]);
+      const __m256i sum1 = _mm256_add_epi64(addend, pv[block]);
+      const __m256i carry1 = _mm256_cmpgt_epi64(
+          _mm256_xor_si256(addend, sign),
+          _mm256_xor_si256(sum1, sign));
+      const __m256i sum2 = _mm256_add_epi64(sum1, carry);
+      const __m256i carry2 = _mm256_cmpgt_epi64(
+          _mm256_xor_si256(sum1, sign),
+          _mm256_xor_si256(sum2, sign));
+      carry = _mm256_and_si256(
+          _mm256_or_si256(carry1, carry2), one);
+
+      const __m256i xh = _mm256_and_si256(
+          _mm256_or_si256(
+              _mm256_xor_si256(sum2, pv[block]), xv[block]),
+          masks[block]);
+      ph[block] = _mm256_and_si256(
+          _mm256_or_si256(
+              mv[block],
+              _mm256_andnot_si256(
+                  _mm256_or_si256(xh, pv[block]), all_ones)),
+          masks[block]);
+      mh[block] = _mm256_and_si256(
+          _mm256_and_si256(pv[block], xh), masks[block]);
+    }
+
+    const __m256i ph_zero = _mm256_cmpeq_epi64(
+        _mm256_and_si256(ph[last_block], top_bit), zero);
+    const __m256i mh_zero = _mm256_cmpeq_epi64(
+        _mm256_and_si256(mh[last_block], top_bit), zero);
+    scores = _mm256_add_epi64(
+        scores, _mm256_andnot_si256(ph_zero, one));
+    scores = _mm256_sub_epi64(
+        scores, _mm256_andnot_si256(mh_zero, one));
+
+    __m256i ph_carry = one;
+    __m256i mh_carry = zero;
+    for (size_t block = 0; block < block_count; ++block) {
+      const __m256i next_ph_carry =
+          _mm256_srli_epi64(ph[block], 63);
+      const __m256i next_mh_carry =
+          _mm256_srli_epi64(mh[block], 63);
+      ph[block] = _mm256_and_si256(
+          _mm256_or_si256(
+              _mm256_slli_epi64(ph[block], 1), ph_carry),
+          masks[block]);
+      mh[block] = _mm256_and_si256(
+          _mm256_or_si256(
+              _mm256_slli_epi64(mh[block], 1), mh_carry),
+          masks[block]);
+      ph_carry = next_ph_carry;
+      mh_carry = next_mh_carry;
+    }
+
+    for (size_t block = 0; block < block_count; ++block) {
+      mv[block] = _mm256_and_si256(
+          _mm256_and_si256(ph[block], xv[block]), masks[block]);
+      pv[block] = _mm256_and_si256(
+          _mm256_or_si256(
+              mh[block],
+              _mm256_andnot_si256(
+                  _mm256_or_si256(ph[block], xv[block]), all_ones)),
+          masks[block]);
+    }
+
+    // The current score is ED(pattern, text_prefix). Appending the remaining
+    // text characters can reduce that distance by at most one per character,
+    // so score - remaining is an exact lower bound on the final distance.
+    // Check only periodically to keep the accepted/near-candidate hot path
+    // cheap, and stop only when every SIMD lane is provably outside tau.
+    if ((text_idx & 1U) == 1U) {
+      const __m256i remaining = _mm256_set1_epi64x(
+          static_cast<long long>(text_length - text_idx - 1));
+      const __m256i threshold = _mm256_set1_epi64x(tau);
+      const __m256i rejected = _mm256_cmpgt_epi64(
+          _mm256_sub_epi64(scores, remaining), threshold);
+      if (_mm256_movemask_pd(_mm256_castsi256_pd(rejected)) == 0x0f) {
+        distances.fill(tau + 1);
+        return true;
+      }
+    }
+  }
+
+  alignas(32) std::array<int64_t, 4> score_lanes{};
+  _mm256_store_si256(
+      reinterpret_cast<__m256i*>(score_lanes.data()), scores);
+  for (size_t lane = 0; lane < 4; ++lane) {
+    distances[lane] = score_lanes[lane] <= tau
+                          ? static_cast<int>(score_lanes[lane])
+                          : tau + 1;
+  }
+  return true;
+}
+#endif
+
+bool myers_batch4_avx2_runtime_supported() {
+#if NAVIGAMER_HAS_MYERS_BATCH4_AVX2
+  static const bool supported = [] {
+    __builtin_cpu_init();
+    return static_cast<bool>(__builtin_cpu_supports("avx2"));
+  }();
+  return supported;
+#else
+  return false;
+#endif
+}
+
+bool compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+    const PreparedMyersDnaPattern& pattern,
+    const std::array<std::string_view, 4>& texts,
+    int tau,
+    std::array<int, 4>& distances) {
+  if (tau < 0) {
+    throw std::invalid_argument(
+        "edit-distance threshold must be non-negative");
+  }
+  if (!myers_batch4_avx2_runtime_supported() ||
+      !pattern.supported || pattern.pattern_length == 0 ||
+      pattern.block_count == 0 || pattern.block_count > 4) {
+    return false;
+  }
+  const size_t text_length = texts[0].size();
+  if (text_length != pattern.pattern_length) return false;
+  for (size_t lane = 1; lane < 4; ++lane) {
+    if (texts[lane].size() != text_length) return false;
+  }
+#if NAVIGAMER_HAS_MYERS_BATCH4_AVX2
+  return compute_distance_bounded_myers_prepared_batch4_avx2(
+      pattern, texts, tau, distances);
+#else
+  (void)texts;
+  (void)distances;
+  return false;
+#endif
+}
+
+bool compute_distance_bounded_myers_supported(std::string_view a,
+                                              std::string_view b) {
   if (a.empty() || b.empty()) return true;
   const size_t shorter = std::min(a.size(), b.size());
   return shorter <= kMyersMaxPatternBits && is_acgt_string(a) &&
          is_acgt_string(b);
 }
 
-int compute_distance_bounded_myers(const std::string& a, const std::string& b,
+int compute_distance_bounded_myers(std::string_view a, std::string_view b,
                                    int tau) {
   if (tau < 0) throw std::invalid_argument("edit-distance threshold must be non-negative");
 
@@ -300,21 +639,23 @@ int compute_distance_bounded_myers(const std::string& a, const std::string& b,
   if (a.empty()) return n_input <= tau ? n_input : tau + 1;
   if (b.empty()) return m_input <= tau ? m_input : tau + 1;
 
-  const std::string* pattern = &a;
-  const std::string* text = &b;
-  if (pattern->size() > text->size()) std::swap(pattern, text);
-  const size_t m = pattern->size();
+  std::string_view pattern = a;
+  std::string_view text = b;
+  if (pattern.size() > text.size()) std::swap(pattern, text);
+  const size_t m = pattern.size();
   if (!compute_distance_bounded_myers_supported(a, b)) {
     return compute_distance_bounded_dp(a, b, tau);
   }
+  const PreparedMyersPattern prepared =
+      prepare_myers_pattern_impl(pattern);
   if (m <= 64) {
-    return compute_distance_bounded_myers_single_word(*pattern, *text, tau);
+    return compute_distance_bounded_myers_single_word(prepared, text, tau);
   }
-  return compute_distance_bounded_myers_multiword(*pattern, *text, tau);
+  return compute_distance_bounded_myers_multiword(prepared, text, tau);
 }
 
-int compute_distance_bounded_with_mode(const std::string& a,
-                                       const std::string& b, int tau,
+int compute_distance_bounded_with_mode(std::string_view a,
+                                       std::string_view b, int tau,
                                        DistanceMode mode) {
   switch (mode) {
     case DistanceMode::DP:
@@ -324,12 +665,15 @@ int compute_distance_bounded_with_mode(const std::string& a,
     case DistanceMode::Edlib:
       return compute_distance_bounded_edlib(a, b, tau);
     case DistanceMode::Auto:
-      return compute_distance_bounded_dp(a, b, tau);
+      if (compute_distance_bounded_myers_supported(a, b)) {
+        return compute_distance_bounded_myers(a, b, tau);
+      }
+      return compute_distance_bounded_edlib(a, b, tau);
   }
   return compute_distance_bounded_dp(a, b, tau);
 }
 
-int compute_distance_bounded(const std::string& a, const std::string& b,
+int compute_distance_bounded(std::string_view a, std::string_view b,
                              int tau) {
   return compute_distance_bounded_dp(a, b, tau);
 }
@@ -392,5 +736,7 @@ void shuffle_indices(std::vector<size_t>& indices, unsigned seed) {
   std::mt19937 gen(seed);
   std::shuffle(indices.begin(), indices.end(), gen);
 }
+
+#undef NAVIGAMER_DISTANCE_HOT_ALIGN
 
 }  // namespace navigamer

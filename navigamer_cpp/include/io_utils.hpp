@@ -2,6 +2,8 @@
 #define NAVIGAMER_IO_UTILS_HPP
 
 #include "structure.hpp"
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 #include <utility>
@@ -9,7 +11,62 @@
 
 namespace navigamer {
 
+class ReferenceFileMapping;
+
+struct LoadedReference {
+  std::string id;
+  std::string sequence;
+  std::vector<ReferenceContig> contigs;
+};
+
+struct QuerySequence {
+  std::string id;
+  std::string seq;
+};
+
+// Incremental FASTQ/literal reader for bounded-memory query pipelines.
+class QuerySequenceReader {
+ public:
+  explicit QuerySequenceReader(const std::string& path_or_string);
+
+  bool next(QuerySequence* query);
+  size_t read_block(size_t max_records,
+                    std::vector<QuerySequence>* queries);
+
+ private:
+  std::ifstream input_;
+  std::string literal_;
+  std::string line_;
+  bool literal_pending_ = false;
+};
+
+// Sparse random-access index over an existing FASTA/plain-sequence file.
+// It preserves load_reference_genome() normalization without retaining the
+// complete normalized reference in memory.
+struct IndexedReferenceFile {
+  std::string path;
+  std::string id;
+  size_t sequence_size = 0;
+  std::vector<ReferenceContig> contigs;
+
+  std::string slice(size_t begin, size_t end) const;
+
+ private:
+  size_t checkpoint_stride = 0;
+  std::vector<uint32_t> contig_checkpoint_begins;
+  std::vector<uint64_t> checkpoint_file_positions;
+  std::shared_ptr<const ReferenceFileMapping> mapping;
+
+  friend IndexedReferenceFile index_reference_genome_file(
+      const std::string& path,
+      size_t checkpoint_stride);
+};
+
 // Load a reference: existing paths are parsed as FASTA, otherwise literal DNA.
+LoadedReference load_reference_genome(const std::string& path_or_string);
+IndexedReferenceFile index_reference_genome_file(
+    const std::string& path,
+    size_t checkpoint_stride = size_t{1} << 20);
 std::pair<std::string, std::string> load_reference(const std::string& path_or_string);
 
 // Load reads: existing paths are parsed as FASTQ, otherwise one literal read.
@@ -18,6 +75,17 @@ std::vector<std::shared_ptr<BioSequence>> load_reads(
     const std::string& ref_id = "ref");
 
 // Write a TSV table with an explicit header.
+class TsvWriter {
+ public:
+  TsvWriter(const std::string& output_path,
+            const std::vector<std::string>& columns);
+  void write_row(const std::vector<std::string>& row);
+  void close();
+
+ private:
+  std::ofstream out_;
+};
+
 void write_tsv(const std::string& output_path,
                const std::vector<std::string>& columns,
                const std::vector<std::vector<std::string>>& rows);
