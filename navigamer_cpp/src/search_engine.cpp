@@ -3943,6 +3943,103 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
     }
   }
 
+  struct PendingCenter {
+    NodeId node_id = INVALID_NODE_ID;
+    LeafId center_id = INVALID_LEAF_ID;
+    std::string key;
+  };
+  constexpr size_t kCenterBatchWidth = 4;
+  std::array<PendingCenter, kCenterBatchWidth> pending_centers{};
+  size_t pending_center_count = 0;
+  const auto* myers_context = g_active_myers_query_context;
+  const bool center_batch_enabled =
+      view.sequences.reference_backed &&
+      (config_.distance_mode == DistanceMode::Myers ||
+       config_.distance_mode == DistanceMode::Auto) &&
+      myers_context && myers_context->query.data() == query_seq.seq.data() &&
+      myers_context->query.size() == query_seq.seq.size() &&
+      myers_context->batch_pattern.supported &&
+      view.sequences.fixed_sequence_length == query_seq.seq.size();
+  auto* const reuse_context = active_path_reuse_context(this);
+  const bool record_exact_center_distance =
+      reuse_context && reuse_context->enabled && config_.path_reuse_enabled;
+  const int tau = layer_radius + tolerance;
+  const auto record_center_outcome = [&](const PendingCenter& pending,
+                                         int dist,
+                                         bool cache_hit) {
+    if (record_exact_center_distance) {
+      reuse_context->next.center_dist_by_node[pending.key] = dist;
+    }
+    stats.center_distance_count++;
+    if (!cache_hit) {
+      stats.center_exact_distance_call_count++;
+      stats.dist_calc_count++;
+    }
+    stats.world_access_count++;
+    if (config_.trace_paths) stats.world_trace.push_back(pending.node_id);
+    if (layer_id >= 0 &&
+        static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
+      stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
+    }
+    if (dist > tau) return false;
+    if (config_.proximal_oracle_enabled) {
+      stats.proximal_frontier_node_ids.push_back(pending.key);
+    }
+    if (dist + tolerance <= layer_radius) {
+      stats.contained_fastpath_count++;
+      contained_node = pending.node_id;
+      return true;
+    }
+    overlap_nodes.push_back(pending.node_id);
+    return false;
+  };
+  const auto flush_pending_centers = [&]() {
+    if (pending_center_count == 0) return false;
+    ScopedSearchTimer center_timer(
+        stats.query_profile_enabled, &stats.center_distance_ms);
+    std::array<int, kCenterBatchWidth> distances{};
+    bool used_batch = false;
+    if (center_batch_enabled && pending_center_count >= 2) {
+      std::array<std::string_view, kCenterBatchWidth> texts{};
+      for (size_t lane = 0; lane < pending_center_count; ++lane) {
+        texts[lane] = view.sequences.sequence(
+            pending_centers[lane].center_id);
+      }
+      for (size_t lane = pending_center_count;
+           lane < kCenterBatchWidth; ++lane) {
+        texts[lane] = texts[pending_center_count - 1];
+      }
+      const int batch_tau = record_exact_center_distance
+                                ? static_cast<int>(query_seq.seq.size())
+                                : tau;
+      used_batch = compute_query_distances_batch4(
+          query_seq.seq, texts, batch_tau, config_.distance_mode,
+          distances);
+    }
+    for (size_t lane = 0; lane < pending_center_count; ++lane) {
+      bool cache_hit = false;
+      if (!used_batch) {
+        distances[lane] = compute_indexed_query_distance(
+            query_seq.seq,
+            view.sequences.sequence(pending_centers[lane].center_id),
+            pending_centers[lane].center_id, tau,
+            config_.distance_mode, record_exact_center_distance,
+            &cache_hit);
+      } else if (record_exact_center_distance || distances[lane] <= tau) {
+        g_query_distance_cache.store(
+            pending_centers[lane].center_id, distances[lane]);
+      }
+      const bool contained = record_center_outcome(
+          pending_centers[lane], distances[lane], cache_hit);
+      if (contained) {
+        pending_center_count = 0;
+        return true;
+      }
+    }
+    pending_center_count = 0;
+    return false;
+  };
+
   for (size_t candidate_idx = 0; candidate_idx < candidates.size();
        ++candidate_idx) {
     const NodeId node_id = candidates[candidate_idx];
@@ -3971,7 +4068,6 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
       continue;
     }
 
-    const int tau = layer_radius + tolerance;
     if (after_mbb_filter) {
       stats.center_distance_calls_after_mbb++;
       stats.center_distance_calls_before_qgram++;
@@ -3999,38 +4095,50 @@ void BioGeometrySearchEngine::search_layer_adaptive_view(
         near_query_triangle_prunes_center(key, tau, stats)) {
       continue;
     }
-    stats.center_distance_count++;
-    ScopedSearchTimer center_timer(stats.query_profile_enabled,
-                                   &stats.center_distance_ms);
-    bool cache_hit = false;
-    int dist = compute_center_distance_for_search(
-        query_seq, key, center_id,
-        view.sequences.sequence(center_id), tau,
-        after_mbb_filter, &cache_hit);
-    if (!cache_hit) {
-      stats.center_exact_distance_call_count++;
-      stats.dist_calc_count++;
-    }
-    stats.world_access_count++;
-    if (config_.trace_paths) {
-      stats.world_trace.push_back(node_id);
-    }
-    if (layer_id >= 0 && static_cast<size_t>(layer_id) < stats.layer_breakdown.size()) {
-      stats.layer_breakdown[static_cast<size_t>(layer_id)]++;
+    PendingCenter pending{node_id, center_id, std::move(key)};
+    if (!center_batch_enabled) {
+      ScopedSearchTimer center_timer(
+          stats.query_profile_enabled, &stats.center_distance_ms);
+      bool cache_hit = false;
+      const int dist = compute_indexed_query_distance(
+          query_seq.seq, view.sequences.sequence(center_id), center_id,
+          tau, config_.distance_mode, record_exact_center_distance,
+          &cache_hit);
+      if (record_center_outcome(pending, dist, cache_hit)) break;
+      continue;
     }
 
-    if (dist > tau) continue;
-    if (config_.proximal_oracle_enabled) {
-      stats.proximal_frontier_node_ids.push_back(key);
+    int cached_distance = 0;
+    if (g_query_distance_cache.lookup(center_id, &cached_distance)) {
+      if (flush_pending_centers()) break;
+      ScopedSearchTimer center_timer(
+          stats.query_profile_enabled, &stats.center_distance_ms);
+      if (record_center_outcome(pending, cached_distance, true)) break;
+      continue;
     }
-
-    if (dist + tolerance <= layer_radius) {
-      stats.contained_fastpath_count++;
-      contained_node = node_id;
+    bool pending_duplicate = false;
+    for (size_t lane = 0; lane < pending_center_count; ++lane) {
+      if (pending_centers[lane].center_id == center_id) {
+        pending_duplicate = true;
+        break;
+      }
+    }
+    if (pending_duplicate) {
+      if (flush_pending_centers()) break;
+      if (g_query_distance_cache.lookup(center_id, &cached_distance)) {
+        ScopedSearchTimer center_timer(
+            stats.query_profile_enabled, &stats.center_distance_ms);
+        if (record_center_outcome(pending, cached_distance, true)) break;
+        continue;
+      }
+    }
+    pending_centers[pending_center_count++] = std::move(pending);
+    if (pending_center_count == kCenterBatchWidth &&
+        flush_pending_centers()) {
       break;
     }
-    overlap_nodes.push_back(node_id);
   }
+  if (contained_node == INVALID_NODE_ID) flush_pending_centers();
 
   stats.record_path_step(overlap_nodes.size(),
                          contained_node != INVALID_NODE_ID);
