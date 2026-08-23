@@ -252,6 +252,23 @@ void test_indexed_reference_file_slices() {
   assert(lowercase_reader.next(&lowercase_query));
   assert(lowercase_query.seq == "ACGTTGCAAA");
 
+  navigamer::HierarchyConfig hierarchy({8, 4, 2});
+  navigamer::BuildRangeConfig range_config;
+  range_config.emit_build_output = false;
+  const auto packed_bundle = directory / "multi-contig.navshard";
+  const auto packed_manifest =
+      navigamer::build_sharded_reference_index(
+          packed_bundle.string(), fasta.string(), indexed,
+          24, 1, 5000, hierarchy, range_config, 2, false);
+  const auto packed_reference =
+      navigamer::load_packed_reference_file(
+          packed_bundle.string(), packed_manifest);
+  assert(packed_reference.sequence_size == loaded.sequence.size());
+  assert(packed_reference.slice(0, first.size()) == first);
+  assert(packed_reference.slice(
+             first.size(), loaded.sequence.size()) ==
+         loaded.sequence.substr(first.size()));
+
   std::filesystem::remove_all(directory);
 }
 
@@ -437,6 +454,13 @@ void test_sharded_round_trip_and_no_false_negatives() {
   assert(navigamer::is_sharded_index(bundle.string()));
   const auto reloaded_manifest =
       navigamer::read_sharded_index_manifest(bundle.string());
+  const auto packed_reference =
+      navigamer::load_packed_reference_file(
+          bundle.string(), reloaded_manifest);
+  assert(packed_reference.sequence_size == reference.size());
+  assert(packed_reference.slice(0, first.size()) == first);
+  assert(packed_reference.slice(
+             first.size(), reference.size()) == second);
   assert(reloaded_manifest.window_length == window);
   assert(reloaded_manifest.format_version == 20);
   assert(reloaded_manifest.stride == stride);
@@ -635,6 +659,11 @@ void test_seed_router_no_false_negatives() {
   assert(files_equal(
       bundle.string() + ".route",
       file_bundle.string() + ".route"));
+  const auto packed_file_reference =
+      navigamer::load_packed_reference_file(
+          file_bundle.string(), file_manifest);
+  assert(packed_file_reference.sequence_size == reference.size());
+  assert(packed_file_reference.slice(0, reference.size()) == reference);
 
   const auto router_only_bundle =
       directory / "reference-router-only.navshard";
@@ -789,6 +818,10 @@ void test_seed_router_no_false_negatives() {
       navigamer::load_sharded_seed_router(
           short_router_only_bundle.string(),
           short_router_only_manifest);
+  const auto short_packed_reference =
+      navigamer::load_packed_reference_file(
+          short_router_only_bundle.string(),
+          short_router_only_manifest);
   for (size_t source_pos : {size_t{0}, size_t{98}, size_t{300}}) {
     const std::string exact = reference.substr(source_pos, 150);
     for (size_t edit_case = 0; edit_case < 4; ++edit_case) {
@@ -828,7 +861,8 @@ void test_seed_router_no_false_negatives() {
       const auto direct =
           navigamer::verify_selected_shards_by_exact_blocks(
               sequence, 5, short_router_only_manifest,
-              indexed_reference, router_only_route.shard_ids.data(),
+              short_packed_reference,
+              router_only_route.shard_ids.data(),
               router_only_route.shard_ids.data() +
                   router_only_route.shard_ids.size());
       assert(direct.enabled);
@@ -892,7 +926,8 @@ void test_seed_router_no_false_negatives() {
   }
   const auto batch_results =
       navigamer::verify_selected_shards_by_exact_blocks_batch(
-          5, short_manifest, indexed_reference, batch_requests);
+          5, short_router_only_manifest, short_packed_reference,
+          batch_requests);
   assert(batch_results.size() == batch_sequences.size());
   for (size_t query_idx = 0; query_idx < batch_results.size();
        ++query_idx) {
@@ -916,6 +951,31 @@ void test_seed_router_no_false_negatives() {
   assert(!router.select(ambiguous, 5).enabled);
   assert(!router.select(exact.substr(0, 100), 5).enabled);
   assert(!router.select(exact, -1).enabled);
+
+  {
+    std::fstream damaged(
+        short_router_only_bundle.string() + ".ref2",
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(damaged.good());
+    damaged.seekg(static_cast<std::streamoff>(
+        short_packed_reference.payload_offset));
+    char byte = 0;
+    damaged.get(byte);
+    damaged.seekp(static_cast<std::streamoff>(
+        short_packed_reference.payload_offset));
+    damaged.put(static_cast<char>(byte ^ 1));
+  }
+  const auto damaged_packed_reference =
+      navigamer::load_packed_reference_file(
+          short_router_only_bundle.string(),
+          short_router_only_manifest);
+  bool damaged_block_rejected = false;
+  try {
+    (void)damaged_packed_reference.slice(0, 1);
+  } catch (const std::runtime_error&) {
+    damaged_block_rejected = true;
+  }
+  assert(damaged_block_rejected);
 
   std::filesystem::remove_all(directory);
 }

@@ -319,9 +319,11 @@ memory. `--shard-build-jobs N` sets an explicit concurrency limit. The product
 of part jobs and their internal worker teams never exceeds the OpenMP thread
 limit, while peak build memory is bounded by the number of concurrent parts.
 `--router-only 1` skips all graph payloads and persists only the shard
-descriptors and exact-minimizer router. It is a reference-bound no-FN mode:
-querying requires the unchanged file-backed FASTA and a current `.fai`, and
-fails rather than silently omitting hits when direct verification is
+descriptors, exact-minimizer router, and a self-contained `.ref2` reference.
+The reference uses two bits per A/C/G/T base and adds a one-bit mask only to
+4,096-base blocks containing ambiguity symbols. Queries mmap only routed
+blocks, validate their checksums, and do not require the original FASTA. This
+mode fails rather than silently omitting hits when direct verification is
 unavailable. The default full mode keeps graph payloads for fallback.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
@@ -330,7 +332,9 @@ During a rebuild only the current group's atomic temporary pack exists; shard
 payloads are written directly into it, without per-shard temporary files. The final v20
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
-router sidecar. Pack entries contain only independently decodable graph
+router sidecar. A self-contained `.ref2` sidecar stores A/C/G/T at two bits
+per base and adds an ambiguity mask only for affected 4,096-base blocks;
+queries mmap and checksum only touched blocks. Pack entries contain only independently decodable graph
 payloads, rather than repeating the common manifest for every logical shard.
 Paired child-MBB coordinates are ranked only among quantized states permitted
 by their exact beacon-pair distance. This reconstructs the same conservative

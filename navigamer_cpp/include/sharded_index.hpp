@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,6 +17,28 @@ constexpr uint32_t kRouterCodeBlocksPerGroup = 4;
 constexpr uint32_t kRouterCodeGroupsPerSupergroup = 256;
 
 struct IndexedReferenceFile;
+struct ShardedIndexManifest;
+class PackedReferenceFileMapping;
+
+struct PackedReferenceFile {
+  std::string path;
+  size_t sequence_size = 0;
+  size_t block_bases = 0;
+  size_t block_count = 0;
+  size_t payload_offset = 0;
+  std::vector<ReferenceContig> contigs;
+
+  std::string slice(size_t begin, size_t end) const;
+  void slice(size_t begin, size_t end, std::string* output) const;
+
+ private:
+  friend PackedReferenceFile load_packed_reference_file(
+      const std::string&, const ShardedIndexManifest&);
+  std::shared_ptr<const PackedReferenceFileMapping> mapping;
+  const uint64_t* ambiguity_blocks = nullptr;
+  const uint64_t* block_checksums = nullptr;
+  std::vector<uint32_t> ambiguity_rank;
+};
 
 struct IndexShardDescriptor {
   uint64_t file_offset = 0;
@@ -142,6 +165,10 @@ ShardedSeedRouter load_sharded_seed_router(
     const std::string& manifest_path,
     const ShardedIndexManifest& manifest);
 
+PackedReferenceFile load_packed_reference_file(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest);
+
 // Use exact pigeonhole-block occurrences to enumerate every possible indexed
 // window start, then verify those windows with exact bounded edit distance.
 // This can replace graph search for a large minimizer route without FN.
@@ -153,6 +180,14 @@ ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
     const uint32_t* shard_ids_begin,
     const uint32_t* shard_ids_end);
 
+ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const uint32_t* shard_ids_begin,
+    const uint32_t* shard_ids_end);
+
 // Batch form of the direct verifier. The reference slice for a shard routed
 // by multiple queries is loaded once, while each query keeps its complete
 // pigeonhole blocks and independent exact-distance verification.
@@ -161,6 +196,13 @@ verify_selected_shards_by_exact_blocks_batch(
     int tolerance,
     const ShardedIndexManifest& manifest,
     const IndexedReferenceFile& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests);
+
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
     const std::vector<ExactBlockVerificationRequest>& requests);
 
 ShardedIndexManifest build_sharded_reference_index(

@@ -828,10 +828,6 @@ void run_build_sharded(
   }
   const bool reference_is_regular_file =
       std::filesystem::is_regular_file(ref_input);
-  if (router_only && !reference_is_regular_file) {
-    throw std::invalid_argument(
-        "--router-only requires --ref to be a regular FASTA file");
-  }
   size_t reference_bases = 0;
   ShardedIndexManifest manifest;
   const auto print_start = [&](size_t base_count) {
@@ -1076,6 +1072,69 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
         std::string id;
         std::string sequence;
       };
+      const char* mode_label =
+          mode == "greedy"
+              ? "Greedy"
+              : mode == "exhaustive"
+                    ? "Exhaustive"
+                    : "Adaptive";
+      if (route.enabled && !route.shard_ids.empty()) {
+        try {
+          const auto packed_reference =
+              load_packed_reference_file(index_path, manifest);
+          const auto direct_start =
+              std::chrono::high_resolution_clock::now();
+          const auto direct =
+              verify_selected_shards_by_exact_blocks(
+                  query.seq, tolerance, manifest, packed_reference,
+                  route.shard_ids.data(),
+                  route.shard_ids.data() + route.shard_ids.size());
+          const double direct_ms =
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::high_resolution_clock::now() -
+                  direct_start)
+                  .count();
+          if (direct.enabled) {
+            std::vector<DisplayHit> direct_hits;
+            std::unordered_set<std::string> seen_sequences;
+            for (const auto& occurrence : direct.occurrences) {
+              if (!seen_sequences.insert(occurrence.sequence).second) {
+                continue;
+              }
+              direct_hits.push_back(
+                  {manifest.contig_ids[occurrence.contig_id] + "_" +
+                       std::to_string(occurrence.source_start),
+                   occurrence.sequence});
+            }
+            std::cerr << "Loaded sharded index: " << index_path
+                      << " shards=0/" << manifest.shards.size()
+                      << " direct_shards="
+                      << direct.matched_shard_count << "/"
+                      << route.shard_ids.size()
+                      << " sequences="
+                      << manifest.total_sequence_count
+                      << " world_nodes="
+                      << manifest.total_world_node_count << "\n";
+            std::cout << mode_label << " hits: "
+                      << direct_hits.size() << " (shards="
+                      << route.shard_ids.size() << "/"
+                      << manifest.shards.size() << " dist_calcs="
+                      << direct.distance_call_count
+                      << " query_time_ms="
+                      << format_double(direct_ms) << ")\n";
+            for (const auto& hit : direct_hits) {
+              std::cout << "  " << hit.id << " dist="
+                        << compute_distance(
+                               query_seq, hit.sequence)
+                        << "\n";
+            }
+            return;
+          }
+        } catch (const std::exception& error) {
+          std::cerr << "Exact-block direct verification disabled: "
+                    << error.what() << "\n";
+        }
+      }
       std::vector<DisplayHit> hits;
       std::unordered_multimap<size_t, size_t> hit_by_hash;
       size_t distance_calculations = 0;
@@ -1188,12 +1247,6 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
                 << " sequences=" << manifest.total_sequence_count
                 << " world_nodes="
                 << manifest.total_world_node_count << "\n";
-      const char* mode_label =
-          mode == "greedy"
-              ? "Greedy"
-              : mode == "exhaustive"
-                    ? "Exhaustive"
-                    : "Adaptive";
       std::cout << mode_label << " hits: " << hits.size()
                 << " (shards="
                 << active_shard_count
@@ -1855,7 +1908,8 @@ void run_query_index_batch(const std::string& index_path,
     size_t exact_block_candidate_windows = 0;
     size_t exact_block_distance_calls = 0;
     bool exact_block_reference_attempted = false;
-    std::unique_ptr<IndexedReferenceFile> exact_block_reference;
+    std::unique_ptr<PackedReferenceFile> exact_block_packed_reference;
+    std::unique_ptr<IndexedReferenceFile> exact_block_external_reference;
     std::vector<uint32_t> cached_shard_ids;
     std::vector<LoadedIndex> cached_loaded_shards;
     std::vector<std::unique_ptr<BioGeometrySearchEngine>> cached_engines;
@@ -1903,7 +1957,16 @@ void run_query_index_batch(const std::string& index_path,
       if (routed && route_count >= kExactBlockDirectMinShards) {
         if (!exact_block_reference_attempted) {
           exact_block_reference_attempted = true;
+          std::string packed_reference_error;
           try {
+            exact_block_packed_reference =
+                std::make_unique<PackedReferenceFile>(
+                    load_packed_reference_file(
+                        index_path, shard_manifest));
+          } catch (const std::exception& error) {
+            packed_reference_error = error.what();
+          }
+          if (!exact_block_packed_reference) try {
             const std::string& reference_path =
                 shard_manifest.part_manifest.ref_input;
             if (!std::filesystem::is_regular_file(reference_path)) {
@@ -1942,15 +2005,19 @@ void run_query_index_batch(const std::string& index_path,
               throw std::runtime_error(
                   "current FASTA .fai is unavailable");
             }
-            exact_block_reference =
+            exact_block_external_reference =
                 std::make_unique<IndexedReferenceFile>(
                     index_reference_genome_file(reference_path));
           } catch (const std::exception& error) {
             std::cerr << "Exact-block direct verification disabled: "
+                      << "packed sidecar: "
+                      << packed_reference_error
+                      << "; external FASTA: "
                       << error.what() << "\n";
           }
         }
-        if (exact_block_reference) {
+        if (exact_block_packed_reference ||
+            exact_block_external_reference) {
           direct_route.assign(
               query_route_shard_ids.begin() + route_id_begin,
               query_route_shard_ids.end());
@@ -1995,10 +2062,21 @@ void run_query_index_batch(const std::string& index_path,
     if (!direct_requests.empty()) {
       const auto direct_start =
           std::chrono::high_resolution_clock::now();
-      auto verified_results =
-          verify_selected_shards_by_exact_blocks_batch(
-              tolerance, shard_manifest, *exact_block_reference,
-              direct_requests);
+      std::vector<ExactBlockVerificationResult> verified_results;
+      try {
+        verified_results = exact_block_packed_reference
+            ? verify_selected_shards_by_exact_blocks_batch(
+                  tolerance, shard_manifest,
+                  *exact_block_packed_reference, direct_requests)
+            : verify_selected_shards_by_exact_blocks_batch(
+                  tolerance, shard_manifest,
+                  *exact_block_external_reference, direct_requests);
+      } catch (const std::exception& error) {
+        exact_block_packed_reference.reset();
+        exact_block_external_reference.reset();
+        std::cerr << "Exact-block direct verification disabled: "
+                  << error.what() << "\n";
+      }
       const auto direct_end =
           std::chrono::high_resolution_clock::now();
       const float direct_batch_ms = static_cast<float>(
@@ -2061,15 +2139,20 @@ void run_query_index_batch(const std::string& index_path,
         }
         query_route_shard_ids.swap(restored_shard_ids);
         query_route_offsets.swap(restored_offsets);
-        exact_block_reference.reset();
-        std::cerr << "Exact-block direct verification disabled: "
-                     "reference metadata does not match the bundle\n";
+        if (exact_block_packed_reference ||
+            exact_block_external_reference) {
+          exact_block_packed_reference.reset();
+          exact_block_external_reference.reset();
+          std::cerr << "Exact-block direct verification disabled: "
+                       "reference metadata does not match the bundle\n";
+        }
       }
     }
     const size_t planned_query_count =
         query_block_end - query_block_begin;
     peak_planned_route_ids = std::max(
-        peak_planned_route_ids, query_route_shard_ids.size());
+        peak_planned_route_ids,
+        query_route_shard_ids.size() + planned_direct_route_ids);
     const auto query_is_routed = [&](size_t query_idx) {
       return (query_routed_bits[query_idx >> 3] &
               static_cast<uint8_t>(uint8_t{1} << (query_idx & 7))) != 0;

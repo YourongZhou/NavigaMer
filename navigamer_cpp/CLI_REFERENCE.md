@@ -323,6 +323,10 @@ manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
 descriptor per logical shard in memory.
+Every sharded bundle also stores a self-contained `.ref2` sidecar. A/C/G/T
+use exactly two bits per base; only 4,096-base blocks containing ambiguity
+symbols add a one-bit mask. Block checksums are validated lazily on first
+access, and the file is mmap-decoded without materializing the reference.
 Multi-part bundles with
 windows of at least 24 bases also store a memory-mapped `.route` sidecar of
 exact 16-mer minimizers. Sorted minimizers use exact 16-entry blocks with one
@@ -350,10 +354,11 @@ changing the minimizer route. Batch stderr reports
 `exact_block_direct_queries`, `exact_block_shards=matched/routed`,
 `exact_block_candidate_windows`, and `exact_block_distance_calls`.
 With `--router-only 1`, graph payloads are deliberately absent, so direct
-verification is mandatory rather than optional. The original file-backed
-FASTA and a current `.fai` must remain available and unchanged; unsupported
-queries or inconsistent reference metadata fail closed instead of emitting an
-incomplete result.
+verification is mandatory rather than optional. A self-contained mmap-backed
+`.ref2` sidecar stores two-bit bases plus ambiguity masks only for affected
+4,096-base blocks, so the original FASTA is not required at query time.
+Unsupported queries, inconsistent metadata, or a damaged selected reference
+block fail closed instead of emitting an incomplete result.
 `query-index` loads only the routed parts. `query-index-batch` loads the union
 of routed parts required by the input reads; if any read cannot be routed, it
 loads all parts for the no-FN fallback.
@@ -385,7 +390,7 @@ length-compatible candidate superset without allocating a q-gram posting index.
 | `--stride` | `1` | Step between window starts |
 | `--shard-windows` | *(required)* | Maximum window starts per logical shard; `5000` is the recommended human stride-1 starting point when construction time/RAM matter (`10000` trades that for fewer logical shards), then benchmark nearby sizes |
 | `--shard-build-jobs` | auto | Maximum concurrently built parts; auto uses one below 8 OpenMP threads, two at 8--15, up to 20 for parts of at most 8,192 windows, up to 16 through 16,384 windows, otherwise up to four; it divides the thread budget among internal teams |
-| `--router-only` | `0` | With `1`, omit graph payloads and retain only shard descriptors plus the exact-minimizer router; queries require the unchanged file-backed FASTA and current `.fai` and fail closed if exact direct verification is unavailable |
+| `--router-only` | `0` | With `1`, omit graph payloads and retain shard descriptors, the exact-minimizer router, and a compact self-contained `.ref2`; queries fail closed if exact direct verification is unavailable |
 | `--index` | *(required)* | Output `.navshard` manifest; packed part containers are created beside it |
 | `--progress-interval-seconds` | `600` | Periodic progress interval for a serial shard build; parallel shard builds suppress per-part diagnostics and retain only the outer summary |
 

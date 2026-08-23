@@ -182,12 +182,14 @@ budget. Parallel builders suppress per-part progress/summary output, avoiding
 large contended stderr streams at human-genome shard counts while retaining the
 outer completed-index summary.
 `--router-only 1` omits every graph payload and writes only the shard
-descriptors plus the exact-minimizer router. This mode requires the unchanged
-file-backed FASTA and a current `.fai` at query time. Direct exact-block
-verification remains no-FN under that reference-identity requirement; if the
-reference is unavailable, inconsistent, or the query cannot use the exact
-route, the command fails instead of returning a partial result. The default
-`--router-only 0` retains graph payloads as the conservative fallback.
+descriptors, the exact-minimizer router, and a self-contained `.ref2`
+reference. The reference stores two bits per unambiguous base; only 4,096-base
+blocks containing non-ACGT symbols receive an additional one-bit ambiguity
+mask. It is mmap-decoded by routed shard and each touched block is checksum
+verified. Direct exact-block verification remains no-FN without the original
+FASTA; unsupported routing or a damaged block fails instead of returning a
+partial result. The default `--router-only 0` retains graph payloads as an
+additional conservative fallback.
 For a human stride-1 build, `--shard-windows 5000` is the recommended
 starting point when construction time and peak memory matter. Packing keeps
 the resulting logical-shard count manageable, while smaller bounded parts

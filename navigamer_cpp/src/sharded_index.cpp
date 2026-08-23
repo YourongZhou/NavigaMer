@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
@@ -35,6 +36,48 @@
 
 namespace navigamer {
 
+class PackedReferenceFileMapping {
+ public:
+  PackedReferenceFileMapping(void* address, size_t size)
+      : address_(address), size_(size) {}
+  explicit PackedReferenceFileMapping(std::vector<uint8_t> bytes)
+      : owned_(std::move(bytes)), size_(owned_.size()) {}
+  ~PackedReferenceFileMapping() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (address_ && size_ != 0) munmap(address_, size_);
+#endif
+  }
+  const uint8_t* data() const {
+    return address_ ? static_cast<const uint8_t*>(address_)
+                    : owned_.data();
+  }
+  size_t size() const { return size_; }
+  void initialize_block_validation(size_t block_count) {
+    validated_block_count_ = block_count;
+    validated_blocks_ = std::make_unique<std::atomic<uint8_t>[]>(
+        block_count);
+    for (size_t block = 0; block < block_count; ++block) {
+      validated_blocks_[block].store(0, std::memory_order_relaxed);
+    }
+  }
+  bool block_validated(size_t block) const {
+    return block < validated_block_count_ &&
+           validated_blocks_[block].load(std::memory_order_acquire) != 0;
+  }
+  void mark_block_validated(size_t block) const {
+    if (block < validated_block_count_) {
+      validated_blocks_[block].store(1, std::memory_order_release);
+    }
+  }
+
+ private:
+  void* address_ = nullptr;
+  std::vector<uint8_t> owned_;
+  size_t size_ = 0;
+  std::unique_ptr<std::atomic<uint8_t>[]> validated_blocks_;
+  size_t validated_block_count_ = 0;
+};
+
 namespace {
 
 constexpr std::array<char, 8> kShardMagic = {
@@ -43,9 +86,14 @@ constexpr std::array<char, 8> kShardPackMagic = {
     'N', 'G', 'P', 'A', 'C', 'K', '1', '3'};
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '4'};
+constexpr std::array<char, 8> kPackedReferenceMagic = {
+    'N', 'G', 'R', 'E', 'F', '2', '0', '1'};
 constexpr uint32_t kShardFormatVersion = 20;
 constexpr uint32_t kShardPackFormatVersion = 13;
 constexpr uint32_t kRouterFormatVersion = 5;
+constexpr uint32_t kPackedReferenceFormatVersion = 1;
+constexpr uint32_t kPackedReferenceBlockBases = 4096;
+constexpr size_t kPackedReferenceHeaderBytes = 88;
 constexpr size_t kRouterHeaderBytes = 80;
 constexpr std::streamoff kRouterCodePayloadSizeOffset = 60;
 constexpr std::streamoff kRouterChecksumOffset = 68;
@@ -164,6 +212,86 @@ void hash_string(uint64_t* hash, const std::string& value) {
   hash_bytes(hash, value.data(), value.size());
 }
 
+size_t checked_reference_add(size_t left, size_t right) {
+  if (right > std::numeric_limits<size_t>::max() - left) {
+    throw std::runtime_error("packed reference size overflow");
+  }
+  return left + right;
+}
+
+size_t checked_reference_multiply(size_t left, size_t right) {
+  if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
+    throw std::runtime_error("packed reference size overflow");
+  }
+  return left * right;
+}
+
+size_t align_reference_offset(size_t offset, size_t alignment) {
+  const size_t remainder = offset % alignment;
+  return remainder == 0
+      ? offset
+      : checked_reference_add(offset, alignment - remainder);
+}
+
+struct PackedReferenceLayout {
+  size_t contigs_begin = kPackedReferenceHeaderBytes;
+  size_t ambiguity_bitmap_begin = 0;
+  size_t block_checksums_begin = 0;
+  size_t payload_begin = 0;
+  size_t total_size = 0;
+  size_t block_count = 0;
+  size_t bitmap_word_count = 0;
+};
+
+PackedReferenceLayout packed_reference_layout(
+    size_t sequence_size,
+    size_t contig_count,
+    size_t ambiguous_block_count,
+    bool final_block_ambiguous) {
+  PackedReferenceLayout layout;
+  layout.block_count =
+      (sequence_size + kPackedReferenceBlockBases - 1) /
+      kPackedReferenceBlockBases;
+  layout.bitmap_word_count = (layout.block_count + 63) / 64;
+  const size_t contig_bytes = checked_reference_multiply(
+      contig_count, size_t{3} * sizeof(uint32_t));
+  layout.ambiguity_bitmap_begin = align_reference_offset(
+      checked_reference_add(layout.contigs_begin, contig_bytes),
+      alignof(uint64_t));
+  layout.block_checksums_begin = checked_reference_add(
+      layout.ambiguity_bitmap_begin,
+      checked_reference_multiply(
+          layout.bitmap_word_count, sizeof(uint64_t)));
+  layout.payload_begin = align_reference_offset(
+      checked_reference_add(
+          layout.block_checksums_begin,
+          checked_reference_multiply(
+              layout.block_count, sizeof(uint64_t))),
+      64);
+  const size_t base_bytes = (sequence_size + 3) / 4;
+  size_t ambiguity_bytes = checked_reference_multiply(
+      ambiguous_block_count,
+      kPackedReferenceBlockBases / size_t{8});
+  if (final_block_ambiguous &&
+      sequence_size % kPackedReferenceBlockBases != 0) {
+    ambiguity_bytes -= kPackedReferenceBlockBases / size_t{8};
+    ambiguity_bytes = checked_reference_add(
+        ambiguity_bytes,
+        (sequence_size % kPackedReferenceBlockBases + 7) / 8);
+  }
+  layout.total_size = checked_reference_add(
+      layout.payload_begin,
+      checked_reference_add(base_bytes, ambiguity_bytes));
+  return layout;
+}
+
+uint64_t reference_fingerprint_checksum(
+    const std::string& fingerprint) {
+  uint64_t checksum = kFnvOffset;
+  hash_string(&checksum, fingerprint);
+  return checksum;
+}
+
 void hash_build_manifest(
     uint64_t* hash, const IndexBuildManifest& manifest) {
   std::ostringstream encoded(std::ios::out | std::ios::binary);
@@ -212,6 +340,11 @@ uint64_t manifest_checksum(
 std::filesystem::path router_output_path(
     const std::filesystem::path& bundle_path) {
   return bundle_path.string() + ".route";
+}
+
+std::filesystem::path packed_reference_output_path(
+    const std::filesystem::path& bundle_path) {
+  return bundle_path.string() + ".ref2";
 }
 
 uint32_t required_shard_id_bits(uint32_t shard_count) {
@@ -1163,6 +1296,237 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
   }
 }
 
+uint64_t packed_reference_metadata_checksum(
+    size_t sequence_size,
+    size_t contig_count,
+    size_t block_count,
+    size_t ambiguous_block_count,
+    uint64_t fingerprint_checksum,
+    size_t payload_offset,
+    size_t total_size,
+    const std::vector<ReferenceContig>& contigs,
+    const uint64_t* ambiguity_bitmap,
+    size_t bitmap_word_count,
+    const uint64_t* block_checksums) {
+  uint64_t checksum = kFnvOffset;
+  hash_pod<uint32_t>(&checksum, kPackedReferenceFormatVersion);
+  hash_pod<uint32_t>(&checksum, kPackedReferenceBlockBases);
+  hash_pod<uint64_t>(&checksum, sequence_size);
+  hash_pod<uint64_t>(&checksum, contig_count);
+  hash_pod<uint64_t>(&checksum, block_count);
+  hash_pod<uint64_t>(&checksum, ambiguous_block_count);
+  hash_pod<uint64_t>(&checksum, fingerprint_checksum);
+  hash_pod<uint64_t>(&checksum, payload_offset);
+  hash_pod<uint64_t>(&checksum, total_size);
+  for (const auto& contig : contigs) {
+    hash_pod<uint32_t>(&checksum, contig.begin);
+    hash_pod<uint32_t>(&checksum, contig.end);
+    hash_pod<uint32_t>(&checksum, contig.source_begin);
+  }
+  hash_bytes(
+      &checksum, ambiguity_bitmap,
+      bitmap_word_count * sizeof(uint64_t));
+  hash_bytes(
+      &checksum, block_checksums,
+      block_count * sizeof(uint64_t));
+  return checksum;
+}
+
+void build_packed_reference_sidecar(
+    const std::filesystem::path& bundle,
+    const IndexBuildManifest& manifest,
+    size_t reference_size,
+    const std::vector<ReferenceContig>& reference_contigs,
+    const std::function<std::string(size_t, size_t)>& load_slice,
+    const std::string* contiguous_reference) {
+  const auto output_path = packed_reference_output_path(bundle);
+  const auto temporary_path = output_path.string() + ".tmp";
+  const PackedReferenceLayout initial_layout = packed_reference_layout(
+      reference_size, reference_contigs.size(), 0, false);
+  std::vector<uint64_t> ambiguity_bitmap(
+      initial_layout.bitmap_word_count, uint64_t{0});
+  std::vector<uint64_t> block_checksums(
+      initial_layout.block_count, uint64_t{0});
+  std::error_code ignored;
+  std::filesystem::remove(temporary_path, ignored);
+
+  try {
+    std::ofstream out(
+        temporary_path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      throw std::runtime_error(
+          "unable to create packed reference sidecar");
+    }
+    std::array<char, 65536> zeros{};
+    size_t zero_bytes = initial_layout.payload_begin;
+    while (zero_bytes != 0) {
+      const size_t count = std::min(zero_bytes, zeros.size());
+      out.write(zeros.data(), static_cast<std::streamsize>(count));
+      zero_bytes -= count;
+    }
+    if (!out) {
+      throw std::runtime_error(
+          "unable to reserve packed reference metadata");
+    }
+
+    size_t contig_idx = 0;
+    size_t ambiguous_block_count = 0;
+    bool final_block_ambiguous = false;
+    std::string sequence;
+    std::vector<uint8_t> packed_bases;
+    std::vector<uint8_t> ambiguity_mask;
+    for (size_t block_idx = 0;
+         block_idx < initial_layout.block_count; ++block_idx) {
+      const size_t block_begin =
+          block_idx * kPackedReferenceBlockBases;
+      const size_t block_end = std::min(
+          reference_size,
+          block_begin + kPackedReferenceBlockBases);
+      const size_t block_size = block_end - block_begin;
+      sequence.clear();
+      sequence.reserve(block_size);
+      if (contiguous_reference) {
+        sequence.assign(
+            contiguous_reference->data() + block_begin, block_size);
+      } else {
+        size_t cursor = block_begin;
+        while (cursor < block_end) {
+          while (contig_idx < reference_contigs.size() &&
+                 cursor >= reference_contigs[contig_idx].end) {
+            ++contig_idx;
+          }
+          if (contig_idx >= reference_contigs.size() ||
+              cursor < reference_contigs[contig_idx].begin) {
+            throw std::runtime_error(
+                "packed reference contig coverage is inconsistent");
+          }
+          const size_t piece_end = std::min<size_t>(
+              block_end, reference_contigs[contig_idx].end);
+          std::string piece = load_slice(cursor, piece_end);
+          if (piece.size() != piece_end - cursor) {
+            throw std::runtime_error(
+                "packed reference slice has the wrong length");
+          }
+          sequence.append(piece);
+          cursor = piece_end;
+        }
+      }
+      if (sequence.size() != block_size) {
+        throw std::runtime_error(
+            "packed reference block has the wrong length");
+      }
+
+      packed_bases.assign((block_size + 3) / 4, uint8_t{0});
+      ambiguity_mask.assign((block_size + 7) / 8, uint8_t{0});
+      bool ambiguous = false;
+      for (size_t pos = 0; pos < block_size; ++pos) {
+        const int code = dna_code(sequence[pos]);
+        if (code < 0) {
+          ambiguous = true;
+          ambiguity_mask[pos >> 3] |= static_cast<uint8_t>(
+              uint8_t{1} << (pos & 7));
+        } else {
+          packed_bases[pos >> 2] |= static_cast<uint8_t>(
+              static_cast<uint8_t>(code) << (2 * (pos & 3)));
+        }
+      }
+      if (ambiguous) {
+        ambiguity_bitmap[block_idx >> 6] |=
+            uint64_t{1} << (block_idx & 63);
+        ++ambiguous_block_count;
+      }
+      final_block_ambiguous =
+          block_idx + 1 == initial_layout.block_count && ambiguous;
+      uint64_t block_checksum = kFnvOffset;
+      hash_bytes(
+          &block_checksum, packed_bases.data(), packed_bases.size());
+      if (ambiguous) {
+        hash_bytes(
+            &block_checksum, ambiguity_mask.data(),
+            ambiguity_mask.size());
+      }
+      block_checksums[block_idx] = block_checksum;
+      out.write(
+          reinterpret_cast<const char*>(packed_bases.data()),
+          static_cast<std::streamsize>(packed_bases.size()));
+      if (ambiguous) {
+        out.write(
+            reinterpret_cast<const char*>(ambiguity_mask.data()),
+            static_cast<std::streamsize>(ambiguity_mask.size()));
+      }
+      if (!out) {
+        throw std::runtime_error(
+            "unable to write packed reference payload");
+      }
+    }
+
+    const PackedReferenceLayout layout = packed_reference_layout(
+        reference_size, reference_contigs.size(),
+        ambiguous_block_count, final_block_ambiguous);
+    if (layout.payload_begin != initial_layout.payload_begin ||
+        static_cast<uint64_t>(out.tellp()) != layout.total_size) {
+      throw std::runtime_error(
+          "packed reference layout accounting mismatch");
+    }
+    const uint64_t fingerprint_checksum =
+        reference_fingerprint_checksum(manifest.ref_fingerprint);
+    const uint64_t metadata_checksum =
+        packed_reference_metadata_checksum(
+            reference_size, reference_contigs.size(),
+            layout.block_count, ambiguous_block_count,
+            fingerprint_checksum, layout.payload_begin,
+            layout.total_size, reference_contigs,
+            ambiguity_bitmap.data(), layout.bitmap_word_count,
+            block_checksums.data());
+
+    out.seekp(0);
+    out.write(
+        kPackedReferenceMagic.data(),
+        static_cast<std::streamsize>(kPackedReferenceMagic.size()));
+    write_pod<uint32_t>(out, kPackedReferenceFormatVersion);
+    write_pod<uint32_t>(out, kPackedReferenceBlockBases);
+    write_pod<uint64_t>(out, reference_size);
+    write_pod<uint64_t>(out, reference_contigs.size());
+    write_pod<uint64_t>(out, layout.block_count);
+    write_pod<uint64_t>(out, ambiguous_block_count);
+    write_pod<uint64_t>(out, fingerprint_checksum);
+    write_pod<uint64_t>(out, metadata_checksum);
+    write_pod<uint64_t>(out, layout.payload_begin);
+    write_pod<uint64_t>(out, layout.total_size);
+    write_pod<uint64_t>(out, 0);
+    for (const auto& contig : reference_contigs) {
+      write_pod<uint32_t>(out, contig.begin);
+      write_pod<uint32_t>(out, contig.end);
+      write_pod<uint32_t>(out, contig.source_begin);
+    }
+    out.seekp(static_cast<std::streamoff>(
+        layout.ambiguity_bitmap_begin));
+    out.write(
+        reinterpret_cast<const char*>(ambiguity_bitmap.data()),
+        static_cast<std::streamsize>(
+            ambiguity_bitmap.size() * sizeof(uint64_t)));
+    out.write(
+        reinterpret_cast<const char*>(block_checksums.data()),
+        static_cast<std::streamsize>(
+            block_checksums.size() * sizeof(uint64_t)));
+    out.close();
+    if (!out) {
+      throw std::runtime_error(
+          "unable to finalize packed reference sidecar");
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary_path, output_path, error);
+    if (error) {
+      throw std::runtime_error(
+          "unable to install packed reference sidecar: " +
+          error.message());
+    }
+  } catch (...) {
+    std::filesystem::remove(temporary_path, ignored);
+    throw;
+  }
+}
+
 }  // namespace
 
 bool is_sharded_index(const std::string& path) {
@@ -1329,6 +1693,294 @@ std::string resolve_index_shard_path(
   if (part.is_absolute()) return part.string();
   return (std::filesystem::path(manifest_path).parent_path() /
           part).string();
+}
+
+PackedReferenceFile load_packed_reference_file(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest) {
+  validate_manifest(manifest);
+  const auto path = packed_reference_output_path(manifest_path);
+  std::shared_ptr<PackedReferenceFileMapping> mapping;
+#if defined(__unix__) || defined(__APPLE__)
+  const int fd = open(path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    throw std::runtime_error("unable to open packed reference sidecar");
+  }
+  struct stat status {};
+  if (fstat(fd, &status) != 0 || status.st_size < 0 ||
+      static_cast<uint64_t>(status.st_size) >
+          std::numeric_limits<size_t>::max()) {
+    close(fd);
+    throw std::runtime_error("invalid packed reference sidecar size");
+  }
+  const size_t mapped_size = static_cast<size_t>(status.st_size);
+  void* address = mapped_size == 0
+      ? MAP_FAILED
+      : mmap(nullptr, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if (address == MAP_FAILED) {
+    throw std::runtime_error("unable to map packed reference sidecar");
+  }
+#if defined(MADV_RANDOM)
+  (void)madvise(address, mapped_size, MADV_RANDOM);
+#endif
+  mapping = std::make_shared<PackedReferenceFileMapping>(
+      address, mapped_size);
+#else
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in || in.tellg() < 0 ||
+      static_cast<uint64_t>(in.tellg()) >
+          std::numeric_limits<size_t>::max()) {
+    throw std::runtime_error("unable to open packed reference sidecar");
+  }
+  std::vector<uint8_t> bytes(static_cast<size_t>(in.tellg()));
+  in.seekg(0);
+  in.read(
+      reinterpret_cast<char*>(bytes.data()),
+      static_cast<std::streamsize>(bytes.size()));
+  if (!in) {
+    throw std::runtime_error("unable to read packed reference sidecar");
+  }
+  mapping = std::make_shared<PackedReferenceFileMapping>(
+      std::move(bytes));
+#endif
+  if (mapping->size() < kPackedReferenceHeaderBytes) {
+    throw std::runtime_error("truncated packed reference header");
+  }
+  const uint8_t* cursor = mapping->data();
+  const auto read_field = [&cursor](auto* value) {
+    std::memcpy(value, cursor, sizeof(*value));
+    cursor += sizeof(*value);
+  };
+  std::array<char, 8> magic{};
+  uint32_t version = 0;
+  uint32_t block_bases = 0;
+  uint64_t sequence_size = 0;
+  uint64_t contig_count = 0;
+  uint64_t block_count = 0;
+  uint64_t ambiguous_block_count = 0;
+  uint64_t fingerprint_checksum = 0;
+  uint64_t metadata_checksum = 0;
+  uint64_t payload_offset = 0;
+  uint64_t stored_file_size = 0;
+  uint64_t reserved = 0;
+  read_field(&magic);
+  read_field(&version);
+  read_field(&block_bases);
+  read_field(&sequence_size);
+  read_field(&contig_count);
+  read_field(&block_count);
+  read_field(&ambiguous_block_count);
+  read_field(&fingerprint_checksum);
+  read_field(&metadata_checksum);
+  read_field(&payload_offset);
+  read_field(&stored_file_size);
+  read_field(&reserved);
+  if (magic != kPackedReferenceMagic ||
+      version != kPackedReferenceFormatVersion ||
+      block_bases != kPackedReferenceBlockBases ||
+      sequence_size == 0 ||
+      sequence_size > std::numeric_limits<size_t>::max() ||
+      contig_count != manifest.contig_ids.size() ||
+      contig_count > std::numeric_limits<size_t>::max() ||
+      block_count > std::numeric_limits<size_t>::max() ||
+      ambiguous_block_count > block_count ||
+      fingerprint_checksum != reference_fingerprint_checksum(
+          manifest.part_manifest.ref_fingerprint) ||
+      payload_offset > std::numeric_limits<size_t>::max() ||
+      stored_file_size != mapping->size() || reserved != 0) {
+    throw std::runtime_error("packed reference metadata mismatch");
+  }
+  const size_t stored_sequence_size =
+      static_cast<size_t>(sequence_size);
+  const size_t stored_contig_count =
+      static_cast<size_t>(contig_count);
+  const size_t stored_block_count =
+      static_cast<size_t>(block_count);
+  const PackedReferenceLayout preliminary_layout =
+      packed_reference_layout(
+          stored_sequence_size, stored_contig_count,
+          static_cast<size_t>(ambiguous_block_count), false);
+  if (stored_block_count != preliminary_layout.block_count ||
+      payload_offset != preliminary_layout.payload_begin ||
+      preliminary_layout.payload_begin > mapping->size()) {
+    throw std::runtime_error("invalid packed reference layout");
+  }
+
+  PackedReferenceFile reference;
+  reference.path = path.string();
+  reference.sequence_size = stored_sequence_size;
+  reference.block_bases = kPackedReferenceBlockBases;
+  reference.block_count = stored_block_count;
+  reference.payload_offset = preliminary_layout.payload_begin;
+  reference.mapping = mapping;
+  reference.contigs.reserve(stored_contig_count);
+  cursor = mapping->data() + preliminary_layout.contigs_begin;
+  uint32_t expected_begin = 0;
+  for (size_t contig_idx = 0;
+       contig_idx < stored_contig_count; ++contig_idx) {
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    uint32_t source_begin = 0;
+    read_field(&begin);
+    read_field(&end);
+    read_field(&source_begin);
+    if (begin != expected_begin || end < begin ||
+        end > stored_sequence_size) {
+      throw std::runtime_error(
+          "invalid packed reference contig coordinates");
+    }
+    reference.contigs.push_back(
+        {manifest.contig_ids[contig_idx], begin, end, source_begin});
+    expected_begin = end;
+  }
+  if (expected_begin != stored_sequence_size) {
+    throw std::runtime_error(
+        "packed reference contigs do not cover the sequence");
+  }
+  reference.ambiguity_blocks = reinterpret_cast<const uint64_t*>(
+      mapping->data() + preliminary_layout.ambiguity_bitmap_begin);
+  reference.block_checksums = reinterpret_cast<const uint64_t*>(
+      mapping->data() + preliminary_layout.block_checksums_begin);
+  reference.ambiguity_rank.resize(
+      preliminary_layout.bitmap_word_count + 1, 0);
+  size_t counted_ambiguous_blocks = 0;
+  for (size_t word = 0;
+       word < preliminary_layout.bitmap_word_count; ++word) {
+    reference.ambiguity_rank[word] = static_cast<uint32_t>(
+        counted_ambiguous_blocks);
+    counted_ambiguous_blocks += static_cast<size_t>(
+        __builtin_popcountll(reference.ambiguity_blocks[word]));
+  }
+  reference.ambiguity_rank.back() = static_cast<uint32_t>(
+      counted_ambiguous_blocks);
+  if (counted_ambiguous_blocks != ambiguous_block_count) {
+    throw std::runtime_error(
+        "packed reference ambiguity count mismatch");
+  }
+  if (stored_block_count % 64 != 0 &&
+      preliminary_layout.bitmap_word_count != 0) {
+    const uint64_t unused_mask =
+        ~((uint64_t{1} << (stored_block_count % 64)) - 1);
+    if ((reference.ambiguity_blocks[
+             preliminary_layout.bitmap_word_count - 1] &
+         unused_mask) != 0) {
+      throw std::runtime_error(
+          "packed reference ambiguity bitmap has trailing bits");
+    }
+  }
+  const bool final_block_ambiguous = stored_block_count != 0 &&
+      (reference.ambiguity_blocks[(stored_block_count - 1) >> 6] &
+       (uint64_t{1} << ((stored_block_count - 1) & 63))) != 0;
+  const PackedReferenceLayout layout = packed_reference_layout(
+      stored_sequence_size, stored_contig_count,
+      counted_ambiguous_blocks, final_block_ambiguous);
+  if (layout.total_size != mapping->size()) {
+    throw std::runtime_error("packed reference file size mismatch");
+  }
+  const uint64_t actual_metadata_checksum =
+      packed_reference_metadata_checksum(
+          stored_sequence_size, stored_contig_count,
+          stored_block_count, counted_ambiguous_blocks,
+          fingerprint_checksum, layout.payload_begin,
+          layout.total_size, reference.contigs,
+          reference.ambiguity_blocks, layout.bitmap_word_count,
+          reference.block_checksums);
+  if (actual_metadata_checksum != metadata_checksum) {
+    throw std::runtime_error("packed reference metadata checksum mismatch");
+  }
+  mapping->initialize_block_validation(stored_block_count);
+  return reference;
+}
+
+std::string PackedReferenceFile::slice(
+    size_t begin, size_t end) const {
+  std::string output;
+  slice(begin, end, &output);
+  return output;
+}
+
+void PackedReferenceFile::slice(
+    size_t begin, size_t end, std::string* output) const {
+  if (!output) {
+    throw std::invalid_argument(
+        "packed reference slice output must not be null");
+  }
+  if (!mapping || begin > end || end > sequence_size) {
+    throw std::out_of_range("packed reference slice is out of range");
+  }
+  if (begin != end) {
+    const auto contig = std::lower_bound(
+        contigs.begin(), contigs.end(), begin,
+        [](const ReferenceContig& candidate, size_t position) {
+          return candidate.end <= position;
+        });
+    if (contig == contigs.end() || begin < contig->begin ||
+        end > contig->end) {
+      throw std::out_of_range(
+          "packed reference slice crosses a contig boundary");
+    }
+  }
+  output->resize(end - begin);
+  static constexpr std::array<char, 4> bases = {'A', 'C', 'G', 'T'};
+  size_t output_pos = 0;
+  size_t cursor_pos = begin;
+  while (cursor_pos < end) {
+    const size_t block_idx = cursor_pos / block_bases;
+    const size_t block_begin = block_idx * block_bases;
+    const size_t block_size = std::min(
+        block_bases, sequence_size - block_begin);
+    const size_t block_end = block_begin + block_size;
+    const size_t word = block_idx >> 6;
+    const size_t bit = block_idx & 63;
+    const uint64_t lower_mask = bit == 0
+        ? uint64_t{0}
+        : (uint64_t{1} << bit) - 1;
+    const size_t ambiguity_before =
+        ambiguity_rank[word] + static_cast<size_t>(
+            __builtin_popcountll(ambiguity_blocks[word] & lower_mask));
+    const bool ambiguous =
+        (ambiguity_blocks[word] & (uint64_t{1} << bit)) != 0;
+    const size_t base_bytes = (block_size + 3) / 4;
+    const size_t mask_bytes = (block_size + 7) / 8;
+    const size_t raw_offset = checked_reference_add(
+        payload_offset,
+        checked_reference_add(
+            checked_reference_multiply(
+                block_idx, block_bases / size_t{4}),
+            checked_reference_multiply(
+                ambiguity_before, block_bases / size_t{8})));
+    const size_t raw_size = checked_reference_add(
+        base_bytes, ambiguous ? mask_bytes : 0);
+    if (raw_offset > mapping->size() ||
+        raw_size > mapping->size() - raw_offset) {
+      throw std::runtime_error(
+          "packed reference block lies outside its file");
+    }
+    const uint8_t* packed = mapping->data() + raw_offset;
+    const uint8_t* mask = ambiguous ? packed + base_bytes : nullptr;
+    if (!mapping->block_validated(block_idx)) {
+      uint64_t checksum = kFnvOffset;
+      hash_bytes(&checksum, packed, raw_size);
+      if (checksum != block_checksums[block_idx]) {
+        throw std::runtime_error(
+            "packed reference block checksum mismatch");
+      }
+      mapping->mark_block_validated(block_idx);
+    }
+    const size_t copy_end = std::min(end, block_end);
+    for (size_t position = cursor_pos;
+         position < copy_end; ++position) {
+      const size_t local = position - block_begin;
+      (*output)[output_pos++] =
+          mask && (mask[local >> 3] &
+                   static_cast<uint8_t>(uint8_t{1} << (local & 7)))
+              ? 'N'
+              : bases[(packed[local >> 2] >>
+                       (2 * (local & 3))) & 3];
+    }
+    cursor_pos = copy_end;
+  }
 }
 
 ShardedSeedRouter load_sharded_seed_router(
@@ -1566,11 +2218,12 @@ ShardedSeedRouter load_sharded_seed_router(
   return router;
 }
 
+template <typename Reference>
 std::vector<ExactBlockVerificationResult>
-verify_selected_shards_by_exact_blocks_batch(
+verify_selected_shards_by_exact_blocks_batch_impl(
     int tolerance,
     const ShardedIndexManifest& manifest,
-    const IndexedReferenceFile& reference,
+    const Reference& reference,
     const std::vector<ExactBlockVerificationRequest>& requests) {
   std::vector<ExactBlockVerificationResult> results(requests.size());
   if (requests.empty()) return results;
@@ -1756,8 +2409,14 @@ verify_selected_shards_by_exact_blocks_batch(
       return results;
     }
     const auto& contig = reference.contigs[descriptor.contig_id];
+    if (descriptor.source_begin < contig.source_begin) {
+      return results;
+    }
+    const uint64_t local_source_begin =
+        static_cast<uint64_t>(descriptor.source_begin) -
+        contig.source_begin;
     const uint64_t local_end =
-        static_cast<uint64_t>(descriptor.source_begin) +
+        local_source_begin +
         (static_cast<uint64_t>(descriptor.window_count) - 1) *
             manifest.stride + manifest.window_length;
     if (local_end >
@@ -1811,8 +2470,11 @@ verify_selected_shards_by_exact_blocks_batch(
         const auto& descriptor =
             manifest.shards[tasks[task_begin].shard_id];
         const auto& contig = reference.contigs[descriptor.contig_id];
+        const size_t local_source_begin =
+            static_cast<size_t>(descriptor.source_begin) -
+            contig.source_begin;
         const size_t slice_begin =
-            static_cast<size_t>(contig.begin) + descriptor.source_begin;
+            static_cast<size_t>(contig.begin) + local_source_begin;
         const size_t maximum_window_start =
             (static_cast<size_t>(descriptor.window_count) - 1) *
             manifest.stride;
@@ -1983,11 +2645,46 @@ verify_selected_shards_by_exact_blocks_batch(
   return results;
 }
 
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const IndexedReferenceFile& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests) {
+  return verify_selected_shards_by_exact_blocks_batch_impl(
+      tolerance, manifest, reference, requests);
+}
+
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests) {
+  return verify_selected_shards_by_exact_blocks_batch_impl(
+      tolerance, manifest, reference, requests);
+}
+
 ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
     std::string_view query,
     int tolerance,
     const ShardedIndexManifest& manifest,
     const IndexedReferenceFile& reference,
+    const uint32_t* shard_ids_begin,
+    const uint32_t* shard_ids_end) {
+  const std::vector<ExactBlockVerificationRequest> requests = {
+      {query, shard_ids_begin, shard_ids_end}};
+  auto results = verify_selected_shards_by_exact_blocks_batch(
+      tolerance, manifest, reference, requests);
+  return results.empty() ? ExactBlockVerificationResult{}
+                         : std::move(results.front());
+}
+
+ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
     const uint32_t* shard_ids_begin,
     const uint32_t* shard_ids_end) {
   const std::vector<ExactBlockVerificationRequest> requests = {
@@ -2490,6 +3187,18 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     manifest.router_window = router_metadata.window;
     manifest.router_entry_count = router_entry_count;
     manifest.router_checksum = router_checksum;
+  }
+  bool packed_reference_reusable = false;
+  try {
+    (void)load_packed_reference_file(bundle_path, manifest);
+    packed_reference_reusable = true;
+  } catch (const std::exception&) {
+  }
+  if (!packed_reference_reusable) {
+    build_packed_reference_sidecar(
+        bundle, part_manifest, reference_size, reference_contigs,
+        load_slice, contiguous_reference);
+    (void)load_packed_reference_file(bundle_path, manifest);
   }
   save_sharded_index_manifest(bundle_path, manifest);
   return manifest;
