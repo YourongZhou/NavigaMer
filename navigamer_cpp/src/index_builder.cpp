@@ -5848,6 +5848,7 @@ void BioGeometryIndexBuilder::build_search_graph_view() {
       }
       if (implicit_child_mbb_exception_bits != 0) {
         implicit_child_mbb_widths = false;
+        implicit_child_mbb_exception_bits = 0;
         break;
       }
       implicit_child_mbb_exception_bits = bits;

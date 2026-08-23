@@ -813,6 +813,70 @@ void test_implicit_dense_leaf_fields() {
   std::filesystem::remove_all(directory);
 }
 
+void test_child_mbb_width_fallback_for_three_widths() {
+  const std::string informative =
+      "TGCTGGTCTGGTTCTCTTTCTCTCCGTGACCTATAGAGCAAGGTGGAGGGGTAGGAGGGGGACACCCAGTGAAGGG"
+      "TCCTTTGGCCTTGTAGTTTCTTAGAGGCTTCTTCTGGGAACATGTACTGGGAGCTGGGGTGGGTCCTGCACCTGCA"
+      "TGGGGCCATTTCCCTTCGTGGGCCCACAGACAACTGTTCCCCACCACGGAGGGAAGGAGACGCACAGGGCCTGGGC"
+      "CTTCTTCTCTGAGAACACTCTCAAGCAGAACTCGCCGTCTTTGAAGGGTTCAAATGTGGATGGCACCACCAGGTAC"
+      "TCCCCAGGGGGCAGCCGGGCCCGGCCAGAGACCTCCCGCAGGTTGACGTAGGTGCTGGTGCGGGCTGAGGGCTGGT"
+      "AGGCCAGGAAGAAATCCCGGCCCAAGTGTGCGTCCGTGTGACTCTCCAGCTGCACGAAACAATAAGCAGAGTCAAT"
+      "TTCTTGTTAAATCCTGGAAGATGAGAGCCCAAGAGTTCAGCTTTATTGTGCTGATTTAGGAATTATTGATTTTTAC"
+      "CATTGCACCAAGAATCAGGAGGCCGTGGATTCTGTTGTGAACTCACTGTATGTCAATCATCAAGTGTATTTTCAGT"
+      "GCCTTCTGGGTGCCAGGCCCTGTTTGAGGCATTGATCTTGACTGTGTGACCTTGACCTCTGGGCCTCCCCAGTTAA"
+      "ACGAAGGTTGAGGGACAGGGTCTCTAGTGTGCGCTCAGCTTCTCTCTGGATATTTTTCCTCTCTAATCCAATAGGC"
+      "TCTTTCATTCTGCAGCTGTCTCTGGGAGTGTGGCATTGATCTTCCCAGTACAGGCCCAAGGCTGGAGAAAAGAGCT"
+      "TAAATCCTAGTCCTCAAGCAAAAGCTGCCACAAAAACTTGTTCACCTTTGACTATCTGTGAAAACTGCTCTGCAAA"
+      "GAGACTAGGATGGTCAGTCTGGGAACCCAGGGAGGCAGCTCTAAAAGAGACAGGCAGAGGGGGCGGCCACAGCTAG"
+      "GCCTAGTCTGGGGTCCCCCCAGCCTCCCCAGGGCCTCGACTCTCCTCAACAGGCGACGATGCTCTCCAAGACCCAC"
+      "TTATTTGTTGCGGGGAGGTGGGAGGCTGTTGGTGCATGACACAGGTTAATTAGTGACTGCAGAGTGCTTCCAAAAC"
+      "ACAGGTGCCAAAGTTATTATTGCTGTAATTAAGCCTCCCCATAACACTGTGTCTTTACCATCAATCTTCATCAA";
+  const std::string reference = std::string(3935, 'N') + informative;
+  assert(reference.size() == 5149);
+  const std::vector<navigamer::ReferenceContig> contigs = {
+      {"chrThreeWidths", 0, static_cast<uint32_t>(reference.size()), 0}};
+  navigamer::HierarchyConfig hierarchy({40, 20, 8});
+  navigamer::BuildRangeConfig range_config;
+  range_config.emit_build_output = false;
+
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("navigamer-three-child-mbb-widths-test-" +
+       std::to_string(static_cast<unsigned long long>(::getpid())));
+  std::filesystem::create_directories(directory);
+  const auto bundle = directory / "reference.navshard";
+  const auto manifest = navigamer::build_sharded_reference_index(
+      bundle.string(), "three-child-mbb-widths-reference",
+      "chrThreeWidths", reference, contigs, 150, 1, 5000,
+      hierarchy, range_config, 1);
+  const auto shards = navigamer::load_sharded_index(
+      bundle.string(), manifest);
+  assert(shards.size() == 1);
+  const auto& builder = shards.front().builder;
+  const auto& view = builder.search_graph_view();
+  assert(!view.implicit_child_mbb_widths);
+  assert(view.implicit_child_mbb_exception_bits == 0);
+  assert(view.child_mbb_width_exceptions.empty());
+  assert(builder.validate_search_graph_view());
+
+  navigamer::BioGeometrySearchEngine engine(builder);
+  for (size_t source_pos : {size_t{3935}, size_t{4467}, size_t{4999}}) {
+    navigamer::BioSequence query(
+        "three_widths_" + std::to_string(source_pos),
+        reference.substr(source_pos, 150));
+    const auto [adaptive, adaptive_stats] =
+        engine.search_adaptive(query, 5);
+    const auto [brute_force, brute_force_stats] =
+        engine.search_brute_force(query, 5);
+    (void)adaptive_stats;
+    (void)brute_force_stats;
+    assert(std::set<navigamer::LeafId>(adaptive.begin(), adaptive.end()) ==
+           std::set<navigamer::LeafId>(
+               brute_force.begin(), brute_force.end()));
+  }
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -822,6 +886,7 @@ int main() {
   test_sharded_round_trip_and_no_false_negatives();
   test_seed_router_no_false_negatives();
   test_implicit_dense_leaf_fields();
+  test_child_mbb_width_fallback_for_three_widths();
   std::cout << "sharded index tests passed\n";
   return 0;
 }
