@@ -334,7 +334,7 @@ unioned. At least one block is exact for every edit-distance hit, so its true
 shard survives all of that block's intersections. Unsupported
 short/ambiguous queries or an unavailable
 sidecar conservatively search all parts.
-Routes of at least 4,096 shards are additionally verified against the persisted
+Non-empty routes are additionally verified against the persisted
 reference path when it is an unchanged regular FASTA with a current `.fai`.
 Every complete pigeonhole-block occurrence generates all indexed window starts
 within its possible `[-d,+d]` indel shift, followed by exact bounded Myers

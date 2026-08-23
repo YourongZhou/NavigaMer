@@ -1890,7 +1890,7 @@ void run_query_index_batch(const std::string& index_path,
       const bool routed = shard_router.append_selected_shards(
           query.seq, tolerance, &query_route_shard_ids);
       std::vector<uint32_t> direct_route;
-      constexpr size_t kExactBlockDirectMinShards = 4096;
+      constexpr size_t kExactBlockDirectMinShards = 1;
       const size_t route_count =
           query_route_shard_ids.size() - route_id_begin;
       if (routed && route_count >= kExactBlockDirectMinShards) {
