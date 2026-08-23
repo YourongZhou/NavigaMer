@@ -68,7 +68,7 @@ Adaptive profiling additionally accepts `--query-profile 0|1` (default `0`) and
 records per-query timing/counter buckets in `SearchStats`, `benchmark`, and
 `query-benchmark` output without changing search results.
 
-Adaptive path reuse additionally accepts `--path-reuse 0|1` (default `1`).
+Adaptive path reuse additionally accepts `--path-reuse 0|1` (default `0`).
 When enabled, adaptive search keeps thread-local warm-start caches for exact
 parent-local anchor-distance vectors on repeated queries and cached child
 shortlists keyed by cheap query-derived fingerprints. This remains an
@@ -86,6 +86,8 @@ exact verification, and records `path_reuse_attempt_count`,
 	rebuilding the index.
 	Batch-oriented commands group queries by the same query-derived fingerprint
 while keeping emitted output rows in original query order.
+Path reuse is experimental and should remain disabled for sharded batch query
+workloads until cache ownership is tied to a stable shard engine identity.
 
 Adaptive router hints additionally accept `--router-hints 0|1`,
 `--router-hint-qgram-q N`, `--router-hint-minimizer-k N`, and
@@ -293,18 +295,21 @@ points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
 has multiple shards and windows of at least 24 bases, a memory-mapped
-`.route` sidecar. The router uses 16-mer minimizers from 24- to 64-base seeds
-in `d + 1` disjoint query blocks. Sorted keys use exact 16-entry blocks with
+`.route` sidecar. The router uses every 24-base-window 16-mer minimizer in
+each of `d + 1` disjoint query blocks. Sorted keys use exact 16-entry blocks with
 one 32-bit base and minimum-width packed adjacent deltas; the parallel shard
 IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
-within edit distance `d` must contain one whole block exactly, so omitting
-shards without any of those minimizers is no-FN-safe.
+within edit distance `d` must contain one whole block exactly. The router
+therefore intersects all minimizer postings inside each block, then unions the
+`d + 1` block results; the exact block and its true shard survive every
+intersection, so the pruning remains no-FN-safe.
 Pack paths and contig names are interned once in the manifest; logical-shard
 descriptors contain only fixed-width numeric fields and occupy 40 bytes in
 memory on the supported 64-bit build. Unsupported short/ambiguous queries or
 an unavailable sidecar fall back to an exact scan of every part in groups of
-at most 64 resident shards. Selected ranges are memory-mapped directly rather than loading
-their whole pack. `query-index` and `query-index-batch` search selected parts
+at most 64 resident shards. Selected payloads from the same pack share one
+lazy file mapping and one input stream; only their graph pages are decoded.
+`query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed
 parts, with oversized routed selections split at the same 64-shard cap. Any
@@ -317,9 +322,9 @@ are reused across block boundaries, so memory is independent of total FASTQ
 record count. Each block is executed in online subplans that stop after at
 least 65,536 selected shard IDs. A query route is never split, bounding the
 route table by that budget plus one complete route; stderr reports
-`peak_route_ids`. Large sorted per-minimizer shard ranges are merged directly
-into that unique route; the ordinary small-sort path expands at most 4,096 IDs
-(16 KiB). Single-shard results bypass cross-shard hash merging. Non-sharded
+`peak_route_ids`. Per-block posting intersections start with the rarest
+minimizer, bounding temporary candidate IDs by its posting length.
+Single-shard results bypass cross-shard hash merging. Non-sharded
 queries stream one record at a time, and path tracing retains only the previous
 query trace needed for overlap statistics. Bundle query
 loading validates signatures, counts, mapped pack bounds, layer ranges, shard coordinates, and

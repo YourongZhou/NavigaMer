@@ -54,8 +54,10 @@ struct ShardRouteSelection {
 
 // Sorted minimizer codes are stored as exact adjacent-delta blocks and shard
 // IDs as a bit-packed parallel array. Both are memory-mapped from the router
-// sidecar. Exact query blocks provide a no-false-negative necessary
-// condition; unsupported queries conservatively disable routing.
+// sidecar. Every minimizer within one exact pigeonhole block is a
+// no-false-negative necessary condition, so their posting lists are
+// intersected within a block and block results are unioned. Unsupported
+// queries conservatively disable routing.
 struct ShardedSeedRouter {
   uint32_t k = 0;
   uint32_t window = 0;

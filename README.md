@@ -478,7 +478,7 @@ calls, center distance calls, and raw candidate counts. The `benchmark` and
 `query-benchmark` commands surface these values in TSV output and print query
 time/world-access summaries to stderr.
 
-Adaptive path reuse supports `--path-reuse 0|1` (default `1`). When enabled,
+Adaptive path reuse supports `--path-reuse 0|1` (default `0`). When enabled,
 adaptive search keeps thread-local warm-start caches for exact per-parent
 anchor-distance vectors on repeated queries and cached child shortlists keyed by
 query-derived fingerprints. These caches affect ordering or exact memoization
@@ -490,6 +490,8 @@ only, never become a pruning reason, and record counters such as
 `source_pos=` FASTQ annotations when present, otherwise by a cheap query-derived
 fingerprint, while preserving output order so related queries are more likely to
 hit the same thread-local warm cache.
+Path reuse is experimental and should remain disabled for sharded batch query
+workloads until cache ownership is tied to a stable shard engine identity.
 
 Adaptive local routing accepts `--local-router 0|1`,
 `--local-router-max-anchors N`, `--local-router-max-children N`, and

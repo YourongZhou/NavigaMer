@@ -15,6 +15,7 @@
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <omp.h>
 #include <queue>
 #include <sstream>
@@ -2088,24 +2089,10 @@ ShardedIndexManifest build_sharded_reference_index(
       hierarchy, range_config, build_jobs);
 }
 
-LoadedIndex load_sharded_index_part(
-    const std::string& manifest_path,
+void validate_loaded_sharded_index_part(
     const ShardedIndexManifest& manifest,
-    uint32_t shard_id) {
-  if (shard_id >= manifest.shards.size()) {
-    throw std::out_of_range("sharded index part ID is out of range");
-  }
-  const auto& descriptor = manifest.shards[shard_id];
-  if (descriptor.pack_id >= manifest.pack_paths.size() ||
-      descriptor.contig_id >= manifest.contig_ids.size()) {
-    throw std::runtime_error("sharded index part has invalid interned ID");
-  }
-  LoadedIndex loaded = load_index_payload_range(
-      resolve_index_shard_path(
-          manifest_path, manifest.pack_paths[descriptor.pack_id]),
-      descriptor.file_offset, descriptor.file_size,
-      manifest.part_manifest,
-      IndexLoadValidation::Structural);
+    const IndexShardDescriptor& descriptor,
+    const LoadedIndex& loaded) {
   const auto& store = loaded.builder.sequence_store();
   if (!store.reference_backed ||
       loaded.manifest.signature != manifest.part_manifest.signature ||
@@ -2131,6 +2118,27 @@ LoadedIndex load_sharded_index_part(
     throw std::runtime_error(
         "sharded index part does not match its descriptor");
   }
+}
+
+LoadedIndex load_sharded_index_part(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    uint32_t shard_id) {
+  if (shard_id >= manifest.shards.size()) {
+    throw std::out_of_range("sharded index part ID is out of range");
+  }
+  const auto& descriptor = manifest.shards[shard_id];
+  if (descriptor.pack_id >= manifest.pack_paths.size() ||
+      descriptor.contig_id >= manifest.contig_ids.size()) {
+    throw std::runtime_error("sharded index part has invalid interned ID");
+  }
+  LoadedIndex loaded = load_index_payload_range(
+      resolve_index_shard_path(
+          manifest_path, manifest.pack_paths[descriptor.pack_id]),
+      descriptor.file_offset, descriptor.file_size,
+      manifest.part_manifest,
+      IndexLoadValidation::Structural);
+  validate_loaded_sharded_index_part(manifest, descriptor, loaded);
   return loaded;
 }
 
@@ -2139,11 +2147,78 @@ std::vector<LoadedIndex> load_sharded_index(
     const ShardedIndexManifest& manifest,
     const std::vector<uint32_t>& shard_ids) {
   validate_manifest(manifest);
+
+  struct PackRequest {
+    size_t output_index = 0;
+    uint32_t shard_id = 0;
+    IndexPayloadRange range;
+  };
+  struct PackBatch {
+    uint32_t pack_id = 0;
+    std::vector<PackRequest> requests;
+  };
+  constexpr size_t kNoPackBatch =
+      std::numeric_limits<size_t>::max();
+  std::vector<size_t> pack_batch_indices(
+      manifest.pack_paths.size(), kNoPackBatch);
+  std::vector<PackBatch> pack_batches;
+  pack_batches.reserve(std::min(
+      shard_ids.size(), manifest.pack_paths.size()));
+  for (size_t output_index = 0; output_index < shard_ids.size();
+       ++output_index) {
+    const uint32_t shard_id = shard_ids[output_index];
+    if (shard_id >= manifest.shards.size()) {
+      throw std::out_of_range("sharded index part ID is out of range");
+    }
+    const auto& descriptor = manifest.shards[shard_id];
+    if (descriptor.pack_id >= manifest.pack_paths.size() ||
+        descriptor.contig_id >= manifest.contig_ids.size()) {
+      throw std::runtime_error("sharded index part has invalid interned ID");
+    }
+    size_t& pack_batch_index = pack_batch_indices[descriptor.pack_id];
+    if (pack_batch_index == kNoPackBatch) {
+      pack_batch_index = pack_batches.size();
+      pack_batches.push_back({descriptor.pack_id, {}});
+    }
+    pack_batches[pack_batch_index].requests.push_back(
+        {output_index, shard_id,
+         {descriptor.file_offset, descriptor.file_size}});
+  }
+
+  std::vector<std::optional<LoadedIndex>> loaded_by_output(
+      shard_ids.size());
+  for (const auto& pack_batch : pack_batches) {
+    const auto& requests = pack_batch.requests;
+    std::vector<IndexPayloadRange> ranges;
+    ranges.reserve(requests.size());
+    for (const auto& request : requests) ranges.push_back(request.range);
+    auto pack_loaded = load_index_payload_ranges(
+        resolve_index_shard_path(
+            manifest_path, manifest.pack_paths[pack_batch.pack_id]),
+        ranges, manifest.part_manifest,
+        IndexLoadValidation::Structural);
+    if (pack_loaded.size() != requests.size()) {
+      throw std::runtime_error(
+          "sharded index pack load returned the wrong part count");
+    }
+    for (size_t request_index = 0; request_index < requests.size();
+         ++request_index) {
+      const auto& request = requests[request_index];
+      validate_loaded_sharded_index_part(
+          manifest, manifest.shards[request.shard_id],
+          pack_loaded[request_index]);
+      loaded_by_output[request.output_index].emplace(
+          std::move(pack_loaded[request_index]));
+    }
+  }
+
   std::vector<LoadedIndex> loaded;
   loaded.reserve(shard_ids.size());
-  for (uint32_t shard_id : shard_ids) {
-    loaded.push_back(load_sharded_index_part(
-        manifest_path, manifest, shard_id));
+  for (auto& output : loaded_by_output) {
+    if (!output) {
+      throw std::runtime_error("sharded index pack load omitted a part");
+    }
+    loaded.push_back(std::move(*output));
   }
   return loaded;
 }

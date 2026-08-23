@@ -44,7 +44,7 @@ Used by all pipelines that build the index:
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 | `--query-profile` | `0` | Enable (`1`) or disable (`0`) per-query profiling timers in adaptive search; counters remain available either way |
-| `--path-reuse` | `1` | Enable (`1`) or disable (`0`) thread-local warm-start caches and query-derived batch scheduling hints |
+| `--path-reuse` | `0` | Enable (`1`) or disable (`0`) experimental thread-local warm-start caches and query-derived batch scheduling hints; keep disabled for sharded batch queries |
 | `--router-hints` | `0` | Enable (`1`) or disable (`0`) q-gram/minimizer/pigeonhole router hints before local-router / best-first ordering |
 | `--router-hint-qgram-q` | `5` | Router-hint q-gram length used for cached child-center signatures and parent-local range hints |
 | `--router-hint-minimizer-k` | `4` | Router-hint minimizer k-mer length |
@@ -327,10 +327,11 @@ Multi-part bundles with
 windows of at least 24 bases also store a memory-mapped `.route` sidecar of
 exact 16-mer minimizers. Sorted minimizers use exact 16-entry blocks with one
 32-bit base and minimum-width packed adjacent deltas; parallel shard IDs use
-exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
-24- to 64-base seed is taken from each of `d + 1` disjoint query blocks; only
-shards containing at least one seed minimizer are searched. This is a pigeonhole
-necessary condition for an exact edit-distance hit. Unsupported
+exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, every
+24-base-window minimizer is taken from each of `d + 1` disjoint query blocks.
+Posting lists are intersected within each block and the block results are
+unioned. At least one block is exact for every edit-distance hit, so its true
+shard survives all of that block's intersections. Unsupported
 short/ambiguous queries or an unavailable
 sidecar conservatively search all parts.
 `query-index` loads only the routed parts. `query-index-batch` loads the union

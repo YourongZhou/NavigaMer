@@ -344,6 +344,21 @@ void test_router_merges_sorted_code_ranges() {
   assert(long_selection.shard_ids == long_shard_ids);
 }
 
+void test_router_intersects_minimizers_within_one_partition() {
+  navigamer::ShardedSeedRouter router;
+  router.k = 1;
+  router.window = 2;
+  router.shard_count = 5;
+  router.shard_id_bits = shard_id_bits(router.shard_count);
+  router.minimizer_codes = {0, 0, 0, 1, 1, 1};
+  router.packed_shard_ids.set_owned(
+      pack_shard_ids({1, 2, 3, 2, 3, 4}, router.shard_id_bits));
+
+  const auto selected = router.select("AAAACC", 0);
+  assert(selected.enabled);
+  assert((selected.shard_ids == std::vector<uint32_t>{2, 3}));
+}
+
 std::set<std::string> matching_sequences(
     const std::vector<navigamer::LoadedIndex>& shards,
     const navigamer::BioSequence& query,
@@ -883,6 +898,7 @@ int main() {
   test_indexed_reference_file_slices();
   test_bit_packed_shard_id_boundaries();
   test_router_merges_sorted_code_ranges();
+  test_router_intersects_minimizers_within_one_partition();
   test_sharded_round_trip_and_no_false_negatives();
   test_seed_router_no_false_negatives();
   test_implicit_dense_leaf_fields();

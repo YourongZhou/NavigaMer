@@ -4,7 +4,6 @@
 #include <array>
 #include <cstdint>
 #include <limits>
-#include <queue>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -330,211 +329,129 @@ bool ShardedSeedRouter::append_selected_shards(
     return false;
   }
 
-  constexpr size_t kInlineMinimizerCount = 16;
-  std::array<uint32_t, kInlineMinimizerCount> inline_minimizers{};
-  std::vector<uint32_t> overflow_minimizers;
-  uint32_t* minimizers = inline_minimizers.data();
-  if (partition_count > inline_minimizers.size()) {
-    overflow_minimizers.resize(partition_count);
-    minimizers = overflow_minimizers.data();
-  }
+  struct CodeRange {
+    size_t begin = 0;
+    size_t end = 0;
+  };
+
+  std::vector<uint32_t> selected;
+  std::vector<uint32_t> partition_candidates;
+  std::vector<uint32_t> intersection;
+  std::vector<uint32_t> merged;
+  std::vector<uint32_t> minimizers;
+  std::vector<CodeRange> ranges;
   for (size_t partition = 0; partition < partition_count;
        ++partition) {
     const size_t begin = partition * query.size() / partition_count;
     const size_t end =
         (partition + 1) * query.size() / partition_count;
-    // A minimizer of a longer exact seed is also the minimizer of at least
-    // one `window`-base subwindow containing it, so it is present in the
-    // reference router. Retain the more selective 64-base query seed when
-    // the partition is long enough while keeping the router window as the
-    // safe floor.
-    const size_t seed_length =
-        std::min<size_t>(64, end - begin);
-    const size_t seed_begin =
-        begin + (end - begin - seed_length) / 2;
-    uint32_t minimizer = 0;
-    if (!exact_minimizer_code(
-            query.substr(seed_begin, seed_length), k,
-            static_cast<uint32_t>(seed_length),
-            &minimizer)) {
-      return false;
-    }
-    minimizers[partition] = minimizer;
-  }
-  std::sort(minimizers, minimizers + partition_count);
-  const size_t minimizer_count = static_cast<size_t>(
-      std::unique(minimizers, minimizers + partition_count) - minimizers);
 
-  struct CodeRange {
-    size_t next = 0;
-    size_t last = 0;
-    uint32_t shard_id = 0;
-  };
-  std::array<CodeRange, kInlineMinimizerCount> inline_ranges{};
-  std::vector<CodeRange> overflow_ranges;
-  CodeRange* ranges = inline_ranges.data();
-  if (minimizer_count > inline_ranges.size()) {
-    overflow_ranges.resize(minimizer_count);
-    ranges = overflow_ranges.data();
+    minimizers.clear();
+    minimizers.reserve(end - begin - window + 1);
+    for (size_t seed_begin = begin;
+         seed_begin + window <= end; ++seed_begin) {
+      uint32_t minimizer = 0;
+      if (!exact_minimizer_code(
+              query.substr(seed_begin, window), k, window,
+              &minimizer)) {
+        return false;
+      }
+      minimizers.push_back(minimizer);
+    }
+    std::sort(minimizers.begin(), minimizers.end());
+    minimizers.erase(
+        std::unique(minimizers.begin(), minimizers.end()),
+        minimizers.end());
+
+    ranges.clear();
+    ranges.reserve(minimizers.size());
+    for (uint32_t minimizer : minimizers) {
+      const auto bounds = equal_range_minimizer_code(minimizer);
+      ranges.push_back({bounds.first, bounds.second});
+    }
+    std::sort(
+        ranges.begin(), ranges.end(),
+        [](const CodeRange& left, const CodeRange& right) {
+          return left.end - left.begin < right.end - right.begin;
+        });
+
+    partition_candidates.clear();
+    if (!ranges.empty()) {
+      const CodeRange& first = ranges.front();
+      partition_candidates.reserve(first.end - first.begin);
+      uint32_t previous = 0;
+      bool has_previous = false;
+      for (size_t entry = first.begin; entry < first.end; ++entry) {
+        const uint32_t shard_id = unpack_shard_id(
+            packed_shard_ids, entry, shard_id_bits);
+        if (shard_id >= shard_count ||
+            (has_previous && shard_id < previous)) {
+          return false;
+        }
+        if (!has_previous || shard_id != previous) {
+          partition_candidates.push_back(shard_id);
+        }
+        previous = shard_id;
+        has_previous = true;
+      }
+    }
+
+    for (size_t range_index = 1;
+         range_index < ranges.size() &&
+         !partition_candidates.empty(); ++range_index) {
+      intersection.clear();
+      intersection.reserve(std::min(
+          partition_candidates.size(),
+          ranges[range_index].end - ranges[range_index].begin));
+      size_t candidate_index = 0;
+      uint32_t previous = 0;
+      bool has_previous = false;
+      for (size_t entry = ranges[range_index].begin;
+           entry < ranges[range_index].end &&
+           candidate_index < partition_candidates.size(); ++entry) {
+        const uint32_t shard_id = unpack_shard_id(
+            packed_shard_ids, entry, shard_id_bits);
+        if (shard_id >= shard_count ||
+            (has_previous && shard_id < previous)) {
+          return false;
+        }
+        if (has_previous && shard_id == previous) continue;
+        while (candidate_index < partition_candidates.size() &&
+               partition_candidates[candidate_index] < shard_id) {
+          ++candidate_index;
+        }
+        if (candidate_index < partition_candidates.size() &&
+            partition_candidates[candidate_index] == shard_id) {
+          intersection.push_back(shard_id);
+          ++candidate_index;
+        }
+        previous = shard_id;
+        has_previous = true;
+      }
+      partition_candidates.swap(intersection);
+    }
+
+    if (selected.empty()) {
+      selected = partition_candidates;
+    } else if (!partition_candidates.empty()) {
+      merged.clear();
+      merged.reserve(std::min(
+          static_cast<size_t>(shard_count),
+          selected.size() + partition_candidates.size()));
+      std::set_union(
+          selected.begin(), selected.end(),
+          partition_candidates.begin(), partition_candidates.end(),
+          std::back_inserter(merged));
+      selected.swap(merged);
+    }
   }
-  size_t routed_entry_count = 0;
-  for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
-       ++minimizer_idx) {
-    CodeRange& range = ranges[minimizer_idx];
-    const auto bounds =
-        equal_range_minimizer_code(minimizers[minimizer_idx]);
-    range.next = bounds.first;
-    range.last = bounds.second;
-    routed_entry_count += range.last - range.next;
-  }
-  constexpr size_t kDirectSortEntryLimit = 4096;
-  const bool use_direct_sort =
-      routed_entry_count <= kDirectSortEntryLimit;
-  const size_t maximum_unique_count = std::min(
-      routed_entry_count, static_cast<size_t>(shard_count));
-  const size_t reserve_count =
-      use_direct_sort ? routed_entry_count : maximum_unique_count;
-  if (reserve_count >
+
+  if (selected.size() >
       std::numeric_limits<size_t>::max() - initial_size) {
     throw std::length_error("router shard selection is too large");
   }
-  const size_t required_size = initial_size + reserve_count;
-  if (required_size > shard_ids->capacity()) {
-    size_t new_capacity = required_size;
-    const size_t current_capacity = shard_ids->capacity();
-    if (current_capacity <=
-        std::numeric_limits<size_t>::max() - current_capacity / 2) {
-      new_capacity = std::max(
-          new_capacity, current_capacity + current_capacity / 2);
-    }
-    shard_ids->reserve(new_capacity);
-  }
-  if (use_direct_sort) {
-    for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
-         ++minimizer_idx) {
-      const CodeRange& range = ranges[minimizer_idx];
-      for (size_t entry_index = range.next;
-           entry_index < range.last; ++entry_index) {
-        const uint32_t shard_id = unpack_shard_id(
-            packed_shard_ids, entry_index, shard_id_bits);
-        if (shard_id >= shard_count) {
-          shard_ids->resize(initial_size);
-          return false;
-        }
-        shard_ids->push_back(shard_id);
-      }
-    }
-    auto selected_begin = shard_ids->begin() + initial_size;
-    std::sort(selected_begin, shard_ids->end());
-    shard_ids->erase(
-        std::unique(selected_begin, shard_ids->end()),
-        shard_ids->end());
-    return true;
-  }
-  size_t active_range_count = 0;
-  for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
-       ++minimizer_idx) {
-    CodeRange& range = ranges[minimizer_idx];
-    if (range.next != range.last) {
-      range.shard_id = unpack_shard_id(
-          packed_shard_ids, range.next, shard_id_bits);
-      if (range.shard_id >= shard_count) {
-        return false;
-      }
-      ++active_range_count;
-    }
-  }
-  const auto append_unique = [&](uint32_t shard_id) {
-    if (shard_ids->size() == initial_size ||
-        shard_ids->back() != shard_id) {
-      shard_ids->push_back(shard_id);
-    }
-  };
-  const auto advance_range = [&](CodeRange* range) {
-    const uint32_t previous_shard_id = range->shard_id;
-    ++range->next;
-    if (range->next == range->last) return 0;
-    range->shard_id = unpack_shard_id(
-        packed_shard_ids, range->next, shard_id_bits);
-    return range->shard_id < shard_count &&
-                   range->shard_id >= previous_shard_id
-               ? 1
-               : -1;
-  };
-
-  // Entries with one minimizer code are emitted in shard-ID order. Merge the
-  // already sorted code ranges directly instead of materializing every
-  // duplicate ID and sorting the expanded list. Fixed-length mapping queries
-  // stay in the allocation-free path; unusually many partitions use a heap
-  // so long-query complexity remains O(entries log partitions).
-  if (minimizer_count <= kInlineMinimizerCount) {
-    while (active_range_count != 0) {
-      uint32_t next_shard_id = UINT32_MAX;
-      for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
-           ++minimizer_idx) {
-        const CodeRange& range = ranges[minimizer_idx];
-        if (range.next != range.last) {
-          next_shard_id = std::min(next_shard_id, range.shard_id);
-        }
-      }
-      append_unique(next_shard_id);
-      for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
-           ++minimizer_idx) {
-        CodeRange& range = ranges[minimizer_idx];
-        if (range.next == range.last ||
-            range.shard_id != next_shard_id) {
-          continue;
-        }
-        const int state = advance_range(&range);
-        if (state < 0) {
-          shard_ids->resize(initial_size);
-          return false;
-        }
-        if (state == 0) --active_range_count;
-      }
-    }
-  } else {
-    struct RangeHead {
-      uint32_t shard_id = 0;
-      size_t range_index = 0;
-    };
-    struct RangeHeadGreater {
-      bool operator()(const RangeHead& left,
-                      const RangeHead& right) const {
-        return left.shard_id > right.shard_id;
-      }
-    };
-    std::vector<RangeHead> heads;
-    heads.reserve(active_range_count);
-    for (size_t minimizer_idx = 0; minimizer_idx < minimizer_count;
-         ++minimizer_idx) {
-      if (ranges[minimizer_idx].next != ranges[minimizer_idx].last) {
-        heads.push_back(
-            {ranges[minimizer_idx].shard_id, minimizer_idx});
-      }
-    }
-    std::priority_queue<
-        RangeHead, std::vector<RangeHead>, RangeHeadGreater> queue(
-            RangeHeadGreater{}, std::move(heads));
-    while (!queue.empty()) {
-      const uint32_t next_shard_id = queue.top().shard_id;
-      append_unique(next_shard_id);
-      do {
-        const size_t range_index = queue.top().range_index;
-        queue.pop();
-        CodeRange& range = ranges[range_index];
-        const int state = advance_range(&range);
-        if (state < 0) {
-          shard_ids->resize(initial_size);
-          return false;
-        }
-        if (state > 0) {
-          queue.push({range.shard_id, range_index});
-        }
-      } while (!queue.empty() &&
-               queue.top().shard_id == next_shard_id);
-    }
-  }
+  shard_ids->insert(
+      shard_ids->end(), selected.begin(), selected.end());
   return true;
 }
 

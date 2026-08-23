@@ -2882,7 +2882,7 @@ int main(int argc, char** argv) {
   int router_hint_qgram_q = 5;
   int router_hint_minimizer_k = 4;
   int router_hint_minimizer_w = 8;
-  bool path_reuse_enabled = true;
+  bool path_reuse_enabled = false;
   bool local_router_enabled = false;
   size_t local_router_max_anchors = 4;
   size_t local_router_max_children = 64;
