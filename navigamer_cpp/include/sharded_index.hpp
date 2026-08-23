@@ -121,6 +121,17 @@ ShardedSeedRouter load_sharded_seed_router(
     const std::string& manifest_path,
     const ShardedIndexManifest& manifest);
 
+// Retain only routed shards whose source span contains at least one complete
+// pigeonhole block. On unsupported metadata the suffix is left unchanged and
+// false is returned, allowing the caller to keep the minimizer-only route.
+bool filter_selected_shards_by_exact_blocks(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const IndexedReferenceFile& reference,
+    size_t shard_ids_begin,
+    std::vector<uint32_t>* shard_ids);
+
 ShardedIndexManifest build_sharded_reference_index(
     const std::string& bundle_path,
     const std::string& ref_input,

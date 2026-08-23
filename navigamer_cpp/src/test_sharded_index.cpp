@@ -224,6 +224,23 @@ void test_indexed_reference_file_slices() {
   }
   assert(crossing_rejected);
 
+  const auto fai_fasta = directory / "indexed.fa";
+  {
+    std::ofstream out(fai_fasta, std::ios::binary);
+    out << ">chrF\nACGT\nTGCA\nAA\n";
+  }
+  {
+    std::ofstream out(fai_fasta.string() + ".fai");
+    out << "chrF\t10\t6\t4\t5\n";
+  }
+  const auto fai_indexed =
+      navigamer::index_reference_genome_file(fai_fasta.string(), 3);
+  assert(fai_indexed.sequence_size == 10);
+  assert(fai_indexed.contigs.size() == 1);
+  assert(fai_indexed.contigs.front().id == "chrF");
+  assert(fai_indexed.slice(0, 10) == "ACGTTGCAAA");
+  assert(fai_indexed.slice(2, 9) == "GTTGCAA");
+
   std::filesystem::remove_all(directory);
 }
 
@@ -688,11 +705,32 @@ void test_seed_router_no_false_negatives() {
       const auto route = router.select(sequence, 5);
       assert(route.enabled);
       assert(!route.shard_ids.empty());
+      std::vector<uint32_t> exact_block_route = route.shard_ids;
+      assert(navigamer::filter_selected_shards_by_exact_blocks(
+          sequence, 5, file_manifest, indexed_reference, 0,
+          &exact_block_route));
+      assert(exact_block_route.size() <= route.shard_ids.size());
+      if (ordinal == 0) {
+        std::string lowercase = sequence;
+        std::transform(
+            lowercase.begin(), lowercase.end(), lowercase.begin(),
+            [](unsigned char base) {
+              return static_cast<char>(std::tolower(base));
+            });
+        std::vector<uint32_t> lowercase_route = route.shard_ids;
+        assert(navigamer::filter_selected_shards_by_exact_blocks(
+            lowercase, 5, file_manifest, indexed_reference, 0,
+            &lowercase_route));
+        assert(lowercase_route == exact_block_route);
+      }
       navigamer::BioSequence query(
           "router_" + std::to_string(ordinal++), sequence);
       assert(matching_occurrences(shards, query, 5) ==
              matching_occurrences(
                  shards, query, 5, &route.shard_ids));
+      assert(matching_occurrences(shards, query, 5) ==
+             matching_occurrences(
+                 shards, query, 5, &exact_block_route));
     }
   }
 
@@ -726,12 +764,19 @@ void test_seed_router_no_false_negatives() {
       const auto route = short_router.select(sequence, 5);
       assert(route.enabled);
       assert(!route.shard_ids.empty());
+      std::vector<uint32_t> exact_block_route = route.shard_ids;
+      assert(navigamer::filter_selected_shards_by_exact_blocks(
+          sequence, 5, short_manifest, indexed_reference, 0,
+          &exact_block_route));
       navigamer::BioSequence query(
           "router_150_" + std::to_string(source_pos) + "_" +
           std::to_string(edit_case), sequence);
       assert(matching_occurrences(short_shards, query, 5) ==
              matching_occurrences(
                  short_shards, query, 5, &route.shard_ids));
+      assert(matching_occurrences(short_shards, query, 5) ==
+             matching_occurrences(
+                 short_shards, query, 5, &exact_block_route));
     }
   }
 

@@ -309,6 +309,13 @@ memory on the supported 64-bit build. Unsupported short/ambiguous queries or
 an unavailable sidecar fall back to an exact scan of every part in groups of
 at most 64 resident shards. Selected payloads from the same pack share one
 lazy file mapping and one input stream; only their graph pages are decoded.
+For a routed query with at least 4,096 candidate shards, an unchanged indexed
+FASTA with a current `.fai` enables a second no-FN filter before graph loading:
+the source span must contain at least one complete `d + 1` pigeonhole block.
+Path, size, modification time, contigs, and coordinates are checked first; any
+unsupported or inconsistent reference metadata keeps the minimizer-only route.
+Reference-span checks run in parallel with one reusable slice buffer per
+worker.
 `query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed

@@ -50,6 +50,7 @@ struct IndexedReferenceFile {
   std::vector<ReferenceContig> contigs;
 
   std::string slice(size_t begin, size_t end) const;
+  void slice(size_t begin, size_t end, std::string* output) const;
 
  private:
   size_t checkpoint_stride = 0;

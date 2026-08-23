@@ -1842,6 +1842,11 @@ void run_query_index_batch(const std::string& index_path,
     size_t searched_shards = 0;
     size_t peak_loaded_shards = 0;
     size_t peak_planned_route_ids = 0;
+    size_t exact_block_prefilter_queries = 0;
+    size_t exact_block_prefilter_before = 0;
+    size_t exact_block_prefilter_after = 0;
+    bool exact_block_reference_attempted = false;
+    std::unique_ptr<IndexedReferenceFile> exact_block_reference;
     std::vector<uint32_t> cached_shard_ids;
     std::vector<LoadedIndex> cached_loaded_shards;
     std::vector<std::unique_ptr<BioGeometrySearchEngine>> cached_engines;
@@ -1873,8 +1878,73 @@ void run_query_index_batch(const std::string& index_path,
       const auto& query = queries[query_block_end];
       const auto route_start =
           std::chrono::high_resolution_clock::now();
+      const size_t route_id_begin = query_route_shard_ids.size();
       const bool routed = shard_router.append_selected_shards(
           query.seq, tolerance, &query_route_shard_ids);
+      constexpr size_t kExactBlockPrefilterMinShards = 4096;
+      const size_t route_count =
+          query_route_shard_ids.size() - route_id_begin;
+      if (routed && route_count >= kExactBlockPrefilterMinShards) {
+        if (!exact_block_reference_attempted) {
+          exact_block_reference_attempted = true;
+          try {
+            const std::string& reference_path =
+                shard_manifest.part_manifest.ref_input;
+            if (!std::filesystem::is_regular_file(reference_path)) {
+              throw std::runtime_error(
+                  "persisted reference path is unavailable");
+            }
+            const std::string fingerprint_prefix =
+                "file:" + reference_path + ":";
+            const std::string& stored_fingerprint =
+                shard_manifest.part_manifest.ref_fingerprint;
+            const size_t hash_separator =
+                stored_fingerprint.rfind(':');
+            if (stored_fingerprint.compare(
+                    0, fingerprint_prefix.size(),
+                    fingerprint_prefix) != 0 ||
+                hash_separator == std::string::npos ||
+                hash_separator <= fingerprint_prefix.size()) {
+              throw std::runtime_error(
+                  "persisted reference fingerprint is incompatible");
+            }
+            const uint64_t expected_file_size = std::stoull(
+                stored_fingerprint.substr(
+                    fingerprint_prefix.size(),
+                    hash_separator - fingerprint_prefix.size()));
+            if (std::filesystem::file_size(reference_path) !=
+                    expected_file_size ||
+                std::filesystem::last_write_time(reference_path) >
+                    std::filesystem::last_write_time(index_path)) {
+              throw std::runtime_error(
+                  "persisted reference file changed after index build");
+            }
+            exact_block_reference =
+                std::make_unique<IndexedReferenceFile>(
+                    index_reference_genome_file(reference_path));
+          } catch (const std::exception& error) {
+            std::cerr << "Exact-block shard prefilter disabled: "
+                      << error.what() << "\n";
+          }
+        }
+        if (exact_block_reference) {
+          const size_t before =
+              query_route_shard_ids.size() - route_id_begin;
+          if (filter_selected_shards_by_exact_blocks(
+                  query.seq, tolerance, shard_manifest,
+                  *exact_block_reference, route_id_begin,
+                  &query_route_shard_ids)) {
+            ++exact_block_prefilter_queries;
+            exact_block_prefilter_before += before;
+            exact_block_prefilter_after +=
+                query_route_shard_ids.size() - route_id_begin;
+          } else {
+            exact_block_reference.reset();
+            std::cerr << "Exact-block shard prefilter disabled: "
+                         "reference metadata does not match the bundle\n";
+          }
+        }
+      }
       const auto route_end =
           std::chrono::high_resolution_clock::now();
       query_route_ms.push_back(static_cast<float>(
@@ -2324,6 +2394,11 @@ void run_query_index_batch(const std::string& index_path,
               << " searched_shards=" << searched_shards
               << "/" <<
                   total_query_count * shard_manifest.shards.size()
+              << " exact_block_prefilter_queries="
+              << exact_block_prefilter_queries
+              << " exact_block_shards="
+              << exact_block_prefilter_after << "/"
+              << exact_block_prefilter_before
               << "\n";
     return;
   }
