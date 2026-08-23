@@ -318,7 +318,9 @@ the routed world trees at all.
 Path, size, modification time, contigs, and coordinates are checked first; any
 unsupported or inconsistent reference metadata keeps the minimizer-only route.
 Reference-span checks run in parallel with one reusable slice buffer per
-worker.
+worker. Within one query block, direct routes are grouped by physical shard,
+so a shard shared by several queries is sliced once while every query still
+runs its own complete exact-block and edit-distance checks.
 `query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed
@@ -330,9 +332,10 @@ map proportional to the total shard count. FASTQ records and route plans are
 streamed in blocks of at most 8,192 queries; unchanged resident shard groups
 are reused across block boundaries, so memory is independent of total FASTQ
 record count. Each block is executed in online subplans that stop after at
-least 65,536 selected shard IDs. A query route is never split, bounding the
-route table by that budget plus one complete route; stderr reports
-`peak_route_ids`. Per-block posting intersections start with the rarest
+least 65,536 graph-search shard IDs or 1,048,576 direct-verification route
+IDs. A query route is never split, bounding either route table by its budget
+plus one complete route; stderr `peak_route_ids` reports the graph-search
+table. Per-block posting intersections start with the rarest
 minimizer, bounding temporary candidate IDs by its posting length.
 Single-shard results bypass cross-shard hash merging. Non-sharded
 queries stream one record at a time, and path tracing retains only the previous

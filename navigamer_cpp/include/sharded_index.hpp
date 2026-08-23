@@ -67,6 +67,12 @@ struct ExactBlockVerificationResult {
   std::vector<ExactBlockVerifiedOccurrence> occurrences;
 };
 
+struct ExactBlockVerificationRequest {
+  std::string_view query;
+  const uint32_t* shard_ids_begin = nullptr;
+  const uint32_t* shard_ids_end = nullptr;
+};
+
 // Sorted minimizer codes are stored as exact adjacent-delta blocks and shard
 // IDs as a bit-packed parallel array. Both are memory-mapped from the router
 // sidecar. Every minimizer within one exact pigeonhole block is a
@@ -146,6 +152,16 @@ ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
     const IndexedReferenceFile& reference,
     const uint32_t* shard_ids_begin,
     const uint32_t* shard_ids_end);
+
+// Batch form of the direct verifier. The reference slice for a shard routed
+// by multiple queries is loaded once, while each query keeps its complete
+// pigeonhole blocks and independent exact-distance verification.
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const IndexedReferenceFile& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests);
 
 ShardedIndexManifest build_sharded_reference_index(
     const std::string& bundle_path,

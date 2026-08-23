@@ -339,8 +339,10 @@ reference path when it is an unchanged regular FASTA with a current `.fai`.
 Every complete pigeonhole-block occurrence generates all indexed window starts
 within its possible `[-d,+d]` indel shift, followed by exact bounded Myers
 verification. A successful pass returns those hits directly without loading
-the routed graph shards. This is the same no-FN necessary condition at full
-block resolution followed by exact verification. Missing
+the routed graph shards. Direct routes in the same input block are grouped by
+physical shard, avoiding duplicate reference slices without sharing or
+dropping any query's candidates. This is the same no-FN necessary condition
+at full block resolution followed by exact verification. Missing
 or inconsistent reference metadata disables this optional stage without
 changing the minimizer route. Batch stderr reports
 `exact_block_direct_queries`, `exact_block_shards=matched/routed`,

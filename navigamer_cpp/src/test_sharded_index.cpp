@@ -812,6 +812,43 @@ void test_seed_router_no_false_negatives() {
     }
   }
 
+  std::vector<std::string> batch_sequences = {
+      reference.substr(98, 150), reference.substr(300, 150)};
+  batch_sequences[0].erase(batch_sequences[0].begin() + 70);
+  batch_sequences[1].insert(batch_sequences[1].begin() + 80, 'G');
+  std::vector<std::vector<uint32_t>> batch_routes;
+  for (const auto& sequence : batch_sequences) {
+    auto route = short_router.select(sequence, 5);
+    assert(route.enabled && !route.shard_ids.empty());
+    batch_routes.push_back(std::move(route.shard_ids));
+  }
+  std::vector<navigamer::ExactBlockVerificationRequest> batch_requests;
+  for (size_t query_idx = 0; query_idx < batch_sequences.size();
+       ++query_idx) {
+    batch_requests.push_back(
+        {batch_sequences[query_idx], batch_routes[query_idx].data(),
+         batch_routes[query_idx].data() + batch_routes[query_idx].size()});
+  }
+  const auto batch_results =
+      navigamer::verify_selected_shards_by_exact_blocks_batch(
+          5, short_manifest, indexed_reference, batch_requests);
+  assert(batch_results.size() == batch_sequences.size());
+  for (size_t query_idx = 0; query_idx < batch_results.size();
+       ++query_idx) {
+    assert(batch_results[query_idx].enabled);
+    std::set<Occurrence> batch_occurrences;
+    for (const auto& occurrence : batch_results[query_idx].occurrences) {
+      batch_occurrences.emplace(
+          short_manifest.contig_ids[occurrence.contig_id],
+          occurrence.source_start, occurrence.sequence);
+    }
+    navigamer::BioSequence query(
+        "router_batch_" + std::to_string(query_idx),
+        batch_sequences[query_idx]);
+    assert(matching_occurrences(short_shards, query, 5) ==
+           batch_occurrences);
+  }
+
   const std::string exact = reference.substr(98, window);
   std::string ambiguous = exact;
   ambiguous[10] = 'N';
