@@ -540,6 +540,10 @@ void load_read_records(const std::string& path_or_string,
     std::string s = path_or_string;
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(0, 1);
+    const auto& byte_table = reference_byte_table();
+    for (char& base : s) {
+      base = byte_table.uppercase[static_cast<unsigned char>(base)];
+    }
     emit_read("query_0", std::move(s), false, size_t{0});
     return;
   }
@@ -559,6 +563,10 @@ void load_read_records(const std::string& path_or_string,
     std::getline(f, line);  // +
     std::getline(f, line);   // qual
     if (!sequence.empty()) {
+      const auto& byte_table = reference_byte_table();
+      for (char& base : sequence) {
+        base = byte_table.uppercase[static_cast<unsigned char>(base)];
+      }
       size_t source_pos = 0;
       const bool has_source_pos =
           parse_source_pos(header_body, &source_pos);
@@ -610,6 +618,10 @@ bool QuerySequenceReader::next(QuerySequence* query) {
   if (literal_pending_) {
     query->id = "query_0";
     query->seq = std::move(literal_);
+    const auto& byte_table = reference_byte_table();
+    for (char& base : query->seq) {
+      base = byte_table.uppercase[static_cast<unsigned char>(base)];
+    }
     literal_pending_ = false;
     return true;
   }
@@ -632,6 +644,10 @@ bool QuerySequenceReader::next(QuerySequence* query) {
     std::getline(input_, line_);  // +
     std::getline(input_, line_);  // quality
     if (query->seq.empty()) continue;
+    const auto& byte_table = reference_byte_table();
+    for (char& base : query->seq) {
+      base = byte_table.uppercase[static_cast<unsigned char>(base)];
+    }
     query->id = std::move(sequence_id);
     return true;
   }

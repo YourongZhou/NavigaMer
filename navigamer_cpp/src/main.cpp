@@ -1842,9 +1842,11 @@ void run_query_index_batch(const std::string& index_path,
     size_t searched_shards = 0;
     size_t peak_loaded_shards = 0;
     size_t peak_planned_route_ids = 0;
-    size_t exact_block_prefilter_queries = 0;
-    size_t exact_block_prefilter_before = 0;
-    size_t exact_block_prefilter_after = 0;
+    size_t exact_block_direct_queries = 0;
+    size_t exact_block_routed_shards = 0;
+    size_t exact_block_matched_shards = 0;
+    size_t exact_block_candidate_windows = 0;
+    size_t exact_block_distance_calls = 0;
     bool exact_block_reference_attempted = false;
     std::unique_ptr<IndexedReferenceFile> exact_block_reference;
     std::vector<uint32_t> cached_shard_ids;
@@ -1872,6 +1874,9 @@ void run_query_index_batch(const std::string& index_path,
         uint8_t{0});
     std::vector<float> query_route_ms;
     query_route_ms.reserve(queries.size() - query_block_begin);
+    std::vector<std::unique_ptr<ExactBlockVerificationResult>>
+        query_direct_results;
+    query_direct_results.reserve(queries.size() - query_block_begin);
     size_t query_block_end = query_block_begin;
     while (query_block_end < queries.size()) {
       const size_t query_idx = query_block_end - query_block_begin;
@@ -1881,6 +1886,7 @@ void run_query_index_batch(const std::string& index_path,
       const size_t route_id_begin = query_route_shard_ids.size();
       const bool routed = shard_router.append_selected_shards(
           query.seq, tolerance, &query_route_shard_ids);
+      std::unique_ptr<ExactBlockVerificationResult> direct_result;
       constexpr size_t kExactBlockPrefilterMinShards = 4096;
       const size_t route_count =
           query_route_shard_ids.size() - route_id_begin;
@@ -1919,32 +1925,49 @@ void run_query_index_batch(const std::string& index_path,
               throw std::runtime_error(
                   "persisted reference file changed after index build");
             }
+            const std::string fai_path = reference_path + ".fai";
+            if (!std::filesystem::is_regular_file(fai_path) ||
+                std::filesystem::last_write_time(fai_path) <
+                    std::filesystem::last_write_time(reference_path)) {
+              throw std::runtime_error(
+                  "current FASTA .fai is unavailable");
+            }
             exact_block_reference =
                 std::make_unique<IndexedReferenceFile>(
                     index_reference_genome_file(reference_path));
           } catch (const std::exception& error) {
-            std::cerr << "Exact-block shard prefilter disabled: "
+            std::cerr << "Exact-block direct verification disabled: "
                       << error.what() << "\n";
           }
         }
         if (exact_block_reference) {
           const size_t before =
               query_route_shard_ids.size() - route_id_begin;
-          if (filter_selected_shards_by_exact_blocks(
-                  query.seq, tolerance, shard_manifest,
-                  *exact_block_reference, route_id_begin,
-                  &query_route_shard_ids)) {
-            ++exact_block_prefilter_queries;
-            exact_block_prefilter_before += before;
-            exact_block_prefilter_after +=
-                query_route_shard_ids.size() - route_id_begin;
+          auto verified = verify_selected_shards_by_exact_blocks(
+              query.seq, tolerance, shard_manifest,
+              *exact_block_reference,
+              query_route_shard_ids.data() + route_id_begin,
+              query_route_shard_ids.data() +
+                  query_route_shard_ids.size());
+          if (verified.enabled) {
+            ++exact_block_direct_queries;
+            exact_block_routed_shards += before;
+            exact_block_matched_shards += verified.matched_shard_count;
+            exact_block_candidate_windows +=
+                verified.candidate_window_count;
+            exact_block_distance_calls += verified.distance_call_count;
+            query_route_shard_ids.resize(route_id_begin);
+            direct_result =
+                std::make_unique<ExactBlockVerificationResult>(
+                    std::move(verified));
           } else {
             exact_block_reference.reset();
-            std::cerr << "Exact-block shard prefilter disabled: "
+            std::cerr << "Exact-block direct verification disabled: "
                          "reference metadata does not match the bundle\n";
           }
         }
       }
+      query_direct_results.push_back(std::move(direct_result));
       const auto route_end =
           std::chrono::high_resolution_clock::now();
       query_route_ms.push_back(static_cast<float>(
@@ -1977,6 +2000,7 @@ void run_query_index_batch(const std::string& index_path,
       std::vector<uint32_t> shard_ids;
       bool full_scan = false;
       bool oversized_route_scan = false;
+      bool direct_verified = false;
 
       bool empty() const { return query_begin == query_end; }
     };
@@ -2012,6 +2036,15 @@ void run_query_index_batch(const std::string& index_path,
         merged_shard_ids;
     for (size_t query_idx = 0; query_idx < planned_query_count;
          ++query_idx) {
+      if (query_direct_results[query_idx]) {
+        flush_batch();
+        ShardQueryBatch direct_batch;
+        direct_batch.query_begin = query_idx;
+        direct_batch.query_end = query_idx + 1;
+        direct_batch.direct_verified = true;
+        shard_query_batches.push_back(std::move(direct_batch));
+        continue;
+      }
       if (!query_is_routed(query_idx)) {
         flush_batch();
         append_full_scan_query(query_idx);
@@ -2059,6 +2092,47 @@ void run_query_index_batch(const std::string& index_path,
     }
 
     for (const auto& shard_batch : shard_query_batches) {
+      if (shard_batch.direct_verified) {
+        clear_shard_cache();
+        const size_t query_idx = shard_batch.query_begin;
+        auto& verified = *query_direct_results[query_idx];
+        SearchStats combined;
+        combined.dist_calc_count = verified.distance_call_count;
+        combined.leaf_verify_count = verified.distance_call_count;
+        combined.candidate_count_for_prune =
+            verified.candidate_window_count;
+        std::vector<BioSequence> combined_hits;
+        std::unordered_map<std::string, size_t> hit_by_sequence;
+        hit_by_sequence.reserve(verified.occurrences.size());
+        for (const auto& occurrence : verified.occurrences) {
+          if (occurrence.contig_id >= shard_manifest.contig_ids.size() ||
+              occurrence.source_start >
+                  static_cast<uint32_t>(
+                      std::numeric_limits<int>::max()) -
+                      occurrence.sequence.size()) {
+            throw std::runtime_error(
+                "directly verified occurrence is out of range");
+          }
+          auto inserted = hit_by_sequence.emplace(
+              occurrence.sequence, combined_hits.size());
+          if (inserted.second) {
+            combined_hits.emplace_back(
+                shard_manifest.contig_ids[occurrence.contig_id] + "_" +
+                    std::to_string(occurrence.source_start),
+                occurrence.sequence);
+          }
+          combined_hits[inserted.first->second].add_occurrence(
+              shard_manifest.contig_ids[occurrence.contig_id],
+              static_cast<int>(occurrence.source_start),
+              static_cast<int>(occurrence.source_start +
+                               occurrence.sequence.size()),
+              "+");
+        }
+        emit_query_hits(
+            queries[query_block_begin + query_idx], combined,
+            combined_hits, query_route_ms[query_idx]);
+        continue;
+      }
       if (shard_batch.full_scan ||
           shard_batch.oversized_route_scan) {
         clear_shard_cache();
@@ -2394,11 +2468,15 @@ void run_query_index_batch(const std::string& index_path,
               << " searched_shards=" << searched_shards
               << "/" <<
                   total_query_count * shard_manifest.shards.size()
-              << " exact_block_prefilter_queries="
-              << exact_block_prefilter_queries
+              << " exact_block_direct_queries="
+              << exact_block_direct_queries
               << " exact_block_shards="
-              << exact_block_prefilter_after << "/"
-              << exact_block_prefilter_before
+              << exact_block_matched_shards << "/"
+              << exact_block_routed_shards
+              << " exact_block_candidate_windows="
+              << exact_block_candidate_windows
+              << " exact_block_distance_calls="
+              << exact_block_distance_calls
               << "\n";
     return;
   }

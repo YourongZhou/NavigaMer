@@ -1,5 +1,6 @@
 #include "sharded_index.hpp"
 #include "io_utils.hpp"
+#include "tools.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <numeric>
@@ -1553,117 +1555,199 @@ ShardedSeedRouter load_sharded_seed_router(
   return router;
 }
 
-bool filter_selected_shards_by_exact_blocks(
+ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
     std::string_view query,
     int tolerance,
     const ShardedIndexManifest& manifest,
     const IndexedReferenceFile& reference,
-    size_t shard_ids_begin,
-    std::vector<uint32_t>* shard_ids) {
-  if (!shard_ids || shard_ids_begin > shard_ids->size()) {
-    throw std::invalid_argument("invalid exact-block shard filter output");
-  }
-  if (tolerance < 0 || query.empty() ||
+    const uint32_t* shard_ids_begin,
+    const uint32_t* shard_ids_end) {
+  ExactBlockVerificationResult result;
+  if (!shard_ids_begin || !shard_ids_end ||
+      shard_ids_begin > shard_ids_end || tolerance < 0 || query.empty() ||
       reference.contigs.size() != manifest.contig_ids.size()) {
-    return false;
+    return result;
   }
   const size_t partition_count =
       static_cast<size_t>(tolerance) + 1;
-  if (partition_count == 0 || partition_count > query.size()) {
-    return false;
-  }
+  if (partition_count == 0 || partition_count > query.size()) return result;
   for (size_t contig_id = 0; contig_id < manifest.contig_ids.size();
        ++contig_id) {
     const auto& contig = reference.contigs[contig_id];
     if (contig.id != manifest.contig_ids[contig_id] ||
         contig.begin > contig.end || contig.end > reference.sequence_size) {
-      return false;
+      return result;
     }
   }
 
-  std::vector<std::string> blocks;
+  std::string normalized_query(query);
+  for (char& base : normalized_query) {
+    base = static_cast<char>(
+        std::toupper(static_cast<unsigned char>(base)));
+    if (base != 'A' && base != 'C' && base != 'G' && base != 'T') {
+      return result;
+    }
+  }
+  std::vector<std::string_view> blocks;
+  std::vector<size_t> block_begins;
   blocks.reserve(partition_count);
+  block_begins.reserve(partition_count);
   for (size_t partition = 0; partition < partition_count; ++partition) {
-    const size_t begin = partition * query.size() / partition_count;
+    const size_t begin =
+        partition * normalized_query.size() / partition_count;
     const size_t end =
-        (partition + 1) * query.size() / partition_count;
-    if (begin == end) return false;
-    blocks.emplace_back(query.substr(begin, end - begin));
-    for (char& base : blocks.back()) {
-      base = static_cast<char>(
-          std::toupper(static_cast<unsigned char>(base)));
-    }
+        (partition + 1) * normalized_query.size() / partition_count;
+    if (begin == end) return result;
+    blocks.push_back(std::string_view(normalized_query).substr(
+        begin, end - begin));
+    block_begins.push_back(begin);
   }
 
-  for (size_t input = shard_ids_begin; input < shard_ids->size(); ++input) {
-    const uint32_t shard_id = (*shard_ids)[input];
-    if (shard_id >= manifest.shards.size()) return false;
+  const size_t shard_count = static_cast<size_t>(
+      shard_ids_end - shard_ids_begin);
+  for (size_t shard_idx = 0; shard_idx < shard_count; ++shard_idx) {
+    const uint32_t shard_id = shard_ids_begin[shard_idx];
+    if (shard_id >= manifest.shards.size()) return result;
     const auto& descriptor = manifest.shards[shard_id];
     if (descriptor.contig_id >= reference.contigs.size() ||
         descriptor.window_count == 0) {
-      return false;
+      return result;
     }
     const auto& contig = reference.contigs[descriptor.contig_id];
     const uint64_t local_end =
         static_cast<uint64_t>(descriptor.source_begin) +
         (static_cast<uint64_t>(descriptor.window_count) - 1) *
             manifest.stride + manifest.window_length;
-    const uint64_t contig_length =
-        static_cast<uint64_t>(contig.end) - contig.begin;
-    if (local_end > contig_length) return false;
+    if (local_end >
+        static_cast<uint64_t>(contig.end) - contig.begin) {
+      return result;
+    }
   }
 
-  const size_t candidate_count = shard_ids->size() - shard_ids_begin;
-  std::vector<uint8_t> retained(candidate_count, uint8_t{0});
+  struct ThreadResult {
+    size_t matched_shards = 0;
+    size_t candidate_windows = 0;
+    size_t distance_calls = 0;
+    std::vector<ExactBlockVerifiedOccurrence> occurrences;
+    std::exception_ptr error;
+  };
   const int thread_count = std::max(1, omp_get_max_threads());
-  std::vector<std::exception_ptr> errors(
+  std::vector<ThreadResult> thread_results(
       static_cast<size_t>(thread_count));
 #pragma omp parallel
   {
     const int thread_id = omp_get_thread_num();
+    auto& thread_result =
+        thread_results[static_cast<size_t>(thread_id)];
     std::string reference_slice;
+    std::vector<uint32_t> candidate_starts;
+    const auto prepared = prepare_myers_pattern(normalized_query);
 #pragma omp for schedule(static)
-    for (size_t candidate = 0; candidate < candidate_count; ++candidate) {
-      if (errors[static_cast<size_t>(thread_id)]) continue;
+    for (size_t shard_idx = 0; shard_idx < shard_count; ++shard_idx) {
+      if (thread_result.error) continue;
       try {
-        const uint32_t shard_id =
-            (*shard_ids)[shard_ids_begin + candidate];
+        const uint32_t shard_id = shard_ids_begin[shard_idx];
         const auto& descriptor = manifest.shards[shard_id];
         const auto& contig = reference.contigs[descriptor.contig_id];
         const size_t slice_begin =
             static_cast<size_t>(contig.begin) + descriptor.source_begin;
-        const size_t slice_end =
-            slice_begin +
+        const size_t maximum_window_start =
             (static_cast<size_t>(descriptor.window_count) - 1) *
-                manifest.stride + manifest.window_length;
-        reference.slice(slice_begin, slice_end, &reference_slice);
-        for (const std::string& block : blocks) {
-          if (reference_slice.find(block) != std::string::npos) {
-            retained[candidate] = 1;
-            break;
+            manifest.stride;
+        const size_t slice_size =
+            maximum_window_start + manifest.window_length;
+        reference.slice(
+            slice_begin, slice_begin + slice_size, &reference_slice);
+
+        candidate_starts.clear();
+        for (size_t block_idx = 0; block_idx < blocks.size(); ++block_idx) {
+          size_t occurrence = reference_slice.find(blocks[block_idx]);
+          while (occurrence != std::string::npos) {
+            const int64_t nominal_start =
+                static_cast<int64_t>(occurrence) -
+                static_cast<int64_t>(block_begins[block_idx]);
+            for (int shift = -tolerance; shift <= tolerance; ++shift) {
+              const int64_t signed_start = nominal_start + shift;
+              if (signed_start < 0) continue;
+              const size_t start = static_cast<size_t>(signed_start);
+              if (start <= maximum_window_start &&
+                  start % manifest.stride == 0) {
+                candidate_starts.push_back(
+                    static_cast<uint32_t>(start));
+              }
+            }
+            occurrence = reference_slice.find(
+                blocks[block_idx], occurrence + 1);
+          }
+        }
+        if (candidate_starts.empty()) continue;
+        ++thread_result.matched_shards;
+        std::sort(candidate_starts.begin(), candidate_starts.end());
+        candidate_starts.erase(
+            std::unique(candidate_starts.begin(), candidate_starts.end()),
+            candidate_starts.end());
+        thread_result.candidate_windows += candidate_starts.size();
+        for (uint32_t start : candidate_starts) {
+          const std::string_view reference_window =
+              std::string_view(reference_slice).substr(
+                  start, manifest.window_length);
+          if (std::any_of(
+                  reference_window.begin(), reference_window.end(),
+                  [](char base) {
+                    return base != 'A' && base != 'C' &&
+                           base != 'G' && base != 'T';
+                  })) {
+            continue;
+          }
+          ++thread_result.distance_calls;
+          const int distance =
+              compute_distance_bounded_myers_prepared(
+                  prepared, reference_window, tolerance);
+          if (distance <= tolerance) {
+            thread_result.occurrences.push_back(
+                {descriptor.contig_id,
+                 static_cast<uint32_t>(
+                     descriptor.source_begin + start),
+                 distance, std::string(reference_window)});
           }
         }
       } catch (...) {
-        errors[static_cast<size_t>(thread_id)] =
-            std::current_exception();
+        thread_result.error = std::current_exception();
       }
     }
   }
-  for (const auto& error : errors) {
-    if (error) std::rethrow_exception(error);
+  for (const auto& thread_result : thread_results) {
+    if (thread_result.error) std::rethrow_exception(thread_result.error);
   }
-
-  std::vector<uint32_t> filtered;
-  filtered.reserve(candidate_count);
-  for (size_t candidate = 0; candidate < candidate_count; ++candidate) {
-    if (retained[candidate]) {
-      filtered.push_back((*shard_ids)[shard_ids_begin + candidate]);
-    }
+  result.enabled = true;
+  for (auto& thread_result : thread_results) {
+    result.matched_shard_count += thread_result.matched_shards;
+    result.candidate_window_count += thread_result.candidate_windows;
+    result.distance_call_count += thread_result.distance_calls;
+    result.occurrences.insert(
+        result.occurrences.end(),
+        std::make_move_iterator(thread_result.occurrences.begin()),
+        std::make_move_iterator(thread_result.occurrences.end()));
   }
-  shard_ids->resize(shard_ids_begin);
-  shard_ids->insert(
-      shard_ids->end(), filtered.begin(), filtered.end());
-  return true;
+  std::sort(
+      result.occurrences.begin(), result.occurrences.end(),
+      [](const ExactBlockVerifiedOccurrence& left,
+         const ExactBlockVerifiedOccurrence& right) {
+        if (left.contig_id != right.contig_id) {
+          return left.contig_id < right.contig_id;
+        }
+        return left.source_start < right.source_start;
+      });
+  result.occurrences.erase(
+      std::unique(
+          result.occurrences.begin(), result.occurrences.end(),
+          [](const ExactBlockVerifiedOccurrence& left,
+             const ExactBlockVerifiedOccurrence& right) {
+            return left.contig_id == right.contig_id &&
+                   left.source_start == right.source_start;
+          }),
+      result.occurrences.end());
+  return result;
 }
 
 static ShardedIndexManifest build_sharded_reference_index_impl(

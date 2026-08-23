@@ -241,6 +241,17 @@ void test_indexed_reference_file_slices() {
   assert(fai_indexed.slice(0, 10) == "ACGTTGCAAA");
   assert(fai_indexed.slice(2, 9) == "GTTGCAA");
 
+  const auto lowercase_fastq = directory / "lowercase.fq";
+  {
+    std::ofstream out(lowercase_fastq);
+    out << "@lowercase\nacgttgcaaa\n+\nIIIIIIIIII\n";
+  }
+  navigamer::QuerySequenceReader lowercase_reader(
+      lowercase_fastq.string());
+  navigamer::QuerySequence lowercase_query;
+  assert(lowercase_reader.next(&lowercase_query));
+  assert(lowercase_query.seq == "ACGTTGCAAA");
+
   std::filesystem::remove_all(directory);
 }
 
@@ -705,32 +716,11 @@ void test_seed_router_no_false_negatives() {
       const auto route = router.select(sequence, 5);
       assert(route.enabled);
       assert(!route.shard_ids.empty());
-      std::vector<uint32_t> exact_block_route = route.shard_ids;
-      assert(navigamer::filter_selected_shards_by_exact_blocks(
-          sequence, 5, file_manifest, indexed_reference, 0,
-          &exact_block_route));
-      assert(exact_block_route.size() <= route.shard_ids.size());
-      if (ordinal == 0) {
-        std::string lowercase = sequence;
-        std::transform(
-            lowercase.begin(), lowercase.end(), lowercase.begin(),
-            [](unsigned char base) {
-              return static_cast<char>(std::tolower(base));
-            });
-        std::vector<uint32_t> lowercase_route = route.shard_ids;
-        assert(navigamer::filter_selected_shards_by_exact_blocks(
-            lowercase, 5, file_manifest, indexed_reference, 0,
-            &lowercase_route));
-        assert(lowercase_route == exact_block_route);
-      }
       navigamer::BioSequence query(
           "router_" + std::to_string(ordinal++), sequence);
       assert(matching_occurrences(shards, query, 5) ==
              matching_occurrences(
                  shards, query, 5, &route.shard_ids));
-      assert(matching_occurrences(shards, query, 5) ==
-             matching_occurrences(
-                 shards, query, 5, &exact_block_route));
     }
   }
 
@@ -748,7 +738,7 @@ void test_seed_router_no_false_negatives() {
       short_bundle.string(), short_manifest);
   for (size_t source_pos : {size_t{0}, size_t{98}, size_t{300}}) {
     const std::string exact = reference.substr(source_pos, 150);
-    for (size_t edit_case = 0; edit_case < 2; ++edit_case) {
+    for (size_t edit_case = 0; edit_case < 4; ++edit_case) {
       std::string sequence = exact;
       if (edit_case == 0) {
         for (size_t mutation : {size_t{3}, size_t{45}, size_t{87},
@@ -756,27 +746,69 @@ void test_seed_router_no_false_negatives() {
           sequence[mutation] = sequence[mutation] == 'A' ? 'C' : 'A';
         }
       } else {
-        for (size_t mutation : {size_t{143}, size_t{120}, size_t{96},
-                                size_t{72}, size_t{48}}) {
-          sequence.erase(sequence.begin() + mutation);
+        const std::array<size_t, 5> positions = {
+            size_t{143}, size_t{120}, size_t{96},
+            size_t{72}, size_t{48}};
+        if (edit_case == 1) {
+          for (size_t mutation : positions) {
+            sequence.erase(sequence.begin() + mutation);
+          }
+        } else if (edit_case == 2) {
+          for (size_t mutation : positions) {
+            sequence.insert(sequence.begin() + mutation, 'A');
+          }
+        } else {
+          sequence.erase(sequence.begin() + 120);
+          sequence.erase(sequence.begin() + 72);
+          sequence.insert(sequence.begin() + 96, 'C');
+          sequence.insert(sequence.begin() + 48, 'G');
+          sequence[12] = sequence[12] == 'A' ? 'C' : 'A';
         }
       }
       const auto route = short_router.select(sequence, 5);
       assert(route.enabled);
       assert(!route.shard_ids.empty());
-      std::vector<uint32_t> exact_block_route = route.shard_ids;
-      assert(navigamer::filter_selected_shards_by_exact_blocks(
-          sequence, 5, short_manifest, indexed_reference, 0,
-          &exact_block_route));
+      const auto direct =
+          navigamer::verify_selected_shards_by_exact_blocks(
+              sequence, 5, short_manifest, indexed_reference,
+              route.shard_ids.data(),
+              route.shard_ids.data() + route.shard_ids.size());
+      assert(direct.enabled);
       navigamer::BioSequence query(
           "router_150_" + std::to_string(source_pos) + "_" +
           std::to_string(edit_case), sequence);
       assert(matching_occurrences(short_shards, query, 5) ==
              matching_occurrences(
                  short_shards, query, 5, &route.shard_ids));
+      std::set<Occurrence> direct_occurrences;
+      for (const auto& occurrence : direct.occurrences) {
+        direct_occurrences.emplace(
+            short_manifest.contig_ids[occurrence.contig_id],
+            occurrence.source_start, occurrence.sequence);
+      }
       assert(matching_occurrences(short_shards, query, 5) ==
-             matching_occurrences(
-                 short_shards, query, 5, &exact_block_route));
+             direct_occurrences);
+      if (source_pos == 0 && edit_case == 0) {
+        std::string lowercase = sequence;
+        std::transform(
+            lowercase.begin(), lowercase.end(), lowercase.begin(),
+            [](unsigned char base) {
+              return static_cast<char>(std::tolower(base));
+            });
+        const auto lowercase_direct =
+            navigamer::verify_selected_shards_by_exact_blocks(
+                lowercase, 5, short_manifest, indexed_reference,
+                route.shard_ids.data(),
+                route.shard_ids.data() + route.shard_ids.size());
+        assert(lowercase_direct.enabled);
+        std::set<Occurrence> lowercase_occurrences;
+        for (const auto& occurrence : lowercase_direct.occurrences) {
+          lowercase_occurrences.emplace(
+              short_manifest.contig_ids[occurrence.contig_id],
+              occurrence.source_start, occurrence.sequence);
+        }
+        assert(lowercase_occurrences == direct_occurrences);
+      }
     }
   }
 

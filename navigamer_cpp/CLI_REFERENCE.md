@@ -334,13 +334,17 @@ unioned. At least one block is exact for every edit-distance hit, so its true
 shard survives all of that block's intersections. Unsupported
 short/ambiguous queries or an unavailable
 sidecar conservatively search all parts.
-Routes of at least 4,096 shards are additionally checked against the persisted
+Routes of at least 4,096 shards are additionally verified against the persisted
 reference path when it is an unchanged regular FASTA with a current `.fai`.
-A shard survives when its source span contains any complete pigeonhole block;
-this is the same no-FN necessary condition at full block resolution. Missing
+Every complete pigeonhole-block occurrence generates all indexed window starts
+within its possible `[-d,+d]` indel shift, followed by exact bounded Myers
+verification. A successful pass returns those hits directly without loading
+the routed graph shards. This is the same no-FN necessary condition at full
+block resolution followed by exact verification. Missing
 or inconsistent reference metadata disables this optional stage without
 changing the minimizer route. Batch stderr reports
-`exact_block_prefilter_queries` and `exact_block_shards=after/before`.
+`exact_block_direct_queries`, `exact_block_shards=matched/routed`,
+`exact_block_candidate_windows`, and `exact_block_distance_calls`.
 `query-index` loads only the routed parts. `query-index-batch` loads the union
 of routed parts required by the input reads; if any read cannot be routed, it
 loads all parts for the no-FN fallback.
