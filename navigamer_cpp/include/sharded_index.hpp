@@ -174,7 +174,8 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs = 0);
+    size_t build_jobs = 0,
+    bool build_graph_payloads = true);
 
 ShardedIndexManifest build_sharded_reference_index(
     const std::string& bundle_path,
@@ -185,7 +186,8 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs = 0);
+    size_t build_jobs = 0,
+    bool build_graph_payloads = true);
 
 std::vector<LoadedIndex> load_sharded_index(
     const std::string& manifest_path,

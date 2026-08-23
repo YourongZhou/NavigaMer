@@ -636,6 +636,48 @@ void test_seed_router_no_false_negatives() {
       bundle.string() + ".route",
       file_bundle.string() + ".route"));
 
+  const auto router_only_bundle =
+      directory / "reference-router-only.navshard";
+  const auto router_only_manifest =
+      navigamer::build_sharded_reference_index(
+          router_only_bundle.string(), fasta.string(), indexed_reference,
+          window, stride, shard_windows, hierarchy, range_config, 2,
+          false);
+  assert(router_only_manifest.pack_paths.empty());
+  assert(router_only_manifest.total_window_count ==
+         file_manifest.total_window_count);
+  assert(router_only_manifest.total_sequence_count == 0);
+  assert(router_only_manifest.total_world_node_count == 0);
+  assert(router_only_manifest.router_entry_count ==
+         file_manifest.router_entry_count);
+  assert(router_only_manifest.router_checksum ==
+         file_manifest.router_checksum);
+  assert(files_equal(
+      router_only_bundle.string() + ".route",
+      file_bundle.string() + ".route"));
+  for (const auto& shard : router_only_manifest.shards) {
+    assert(shard.pack_id == 0);
+    assert(shard.file_offset == 0);
+    assert(shard.file_size == 0);
+    assert(shard.sequence_count == 0);
+    assert(shard.world_node_count == 0);
+  }
+  bool router_only_graph_load_rejected = false;
+  try {
+    (void)navigamer::load_sharded_index(
+        router_only_bundle.string(), router_only_manifest);
+  } catch (const std::runtime_error&) {
+    router_only_graph_load_rejected = true;
+  }
+  assert(router_only_graph_load_rejected);
+  const auto router_only_reloaded =
+      navigamer::read_sharded_index_manifest(
+          router_only_bundle.string());
+  const auto router_only_router =
+      navigamer::load_sharded_seed_router(
+          router_only_bundle.string(), router_only_reloaded);
+  assert(router_only_router.enabled());
+
   const auto router = navigamer::load_sharded_seed_router(
       bundle.string(), rebuilt_manifest);
   assert(router.enabled());
@@ -736,6 +778,17 @@ void test_seed_router_no_false_negatives() {
       short_bundle.string(), short_manifest);
   const auto short_shards = navigamer::load_sharded_index(
       short_bundle.string(), short_manifest);
+  const auto short_router_only_bundle =
+      directory / "reference-150-router-only.navshard";
+  const auto short_router_only_manifest =
+      navigamer::build_sharded_reference_index(
+          short_router_only_bundle.string(), fasta.string(),
+          indexed_reference, 150, stride, shard_windows,
+          hierarchy, range_config, 2, false);
+  const auto short_router_only =
+      navigamer::load_sharded_seed_router(
+          short_router_only_bundle.string(),
+          short_router_only_manifest);
   for (size_t source_pos : {size_t{0}, size_t{98}, size_t{300}}) {
     const std::string exact = reference.substr(source_pos, 150);
     for (size_t edit_case = 0; edit_case < 4; ++edit_case) {
@@ -768,11 +821,16 @@ void test_seed_router_no_false_negatives() {
       const auto route = short_router.select(sequence, 5);
       assert(route.enabled);
       assert(!route.shard_ids.empty());
+      const auto router_only_route =
+          short_router_only.select(sequence, 5);
+      assert(router_only_route.enabled);
+      assert(router_only_route.shard_ids == route.shard_ids);
       const auto direct =
           navigamer::verify_selected_shards_by_exact_blocks(
-              sequence, 5, short_manifest, indexed_reference,
-              route.shard_ids.data(),
-              route.shard_ids.data() + route.shard_ids.size());
+              sequence, 5, short_router_only_manifest,
+              indexed_reference, router_only_route.shard_ids.data(),
+              router_only_route.shard_ids.data() +
+                  router_only_route.shard_ids.size());
       assert(direct.enabled);
       navigamer::BioSequence query(
           "router_150_" + std::to_string(source_pos) + "_" +

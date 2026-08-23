@@ -20,7 +20,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer demo   [--size N] [--primary-radii 30,15,5 | --r-sw 5 --r-mw 15 --r-lw 30]
 ./navigamer build  --ref <fasta|sequence> --reads <fastq|sequence> [--index index.navidx] [same primary-layer flags]
 ./navigamer build-scale --ref <fasta|sequence> --window 250 --stride 1 --prefix-lengths 50000 --out build_scale.csv [--index index.navidx] [same primary-layer flags]
-./navigamer build-sharded --ref <fasta|sequence> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --index index.navshard [same primary-layer flags]
+./navigamer build-sharded --ref <fasta|sequence> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --router-only 0|1 --index index.navshard [same primary-layer flags]
 ./navigamer query  --reads <fastq|sequence> --query <sequence> [--index index.navidx] [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer query-index --index <index.navidx|index.navshard> --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer query-index-batch --index <index.navidx|index.navshard> --reads <fastq> [--tolerance 2] [--out out.tsv] [--path-trace-out trace.tsv]
@@ -181,6 +181,13 @@ aggregate memory; nested teams remain inside the original OpenMP thread
 budget. Parallel builders suppress per-part progress/summary output, avoiding
 large contended stderr streams at human-genome shard counts while retaining the
 outer completed-index summary.
+`--router-only 1` omits every graph payload and writes only the shard
+descriptors plus the exact-minimizer router. This mode requires the unchanged
+file-backed FASTA and a current `.fai` at query time. Direct exact-block
+verification remains no-FN under that reference-identity requirement; if the
+reference is unavailable, inconsistent, or the query cannot use the exact
+route, the command fails instead of returning a partial result. The default
+`--router-only 0` retains graph payloads as the conservative fallback.
 For a human stride-1 build, `--shard-windows 5000` is the recommended
 starting point when construction time and peak memory matter. Packing keeps
 the resulting logical-shard count manageable, while smaller bounded parts

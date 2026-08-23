@@ -47,7 +47,7 @@ void usage(const char* prog) {
             << "  " << prog << " demo [--size N] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build-scale --ref <path|seq> --window 250 --stride 1 --prefix-lengths csv --out <csv> [--index <file>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
-            << "  " << prog << " build-sharded --ref <path|seq> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --index <manifest> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " build-sharded --ref <path|seq> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --router-only 0|1 --index <manifest> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--index <file>] [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query-index --index <file> --query <seq> [--tolerance 2] [--mode adaptive]\n"
             << "  " << prog << " query-index-batch --index <file> --reads <fastq> [--tolerance 2] [--out <tsv>] [--path-trace-out <tsv>] [--mode adaptive]\n"
@@ -810,6 +810,7 @@ void run_build_sharded(
     int stride,
     size_t max_shard_windows,
     size_t shard_build_jobs,
+    bool router_only,
     const std::string& index_path,
     const navigamer::HierarchyConfig& hierarchy,
     const navigamer::BuildRangeConfig& range_config) {
@@ -827,6 +828,10 @@ void run_build_sharded(
   }
   const bool reference_is_regular_file =
       std::filesystem::is_regular_file(ref_input);
+  if (router_only && !reference_is_regular_file) {
+    throw std::invalid_argument(
+        "--router-only requires --ref to be a regular FASTA file");
+  }
   size_t reference_bases = 0;
   ShardedIndexManifest manifest;
   const auto print_start = [&](size_t base_count) {
@@ -838,7 +843,9 @@ void run_build_sharded(
                       ? std::string("auto")
                       : std::to_string(shard_build_jobs))
               << " window=" << window_size
-              << " stride=" << stride << "\n";
+              << " stride=" << stride
+              << " router_only=" << (router_only ? "true" : "false")
+              << "\n";
   };
   if (reference_is_regular_file) {
     constexpr size_t kMinCheckpointStride = size_t{4} << 10;
@@ -861,7 +868,7 @@ void run_build_sharded(
         index_path, ref_input, reference,
         static_cast<size_t>(window_size),
         static_cast<size_t>(stride), max_shard_windows,
-        hierarchy, range_config, shard_build_jobs);
+        hierarchy, range_config, shard_build_jobs, !router_only);
   } else {
     auto reference = load_reference_genome(ref_input);
     reference_bases = reference.sequence.size();
@@ -873,7 +880,7 @@ void run_build_sharded(
         index_path, ref_input, reference.id, reference.sequence,
         reference.contigs, static_cast<size_t>(window_size),
         static_cast<size_t>(stride), max_shard_windows,
-        hierarchy, range_config, shard_build_jobs);
+        hierarchy, range_config, shard_build_jobs, !router_only);
   }
   std::cerr << "Sharded index saved: " << index_path
             << " shards=" << manifest.shards.size()
@@ -3143,6 +3150,7 @@ int main(int argc, char** argv) {
   size_t phase1_qgram_max_touched = 250000;
   size_t max_shard_windows = 0;
   size_t shard_build_jobs = 0;
+  bool router_only = false;
   int progress_interval_seconds = 600;
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
@@ -3309,6 +3317,10 @@ int main(int argc, char** argv) {
     if (a == "--shard-build-jobs" && i + 1 < argc) {
       shard_build_jobs =
           parse_positive_size(argv[++i], "--shard-build-jobs");
+      continue;
+    }
+    if (a == "--router-only" && i + 1 < argc) {
+      router_only = parse_zero_one(argv[++i], "--router-only");
       continue;
     }
     if (a == "--primary-radii" && i + 1 < argc) { primary_radii_csv = argv[++i]; continue; }
@@ -3653,7 +3665,8 @@ int main(int argc, char** argv) {
       }
       run_build_sharded(
           ref_input, window_size, stride, max_shard_windows,
-          shard_build_jobs, index_path, hierarchy, range_config);
+          shard_build_jobs, router_only, index_path, hierarchy,
+          range_config);
       return 0;
     }
     if (cmd == "query") {

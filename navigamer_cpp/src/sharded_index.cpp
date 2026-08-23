@@ -1050,10 +1050,10 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
       manifest.part_manifest.world_node_count != 0 ||
       manifest.part_manifest.edge_count != 0 ||
       manifest.part_manifest.leaf_link_count != 0 ||
-      manifest.pack_paths.empty() || manifest.contig_ids.empty() ||
-      manifest.shards.empty()) {
+      manifest.contig_ids.empty() || manifest.shards.empty()) {
     throw std::runtime_error("sharded index contains no shards");
   }
+  const bool has_graph_payloads = !manifest.pack_paths.empty();
   if (manifest.pack_paths.size() > manifest.shards.size()) {
     throw std::runtime_error("sharded index has too many pack files");
   }
@@ -1084,6 +1084,10 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
     throw std::runtime_error(
         "sharded index has inconsistent empty router metadata");
   }
+  if (!has_graph_payloads && !has_router) {
+    throw std::runtime_error(
+        "router-only sharded index contains no seed router");
+  }
   size_t total_windows = 0;
   size_t total_sequences = 0;
   size_t total_nodes = 0;
@@ -1091,22 +1095,29 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
   std::vector<uint64_t> pack_ends(manifest.pack_paths.size(), 0);
   std::vector<uint8_t> pack_referenced(manifest.pack_paths.size(), 0);
   for (const auto& shard : manifest.shards) {
-    if (shard.pack_id >= manifest.pack_paths.size() ||
-        shard.contig_id >= manifest.contig_ids.size() ||
-        shard.file_offset % kShardPackAlignment != 0 ||
-        shard.file_size == 0 ||
-        shard.window_count == 0) {
+    if (shard.contig_id >= manifest.contig_ids.size() ||
+        shard.window_count == 0 ||
+        (has_graph_payloads &&
+         (shard.pack_id >= manifest.pack_paths.size() ||
+          shard.file_offset % kShardPackAlignment != 0 ||
+          shard.file_size == 0)) ||
+        (!has_graph_payloads &&
+         (shard.pack_id != 0 || shard.file_offset != 0 ||
+          shard.file_size != 0 || shard.sequence_count != 0 ||
+          shard.world_node_count != 0))) {
       throw std::runtime_error(
           "sharded index contains an invalid shard descriptor");
     }
-    if (shard.file_offset < pack_ends[shard.pack_id] ||
-        shard.file_size >
-            std::numeric_limits<uint64_t>::max() - shard.file_offset) {
-      throw std::runtime_error(
-          "sharded index contains overlapping pack ranges");
+    if (has_graph_payloads) {
+      if (shard.file_offset < pack_ends[shard.pack_id] ||
+          shard.file_size >
+              std::numeric_limits<uint64_t>::max() - shard.file_offset) {
+        throw std::runtime_error(
+            "sharded index contains overlapping pack ranges");
+      }
+      pack_ends[shard.pack_id] = shard.file_offset + shard.file_size;
+      pack_referenced[shard.pack_id] = 1;
     }
-    pack_ends[shard.pack_id] = shard.file_offset + shard.file_size;
-    pack_referenced[shard.pack_id] = 1;
     const uint64_t expected_source_end =
         static_cast<uint64_t>(shard.source_begin) +
         (static_cast<uint64_t>(shard.window_count) - 1) *
@@ -1257,7 +1268,7 @@ ShardedIndexManifest read_sharded_index_manifest(
   manifest.part_manifest = read_index_build_manifest(in);
   const uint64_t pack_count =
       read_pod<uint64_t>(in, "pack_count");
-  if (pack_count == 0 || pack_count > kMaxShardCount) {
+  if (pack_count > kMaxShardCount) {
     throw std::runtime_error("invalid sharded index pack count");
   }
   manifest.pack_paths.reserve(static_cast<size_t>(pack_count));
@@ -2000,7 +2011,8 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs) {
+    size_t build_jobs,
+    bool build_graph_payloads) {
   if (bundle_path.empty()) {
     throw std::invalid_argument(
         "sharded index output path must not be empty");
@@ -2227,8 +2239,9 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     }
   };
 
-  const size_t pack_count =
-      (descriptors.size() + kShardsPerPack - 1) / kShardsPerPack;
+  const size_t pack_count = build_graph_payloads
+      ? (descriptors.size() + kShardsPerPack - 1) / kShardsPerPack
+      : 0;
   std::vector<std::string> pack_paths(pack_count);
   for (size_t pack_idx = 0; pack_idx < pack_count; ++pack_idx) {
     const std::filesystem::path pack_path =
@@ -2493,7 +2506,8 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs) {
+    size_t build_jobs,
+    bool build_graph_payloads) {
   return build_sharded_reference_index_impl(
       bundle_path, ref_input, reference_id,
       reference_sequence.size(), reference_contigs,
@@ -2501,7 +2515,8 @@ ShardedIndexManifest build_sharded_reference_index(
         return reference_sequence.substr(begin, end - begin);
       },
       &reference_sequence, window_length, stride,
-      max_shard_windows, hierarchy, range_config, build_jobs);
+      max_shard_windows, hierarchy, range_config, build_jobs,
+      build_graph_payloads);
 }
 
 ShardedIndexManifest build_sharded_reference_index(
@@ -2513,7 +2528,8 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs) {
+    size_t build_jobs,
+    bool build_graph_payloads) {
   return build_sharded_reference_index_impl(
       bundle_path, ref_input, reference.id,
       reference.sequence_size, reference.contigs,
@@ -2521,7 +2537,7 @@ ShardedIndexManifest build_sharded_reference_index(
         return reference.slice(begin, end);
       },
       nullptr, window_length, stride, max_shard_windows,
-      hierarchy, range_config, build_jobs);
+      hierarchy, range_config, build_jobs, build_graph_payloads);
 }
 
 void validate_loaded_sharded_index_part(
@@ -2562,6 +2578,11 @@ LoadedIndex load_sharded_index_part(
   if (shard_id >= manifest.shards.size()) {
     throw std::out_of_range("sharded index part ID is out of range");
   }
+  if (manifest.pack_paths.empty()) {
+    throw std::runtime_error(
+        "router-only index requires its unchanged reference; "
+        "graph fallback is unavailable");
+  }
   const auto& descriptor = manifest.shards[shard_id];
   if (descriptor.pack_id >= manifest.pack_paths.size() ||
       descriptor.contig_id >= manifest.contig_ids.size()) {
@@ -2582,6 +2603,11 @@ std::vector<LoadedIndex> load_sharded_index(
     const ShardedIndexManifest& manifest,
     const std::vector<uint32_t>& shard_ids) {
   validate_manifest(manifest);
+  if (manifest.pack_paths.empty()) {
+    throw std::runtime_error(
+        "router-only index requires its unchanged reference; "
+        "graph fallback is unavailable");
+  }
 
   struct PackRequest {
     size_t output_index = 0;

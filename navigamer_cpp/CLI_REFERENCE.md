@@ -349,6 +349,11 @@ or inconsistent reference metadata disables this optional stage without
 changing the minimizer route. Batch stderr reports
 `exact_block_direct_queries`, `exact_block_shards=matched/routed`,
 `exact_block_candidate_windows`, and `exact_block_distance_calls`.
+With `--router-only 1`, graph payloads are deliberately absent, so direct
+verification is mandatory rather than optional. The original file-backed
+FASTA and a current `.fai` must remain available and unchanged; unsupported
+queries or inconsistent reference metadata fail closed instead of emitting an
+incomplete result.
 `query-index` loads only the routed parts. `query-index-batch` loads the union
 of routed parts required by the input reads; if any read cannot be routed, it
 loads all parts for the no-FN fallback.
@@ -380,6 +385,7 @@ length-compatible candidate superset without allocating a q-gram posting index.
 | `--stride` | `1` | Step between window starts |
 | `--shard-windows` | *(required)* | Maximum window starts per logical shard; `5000` is the recommended human stride-1 starting point when construction time/RAM matter (`10000` trades that for fewer logical shards), then benchmark nearby sizes |
 | `--shard-build-jobs` | auto | Maximum concurrently built parts; auto uses one below 8 OpenMP threads, two at 8--15, up to 20 for parts of at most 8,192 windows, up to 16 through 16,384 windows, otherwise up to four; it divides the thread budget among internal teams |
+| `--router-only` | `0` | With `1`, omit graph payloads and retain only shard descriptors plus the exact-minimizer router; queries require the unchanged file-backed FASTA and current `.fai` and fail closed if exact direct verification is unavailable |
 | `--index` | *(required)* | Output `.navshard` manifest; packed part containers are created beside it |
 | `--progress-interval-seconds` | `600` | Periodic progress interval for a serial shard build; parallel shard builds suppress per-part diagnostics and retain only the outer summary |
 

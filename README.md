@@ -209,7 +209,7 @@ cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
 ./navigamer build --ref ref --reads ACGTACGTACGTACGT --index /tmp/navigamer.navidx
 ./navigamer query-index --index /tmp/navigamer.navidx --query ACGTACGTACGTACGT --tolerance 2
-./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000 --index /tmp/human.navshard
+./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000 --router-only 0 --index /tmp/human.navshard
 ./navigamer query-index-batch --index /tmp/human.navshard --reads reads.fastq --tolerance 2 --out /tmp/hits.tsv
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
@@ -318,6 +318,11 @@ threads each; larger parts remain capped at four builders to contain peak
 memory. `--shard-build-jobs N` sets an explicit concurrency limit. The product
 of part jobs and their internal worker teams never exceeds the OpenMP thread
 limit, while peak build memory is bounded by the number of concurrent parts.
+`--router-only 1` skips all graph payloads and persists only the shard
+descriptors and exact-minimizer router. It is a reference-bound no-FN mode:
+querying requires the unchanged file-backed FASTA and a current `.fai`, and
+fails rather than silently omitting hits when direct verification is
+unavailable. The default full mode keeps graph payloads for fallback.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
