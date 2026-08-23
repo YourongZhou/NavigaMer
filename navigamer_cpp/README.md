@@ -320,7 +320,11 @@ unsupported or inconsistent reference metadata keeps the minimizer-only route.
 Reference-span checks run in parallel with one reusable slice buffer per
 worker. Within one query block, direct routes are grouped by physical shard,
 so a shard shared by several queries is sliced once while every query still
-runs its own complete exact-block and edit-distance checks.
+runs its own complete exact-block and edit-distance checks. When at least eight
+per-query block scans are projected per physical shard scan, one exact
+multi-pattern automaton matches all active blocks in a single pass; lower
+reuse keeps the faster long-pattern search. Both paths enumerate the same
+exact-block occurrences.
 `query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed

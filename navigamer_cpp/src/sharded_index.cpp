@@ -1622,6 +1622,77 @@ verify_selected_shards_by_exact_blocks_batch(
     total_task_count += request_task_count;
   }
 
+  struct ExactBlockOutput {
+    uint32_t query_idx = 0;
+    size_t query_begin = 0;
+    size_t length = 0;
+  };
+  struct ExactBlockNode {
+    std::array<uint32_t, 4> next = {
+        UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+    uint32_t failure = 0;
+    std::vector<ExactBlockOutput> outputs;
+  };
+  const auto base_index = [](char base) -> int {
+    switch (base) {
+      case 'A': return 0;
+      case 'C': return 1;
+      case 'G': return 2;
+      case 'T': return 3;
+      default: return -1;
+    }
+  };
+  std::vector<ExactBlockNode> block_automaton(1);
+  for (size_t query_idx = 0; query_idx < query_plans.size(); ++query_idx) {
+    const auto& plan = query_plans[query_idx];
+    for (const auto& block : plan.blocks) {
+      uint32_t state = 0;
+      for (size_t pos = block.first; pos < block.second; ++pos) {
+        const size_t base = static_cast<size_t>(
+            base_index(plan.normalized_query[pos]));
+        uint32_t next = block_automaton[state].next[base];
+        if (next == UINT32_MAX) {
+          if (block_automaton.size() == UINT32_MAX) return results;
+          next = static_cast<uint32_t>(block_automaton.size());
+          block_automaton[state].next[base] = next;
+          block_automaton.emplace_back();
+        }
+        state = next;
+      }
+      block_automaton[state].outputs.push_back(
+          {static_cast<uint32_t>(query_idx), block.first,
+           block.second - block.first});
+    }
+  }
+  std::queue<uint32_t> pending_states;
+  for (size_t base = 0; base < 4; ++base) {
+    uint32_t& next = block_automaton[0].next[base];
+    if (next == UINT32_MAX) {
+      next = 0;
+    } else {
+      pending_states.push(next);
+    }
+  }
+  while (!pending_states.empty()) {
+    const uint32_t state = pending_states.front();
+    pending_states.pop();
+    const uint32_t failure = block_automaton[state].failure;
+    const auto& failure_outputs = block_automaton[failure].outputs;
+    block_automaton[state].outputs.insert(
+        block_automaton[state].outputs.end(),
+        failure_outputs.begin(), failure_outputs.end());
+    for (size_t base = 0; base < 4; ++base) {
+      uint32_t& next = block_automaton[state].next[base];
+      if (next == UINT32_MAX) {
+        next = block_automaton[failure].next[base];
+      } else {
+        block_automaton[next].failure =
+            block_automaton[failure].next[base];
+        pending_states.push(next);
+      }
+    }
+  }
+
   struct ShardQueryTask {
     uint32_t shard_id = 0;
     uint32_t query_idx = 0;
@@ -1701,13 +1772,24 @@ verify_selected_shards_by_exact_blocks_batch(
     thread_result.queries.resize(requests.size());
   }
   const size_t shard_group_count = shard_task_offsets.size() - 1;
+  constexpr long double kAutomatonMinimumScanRatio = 8.0L;
+  const bool use_block_automaton =
+      static_cast<long double>(tasks.size()) * partition_count >=
+      static_cast<long double>(shard_group_count) *
+          kAutomatonMinimumScanRatio;
 #pragma omp parallel
   {
     const int thread_id = omp_get_thread_num();
     auto& thread_result =
         thread_results[static_cast<size_t>(thread_id)];
     std::string reference_slice;
-    std::vector<uint32_t> candidate_starts;
+    std::vector<std::vector<uint32_t>> candidate_starts(
+        requests.size());
+    std::vector<uint32_t> active_epochs(requests.size(), uint32_t{0});
+    std::vector<uint32_t> candidate_epochs(
+        requests.size(), uint32_t{0});
+    std::vector<uint32_t> touched_queries;
+    uint32_t epoch = 1;
 #pragma omp for schedule(static)
     for (size_t shard_group = 0;
          shard_group < shard_group_count; ++shard_group) {
@@ -1728,44 +1810,17 @@ verify_selected_shards_by_exact_blocks_batch(
         reference.slice(
             slice_begin, slice_begin + slice_size, &reference_slice);
 
-        for (size_t task_idx = task_begin; task_idx < task_end;
-             ++task_idx) {
-          const size_t query_idx = tasks[task_idx].query_idx;
+        const auto verify_candidates =
+            [&](uint32_t query_idx, std::vector<uint32_t>* starts) {
+          if (!starts || starts->empty()) return;
           const auto& plan = query_plans[query_idx];
           auto& partial = thread_result.queries[query_idx];
-          candidate_starts.clear();
-          for (const auto& block : plan.blocks) {
-            const std::string_view block_sequence(plan.normalized_query.data() +
-                                                      block.first,
-                                                  block.second - block.first);
-            size_t occurrence = reference_slice.find(block_sequence);
-            while (occurrence != std::string::npos) {
-              const int64_t nominal_start =
-                  static_cast<int64_t>(occurrence) -
-                  static_cast<int64_t>(block.first);
-              for (int shift = -tolerance; shift <= tolerance; ++shift) {
-                const int64_t signed_start = nominal_start + shift;
-                if (signed_start < 0) continue;
-                const size_t start = static_cast<size_t>(signed_start);
-                if (start <= maximum_window_start &&
-                    start % manifest.stride == 0) {
-                  candidate_starts.push_back(
-                      static_cast<uint32_t>(start));
-                }
-              }
-              occurrence = reference_slice.find(
-                  block_sequence, occurrence + 1);
-            }
-          }
-          if (candidate_starts.empty()) continue;
           ++partial.matched_shards;
-          std::sort(candidate_starts.begin(), candidate_starts.end());
-          candidate_starts.erase(
-              std::unique(candidate_starts.begin(),
-                          candidate_starts.end()),
-              candidate_starts.end());
-          partial.candidate_windows += candidate_starts.size();
-          for (uint32_t start : candidate_starts) {
+          std::sort(starts->begin(), starts->end());
+          starts->erase(
+              std::unique(starts->begin(), starts->end()), starts->end());
+          partial.candidate_windows += starts->size();
+          for (uint32_t start : *starts) {
             const std::string_view reference_window =
                 std::string_view(reference_slice).substr(
                     start, manifest.window_length);
@@ -1788,6 +1843,88 @@ verify_selected_shards_by_exact_blocks_batch(
                        descriptor.source_begin + start),
                    distance, std::string(reference_window)});
             }
+          }
+          starts->clear();
+        };
+
+        if (use_block_automaton) {
+          for (size_t task_idx = task_begin; task_idx < task_end;
+               ++task_idx) {
+            active_epochs[tasks[task_idx].query_idx] = epoch;
+          }
+          touched_queries.clear();
+          uint32_t state = 0;
+          for (size_t reference_pos = 0;
+               reference_pos < reference_slice.size(); ++reference_pos) {
+            const int base = base_index(reference_slice[reference_pos]);
+            if (base < 0) {
+              state = 0;
+              continue;
+            }
+            state = block_automaton[state].next[
+                static_cast<size_t>(base)];
+            for (const auto& output : block_automaton[state].outputs) {
+              if (active_epochs[output.query_idx] != epoch) continue;
+              if (candidate_epochs[output.query_idx] != epoch) {
+                candidate_epochs[output.query_idx] = epoch;
+                touched_queries.push_back(output.query_idx);
+              }
+              const size_t occurrence =
+                  reference_pos + 1 - output.length;
+              const int64_t nominal_start =
+                  static_cast<int64_t>(occurrence) -
+                  static_cast<int64_t>(output.query_begin);
+              auto& starts = candidate_starts[output.query_idx];
+              for (int shift = -tolerance; shift <= tolerance; ++shift) {
+                const int64_t signed_start = nominal_start + shift;
+                if (signed_start < 0) continue;
+                const size_t start = static_cast<size_t>(signed_start);
+                if (start <= maximum_window_start &&
+                    start % manifest.stride == 0) {
+                  starts.push_back(static_cast<uint32_t>(start));
+                }
+              }
+            }
+          }
+          for (uint32_t query_idx : touched_queries) {
+            verify_candidates(
+                query_idx, &candidate_starts[query_idx]);
+          }
+          ++epoch;
+          if (epoch == 0) {
+            std::fill(active_epochs.begin(), active_epochs.end(), 0);
+            std::fill(candidate_epochs.begin(), candidate_epochs.end(), 0);
+            epoch = 1;
+          }
+        } else {
+          for (size_t task_idx = task_begin; task_idx < task_end;
+               ++task_idx) {
+            const uint32_t query_idx = tasks[task_idx].query_idx;
+            const auto& plan = query_plans[query_idx];
+            auto& starts = candidate_starts[query_idx];
+            for (const auto& block : plan.blocks) {
+              const std::string_view block_sequence(
+                  plan.normalized_query.data() + block.first,
+                  block.second - block.first);
+              size_t occurrence = reference_slice.find(block_sequence);
+              while (occurrence != std::string::npos) {
+                const int64_t nominal_start =
+                    static_cast<int64_t>(occurrence) -
+                    static_cast<int64_t>(block.first);
+                for (int shift = -tolerance; shift <= tolerance; ++shift) {
+                  const int64_t signed_start = nominal_start + shift;
+                  if (signed_start < 0) continue;
+                  const size_t start = static_cast<size_t>(signed_start);
+                  if (start <= maximum_window_start &&
+                      start % manifest.stride == 0) {
+                    starts.push_back(static_cast<uint32_t>(start));
+                  }
+                }
+                occurrence = reference_slice.find(
+                    block_sequence, occurrence + 1);
+              }
+            }
+            verify_candidates(query_idx, &starts);
           }
         }
       } catch (...) {

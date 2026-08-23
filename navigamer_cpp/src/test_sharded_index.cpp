@@ -816,6 +816,9 @@ void test_seed_router_no_false_negatives() {
       reference.substr(98, 150), reference.substr(300, 150)};
   batch_sequences[0].erase(batch_sequences[0].begin() + 70);
   batch_sequences[1].insert(batch_sequences[1].begin() + 80, 'G');
+  for (size_t duplicate = 0; duplicate < 6; ++duplicate) {
+    batch_sequences.push_back(batch_sequences[0]);
+  }
   std::vector<std::vector<uint32_t>> batch_routes;
   for (const auto& sequence : batch_sequences) {
     auto route = short_router.select(sequence, 5);

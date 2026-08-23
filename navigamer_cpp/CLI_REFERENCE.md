@@ -341,8 +341,10 @@ within its possible `[-d,+d]` indel shift, followed by exact bounded Myers
 verification. A successful pass returns those hits directly without loading
 the routed graph shards. Direct routes in the same input block are grouped by
 physical shard, avoiding duplicate reference slices without sharing or
-dropping any query's candidates. This is the same no-FN necessary condition
-at full block resolution followed by exact verification. Missing
+dropping any query's candidates. High-reuse batches match all active exact
+blocks in one multi-pattern pass; low-reuse batches retain independent
+long-pattern searches. This is the same no-FN necessary condition at full
+block resolution followed by exact verification. Missing
 or inconsistent reference metadata disables this optional stage without
 changing the minimizer route. Batch stderr reports
 `exact_block_direct_queries`, `exact_block_shards=matched/routed`,
