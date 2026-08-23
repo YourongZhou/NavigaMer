@@ -356,7 +356,9 @@ minimum-width packed adjacent deltas. Shard IDs use exactly
 `ceil(log2(shard_count))` bits per entry. During construction, per-shard
 minimizer lists are contiguous in the
 spool, so their starts are implicit prefix sums and only one 32-bit count is
-retained per shard. For a query at tolerance `d`, the router takes one seed of
+retained per shard. Compatible router and packed-reference sidecars are reused
+on restart, and FASTA pages are dropped before the large router spool is
+mapped. For a query at tolerance `d`, the router takes one seed of
 32 to 64 bases from each of `d + 1` disjoint query blocks and searches only
 shards containing at least one seed minimizer. The pigeonhole principle makes
 this a necessary condition for an edit-distance

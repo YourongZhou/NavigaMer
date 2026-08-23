@@ -860,6 +860,7 @@ void run_build_sharded(
       throw std::runtime_error("build-sharded reference is empty");
     }
     print_start(reference_bases);
+    reference.discard_cached_pages();
     manifest = build_sharded_reference_index(
         index_path, ref_input, reference,
         static_cast<size_t>(window_size),

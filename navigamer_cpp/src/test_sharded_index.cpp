@@ -602,6 +602,8 @@ void test_seed_router_no_false_negatives() {
       (manifest.router_entry_count * 3 + 7) / 8;
   const size_t compact_router_bytes = static_cast<size_t>(
       std::filesystem::file_size(bundle.string() + ".route"));
+  const auto router_write_time =
+      std::filesystem::last_write_time(bundle.string() + ".route");
   assert(compact_router_bytes < raw_router_bytes);
   assert(compact_router_bytes <
          40 + manifest.router_entry_count * sizeof(uint64_t));
@@ -614,6 +616,8 @@ void test_seed_router_no_false_negatives() {
          manifest.router_entry_count);
   assert(rebuilt_manifest.router_checksum ==
          manifest.router_checksum);
+  assert(std::filesystem::last_write_time(
+             bundle.string() + ".route") == router_write_time);
   assert(!std::filesystem::exists(
       bundle.string() + ".route.packed.tmp"));
   assert(!std::filesystem::exists(

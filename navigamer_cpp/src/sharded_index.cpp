@@ -69,6 +69,36 @@ class PackedReferenceFileMapping {
       validated_blocks_[block].store(1, std::memory_order_release);
     }
   }
+  void prefetch(size_t begin, size_t end) const {
+#if defined(__unix__) || defined(__APPLE__)
+#if defined(MADV_WILLNEED)
+    if (!address_ || begin >= end || begin >= size_) return;
+    end = std::min(end, size_);
+    static const size_t page_size = [] {
+      const long raw_page_size = sysconf(_SC_PAGESIZE);
+      return raw_page_size > 0
+          ? static_cast<size_t>(raw_page_size)
+          : size_t{4096};
+    }();
+    const size_t aligned_begin = begin - begin % page_size;
+    const size_t end_remainder = end % page_size;
+    const size_t end_advance = end_remainder == 0
+        ? 0
+        : page_size - end_remainder;
+    const size_t aligned_end = end_advance > size_ - end
+        ? size_
+        : end + end_advance;
+    if (aligned_begin < aligned_end) {
+      (void)madvise(
+          static_cast<uint8_t*>(address_) + aligned_begin,
+          aligned_end - aligned_begin, MADV_WILLNEED);
+    }
+#endif
+#else
+    (void)begin;
+    (void)end;
+#endif
+  }
 
  private:
   void* address_ = nullptr;
@@ -1721,9 +1751,9 @@ PackedReferenceFile load_packed_reference_file(
   if (address == MAP_FAILED) {
     throw std::runtime_error("unable to map packed reference sidecar");
   }
-#if defined(MADV_RANDOM)
-  (void)madvise(address, mapped_size, MADV_RANDOM);
-#endif
+  // Shard groups are sorted by reference position before verification.
+  // Keep the kernel's normal readahead policy for this mapping; MADV_RANDOM
+  // turns a cold network-backed query into one fault per small shard range.
   mapping = std::make_shared<PackedReferenceFileMapping>(
       address, mapped_size);
 #else
@@ -1981,6 +2011,42 @@ void PackedReferenceFile::slice(
     }
     cursor_pos = copy_end;
   }
+}
+
+void PackedReferenceFile::prefetch(
+    size_t begin, size_t end) const {
+  if (!mapping || begin >= end || end > sequence_size) return;
+  const auto block_raw_offset = [&](size_t block_idx) {
+    const size_t word = block_idx >> 6;
+    const size_t bit = block_idx & 63;
+    const uint64_t lower_mask = bit == 0
+        ? uint64_t{0}
+        : (uint64_t{1} << bit) - 1;
+    const size_t ambiguity_before =
+        ambiguity_rank[word] + static_cast<size_t>(
+            __builtin_popcountll(ambiguity_blocks[word] & lower_mask));
+    return checked_reference_add(
+        payload_offset,
+        checked_reference_add(
+            checked_reference_multiply(
+                block_idx, block_bases / size_t{4}),
+            checked_reference_multiply(
+                ambiguity_before, block_bases / size_t{8})));
+  };
+  const size_t first_block = begin / block_bases;
+  const size_t last_block = (end - 1) / block_bases;
+  const size_t last_block_size = std::min(
+      block_bases, sequence_size - last_block * block_bases);
+  const bool last_ambiguous =
+      (ambiguity_blocks[last_block >> 6] &
+       (uint64_t{1} << (last_block & 63))) != 0;
+  const size_t raw_begin = block_raw_offset(first_block);
+  const size_t raw_end = checked_reference_add(
+      block_raw_offset(last_block),
+      checked_reference_add(
+          (last_block_size + 3) / 4,
+          last_ambiguous ? (last_block_size + 7) / 8 : 0));
+  mapping->prefetch(raw_begin, raw_end);
 }
 
 ShardedSeedRouter load_sharded_seed_router(
@@ -2460,9 +2526,40 @@ verify_selected_shards_by_exact_blocks_batch_impl(
         requests.size(), uint32_t{0});
     std::vector<uint32_t> touched_queries;
     uint32_t epoch = 1;
-#pragma omp for schedule(static)
-    for (size_t shard_group = 0;
-         shard_group < shard_group_count; ++shard_group) {
+    const size_t active_thread_count = static_cast<size_t>(
+        omp_get_num_threads());
+    const size_t worker_group_begin =
+        shard_group_count * static_cast<size_t>(thread_id) /
+        active_thread_count;
+    const size_t worker_group_end =
+        shard_group_count * (static_cast<size_t>(thread_id) + 1) /
+        active_thread_count;
+    if constexpr (std::is_same<Reference, PackedReferenceFile>::value) {
+      if (worker_group_begin < worker_group_end) {
+        const auto& first_descriptor = manifest.shards[
+            tasks[shard_task_offsets[worker_group_begin]].shard_id];
+        const auto& last_descriptor = manifest.shards[
+            tasks[shard_task_offsets[worker_group_end - 1]].shard_id];
+        const auto& first_contig =
+            reference.contigs[first_descriptor.contig_id];
+        const auto& last_contig =
+            reference.contigs[last_descriptor.contig_id];
+        const size_t prefetch_begin =
+            static_cast<size_t>(first_contig.begin) +
+            static_cast<size_t>(first_descriptor.source_begin) -
+            first_contig.source_begin;
+        const size_t prefetch_end =
+            static_cast<size_t>(last_contig.begin) +
+            static_cast<size_t>(last_descriptor.source_begin) -
+            last_contig.source_begin +
+            (static_cast<size_t>(last_descriptor.window_count) - 1) *
+                manifest.stride +
+            manifest.window_length;
+        reference.prefetch(prefetch_begin, prefetch_end);
+      }
+    }
+    for (size_t shard_group = worker_group_begin;
+         shard_group < worker_group_end; ++shard_group) {
       if (thread_result.error) continue;
       try {
         const size_t task_begin = shard_task_offsets[shard_group];
@@ -2703,6 +2800,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     const std::vector<ReferenceContig>& reference_contigs,
     const std::function<std::string(size_t, size_t)>& load_slice,
     const std::string* contiguous_reference,
+    const std::function<void()>& discard_source_cache,
     size_t window_length,
     size_t stride,
     size_t max_shard_windows,
@@ -2804,6 +2902,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     throw std::runtime_error(
         "reference requires more than 2^32 logical shards");
   }
+  if (discard_source_cache) discard_source_cache();
 
   const size_t available_threads = static_cast<size_t>(
       std::max(1, omp_get_max_threads()));
@@ -3140,33 +3239,69 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   size_t router_entry_count = 0;
   if (descriptors.size() > 1 && window_length >= kRouterWindow) {
     const auto router_path = router_output_path(bundle);
-    auto router_data = contiguous_reference
-        ? build_router_data(
-              descriptors, kRouterK, kRouterWindow,
-              router_path.string() + ".codes.tmp",
-              [&](const IndexShardDescriptor& descriptor) {
-                const size_t slice_begin =
-                    descriptor_slice_begin(descriptor);
-                return std::string_view(
-                    contiguous_reference->data() + slice_begin,
-                    descriptor_slice_end(descriptor) - slice_begin);
-              })
-        : build_router_data(
-              descriptors, kRouterK, kRouterWindow,
-              router_path.string() + ".codes.tmp",
-              [&](const IndexShardDescriptor& descriptor) {
-                return load_slice(descriptor_slice_begin(descriptor),
-                                  descriptor_slice_end(descriptor));
-              });
-    if (router_data.entry_count != 0) {
-      router_metadata.k = kRouterK;
-      router_metadata.window = kRouterWindow;
-      router_entry_count = router_data.entry_count;
-      router_checksum = save_router_sidecar(
-          router_path, router_metadata.k,
-          router_metadata.window,
-          static_cast<uint32_t>(descriptors.size()),
-          router_data);
+    bool router_reused = false;
+    try {
+      const auto previous =
+          read_sharded_index_manifest(bundle_path);
+      bool coordinates_match =
+          previous.window_length == window_length &&
+          previous.stride == stride &&
+          previous.part_manifest.signature == part_manifest.signature &&
+          previous.contig_ids == contig_ids &&
+          previous.shards.size() == descriptors.size() &&
+          previous.router_k == kRouterK &&
+          previous.router_window == kRouterWindow &&
+          previous.router_entry_count != 0;
+      for (size_t shard_idx = 0;
+           coordinates_match && shard_idx < descriptors.size();
+           ++shard_idx) {
+        const auto& old_shard = previous.shards[shard_idx];
+        const auto& new_shard = descriptors[shard_idx];
+        coordinates_match =
+            old_shard.contig_id == new_shard.contig_id &&
+            old_shard.source_begin == new_shard.source_begin &&
+            old_shard.window_count == new_shard.window_count;
+      }
+      if (coordinates_match) {
+        (void)load_sharded_seed_router(bundle_path, previous);
+        router_metadata.k = previous.router_k;
+        router_metadata.window = previous.router_window;
+        router_entry_count = previous.router_entry_count;
+        router_checksum = previous.router_checksum;
+        router_reused = true;
+      }
+    } catch (const std::exception&) {
+    }
+    if (!router_reused) {
+      auto router_data = contiguous_reference
+          ? build_router_data(
+                descriptors, kRouterK, kRouterWindow,
+                router_path.string() + ".codes.tmp",
+                [&](const IndexShardDescriptor& descriptor) {
+                  const size_t slice_begin =
+                      descriptor_slice_begin(descriptor);
+                  return std::string_view(
+                      contiguous_reference->data() + slice_begin,
+                      descriptor_slice_end(descriptor) - slice_begin);
+                })
+          : build_router_data(
+                descriptors, kRouterK, kRouterWindow,
+                router_path.string() + ".codes.tmp",
+                [&](const IndexShardDescriptor& descriptor) {
+                  return load_slice(descriptor_slice_begin(descriptor),
+                                    descriptor_slice_end(descriptor));
+                });
+      if (discard_source_cache) discard_source_cache();
+      if (router_data.entry_count != 0) {
+        router_metadata.k = kRouterK;
+        router_metadata.window = kRouterWindow;
+        router_entry_count = router_data.entry_count;
+        router_checksum = save_router_sidecar(
+            router_path, router_metadata.k,
+            router_metadata.window,
+            static_cast<uint32_t>(descriptors.size()),
+            router_data);
+      }
     }
   }
 
@@ -3223,7 +3358,7 @@ ShardedIndexManifest build_sharded_reference_index(
       [&](size_t begin, size_t end) {
         return reference_sequence.substr(begin, end - begin);
       },
-      &reference_sequence, window_length, stride,
+      &reference_sequence, {}, window_length, stride,
       max_shard_windows, hierarchy, range_config, build_jobs,
       build_graph_payloads);
 }
@@ -3245,7 +3380,8 @@ ShardedIndexManifest build_sharded_reference_index(
       [&](size_t begin, size_t end) {
         return reference.slice(begin, end);
       },
-      nullptr, window_length, stride, max_shard_windows,
+      nullptr, [&reference]() { reference.discard_cached_pages(); },
+      window_length, stride, max_shard_windows,
       hierarchy, range_config, build_jobs, build_graph_payloads);
 }
 

@@ -30,6 +30,7 @@ struct PackedReferenceFile {
 
   std::string slice(size_t begin, size_t end) const;
   void slice(size_t begin, size_t end, std::string* output) const;
+  void prefetch(size_t begin, size_t end) const;
 
  private:
   friend PackedReferenceFile load_packed_reference_file(

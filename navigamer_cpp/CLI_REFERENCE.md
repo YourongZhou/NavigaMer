@@ -367,6 +367,10 @@ contiguously to a temporary spool, then memory-maps and k-way merges the lists
 directly into the sidecar. The spool uses exactly four bytes per minimizer and
 has no per-shard page padding; offsets are 64-bit and counts are 32-bit. This
 changes build storage and peak memory, not query-time layout.
+Compatible completed `.route` and `.ref2` sidecars are reused on restart.
+Before the large router spool is mapped, file-backed FASTA pages from the
+generation pass are discarded, preventing the two sequential working sets
+from adding at peak.
 
 Within each shard, reference-window deduplication uses a contiguous 64-bit-slot
 open-addressed table at no more than 7/8 load instead of a node-allocated

@@ -448,6 +448,10 @@ void IndexedReferenceFile::slice(
   }
 }
 
+void IndexedReferenceFile::discard_cached_pages() const {
+  if (mapping) mapping->discard(0, mapping->size());
+}
+
 static bool parse_source_pos(const std::string& header, size_t* source_pos) {
   const std::string key = "source_pos=";
   size_t pos = header.find(key);

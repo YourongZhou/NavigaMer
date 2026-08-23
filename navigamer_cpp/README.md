@@ -379,7 +379,9 @@ four bytes per minimizer, with no per-shard page padding. List starts are
 implicit prefix sums, so build metadata stores only one 32-bit count per shard;
 the merge heap reserves exactly one cursor per non-empty shard, uses a 12-byte
 cursor below 2^32 entries, and advances by absolute entry index. Query-time
-layout is unchanged.
+layout is unchanged. Compatible `.route` and `.ref2` files are reused on
+restart. File-backed builds discard FASTA pages before mapping the router
+spool, so those two large sequential working sets do not overlap at peak.
 
 Reference-window deduplication uses a contiguous exact open-addressed table with
 one 64-bit slot per bucket and a maximum load of 7/8. The stored 32-bit hash is
