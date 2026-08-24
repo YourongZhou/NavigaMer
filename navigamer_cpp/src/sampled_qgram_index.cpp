@@ -1561,12 +1561,12 @@ verify_by_sampled_qgram_positions_batch(
     if (error) std::rethrow_exception(error);
   }
 
-  struct CandidateTask {
-    uint32_t start = 0;
-    uint32_t query_idx = 0;
-  };
   size_t total_candidates = 0;
+  // Preserve the per-query arrays and use a tiny prefix table for global
+  // work partitioning instead of duplicating every start with its query ID.
+  std::vector<size_t> candidate_offsets(plans.size() + 1);
   for (size_t query_idx = 0; query_idx < plans.size(); ++query_idx) {
+    candidate_offsets[query_idx] = total_candidates;
     if (plans[query_idx].candidate_starts.size() >
         std::numeric_limits<size_t>::max() -
             total_candidates) {
@@ -1575,14 +1575,7 @@ verify_by_sampled_qgram_positions_batch(
     }
     total_candidates += plans[query_idx].candidate_starts.size();
   }
-  std::vector<CandidateTask> candidate_tasks;
-  candidate_tasks.reserve(total_candidates);
-  for (size_t query_idx = 0; query_idx < plans.size(); ++query_idx) {
-    for (uint32_t start : plans[query_idx].candidate_starts) {
-      candidate_tasks.push_back(
-          {start, static_cast<uint32_t>(query_idx)});
-    }
-  }
+  candidate_offsets.back() = total_candidates;
   struct DistanceThreadResult {
     std::vector<size_t> distance_counts;
     std::vector<std::vector<ExactBlockVerifiedOccurrence>> occurrences;
@@ -1613,10 +1606,19 @@ verify_by_sampled_qgram_positions_batch(
     std::string combined_reference;
     try {
       size_t task = task_begin;
+      size_t query_idx = task == task_end
+          ? plans.size()
+          : static_cast<size_t>(
+                std::upper_bound(
+                    candidate_offsets.begin(), candidate_offsets.end(),
+                    task) - candidate_offsets.begin() - 1);
       size_t hinted_query_idx = plans.size();
       size_t contig_hint = reference.contigs.size();
       while (task < task_end) {
-        const size_t query_idx = candidate_tasks[task].query_idx;
+        while (query_idx < plans.size() &&
+               task >= candidate_offsets[query_idx + 1]) {
+          ++query_idx;
+        }
         if (query_idx >= plans.size()) {
           throw std::runtime_error(
               "sampled q-gram candidate query mismatch");
@@ -1624,9 +1626,14 @@ verify_by_sampled_qgram_positions_batch(
         std::array<uint32_t, 4> starts{};
         std::array<size_t, 4> contig_indices{};
         size_t lane_count = 0;
-        while (task < task_end && lane_count < starts.size() &&
-               candidate_tasks[task].query_idx == query_idx) {
-          const uint32_t start = candidate_tasks[task++].start;
+        const size_t query_task_end = std::min(
+            task_end, candidate_offsets[query_idx + 1]);
+        while (task < query_task_end && lane_count < starts.size()) {
+          const size_t local_task =
+              task - candidate_offsets[query_idx];
+          ++task;
+          const uint32_t start = plans[query_idx].candidate_starts[
+              local_task];
           // Candidate starts are sorted within each query, so only the first
           // start needs a binary contig lookup.
           if (hinted_query_idx != query_idx) {
