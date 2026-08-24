@@ -31,6 +31,7 @@ struct PackedReferenceFile {
 
   std::string slice(size_t begin, size_t end) const;
   void slice(size_t begin, size_t end, std::string* output) const;
+  bool slice_acgt(size_t begin, size_t end, std::string* output) const;
   bool matches_packed_acgt(
       size_t contig_idx, size_t begin,
       uint64_t packed_expected, size_t length) const;
@@ -178,7 +179,7 @@ struct SampledQgramIndex {
       const std::string&, const ShardedIndexManifest&,
       const PackedReferenceFile&);
   std::shared_ptr<const SampledQgramFileMapping> mapping;
-  const uint64_t* bucket_offsets = nullptr;
+  const uint32_t* bucket_offsets = nullptr;
   const uint64_t* bucket_checksums = nullptr;
   const uint8_t* packed_suffixes = nullptr;
   const uint32_t* positions = nullptr;

@@ -268,6 +268,12 @@ void test_indexed_reference_file_slices() {
   assert(packed_reference.slice(
              first.size(), loaded.sequence.size()) ==
          loaded.sequence.substr(first.size()));
+  std::string packed_slice;
+  assert(packed_reference.slice_acgt(4090, 4122, &packed_slice));
+  assert(packed_slice == first.substr(4090, 32));
+  assert(!packed_reference.slice_acgt(
+      first.size(), first.size() + 8, &packed_slice));
+  assert(packed_slice == loaded.sequence.substr(first.size(), 8));
   const auto packed_acgt = [](std::string_view sequence) {
     uint64_t packed = 0;
     for (size_t idx = 0; idx < sequence.size(); ++idx) {

@@ -1980,6 +1980,11 @@ std::string PackedReferenceFile::slice(
 
 void PackedReferenceFile::slice(
     size_t begin, size_t end, std::string* output) const {
+  (void)slice_acgt(begin, end, output);
+}
+
+bool PackedReferenceFile::slice_acgt(
+    size_t begin, size_t end, std::string* output) const {
   if (!output) {
     throw std::invalid_argument(
         "packed reference slice output must not be null");
@@ -2001,6 +2006,18 @@ void PackedReferenceFile::slice(
   }
   output->resize(end - begin);
   static constexpr std::array<char, 4> bases = {'A', 'C', 'G', 'T'};
+  static const auto unpacked_bases = [] {
+    std::array<std::array<char, 4>, 256> table{};
+    for (size_t packed_byte = 0; packed_byte < table.size();
+         ++packed_byte) {
+      for (size_t base = 0; base < 4; ++base) {
+        table[packed_byte][base] =
+            bases[(packed_byte >> (2 * base)) & 3];
+      }
+    }
+    return table;
+  }();
+  bool all_acgt = true;
   size_t output_pos = 0;
   size_t cursor_pos = begin;
   while (cursor_pos < end) {
@@ -2048,18 +2065,46 @@ void PackedReferenceFile::slice(
       mapping->finish_block_validation(block_idx);
     }
     const size_t copy_end = std::min(end, block_end);
-    for (size_t position = cursor_pos;
-         position < copy_end; ++position) {
-      const size_t local = position - block_begin;
-      (*output)[output_pos++] =
-          mask && (mask[local >> 3] &
-                   static_cast<uint8_t>(uint8_t{1} << (local & 7)))
-              ? 'N'
-              : bases[(packed[local >> 2] >>
-                       (2 * (local & 3))) & 3];
+    if (!mask) {
+      size_t local = cursor_pos - block_begin;
+      while (local < block_size && (local & 3) != 0 &&
+             cursor_pos < copy_end) {
+        (*output)[output_pos++] = bases[
+            (packed[local >> 2] >> (2 * (local & 3))) & 3];
+        ++local;
+        ++cursor_pos;
+      }
+      while (copy_end - cursor_pos >= 4) {
+        std::memcpy(
+            output->data() + output_pos,
+            unpacked_bases[packed[local >> 2]].data(), 4);
+        output_pos += 4;
+        local += 4;
+        cursor_pos += 4;
+      }
+      while (cursor_pos < copy_end) {
+        (*output)[output_pos++] = bases[
+            (packed[local >> 2] >> (2 * (local & 3))) & 3];
+        ++local;
+        ++cursor_pos;
+      }
+    } else {
+      for (size_t position = cursor_pos;
+           position < copy_end; ++position) {
+        const size_t local = position - block_begin;
+        const bool is_ambiguous =
+            (mask[local >> 3] & static_cast<uint8_t>(
+                 uint8_t{1} << (local & 7))) != 0;
+        all_acgt = all_acgt && !is_ambiguous;
+        (*output)[output_pos++] = is_ambiguous
+            ? 'N'
+            : bases[(packed[local >> 2] >>
+                     (2 * (local & 3))) & 3];
+      }
+      cursor_pos = copy_end;
     }
-    cursor_pos = copy_end;
   }
+  return all_acgt;
 }
 
 bool PackedReferenceFile::matches_packed_acgt(

@@ -91,8 +91,8 @@ class SampledQgramFileMapping {
 namespace {
 
 constexpr std::array<char, 8> kSampledQgramMagic = {
-    'N', 'G', 'Q', 'P', 'O', 'S', '0', '5'};
-constexpr uint32_t kSampledQgramFormatVersion = 5;
+    'N', 'G', 'Q', 'P', 'O', 'S', '0', '6'};
+constexpr uint32_t kSampledQgramFormatVersion = 6;
 constexpr uint32_t kSampledQgramK = 13;
 constexpr uint32_t kSampledQgramPrefixK = 10;
 constexpr uint32_t kSampledQgramPeriod = 12;
@@ -205,10 +205,13 @@ SampledQgramLayout sampled_qgram_layout(
       checked_add(
           layout.contigs_begin,
           checked_multiply(contig_count, size_t{3} * sizeof(uint32_t))),
+      alignof(uint32_t));
+  layout.checksums_begin = align_offset(
+      checked_add(
+          layout.offsets_begin,
+          checked_multiply(
+              prefix_bucket_count + 1, sizeof(uint32_t))),
       alignof(uint64_t));
-  layout.checksums_begin = checked_add(
-      layout.offsets_begin,
-      checked_multiply(prefix_bucket_count + 1, sizeof(uint64_t)));
   layout.suffixes_begin = align_offset(
       checked_add(
           layout.checksums_begin,
@@ -281,7 +284,7 @@ uint64_t metadata_checksum(
     size_t position_count,
     uint64_t reference_checksum,
     const SampledQgramLayout& layout,
-    const uint64_t* offsets,
+    const uint32_t* offsets,
     const uint64_t* checksums) {
   uint64_t checksum = kFnvOffset;
   hash_pod<uint32_t>(&checksum, kSampledQgramFormatVersion);
@@ -308,7 +311,7 @@ uint64_t metadata_checksum(
   }
   hash_bytes(
       &checksum, offsets,
-      (prefix_bucket_count + 1) * sizeof(uint64_t));
+      (prefix_bucket_count + 1) * sizeof(uint32_t));
   hash_bytes(
       &checksum, checksums,
       prefix_bucket_count * sizeof(uint64_t));
@@ -501,7 +504,7 @@ void build_sampled_qgram_index(
           "unable to map sampled q-gram sidecar for construction");
     }
     auto* bytes = static_cast<uint8_t*>(address);
-    auto* offsets = reinterpret_cast<uint64_t*>(
+    auto* offsets = reinterpret_cast<uint32_t*>(
         bytes + layout.offsets_begin);
     auto* checksums = reinterpret_cast<uint64_t*>(
         bytes + layout.checksums_begin);
@@ -1022,7 +1025,11 @@ SampledQgramIndex load_sampled_qgram_index(
     }
     stored_contigs.push_back(std::move(contig));
   }
-  const auto* offsets = reinterpret_cast<const uint64_t*>(
+  if (position_count > std::numeric_limits<uint32_t>::max()) {
+    throw std::runtime_error(
+        "sampled q-gram position count exceeds offset width");
+  }
+  const auto* offsets = reinterpret_cast<const uint32_t*>(
       mapping->data() + layout.offsets_begin);
   const auto* checksums = reinterpret_cast<const uint64_t*>(
       mapping->data() + layout.checksums_begin);
@@ -1132,18 +1139,31 @@ verify_by_sampled_qgram_positions_batch(
       std::vector<std::pair<const uint32_t*, const uint32_t*>>
           query_postings(qgram_start_count);
       std::vector<uint64_t> posting_counts(qgram_start_count);
+      uint32_t rolling_qgram = 0;
+      if (!encode_qgram(
+              std::string_view(plan.query).substr(
+                  0, occurrence_index.k),
+              &rolling_qgram)) {
+        throw std::runtime_error(
+            "invalid exact block in sampled q-gram verifier");
+      }
+      const uint32_t qgram_mask =
+          (uint32_t{1} << (2 * occurrence_index.k)) - 1;
       for (size_t qgram_start = 0;
            qgram_start < qgram_start_count; ++qgram_start) {
-        uint32_t code = 0;
-        if (!encode_qgram(
-                std::string_view(plan.query).substr(
-                    qgram_start, occurrence_index.k),
-                &code)) {
-          throw std::runtime_error(
-              "invalid exact block in sampled q-gram verifier");
+        if (qgram_start != 0) {
+          const int encoded = dna_code(
+              plan.query[qgram_start + occurrence_index.k - 1]);
+          if (encoded < 0) {
+            throw std::runtime_error(
+                "invalid exact block in sampled q-gram verifier");
+          }
+          rolling_qgram =
+              ((rolling_qgram << 2) & qgram_mask) |
+              static_cast<uint32_t>(encoded);
         }
         query_postings[qgram_start] =
-            occurrence_index.posting_list(code);
+            occurrence_index.posting_list(rolling_qgram);
         posting_counts[qgram_start] = static_cast<uint64_t>(
             query_postings[qgram_start].second -
             query_postings[qgram_start].first);
@@ -1350,7 +1370,7 @@ verify_by_sampled_qgram_positions_batch(
             }
           }
         };
-        constexpr size_t kParallelVerifyGrain = size_t{8} << 10;
+        constexpr size_t kParallelVerifyGrain = size_t{2} << 10;
         if (omp_in_parallel() &&
             block_occurrences.size() > 2 * kParallelVerifyGrain) {
           const size_t chunk_count =
@@ -1455,6 +1475,7 @@ verify_by_sampled_qgram_positions_batch(
         total_candidates * (static_cast<size_t>(thread_id) + 1) /
         active_thread_count;
     std::array<std::string, 4> reference_windows;
+    std::array<bool, 4> reference_windows_acgt{};
     std::string combined_reference;
     try {
       size_t task = task_begin;
@@ -1512,8 +1533,9 @@ verify_by_sampled_qgram_positions_batch(
             manifest.window_length;
         coalesced = coalesced &&
             combined_size <= lane_count * manifest.window_length;
+        bool combined_reference_acgt = false;
         if (coalesced) {
-          reference.slice(
+          combined_reference_acgt = reference.slice_acgt(
               starts[0], static_cast<size_t>(starts[0]) + combined_size,
               &combined_reference);
           for (size_t lane = 0; lane < lane_count; ++lane) {
@@ -1523,7 +1545,7 @@ verify_by_sampled_qgram_positions_batch(
           }
         } else {
           for (size_t lane = 0; lane < lane_count; ++lane) {
-            reference.slice(
+            reference_windows_acgt[lane] = reference.slice_acgt(
                 starts[lane],
                 static_cast<size_t>(starts[lane]) +
                     manifest.window_length,
@@ -1533,7 +1555,9 @@ verify_by_sampled_qgram_positions_batch(
         }
         size_t valid_lane_count = 0;
         for (size_t lane = 0; lane < lane_count; ++lane) {
-          if (!std::all_of(
+          if (!(coalesced ? combined_reference_acgt
+                          : reference_windows_acgt[lane]) &&
+              !std::all_of(
                   texts[lane].begin(), texts[lane].end(),
                   [](char base) {
                     return base == 'A' || base == 'C' ||
