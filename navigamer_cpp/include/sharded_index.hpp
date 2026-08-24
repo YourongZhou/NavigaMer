@@ -47,12 +47,15 @@ struct PackedReferenceFile {
  private:
   friend PackedReferenceFile load_packed_reference_file(
       const std::string&, const ShardedIndexManifest&);
+  void validate_checksum_range(size_t begin, size_t end) const;
   std::shared_ptr<const PackedReferenceFileMapping> mapping;
   const uint64_t* ambiguity_blocks = nullptr;
   const uint64_t* block_checksums = nullptr;
   const uint32_t* ambiguity_run_offsets = nullptr;
   const PackedReferenceAmbiguityRun* ambiguity_runs = nullptr;
   size_t ambiguity_run_count = 0;
+  size_t checksum_block_bases = 0;
+  size_t checksum_block_count = 0;
   std::vector<uint32_t> ambiguity_rank;
 };
 

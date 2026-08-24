@@ -1144,6 +1144,50 @@ void test_seed_router_no_false_negatives() {
     restored.put(original_checksum_byte);
   }
 
+  uint32_t checksum_block_bases = 0;
+  char original_second_block_byte = 0;
+  {
+    std::fstream damaged(
+        short_router_only_bundle.string() + ".ref2",
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(damaged.good());
+    damaged.seekg(8 + sizeof(uint32_t));
+    damaged.read(
+        reinterpret_cast<char*>(&checksum_block_bases),
+        sizeof(checksum_block_bases));
+    assert(checksum_block_bases > 0);
+    assert(checksum_block_bases < short_packed_reference.sequence_size);
+    const auto second_block_offset = static_cast<std::streamoff>(
+        short_packed_reference.payload_offset +
+        checksum_block_bases / 4);
+    damaged.seekg(second_block_offset);
+    damaged.get(original_second_block_byte);
+    damaged.seekp(second_block_offset);
+    damaged.put(static_cast<char>(original_second_block_byte ^ 1));
+  }
+  const auto second_block_damaged_reference =
+      navigamer::load_packed_reference_file(
+          short_router_only_bundle.string(),
+          short_router_only_manifest);
+  bool second_block_damage_rejected = false;
+  try {
+    (void)second_block_damaged_reference.slice(
+        checksum_block_bases, checksum_block_bases + 1);
+  } catch (const std::runtime_error&) {
+    second_block_damage_rejected = true;
+  }
+  assert(second_block_damage_rejected);
+  {
+    std::fstream restored(
+        short_router_only_bundle.string() + ".ref2",
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(restored.good());
+    restored.seekp(static_cast<std::streamoff>(
+        short_packed_reference.payload_offset +
+        checksum_block_bases / 4));
+    restored.put(original_second_block_byte);
+  }
+
   const std::string exact = reference.substr(98, window);
   std::string ambiguous = exact;
   ambiguous[10] = 'N';
