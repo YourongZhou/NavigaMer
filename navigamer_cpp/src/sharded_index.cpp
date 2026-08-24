@@ -124,11 +124,11 @@ constexpr std::array<char, 8> kShardPackMagic = {
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '4'};
 constexpr std::array<char, 8> kPackedReferenceMagic = {
-    'N', 'G', 'R', 'E', 'F', '2', '0', '2'};
+    'N', 'G', 'R', 'E', 'F', '2', '0', '3'};
 constexpr uint32_t kShardFormatVersion = 20;
 constexpr uint32_t kShardPackFormatVersion = 13;
 constexpr uint32_t kRouterFormatVersion = 5;
-constexpr uint32_t kPackedReferenceFormatVersion = 2;
+constexpr uint32_t kPackedReferenceFormatVersion = 3;
 constexpr uint32_t kPackedReferenceBlockBases = 4096;
 constexpr size_t kPackedReferenceHeaderBytes = 88;
 constexpr size_t kRouterHeaderBytes = 80;
@@ -274,7 +274,9 @@ struct PackedReferenceLayout {
   size_t contigs_begin = kPackedReferenceHeaderBytes;
   size_t ambiguity_bitmap_begin = 0;
   size_t block_checksums_begin = 0;
+  size_t ambiguity_run_offsets_begin = 0;
   size_t payload_begin = 0;
+  size_t ambiguity_runs_begin = 0;
   size_t total_size = 0;
   size_t block_count = 0;
   size_t bitmap_word_count = 0;
@@ -284,7 +286,7 @@ PackedReferenceLayout packed_reference_layout(
     size_t sequence_size,
     size_t contig_count,
     size_t ambiguous_block_count,
-    bool final_block_ambiguous) {
+    size_t ambiguity_run_count) {
   PackedReferenceLayout layout;
   layout.block_count =
       (sequence_size + kPackedReferenceBlockBases - 1) /
@@ -299,26 +301,28 @@ PackedReferenceLayout packed_reference_layout(
       layout.ambiguity_bitmap_begin,
       checked_reference_multiply(
           layout.bitmap_word_count, sizeof(uint64_t)));
-  layout.payload_begin = align_reference_offset(
+  layout.ambiguity_run_offsets_begin = align_reference_offset(
       checked_reference_add(
           layout.block_checksums_begin,
           checked_reference_multiply(
               layout.block_count, sizeof(uint64_t))),
+      alignof(uint32_t));
+  layout.payload_begin = align_reference_offset(
+      checked_reference_add(
+          layout.ambiguity_run_offsets_begin,
+          checked_reference_multiply(
+              checked_reference_add(ambiguous_block_count, 1),
+              sizeof(uint32_t))),
       64);
   const size_t base_bytes = (sequence_size + 3) / 4;
-  size_t ambiguity_bytes = checked_reference_multiply(
-      ambiguous_block_count,
-      kPackedReferenceBlockBases / size_t{8});
-  if (final_block_ambiguous &&
-      sequence_size % kPackedReferenceBlockBases != 0) {
-    ambiguity_bytes -= kPackedReferenceBlockBases / size_t{8};
-    ambiguity_bytes = checked_reference_add(
-        ambiguity_bytes,
-        (sequence_size % kPackedReferenceBlockBases + 7) / 8);
-  }
+  layout.ambiguity_runs_begin = align_reference_offset(
+      checked_reference_add(layout.payload_begin, base_bytes),
+      alignof(PackedReferenceAmbiguityRun));
   layout.total_size = checked_reference_add(
-      layout.payload_begin,
-      checked_reference_add(base_bytes, ambiguity_bytes));
+      layout.ambiguity_runs_begin,
+      checked_reference_multiply(
+          ambiguity_run_count,
+          sizeof(PackedReferenceAmbiguityRun)));
   return layout;
 }
 
@@ -1349,12 +1353,14 @@ uint64_t packed_reference_metadata_checksum(
     size_t contig_count,
     size_t block_count,
     size_t ambiguous_block_count,
+    size_t ambiguity_run_count,
     uint64_t fingerprint_checksum,
     size_t payload_offset,
     size_t total_size,
     const std::vector<ReferenceContig>& contigs,
     const uint64_t* ambiguity_bitmap,
-    size_t bitmap_word_count) {
+    size_t bitmap_word_count,
+    const uint32_t* ambiguity_run_offsets) {
   uint64_t checksum = kFnvOffset;
   hash_pod<uint32_t>(&checksum, kPackedReferenceFormatVersion);
   hash_pod<uint32_t>(&checksum, kPackedReferenceBlockBases);
@@ -1362,6 +1368,7 @@ uint64_t packed_reference_metadata_checksum(
   hash_pod<uint64_t>(&checksum, contig_count);
   hash_pod<uint64_t>(&checksum, block_count);
   hash_pod<uint64_t>(&checksum, ambiguous_block_count);
+  hash_pod<uint64_t>(&checksum, ambiguity_run_count);
   hash_pod<uint64_t>(&checksum, fingerprint_checksum);
   hash_pod<uint64_t>(&checksum, payload_offset);
   hash_pod<uint64_t>(&checksum, total_size);
@@ -1373,7 +1380,38 @@ uint64_t packed_reference_metadata_checksum(
   hash_bytes(
       &checksum, ambiguity_bitmap,
       bitmap_word_count * sizeof(uint64_t));
+  hash_bytes(
+      &checksum, ambiguity_run_offsets,
+      checked_reference_multiply(
+          checked_reference_add(ambiguous_block_count, 1),
+          sizeof(uint32_t)));
   return checksum;
+}
+
+void collect_packed_reference_ambiguity_runs(
+    std::string_view sequence,
+    std::vector<PackedReferenceAmbiguityRun>* runs) {
+  runs->clear();
+  size_t pos = 0;
+  while (pos < sequence.size()) {
+    if (dna_code(sequence[pos]) >= 0) {
+      ++pos;
+      continue;
+    }
+    const size_t begin = pos;
+    do {
+      ++pos;
+    } while (pos < sequence.size() && dna_code(sequence[pos]) < 0);
+    const size_t length = pos - begin;
+    if (begin > std::numeric_limits<uint16_t>::max() ||
+        length > std::numeric_limits<uint16_t>::max()) {
+      throw std::runtime_error(
+          "packed reference ambiguity run exceeds 16-bit block storage");
+    }
+    runs->push_back({
+        static_cast<uint16_t>(begin),
+        static_cast<uint16_t>(length)});
+  }
 }
 
 void build_packed_reference_sidecar(
@@ -1385,16 +1423,118 @@ void build_packed_reference_sidecar(
     const std::string* contiguous_reference) {
   const auto output_path = packed_reference_output_path(bundle);
   const auto temporary_path = output_path.string() + ".tmp";
-  const PackedReferenceLayout initial_layout = packed_reference_layout(
-      reference_size, reference_contigs.size(), 0, false);
+  const auto ambiguity_temporary_path =
+      output_path.string() + ".ambiguity.tmp";
+  const PackedReferenceLayout shape = packed_reference_layout(
+      reference_size, reference_contigs.size(), 0, 0);
   std::vector<uint64_t> ambiguity_bitmap(
-      initial_layout.bitmap_word_count, uint64_t{0});
+      shape.bitmap_word_count, uint64_t{0});
   std::vector<uint64_t> block_checksums(
-      initial_layout.block_count, uint64_t{0});
+      shape.block_count, uint64_t{0});
+  std::vector<uint32_t> ambiguity_run_offsets = {0};
   std::error_code ignored;
   std::filesystem::remove(temporary_path, ignored);
+  std::filesystem::remove(ambiguity_temporary_path, ignored);
+
+  size_t contig_idx = 0;
+  constexpr size_t kLoadCacheBases = size_t{4} << 20;
+  size_t cache_begin = 0;
+  size_t cache_end = 0;
+  std::string cache_sequence;
+  const auto load_block = [&](
+      size_t block_idx, std::string* sequence) {
+    const size_t block_begin =
+        block_idx * kPackedReferenceBlockBases;
+    const size_t block_end = std::min(
+        reference_size,
+        block_begin + kPackedReferenceBlockBases);
+    const size_t block_size = block_end - block_begin;
+    sequence->clear();
+    sequence->reserve(block_size);
+    if (contiguous_reference) {
+      sequence->assign(
+          contiguous_reference->data() + block_begin, block_size);
+    } else {
+      size_t cursor = block_begin;
+      while (cursor < block_end) {
+        while (contig_idx < reference_contigs.size() &&
+               cursor >= reference_contigs[contig_idx].end) {
+          ++contig_idx;
+        }
+        if (contig_idx >= reference_contigs.size() ||
+            cursor < reference_contigs[contig_idx].begin) {
+          throw std::runtime_error(
+              "packed reference contig coverage is inconsistent");
+        }
+        if (cursor < cache_begin || cursor >= cache_end) {
+          cache_begin = cursor;
+          cache_end = std::min<size_t>(
+              reference_contigs[contig_idx].end,
+              cursor + kLoadCacheBases);
+          cache_sequence = load_slice(cache_begin, cache_end);
+          if (cache_sequence.size() != cache_end - cache_begin) {
+            throw std::runtime_error(
+                "packed reference slice has the wrong length");
+          }
+        }
+        const size_t piece_end = std::min(block_end, cache_end);
+        sequence->append(
+            cache_sequence.data() + (cursor - cache_begin),
+            piece_end - cursor);
+        cursor = piece_end;
+      }
+    }
+    if (sequence->size() != block_size) {
+      throw std::runtime_error(
+          "packed reference block has the wrong length");
+    }
+  };
 
   try {
+    std::ofstream ambiguity_out(
+        ambiguity_temporary_path,
+        std::ios::binary | std::ios::trunc);
+    if (!ambiguity_out) {
+      throw std::runtime_error(
+          "unable to create packed reference ambiguity spool");
+    }
+    std::string sequence;
+    std::vector<PackedReferenceAmbiguityRun> ambiguity_runs;
+    size_t ambiguity_run_count = 0;
+    for (size_t block_idx = 0;
+         block_idx < shape.block_count; ++block_idx) {
+      load_block(block_idx, &sequence);
+      collect_packed_reference_ambiguity_runs(
+          sequence, &ambiguity_runs);
+      if (ambiguity_runs.empty()) continue;
+      if (ambiguity_runs.size() >
+          std::numeric_limits<uint32_t>::max() -
+              ambiguity_run_count) {
+        throw std::runtime_error(
+            "packed reference ambiguity runs exceed 32-bit storage");
+      }
+      ambiguity_bitmap[block_idx >> 6] |=
+          uint64_t{1} << (block_idx & 63);
+      ambiguity_run_count += ambiguity_runs.size();
+      ambiguity_run_offsets.push_back(
+          static_cast<uint32_t>(ambiguity_run_count));
+      ambiguity_out.write(
+          reinterpret_cast<const char*>(ambiguity_runs.data()),
+          static_cast<std::streamsize>(
+              ambiguity_runs.size() *
+              sizeof(PackedReferenceAmbiguityRun)));
+    }
+    ambiguity_out.close();
+    if (!ambiguity_out) {
+      throw std::runtime_error(
+          "unable to write packed reference ambiguity spool");
+    }
+
+    const size_t ambiguous_block_count =
+        ambiguity_run_offsets.size() - 1;
+    const PackedReferenceLayout layout = packed_reference_layout(
+        reference_size, reference_contigs.size(),
+        ambiguous_block_count, ambiguity_run_count);
     std::ofstream out(
         temporary_path, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -1402,7 +1542,7 @@ void build_packed_reference_sidecar(
           "unable to create packed reference sidecar");
     }
     std::array<char, 65536> zeros{};
-    size_t zero_bytes = initial_layout.payload_begin;
+    size_t zero_bytes = layout.payload_begin;
     while (zero_bytes != 0) {
       const size_t count = std::min(zero_bytes, zeros.size());
       out.write(zeros.data(), static_cast<std::streamsize>(count));
@@ -1413,117 +1553,112 @@ void build_packed_reference_sidecar(
           "unable to reserve packed reference metadata");
     }
 
-    size_t contig_idx = 0;
-    size_t ambiguous_block_count = 0;
-    bool final_block_ambiguous = false;
-    std::string sequence;
+    contig_idx = 0;
+    cache_begin = 0;
+    cache_end = 0;
+    cache_sequence.clear();
+    size_t ambiguous_idx = 0;
     std::vector<uint8_t> packed_bases;
-    std::vector<uint8_t> ambiguity_mask;
     for (size_t block_idx = 0;
-         block_idx < initial_layout.block_count; ++block_idx) {
-      const size_t block_begin =
-          block_idx * kPackedReferenceBlockBases;
-      const size_t block_end = std::min(
-          reference_size,
-          block_begin + kPackedReferenceBlockBases);
-      const size_t block_size = block_end - block_begin;
-      sequence.clear();
-      sequence.reserve(block_size);
-      if (contiguous_reference) {
-        sequence.assign(
-            contiguous_reference->data() + block_begin, block_size);
-      } else {
-        size_t cursor = block_begin;
-        while (cursor < block_end) {
-          while (contig_idx < reference_contigs.size() &&
-                 cursor >= reference_contigs[contig_idx].end) {
-            ++contig_idx;
-          }
-          if (contig_idx >= reference_contigs.size() ||
-              cursor < reference_contigs[contig_idx].begin) {
-            throw std::runtime_error(
-                "packed reference contig coverage is inconsistent");
-          }
-          const size_t piece_end = std::min<size_t>(
-              block_end, reference_contigs[contig_idx].end);
-          std::string piece = load_slice(cursor, piece_end);
-          if (piece.size() != piece_end - cursor) {
-            throw std::runtime_error(
-                "packed reference slice has the wrong length");
-          }
-          sequence.append(piece);
-          cursor = piece_end;
-        }
-      }
-      if (sequence.size() != block_size) {
-        throw std::runtime_error(
-            "packed reference block has the wrong length");
-      }
-
+         block_idx < layout.block_count; ++block_idx) {
+      load_block(block_idx, &sequence);
+      collect_packed_reference_ambiguity_runs(
+          sequence, &ambiguity_runs);
+      const size_t block_size = sequence.size();
       packed_bases.assign((block_size + 3) / 4, uint8_t{0});
-      ambiguity_mask.assign((block_size + 7) / 8, uint8_t{0});
-      bool ambiguous = false;
       for (size_t pos = 0; pos < block_size; ++pos) {
         const int code = dna_code(sequence[pos]);
-        if (code < 0) {
-          ambiguous = true;
-          ambiguity_mask[pos >> 3] |= static_cast<uint8_t>(
-              uint8_t{1} << (pos & 7));
-        } else {
+        if (code >= 0) {
           packed_bases[pos >> 2] |= static_cast<uint8_t>(
               static_cast<uint8_t>(code) << (2 * (pos & 3)));
         }
       }
-      if (ambiguous) {
-        ambiguity_bitmap[block_idx >> 6] |=
-            uint64_t{1} << (block_idx & 63);
-        ++ambiguous_block_count;
+
+      if (!ambiguity_runs.empty()) {
+        if (ambiguous_idx >= ambiguous_block_count ||
+            ambiguity_run_offsets[ambiguous_idx + 1] -
+                    ambiguity_run_offsets[ambiguous_idx] !=
+                ambiguity_runs.size()) {
+          throw std::runtime_error(
+              "packed reference ambiguity pass mismatch");
+        }
+        ++ambiguous_idx;
       }
-      final_block_ambiguous =
-          block_idx + 1 == initial_layout.block_count && ambiguous;
       uint64_t block_checksum = kFnvOffset;
       hash_pod<uint64_t>(&block_checksum, block_idx);
       hash_pod<uint64_t>(&block_checksum, block_size);
-      hash_pod<uint8_t>(&block_checksum, ambiguous ? 1 : 0);
+      hash_pod<uint32_t>(
+          &block_checksum,
+          static_cast<uint32_t>(ambiguity_runs.size()));
       hash_bytes(
           &block_checksum, packed_bases.data(), packed_bases.size());
-      if (ambiguous) {
-        hash_bytes(
-            &block_checksum, ambiguity_mask.data(),
-            ambiguity_mask.size());
-      }
+      hash_bytes(
+          &block_checksum, ambiguity_runs.data(),
+          ambiguity_runs.size() *
+              sizeof(PackedReferenceAmbiguityRun));
       block_checksums[block_idx] = block_checksum;
       out.write(
           reinterpret_cast<const char*>(packed_bases.data()),
           static_cast<std::streamsize>(packed_bases.size()));
-      if (ambiguous) {
-        out.write(
-            reinterpret_cast<const char*>(ambiguity_mask.data()),
-            static_cast<std::streamsize>(ambiguity_mask.size()));
-      }
       if (!out) {
         throw std::runtime_error(
-            "unable to write packed reference payload");
+            "unable to write packed reference base payload");
       }
     }
+    if (ambiguous_idx != ambiguous_block_count) {
+      throw std::runtime_error(
+          "packed reference base layout accounting mismatch");
+    }
+    while (static_cast<uint64_t>(out.tellp()) <
+           layout.ambiguity_runs_begin) {
+      out.put(0);
+    }
+    if (!out || static_cast<uint64_t>(out.tellp()) !=
+                    layout.ambiguity_runs_begin) {
+      throw std::runtime_error(
+          "packed reference base layout accounting mismatch");
+    }
 
-    const PackedReferenceLayout layout = packed_reference_layout(
-        reference_size, reference_contigs.size(),
-        ambiguous_block_count, final_block_ambiguous);
-    if (layout.payload_begin != initial_layout.payload_begin ||
+    std::ifstream ambiguity_in(
+        ambiguity_temporary_path, std::ios::binary);
+    if (!ambiguity_in) {
+      throw std::runtime_error(
+          "unable to reopen packed reference ambiguity spool");
+    }
+    std::array<char, 65536> buffer{};
+    size_t ambiguity_bytes = 0;
+    while (ambiguity_in) {
+      ambiguity_in.read(
+          buffer.data(),
+          static_cast<std::streamsize>(buffer.size()));
+      const size_t count =
+          static_cast<size_t>(ambiguity_in.gcount());
+      if (count != 0) {
+        out.write(buffer.data(), static_cast<std::streamsize>(count));
+        ambiguity_bytes += count;
+      }
+    }
+    if (!ambiguity_in.eof() ||
+        ambiguity_bytes !=
+            ambiguity_run_count *
+                sizeof(PackedReferenceAmbiguityRun) ||
         static_cast<uint64_t>(out.tellp()) != layout.total_size) {
       throw std::runtime_error(
-          "packed reference layout accounting mismatch");
+          "packed reference ambiguity payload accounting mismatch");
     }
+    ambiguity_in.close();
+
     const uint64_t fingerprint_checksum =
         reference_fingerprint_checksum(manifest.ref_fingerprint);
     const uint64_t metadata_checksum =
         packed_reference_metadata_checksum(
             reference_size, reference_contigs.size(),
             layout.block_count, ambiguous_block_count,
-            fingerprint_checksum, layout.payload_begin,
-            layout.total_size, reference_contigs,
-            ambiguity_bitmap.data(), layout.bitmap_word_count);
+            ambiguity_run_count, fingerprint_checksum,
+            layout.payload_begin, layout.total_size,
+            reference_contigs, ambiguity_bitmap.data(),
+            layout.bitmap_word_count,
+            ambiguity_run_offsets.data());
 
     out.seekp(0);
     out.write(
@@ -1539,7 +1674,7 @@ void build_packed_reference_sidecar(
     write_pod<uint64_t>(out, metadata_checksum);
     write_pod<uint64_t>(out, layout.payload_begin);
     write_pod<uint64_t>(out, layout.total_size);
-    write_pod<uint64_t>(out, 0);
+    write_pod<uint64_t>(out, ambiguity_run_count);
     for (const auto& contig : reference_contigs) {
       write_pod<uint32_t>(out, contig.begin);
       write_pod<uint32_t>(out, contig.end);
@@ -1551,10 +1686,19 @@ void build_packed_reference_sidecar(
         reinterpret_cast<const char*>(ambiguity_bitmap.data()),
         static_cast<std::streamsize>(
             ambiguity_bitmap.size() * sizeof(uint64_t)));
+    out.seekp(static_cast<std::streamoff>(
+        layout.block_checksums_begin));
     out.write(
         reinterpret_cast<const char*>(block_checksums.data()),
         static_cast<std::streamsize>(
             block_checksums.size() * sizeof(uint64_t)));
+    out.seekp(static_cast<std::streamoff>(
+        layout.ambiguity_run_offsets_begin));
+    out.write(
+        reinterpret_cast<const char*>(
+            ambiguity_run_offsets.data()),
+        static_cast<std::streamsize>(
+            ambiguity_run_offsets.size() * sizeof(uint32_t)));
     out.close();
     if (!out) {
       throw std::runtime_error(
@@ -1567,8 +1711,12 @@ void build_packed_reference_sidecar(
           "unable to install packed reference sidecar: " +
           error.message());
     }
+    std::filesystem::remove(
+        ambiguity_temporary_path, ignored);
   } catch (...) {
     std::filesystem::remove(temporary_path, ignored);
+    std::filesystem::remove(
+        ambiguity_temporary_path, ignored);
     throw;
   }
 }
@@ -1809,7 +1957,7 @@ PackedReferenceFile load_packed_reference_file(
   uint64_t metadata_checksum = 0;
   uint64_t payload_offset = 0;
   uint64_t stored_file_size = 0;
-  uint64_t reserved = 0;
+  uint64_t ambiguity_run_count = 0;
   read_field(&magic);
   read_field(&version);
   read_field(&block_bases);
@@ -1821,7 +1969,7 @@ PackedReferenceFile load_packed_reference_file(
   read_field(&metadata_checksum);
   read_field(&payload_offset);
   read_field(&stored_file_size);
-  read_field(&reserved);
+  read_field(&ambiguity_run_count);
   if (magic != kPackedReferenceMagic ||
       version != kPackedReferenceFormatVersion ||
       block_bases != kPackedReferenceBlockBases ||
@@ -1831,10 +1979,13 @@ PackedReferenceFile load_packed_reference_file(
       contig_count > std::numeric_limits<size_t>::max() ||
       block_count > std::numeric_limits<size_t>::max() ||
       ambiguous_block_count > block_count ||
+      ambiguous_block_count > std::numeric_limits<uint32_t>::max() ||
+      ambiguity_run_count > std::numeric_limits<uint32_t>::max() ||
+      ambiguity_run_count < ambiguous_block_count ||
       fingerprint_checksum != reference_fingerprint_checksum(
           manifest.part_manifest.ref_fingerprint) ||
       payload_offset > std::numeric_limits<size_t>::max() ||
-      stored_file_size != mapping->size() || reserved != 0) {
+      stored_file_size != mapping->size()) {
     throw std::runtime_error("packed reference metadata mismatch");
   }
   const size_t stored_sequence_size =
@@ -1843,10 +1994,13 @@ PackedReferenceFile load_packed_reference_file(
       static_cast<size_t>(contig_count);
   const size_t stored_block_count =
       static_cast<size_t>(block_count);
+  const size_t stored_ambiguity_run_count =
+      static_cast<size_t>(ambiguity_run_count);
   const PackedReferenceLayout preliminary_layout =
       packed_reference_layout(
           stored_sequence_size, stored_contig_count,
-          static_cast<size_t>(ambiguous_block_count), false);
+          static_cast<size_t>(ambiguous_block_count),
+          stored_ambiguity_run_count);
   if (stored_block_count != preliminary_layout.block_count ||
       payload_offset != preliminary_layout.payload_begin ||
       preliminary_layout.payload_begin > mapping->size()) {
@@ -1909,6 +2063,14 @@ PackedReferenceFile load_packed_reference_file(
       mapping->data() + preliminary_layout.ambiguity_bitmap_begin);
   reference.block_checksums = reinterpret_cast<const uint64_t*>(
       mapping->data() + preliminary_layout.block_checksums_begin);
+  reference.ambiguity_run_offsets =
+      reinterpret_cast<const uint32_t*>(
+          mapping->data() +
+          preliminary_layout.ambiguity_run_offsets_begin);
+  reference.ambiguity_runs =
+      reinterpret_cast<const PackedReferenceAmbiguityRun*>(
+          mapping->data() + preliminary_layout.ambiguity_runs_begin);
+  reference.ambiguity_run_count = stored_ambiguity_run_count;
   reference.ambiguity_rank.resize(
       preliminary_layout.bitmap_word_count + 1, 0);
   size_t counted_ambiguous_blocks = 0;
@@ -1925,6 +2087,19 @@ PackedReferenceFile load_packed_reference_file(
     throw std::runtime_error(
         "packed reference ambiguity count mismatch");
   }
+  if (reference.ambiguity_run_offsets[0] != 0 ||
+      reference.ambiguity_run_offsets[counted_ambiguous_blocks] !=
+          stored_ambiguity_run_count) {
+    throw std::runtime_error(
+        "packed reference ambiguity offsets mismatch");
+  }
+  for (size_t idx = 0; idx < counted_ambiguous_blocks; ++idx) {
+    if (reference.ambiguity_run_offsets[idx] >=
+        reference.ambiguity_run_offsets[idx + 1]) {
+      throw std::runtime_error(
+          "packed reference ambiguity offsets are not increasing");
+    }
+  }
   if (stored_block_count % 64 != 0 &&
       preliminary_layout.bitmap_word_count != 0) {
     const uint64_t unused_mask =
@@ -1936,12 +2111,9 @@ PackedReferenceFile load_packed_reference_file(
           "packed reference ambiguity bitmap has trailing bits");
     }
   }
-  const bool final_block_ambiguous = stored_block_count != 0 &&
-      (reference.ambiguity_blocks[(stored_block_count - 1) >> 6] &
-       (uint64_t{1} << ((stored_block_count - 1) & 63))) != 0;
   const PackedReferenceLayout layout = packed_reference_layout(
       stored_sequence_size, stored_contig_count,
-      counted_ambiguous_blocks, final_block_ambiguous);
+      counted_ambiguous_blocks, stored_ambiguity_run_count);
   if (layout.total_size != mapping->size()) {
     throw std::runtime_error("packed reference file size mismatch");
   }
@@ -1949,9 +2121,11 @@ PackedReferenceFile load_packed_reference_file(
       packed_reference_metadata_checksum(
           stored_sequence_size, stored_contig_count,
           stored_block_count, counted_ambiguous_blocks,
-          fingerprint_checksum, layout.payload_begin,
+          stored_ambiguity_run_count, fingerprint_checksum,
+          layout.payload_begin,
           layout.total_size, reference.contigs,
-          reference.ambiguity_blocks, layout.bitmap_word_count);
+          reference.ambiguity_blocks, layout.bitmap_word_count,
+          reference.ambiguity_run_offsets);
   if (actual_metadata_checksum != metadata_checksum) {
     throw std::runtime_error("packed reference metadata checksum mismatch");
   }
@@ -2005,6 +2179,7 @@ bool PackedReferenceFile::slice_acgt(
     }
     return table;
   }();
+
   bool all_acgt = true;
   size_t output_pos = 0;
   size_t cursor_pos = begin;
@@ -2019,35 +2194,61 @@ bool PackedReferenceFile::slice_acgt(
     const uint64_t lower_mask = bit == 0
         ? uint64_t{0}
         : (uint64_t{1} << bit) - 1;
-    const size_t ambiguity_before =
-        ambiguity_rank[word] + static_cast<size_t>(
-            __builtin_popcountll(ambiguity_blocks[word] & lower_mask));
     const bool ambiguous =
         (ambiguity_blocks[word] & (uint64_t{1} << bit)) != 0;
+    const size_t ambiguity_before = ambiguous
+        ? ambiguity_rank[word] + static_cast<size_t>(
+              __builtin_popcountll(
+                  ambiguity_blocks[word] & lower_mask))
+        : 0;
+    const uint32_t run_begin = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before]
+        : 0;
+    const uint32_t run_end = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before + 1]
+        : 0;
+    if (run_begin > run_end || run_end > ambiguity_run_count) {
+      throw std::runtime_error(
+          "packed reference ambiguity range is invalid");
+    }
+    const auto* runs = ambiguity_runs + run_begin;
+    const size_t run_count = run_end - run_begin;
+
     const size_t base_bytes = (block_size + 3) / 4;
-    const size_t mask_bytes = (block_size + 7) / 8;
     const size_t raw_offset = checked_reference_add(
         payload_offset,
-        checked_reference_add(
-            checked_reference_multiply(
-                block_idx, block_bases / size_t{4}),
-            checked_reference_multiply(
-                ambiguity_before, block_bases / size_t{8})));
-    const size_t raw_size = checked_reference_add(
-        base_bytes, ambiguous ? mask_bytes : 0);
+        checked_reference_multiply(
+            block_idx, block_bases / size_t{4}));
     if (raw_offset > mapping->size() ||
-        raw_size > mapping->size() - raw_offset) {
+        base_bytes > mapping->size() - raw_offset) {
       throw std::runtime_error(
           "packed reference block lies outside its file");
     }
     const uint8_t* packed = mapping->data() + raw_offset;
-    const uint8_t* mask = ambiguous ? packed + base_bytes : nullptr;
     if (mapping->begin_block_validation(block_idx)) {
+      size_t previous_end = 0;
+      for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+        const size_t current_begin = runs[run_idx].begin;
+        const size_t current_end =
+            current_begin + runs[run_idx].length;
+        if (runs[run_idx].length == 0 ||
+            current_begin < previous_end ||
+            current_end > block_size) {
+          mapping->cancel_block_validation(block_idx);
+          throw std::runtime_error(
+              "packed reference ambiguity run is invalid");
+        }
+        previous_end = current_end;
+      }
       uint64_t checksum = kFnvOffset;
       hash_pod<uint64_t>(&checksum, block_idx);
       hash_pod<uint64_t>(&checksum, block_size);
-      hash_pod<uint8_t>(&checksum, ambiguous ? 1 : 0);
-      hash_bytes(&checksum, packed, raw_size);
+      hash_pod<uint32_t>(
+          &checksum, static_cast<uint32_t>(run_count));
+      hash_bytes(&checksum, packed, base_bytes);
+      hash_bytes(
+          &checksum, runs,
+          run_count * sizeof(PackedReferenceAmbiguityRun));
       if (checksum != block_checksums[block_idx]) {
         mapping->cancel_block_validation(block_idx);
         throw std::runtime_error(
@@ -2055,49 +2256,53 @@ bool PackedReferenceFile::slice_acgt(
       }
       mapping->finish_block_validation(block_idx);
     }
+
+    const size_t copy_begin = cursor_pos;
     const size_t copy_end = std::min(end, block_end);
-    if (!mask) {
-      size_t local = cursor_pos - block_begin;
-      while (local < block_size && (local & 3) != 0 &&
-             cursor_pos < copy_end) {
-        (*output)[output_pos++] = bases[
-            (packed[local >> 2] >> (2 * (local & 3))) & 3];
-        ++local;
-        ++cursor_pos;
-      }
-      while (copy_end - cursor_pos >= 4) {
-        std::memcpy(
-            output->data() + output_pos,
-            unpacked_bases[packed[local >> 2]].data(), 4);
-        output_pos += 4;
-        local += 4;
-        cursor_pos += 4;
-      }
-      while (cursor_pos < copy_end) {
-        (*output)[output_pos++] = bases[
-            (packed[local >> 2] >> (2 * (local & 3))) & 3];
-        ++local;
-        ++cursor_pos;
-      }
-    } else {
-      for (size_t position = cursor_pos;
-           position < copy_end; ++position) {
-        const size_t local = position - block_begin;
-        const bool is_ambiguous =
-            (mask[local >> 3] & static_cast<uint8_t>(
-                 uint8_t{1} << (local & 7))) != 0;
-        all_acgt = all_acgt && !is_ambiguous;
-        (*output)[output_pos++] = is_ambiguous
-            ? 'N'
-            : bases[(packed[local >> 2] >>
-                     (2 * (local & 3))) & 3];
-      }
-      cursor_pos = copy_end;
+    const size_t block_output_begin = output_pos;
+    size_t local = cursor_pos - block_begin;
+    while (local < block_size && (local & 3) != 0 &&
+           cursor_pos < copy_end) {
+      (*output)[output_pos++] = bases[
+          (packed[local >> 2] >> (2 * (local & 3))) & 3];
+      ++local;
+      ++cursor_pos;
+    }
+    while (copy_end - cursor_pos >= 4) {
+      std::memcpy(
+          output->data() + output_pos,
+          unpacked_bases[packed[local >> 2]].data(), 4);
+      output_pos += 4;
+      local += 4;
+      cursor_pos += 4;
+    }
+    while (cursor_pos < copy_end) {
+      (*output)[output_pos++] = bases[
+          (packed[local >> 2] >> (2 * (local & 3))) & 3];
+      ++local;
+      ++cursor_pos;
+    }
+
+    const size_t copy_local_begin = copy_begin - block_begin;
+    const size_t copy_local_end = copy_end - block_begin;
+    for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+      const size_t current_begin = runs[run_idx].begin;
+      const size_t current_end =
+          current_begin + runs[run_idx].length;
+      const size_t overlap_begin =
+          std::max(copy_local_begin, current_begin);
+      const size_t overlap_end =
+          std::min(copy_local_end, current_end);
+      if (overlap_begin >= overlap_end) continue;
+      std::memset(
+          output->data() + block_output_begin +
+              overlap_begin - copy_local_begin,
+          'N', overlap_end - overlap_begin);
+      all_acgt = false;
     }
   }
   return all_acgt;
 }
-
 bool PackedReferenceFile::matches_packed_acgt(
     size_t contig_idx, size_t begin,
     uint64_t packed_expected, size_t length) const {
@@ -2124,35 +2329,61 @@ bool PackedReferenceFile::matches_packed_acgt(
     const uint64_t lower_mask = bit == 0
         ? uint64_t{0}
         : (uint64_t{1} << bit) - 1;
-    const size_t ambiguity_before =
-        ambiguity_rank[word] + static_cast<size_t>(
-            __builtin_popcountll(ambiguity_blocks[word] & lower_mask));
     const bool ambiguous =
         (ambiguity_blocks[word] & (uint64_t{1} << bit)) != 0;
+    const size_t ambiguity_before = ambiguous
+        ? ambiguity_rank[word] + static_cast<size_t>(
+              __builtin_popcountll(
+                  ambiguity_blocks[word] & lower_mask))
+        : 0;
+    const uint32_t run_begin = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before]
+        : 0;
+    const uint32_t run_end = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before + 1]
+        : 0;
+    if (run_begin > run_end || run_end > ambiguity_run_count) {
+      throw std::runtime_error(
+          "packed reference ambiguity range is invalid");
+    }
+    const auto* runs = ambiguity_runs + run_begin;
+    const size_t run_count = run_end - run_begin;
+
     const size_t base_bytes = (block_size + 3) / 4;
-    const size_t mask_bytes = (block_size + 7) / 8;
     const size_t raw_offset = checked_reference_add(
         payload_offset,
-        checked_reference_add(
-            checked_reference_multiply(
-                block_idx, block_bases / size_t{4}),
-            checked_reference_multiply(
-                ambiguity_before, block_bases / size_t{8})));
-    const size_t raw_size = checked_reference_add(
-        base_bytes, ambiguous ? mask_bytes : 0);
+        checked_reference_multiply(
+            block_idx, block_bases / size_t{4}));
     if (raw_offset > mapping->size() ||
-        raw_size > mapping->size() - raw_offset) {
+        base_bytes > mapping->size() - raw_offset) {
       throw std::runtime_error(
           "packed reference block lies outside its file");
     }
     const uint8_t* packed = mapping->data() + raw_offset;
-    const uint8_t* mask = ambiguous ? packed + base_bytes : nullptr;
     if (mapping->begin_block_validation(block_idx)) {
+      size_t previous_end = 0;
+      for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+        const size_t current_begin = runs[run_idx].begin;
+        const size_t current_end =
+            current_begin + runs[run_idx].length;
+        if (runs[run_idx].length == 0 ||
+            current_begin < previous_end ||
+            current_end > block_size) {
+          mapping->cancel_block_validation(block_idx);
+          throw std::runtime_error(
+              "packed reference ambiguity run is invalid");
+        }
+        previous_end = current_end;
+      }
       uint64_t checksum = kFnvOffset;
       hash_pod<uint64_t>(&checksum, block_idx);
       hash_pod<uint64_t>(&checksum, block_size);
-      hash_pod<uint8_t>(&checksum, ambiguous ? 1 : 0);
-      hash_bytes(&checksum, packed, raw_size);
+      hash_pod<uint32_t>(
+          &checksum, static_cast<uint32_t>(run_count));
+      hash_bytes(&checksum, packed, base_bytes);
+      hash_bytes(
+          &checksum, runs,
+          run_count * sizeof(PackedReferenceAmbiguityRun));
       if (checksum != block_checksums[block_idx]) {
         mapping->cancel_block_validation(block_idx);
         throw std::runtime_error(
@@ -2162,6 +2393,18 @@ bool PackedReferenceFile::matches_packed_acgt(
     }
 
     const size_t copy_end = std::min(end, block_end);
+    const size_t local_begin = cursor_pos - block_begin;
+    const size_t local_end = copy_end - block_begin;
+    for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+      const size_t current_begin = runs[run_idx].begin;
+      const size_t current_end =
+          current_begin + runs[run_idx].length;
+      if (std::max(local_begin, current_begin) <
+          std::min(local_end, current_end)) {
+        return false;
+      }
+    }
+
     while (cursor_pos < copy_end) {
       const size_t local = cursor_pos - block_begin;
       const size_t base_shift = 2 * (local & 3);
@@ -2171,7 +2414,6 @@ bool PackedReferenceFile::matches_packed_acgt(
       const uint64_t chunk_mask = chunk_bits == 64
           ? std::numeric_limits<uint64_t>::max()
           : (uint64_t{1} << chunk_bits) - 1;
-
       uint64_t reference_word = 0;
       const size_t base_byte = local >> 2;
       std::memcpy(
@@ -2181,60 +2423,29 @@ bool PackedReferenceFile::matches_packed_acgt(
       const uint64_t expected_word =
           (packed_expected >> (2 * expected_pos)) & chunk_mask;
       if (reference_word != expected_word) return false;
-
-      if (mask) {
-        uint64_t ambiguity_word = 0;
-        const size_t mask_byte = local >> 3;
-        std::memcpy(
-            &ambiguity_word, mask + mask_byte,
-            std::min(sizeof(ambiguity_word), mask_bytes - mask_byte));
-        const uint64_t ambiguity_mask = chunk_bases == 64
-            ? std::numeric_limits<uint64_t>::max()
-            : (uint64_t{1} << chunk_bases) - 1;
-        if (((ambiguity_word >> (local & 7)) & ambiguity_mask) != 0) {
-          return false;
-        }
-      }
       cursor_pos += chunk_bases;
       expected_pos += chunk_bases;
     }
   }
   return true;
 }
-
 void PackedReferenceFile::prefetch(
     size_t begin, size_t end) const {
   if (!mapping || begin >= end || end > sequence_size) return;
   const auto block_raw_offset = [&](size_t block_idx) {
-    const size_t word = block_idx >> 6;
-    const size_t bit = block_idx & 63;
-    const uint64_t lower_mask = bit == 0
-        ? uint64_t{0}
-        : (uint64_t{1} << bit) - 1;
-    const size_t ambiguity_before =
-        ambiguity_rank[word] + static_cast<size_t>(
-            __builtin_popcountll(ambiguity_blocks[word] & lower_mask));
     return checked_reference_add(
         payload_offset,
-        checked_reference_add(
-            checked_reference_multiply(
-                block_idx, block_bases / size_t{4}),
-            checked_reference_multiply(
-                ambiguity_before, block_bases / size_t{8})));
+        checked_reference_multiply(
+            block_idx, block_bases / size_t{4}));
   };
   const size_t first_block = begin / block_bases;
   const size_t last_block = (end - 1) / block_bases;
   const size_t last_block_size = std::min(
       block_bases, sequence_size - last_block * block_bases);
-  const bool last_ambiguous =
-      (ambiguity_blocks[last_block >> 6] &
-       (uint64_t{1} << (last_block & 63))) != 0;
   const size_t raw_begin = block_raw_offset(first_block);
   const size_t raw_end = checked_reference_add(
       block_raw_offset(last_block),
-      checked_reference_add(
-          (last_block_size + 3) / 4,
-          last_ambiguous ? (last_block_size + 7) / 8 : 0));
+      (last_block_size + 3) / 4);
   mapping->prefetch(raw_begin, raw_end);
 }
 

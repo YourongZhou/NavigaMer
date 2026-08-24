@@ -183,9 +183,9 @@ large contended stderr streams at human-genome shard counts while retaining the
 outer completed-index summary.
 `--router-only 1` omits every graph payload and the redundant `.route`
 sidecar, writing only shard descriptors plus self-contained `.ref2` and
-`.qpos` sidecars. The reference stores two bits per unambiguous base; only 4,096-base
-blocks containing non-ACGT symbols receive an additional one-bit ambiguity
-mask. It is mmap-decoded by candidate window and each touched block is checksum
+`.qpos` sidecars. The reference stores two bits per base plus a block bitmap
+and compact 16-bit offset/length runs for non-ACGT intervals. It is mmap-decoded
+by candidate window and each touched block is checksum
 verified. Direct exact-block verification remains no-FN without the original
 FASTA; unsupported routing or a damaged block fails instead of returning a
 partial result. The default `--router-only 0` retains graph payloads as an

@@ -21,6 +21,13 @@ struct ShardedIndexManifest;
 class PackedReferenceFileMapping;
 class SampledQgramFileMapping;
 
+struct PackedReferenceAmbiguityRun {
+  uint16_t begin = 0;
+  uint16_t length = 0;
+};
+static_assert(sizeof(PackedReferenceAmbiguityRun) == 4,
+              "packed reference ambiguity runs must remain four bytes");
+
 struct PackedReferenceFile {
   std::string path;
   size_t sequence_size = 0;
@@ -43,6 +50,9 @@ struct PackedReferenceFile {
   std::shared_ptr<const PackedReferenceFileMapping> mapping;
   const uint64_t* ambiguity_blocks = nullptr;
   const uint64_t* block_checksums = nullptr;
+  const uint32_t* ambiguity_run_offsets = nullptr;
+  const PackedReferenceAmbiguityRun* ambiguity_runs = nullptr;
+  size_t ambiguity_run_count = 0;
   std::vector<uint32_t> ambiguity_rank;
 };
 

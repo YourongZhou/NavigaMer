@@ -321,9 +321,9 @@ limit, while peak build memory is bounded by the number of concurrent parts.
 `--router-only 1` skips all graph payloads and the redundant `.route` sidecar,
 persisting only shard descriptors plus self-contained `.ref2` and `.qpos`
 sidecars.
-The reference uses two bits per A/C/G/T base and adds a one-bit mask only to
-4,096-base blocks containing ambiguity symbols. Queries mmap only candidate
-blocks, validate their checksums, and do not require the original FASTA. This
+The reference uses two bits per base plus a block bitmap and compact 16-bit
+offset/length runs for non-ACGT intervals. Queries mmap only candidate blocks,
+validate their checksums, and do not require the original FASTA. This
 mode fails rather than silently omitting hits when direct verification is
 unavailable. The default full mode keeps graph payloads for fallback.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
@@ -333,8 +333,8 @@ During a rebuild only the current group's atomic temporary pack exists; shard
 payloads are written directly into it, without per-shard temporary files. The final v20
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
-router sidecar. A self-contained `.ref2` sidecar stores A/C/G/T at two bits
-per base and adds an ambiguity mask only for affected 4,096-base blocks;
+router sidecar. A self-contained `.ref2` sidecar stores bases at two bits and
+records non-ACGT intervals as compact runs for affected 4,096-base blocks;
 queries mmap and checksum only touched blocks. Pack entries contain only independently decodable graph
 payloads, rather than repeating the common manifest for every logical shard.
 Bundles with windows of at least 24 bases also store a `.qpos` sidecar: one

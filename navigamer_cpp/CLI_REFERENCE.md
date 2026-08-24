@@ -323,9 +323,9 @@ manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
 descriptor per logical shard in memory.
-Every sharded bundle also stores a self-contained `.ref2` sidecar. A/C/G/T
-use exactly two bits per base; only 4,096-base blocks containing ambiguity
-symbols add a one-bit mask. Block checksums are validated lazily on first
+Every sharded bundle also stores a self-contained `.ref2` sidecar. Bases use
+exactly two bits plus a block bitmap and compact 16-bit offset/length runs for
+non-ACGT intervals. Block checksums are validated lazily on first
 access, and the file is mmap-decoded without materializing the reference.
 Bundles whose windows are at least 24 bases additionally store a memory-mapped
 `.qpos` sidecar. It records exact 13-mer positions every 12 contig-local bases.
@@ -365,7 +365,7 @@ changing the minimizer route. Batch stderr reports
 `peak_route_ids` and `searched_shards` are both zero by construction.
 With `--router-only 1`, graph payloads are deliberately absent, so direct
 verification is mandatory rather than optional. A self-contained mmap-backed
-`.ref2` sidecar stores two-bit bases plus ambiguity masks only for affected
+`.ref2` sidecar stores two-bit bases plus compact non-ACGT runs for affected
 4,096-base blocks, so the original FASTA is not required at query time.
 Unsupported queries, inconsistent metadata, or a damaged selected reference
 block fail closed instead of emitting an incomplete result.

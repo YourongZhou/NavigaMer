@@ -296,6 +296,51 @@ void test_indexed_reference_file_slices() {
   assert(!packed_reference.matches_packed_acgt(
       1, first.size(), packed_acgt(ambiguous_match),
       ambiguous_match.size()));
+  uint64_t stored_ambiguity_run_count = 0;
+  {
+    std::ifstream packed_in(
+        packed_bundle.string() + ".ref2", std::ios::binary);
+    assert(packed_in.good());
+    packed_in.seekg(80);
+    packed_in.read(
+        reinterpret_cast<char*>(&stored_ambiguity_run_count),
+        sizeof(stored_ambiguity_run_count));
+  }
+  assert(stored_ambiguity_run_count != 0);
+  const size_t ambiguity_runs_begin =
+      std::filesystem::file_size(packed_bundle.string() + ".ref2") -
+      static_cast<size_t>(stored_ambiguity_run_count) *
+          sizeof(navigamer::PackedReferenceAmbiguityRun);
+  char original_run_byte = 0;
+  {
+    std::fstream damaged(
+        packed_bundle.string() + ".ref2",
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(damaged.good());
+    damaged.seekg(static_cast<std::streamoff>(ambiguity_runs_begin));
+    damaged.get(original_run_byte);
+    damaged.seekp(static_cast<std::streamoff>(ambiguity_runs_begin));
+    damaged.put(static_cast<char>(original_run_byte ^ 1));
+  }
+  const auto run_damaged_reference =
+      navigamer::load_packed_reference_file(
+          packed_bundle.string(), packed_manifest);
+  bool damaged_run_rejected = false;
+  try {
+    (void)run_damaged_reference.slice(
+        first.size(), first.size() + 1);
+  } catch (const std::runtime_error&) {
+    damaged_run_rejected = true;
+  }
+  assert(damaged_run_rejected);
+  {
+    std::fstream restored(
+        packed_bundle.string() + ".ref2",
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(restored.good());
+    restored.seekp(static_cast<std::streamoff>(ambiguity_runs_begin));
+    restored.put(original_run_byte);
+  }
   const auto packed_occurrence_index =
       navigamer::load_sampled_qgram_index(
           packed_bundle.string(), packed_manifest, packed_reference);
