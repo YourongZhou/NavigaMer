@@ -1229,10 +1229,20 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
       manifest.part_manifest.world_node_count != 0 ||
       manifest.part_manifest.edge_count != 0 ||
       manifest.part_manifest.leaf_link_count != 0 ||
-      manifest.contig_ids.empty() || manifest.shards.empty()) {
-    throw std::runtime_error("sharded index contains no shards");
+      manifest.contig_ids.empty()) {
+    throw std::runtime_error("sharded index metadata is invalid");
   }
   const bool has_graph_payloads = !manifest.pack_paths.empty();
+  const bool has_router = manifest.router_entry_count != 0;
+  if (manifest.shards.empty()) {
+    if (has_graph_payloads || has_router ||
+        manifest.total_window_count == 0 ||
+        manifest.total_sequence_count != 0 ||
+        manifest.total_world_node_count != 0 ||
+        manifest.window_length < kRouterWindow) {
+      throw std::runtime_error("sharded index contains no shards");
+    }
+  }
   if (manifest.pack_paths.size() > manifest.shards.size()) {
     throw std::runtime_error("sharded index has too many pack files");
   }
@@ -1249,7 +1259,6 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
   if (manifest.shards.size() > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("sharded index has too many router targets");
   }
-  const bool has_router = manifest.router_entry_count != 0;
   if (has_router) {
     if (manifest.router_k == 0 || manifest.router_k > 16 ||
         manifest.router_window < manifest.router_k ||
@@ -1335,9 +1344,10 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
       pack_referenced.end()) {
     throw std::runtime_error("sharded index contains an unused pack file");
   }
-  if (total_windows != manifest.total_window_count ||
-      total_sequences != manifest.total_sequence_count ||
-      total_nodes != manifest.total_world_node_count) {
+  if (!manifest.shards.empty() &&
+      (total_windows != manifest.total_window_count ||
+       total_sequences != manifest.total_sequence_count ||
+       total_nodes != manifest.total_world_node_count)) {
     throw std::runtime_error(
         "sharded index aggregate counts are inconsistent");
   }
@@ -1699,7 +1709,7 @@ ShardedIndexManifest read_sharded_index_manifest(
   }
   const uint64_t shard_count =
       read_pod<uint64_t>(in, "shard_count");
-  if (shard_count == 0 || shard_count > kMaxShardCount) {
+  if (shard_count > kMaxShardCount) {
     throw std::runtime_error("invalid sharded index shard count");
   }
   manifest.shards.reserve(static_cast<size_t>(shard_count));
@@ -1885,6 +1895,27 @@ PackedReferenceFile load_packed_reference_file(
     throw std::runtime_error(
         "packed reference contigs do not cover the sequence");
   }
+  if (manifest.shards.empty()) {
+    size_t expected_window_count = 0;
+    for (const auto& contig : reference.contigs) {
+      const size_t contig_size =
+          static_cast<size_t>(contig.end) - contig.begin;
+      if (contig_size < manifest.window_length) continue;
+      const size_t contig_window_count =
+          1 + (contig_size - manifest.window_length) /
+                  manifest.stride;
+      if (contig_window_count >
+          std::numeric_limits<size_t>::max() - expected_window_count) {
+        throw std::runtime_error(
+            "packed reference window count overflow");
+      }
+      expected_window_count += contig_window_count;
+    }
+    if (expected_window_count != manifest.total_window_count) {
+      throw std::runtime_error(
+          "direct-only window count is inconsistent");
+    }
+  }
   reference.ambiguity_blocks = reinterpret_cast<const uint64_t*>(
       mapping->data() + preliminary_layout.ambiguity_bitmap_begin);
   reference.block_checksums = reinterpret_cast<const uint64_t*>(
@@ -2029,6 +2060,107 @@ void PackedReferenceFile::slice(
     }
     cursor_pos = copy_end;
   }
+}
+
+bool PackedReferenceFile::matches_packed_acgt(
+    size_t contig_idx, size_t begin,
+    uint64_t packed_expected, size_t length) const {
+  if (!mapping || contig_idx >= contigs.size() || length > 32) {
+    return false;
+  }
+  const auto& contig = contigs[contig_idx];
+  if (begin < contig.begin || begin > contig.end ||
+      length > static_cast<size_t>(contig.end) - begin) {
+    return false;
+  }
+
+  size_t cursor_pos = begin;
+  size_t expected_pos = 0;
+  const size_t end = begin + length;
+  while (cursor_pos < end) {
+    const size_t block_idx = cursor_pos / block_bases;
+    const size_t block_begin = block_idx * block_bases;
+    const size_t block_size = std::min(
+        block_bases, sequence_size - block_begin);
+    const size_t block_end = block_begin + block_size;
+    const size_t word = block_idx >> 6;
+    const size_t bit = block_idx & 63;
+    const uint64_t lower_mask = bit == 0
+        ? uint64_t{0}
+        : (uint64_t{1} << bit) - 1;
+    const size_t ambiguity_before =
+        ambiguity_rank[word] + static_cast<size_t>(
+            __builtin_popcountll(ambiguity_blocks[word] & lower_mask));
+    const bool ambiguous =
+        (ambiguity_blocks[word] & (uint64_t{1} << bit)) != 0;
+    const size_t base_bytes = (block_size + 3) / 4;
+    const size_t mask_bytes = (block_size + 7) / 8;
+    const size_t raw_offset = checked_reference_add(
+        payload_offset,
+        checked_reference_add(
+            checked_reference_multiply(
+                block_idx, block_bases / size_t{4}),
+            checked_reference_multiply(
+                ambiguity_before, block_bases / size_t{8})));
+    const size_t raw_size = checked_reference_add(
+        base_bytes, ambiguous ? mask_bytes : 0);
+    if (raw_offset > mapping->size() ||
+        raw_size > mapping->size() - raw_offset) {
+      throw std::runtime_error(
+          "packed reference block lies outside its file");
+    }
+    const uint8_t* packed = mapping->data() + raw_offset;
+    const uint8_t* mask = ambiguous ? packed + base_bytes : nullptr;
+    if (mapping->begin_block_validation(block_idx)) {
+      uint64_t checksum = kFnvOffset;
+      hash_bytes(&checksum, packed, raw_size);
+      if (checksum != block_checksums[block_idx]) {
+        mapping->cancel_block_validation(block_idx);
+        throw std::runtime_error(
+            "packed reference block checksum mismatch");
+      }
+      mapping->finish_block_validation(block_idx);
+    }
+
+    const size_t copy_end = std::min(end, block_end);
+    while (cursor_pos < copy_end) {
+      const size_t local = cursor_pos - block_begin;
+      const size_t base_shift = 2 * (local & 3);
+      const size_t chunk_bases = std::min(
+          copy_end - cursor_pos, (size_t{64} - base_shift) / 2);
+      const size_t chunk_bits = 2 * chunk_bases;
+      const uint64_t chunk_mask = chunk_bits == 64
+          ? std::numeric_limits<uint64_t>::max()
+          : (uint64_t{1} << chunk_bits) - 1;
+
+      uint64_t reference_word = 0;
+      const size_t base_byte = local >> 2;
+      std::memcpy(
+          &reference_word, packed + base_byte,
+          std::min(sizeof(reference_word), base_bytes - base_byte));
+      reference_word = (reference_word >> base_shift) & chunk_mask;
+      const uint64_t expected_word =
+          (packed_expected >> (2 * expected_pos)) & chunk_mask;
+      if (reference_word != expected_word) return false;
+
+      if (mask) {
+        uint64_t ambiguity_word = 0;
+        const size_t mask_byte = local >> 3;
+        std::memcpy(
+            &ambiguity_word, mask + mask_byte,
+            std::min(sizeof(ambiguity_word), mask_bytes - mask_byte));
+        const uint64_t ambiguity_mask = chunk_bases == 64
+            ? std::numeric_limits<uint64_t>::max()
+            : (uint64_t{1} << chunk_bases) - 1;
+        if (((ambiguity_word >> (local & 7)) & ambiguity_mask) != 0) {
+          return false;
+        }
+      }
+      cursor_pos += chunk_bases;
+      expected_pos += chunk_bases;
+    }
+  }
+  return true;
 }
 
 void PackedReferenceFile::prefetch(
@@ -3335,7 +3467,9 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     manifest.total_sequence_count += descriptor.sequence_count;
     manifest.total_world_node_count += descriptor.world_node_count;
   }
-  manifest.shards = std::move(descriptors);
+  if (build_graph_payloads) {
+    manifest.shards = std::move(descriptors);
+  }
   if (router_entry_count != 0) {
     manifest.router_k = router_metadata.k;
     manifest.router_window = router_metadata.window;

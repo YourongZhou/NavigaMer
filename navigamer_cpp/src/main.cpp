@@ -1199,6 +1199,11 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
       const size_t active_shard_count =
           route.enabled ? route.shard_ids.size()
                         : manifest.shards.size();
+      if (active_shard_count == 0 && manifest.pack_paths.empty()) {
+        throw std::runtime_error(
+            "router-only index requires its unchanged reference; "
+            "graph fallback is unavailable");
+      }
       size_t peak_loaded_shards = 0;
       std::vector<uint32_t> shard_group_ids;
       shard_group_ids.reserve(kMaxResidentQueryShards);
@@ -2072,6 +2077,12 @@ void run_query_index_batch(const std::string& index_path,
         sampled_qgram_direct_queries += queries.size();
         continue;
       }
+    }
+    if (shard_manifest.shards.empty() &&
+        shard_manifest.pack_paths.empty()) {
+      throw std::runtime_error(
+          "router-only index requires its unchanged reference; "
+          "graph fallback is unavailable");
     }
     size_t query_block_begin = 0;
     while (query_block_begin < queries.size()) {

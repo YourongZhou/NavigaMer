@@ -31,6 +31,9 @@ struct PackedReferenceFile {
 
   std::string slice(size_t begin, size_t end) const;
   void slice(size_t begin, size_t end, std::string* output) const;
+  bool matches_packed_acgt(
+      size_t contig_idx, size_t begin,
+      uint64_t packed_expected, size_t length) const;
   void prefetch(size_t begin, size_t end) const;
 
  private:

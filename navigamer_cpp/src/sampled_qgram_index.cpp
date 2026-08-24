@@ -91,10 +91,10 @@ class SampledQgramFileMapping {
 namespace {
 
 constexpr std::array<char, 8> kSampledQgramMagic = {
-    'N', 'G', 'Q', 'P', 'O', 'S', '0', '3'};
-constexpr uint32_t kSampledQgramFormatVersion = 3;
+    'N', 'G', 'Q', 'P', 'O', 'S', '0', '5'};
+constexpr uint32_t kSampledQgramFormatVersion = 5;
 constexpr uint32_t kSampledQgramK = 13;
-constexpr uint32_t kSampledQgramPrefixK = 8;
+constexpr uint32_t kSampledQgramPrefixK = 10;
 constexpr uint32_t kSampledQgramPeriod = 12;
 constexpr uint32_t kSampledQgramPositionWidth = 4;
 constexpr uint32_t kSampledQgramSuffixBits =
@@ -153,6 +153,18 @@ bool encode_qgram(std::string_view sequence, uint32_t* code) {
     value = (value << 2) | static_cast<uint32_t>(encoded);
   }
   *code = value;
+  return true;
+}
+
+bool pack_acgt_word(std::string_view sequence, uint64_t* packed) {
+  if (!packed || sequence.size() > 32) return false;
+  uint64_t value = 0;
+  for (size_t idx = 0; idx < sequence.size(); ++idx) {
+    const int encoded = dna_code(sequence[idx]);
+    if (encoded < 0) return false;
+    value |= static_cast<uint64_t>(encoded) << (2 * idx);
+  }
+  *packed = value;
   return true;
 }
 
@@ -1109,26 +1121,137 @@ verify_by_sampled_qgram_positions_batch(
           });
       const size_t partition_count =
           static_cast<size_t>(tolerance) + 1;
+      // The edit-distance pigeonhole proof holds for any d+1 disjoint query
+      // blocks. Choose their boundaries by posting cost, while keeping every
+      // block long enough for the sampled-qgram coverage proof below.
+      const size_t exact_seed_span =
+          static_cast<size_t>(occurrence_index.k) +
+          occurrence_index.sample_period - 1;
+      const size_t qgram_start_count =
+          plan.query.size() - occurrence_index.k + 1;
+      std::vector<std::pair<const uint32_t*, const uint32_t*>>
+          query_postings(qgram_start_count);
+      std::vector<uint64_t> posting_counts(qgram_start_count);
+      for (size_t qgram_start = 0;
+           qgram_start < qgram_start_count; ++qgram_start) {
+        uint32_t code = 0;
+        if (!encode_qgram(
+                std::string_view(plan.query).substr(
+                    qgram_start, occurrence_index.k),
+                &code)) {
+          throw std::runtime_error(
+              "invalid exact block in sampled q-gram verifier");
+        }
+        query_postings[qgram_start] =
+            occurrence_index.posting_list(code);
+        posting_counts[qgram_start] = static_cast<uint64_t>(
+            query_postings[qgram_start].second -
+            query_postings[qgram_start].first);
+      }
+      std::vector<uint64_t> anchor_cost(
+          plan.query.size() - exact_seed_span + 1);
+      // Every exact span of k + period - 1 bases contains `period`
+      // consecutive q-gram starts, exactly one of which has sampled phase.
+      // Any such span inside an exact block is therefore a no-FN anchor.
+      uint64_t sliding_cost = 0;
+      for (size_t qgram_start = 0;
+           qgram_start < occurrence_index.sample_period;
+           ++qgram_start) {
+        sliding_cost += posting_counts[qgram_start];
+      }
+      for (size_t anchor = 0; anchor < anchor_cost.size(); ++anchor) {
+        anchor_cost[anchor] = sliding_cost;
+        if (anchor + occurrence_index.sample_period <
+            posting_counts.size()) {
+          sliding_cost -= posting_counts[anchor];
+          sliding_cost += posting_counts[
+              anchor + occurrence_index.sample_period];
+        }
+      }
+      struct ExactBlockPlan {
+        size_t begin = 0;
+        size_t end = 0;
+        size_t anchor = 0;
+      };
+      const size_t state_width = plan.query.size() + 1;
+      const uint64_t unreachable =
+          std::numeric_limits<uint64_t>::max();
+      std::vector<uint64_t> partition_cost(
+          (partition_count + 1) * state_width, unreachable);
+      std::vector<size_t> previous_begin(
+          partition_cost.size(), state_width);
+      std::vector<size_t> selected_anchor(
+          partition_cost.size(), state_width);
+      partition_cost[0] = 0;
+      for (size_t partition = 1; partition <= partition_count;
+           ++partition) {
+        const size_t minimum_end = partition * exact_seed_span;
+        const size_t maximum_end = plan.query.size() -
+            (partition_count - partition) * exact_seed_span;
+        for (size_t block_end = minimum_end;
+             block_end <= maximum_end; ++block_end) {
+          const size_t minimum_begin =
+              (partition - 1) * exact_seed_span;
+          const size_t maximum_begin = block_end - exact_seed_span;
+          for (size_t block_begin = minimum_begin;
+               block_begin <= maximum_begin; ++block_begin) {
+            const uint64_t prefix_cost = partition_cost[
+                (partition - 1) * state_width + block_begin];
+            if (prefix_cost == unreachable) continue;
+            size_t best_anchor = block_begin;
+            uint64_t best_anchor_cost = anchor_cost[block_begin];
+            for (size_t anchor = block_begin + 1;
+                 anchor <= block_end - exact_seed_span; ++anchor) {
+              if (anchor_cost[anchor] < best_anchor_cost) {
+                best_anchor = anchor;
+                best_anchor_cost = anchor_cost[anchor];
+              }
+            }
+            if (best_anchor_cost > unreachable - prefix_cost) {
+              throw std::runtime_error(
+                  "sampled q-gram posting cost overflow");
+            }
+            const uint64_t candidate_cost =
+                prefix_cost + best_anchor_cost;
+            const size_t state =
+                partition * state_width + block_end;
+            if (candidate_cost < partition_cost[state]) {
+              partition_cost[state] = candidate_cost;
+              previous_begin[state] = block_begin;
+              selected_anchor[state] = best_anchor;
+            }
+          }
+        }
+      }
+      std::vector<ExactBlockPlan> exact_blocks(partition_count);
+      size_t reconstructed_end = plan.query.size();
+      for (size_t partition = partition_count; partition != 0;
+           --partition) {
+        const size_t state =
+            partition * state_width + reconstructed_end;
+        if (partition_cost[state] == unreachable ||
+            previous_begin[state] == state_width) {
+          throw std::runtime_error(
+              "unable to plan exact sampled q-gram blocks");
+        }
+        exact_blocks[partition - 1] = {
+            previous_begin[state], reconstructed_end,
+            selected_anchor[state]};
+        reconstructed_end = previous_begin[state];
+      }
       std::vector<uint32_t> block_occurrences;
       for (size_t partition = 0; partition < partition_count;
            ++partition) {
-        const size_t block_begin =
-            partition * plan.query.size() / partition_count;
-        const size_t block_end =
-            (partition + 1) * plan.query.size() / partition_count;
+        const size_t block_begin = exact_blocks[partition].begin;
+        const size_t block_end = exact_blocks[partition].end;
+        const size_t anchor_begin = exact_blocks[partition].anchor;
         const size_t block_length = block_end - block_begin;
         block_occurrences.clear();
         for (size_t shift = 0;
              shift < occurrence_index.sample_period; ++shift) {
-          uint32_t code = 0;
-          if (!encode_qgram(
-                  std::string_view(plan.query).substr(
-                      block_begin + shift, occurrence_index.k),
-                  &code)) {
-            throw std::runtime_error(
-                "invalid exact block in sampled q-gram verifier");
-          }
-          const auto postings = occurrence_index.posting_list(code);
+          const size_t seed_offset =
+              anchor_begin + shift - block_begin;
+          const auto postings = query_postings[anchor_begin + shift];
           size_t posting_contig_idx = postings.first == postings.second
               ? reference.contigs.size()
               : containing_contig(
@@ -1149,9 +1272,9 @@ verify_by_sampled_qgram_positions_batch(
                 reference.contigs[posting_contig_idx];
             const size_t local_position =
                 static_cast<size_t>(*posting) - contig.begin;
-            if (local_position < shift) continue;
+            if (local_position < seed_offset) continue;
             const size_t occurrence =
-                static_cast<size_t>(*posting) - shift;
+                static_cast<size_t>(*posting) - seed_offset;
             if (occurrence < contig.begin ||
                 block_length >
                     static_cast<size_t>(contig.end) - occurrence) {
@@ -1164,8 +1287,12 @@ verify_by_sampled_qgram_positions_batch(
         sort_unique_uint32(&block_occurrences);
         const std::string_view query_block(
             plan.query.data() + block_begin, block_length);
+        uint64_t packed_query_block = 0;
+        const bool packed_query_block_supported =
+            pack_acgt_word(query_block, &packed_query_block);
         const auto verify_occurrence_range = [
             &block_occurrences, &reference, &manifest, query_block,
+            packed_query_block, packed_query_block_supported,
             block_begin, block_length, tolerance](
             size_t range_begin, size_t range_end,
             std::vector<uint32_t>* candidates) {
@@ -1189,11 +1316,19 @@ verify_by_sampled_qgram_positions_batch(
                     reference.contigs[occurrence_contig_idx].begin) {
               continue;
             }
-            reference.slice(
-                occurrence,
-                static_cast<size_t>(occurrence) + block_length,
-                &reference_block);
-            if (reference_block != query_block) continue;
+            if (packed_query_block_supported) {
+              if (!reference.matches_packed_acgt(
+                      occurrence_contig_idx, occurrence,
+                      packed_query_block, block_length)) {
+                continue;
+              }
+            } else {
+              reference.slice(
+                  occurrence,
+                  static_cast<size_t>(occurrence) + block_length,
+                  &reference_block);
+              if (reference_block != query_block) continue;
+            }
             const auto& contig =
                 reference.contigs[occurrence_contig_idx];
             const int64_t nominal_start =

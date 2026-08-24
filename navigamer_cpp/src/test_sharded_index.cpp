@@ -268,6 +268,28 @@ void test_indexed_reference_file_slices() {
   assert(packed_reference.slice(
              first.size(), loaded.sequence.size()) ==
          loaded.sequence.substr(first.size()));
+  const auto packed_acgt = [](std::string_view sequence) {
+    uint64_t packed = 0;
+    for (size_t idx = 0; idx < sequence.size(); ++idx) {
+      const uint64_t code = sequence[idx] == 'A' ? 0
+          : sequence[idx] == 'C' ? 1
+          : sequence[idx] == 'G' ? 2 : 3;
+      packed |= code << (2 * idx);
+    }
+    return packed;
+  };
+  const std::string packed_match = first.substr(4090, 24);
+  assert(packed_reference.matches_packed_acgt(
+      0, 4090, packed_acgt(packed_match), packed_match.size()));
+  std::string packed_mismatch = packed_match;
+  packed_mismatch[7] = packed_mismatch[7] == 'A' ? 'C' : 'A';
+  assert(!packed_reference.matches_packed_acgt(
+      0, 4090, packed_acgt(packed_mismatch), packed_mismatch.size()));
+  const std::string ambiguous_match =
+      loaded.sequence.substr(first.size(), 8);
+  assert(!packed_reference.matches_packed_acgt(
+      1, first.size(), packed_acgt(ambiguous_match),
+      ambiguous_match.size()));
   const auto packed_occurrence_index =
       navigamer::load_sampled_qgram_index(
           packed_bundle.string(), packed_manifest, packed_reference);
@@ -709,6 +731,7 @@ void test_seed_router_no_false_negatives() {
   assert(router_only_manifest.total_world_node_count == 0);
   assert(router_only_manifest.router_entry_count == 0);
   assert(router_only_manifest.router_checksum == 0);
+  assert(router_only_manifest.shards.empty());
   assert(!std::filesystem::exists(
       router_only_bundle.string() + ".route"));
   assert(std::filesystem::exists(
@@ -731,13 +754,7 @@ void test_seed_router_no_false_negatives() {
   assert(std::filesystem::last_write_time(
              router_only_bundle.string() + ".qpos") ==
          router_only_qpos_write_time);
-  for (const auto& shard : router_only_manifest.shards) {
-    assert(shard.pack_id == 0);
-    assert(shard.file_offset == 0);
-    assert(shard.file_size == 0);
-    assert(shard.sequence_count == 0);
-    assert(shard.world_node_count == 0);
-  }
+  assert(rebuilt_router_only_manifest.shards.empty());
   bool router_only_graph_load_rejected = false;
   try {
     (void)navigamer::load_sharded_index(
@@ -876,6 +893,7 @@ void test_seed_router_no_false_negatives() {
           short_router_only_manifest, short_packed_reference);
   assert(short_occurrence_index.enabled());
   assert(short_occurrence_index.k == 13);
+  assert(short_occurrence_index.prefix_k == 10);
   assert(short_occurrence_index.sample_period == 12);
   for (size_t source_pos : {size_t{0}, size_t{98}, size_t{300}}) {
     const std::string exact = reference.substr(source_pos, 150);
@@ -911,7 +929,7 @@ void test_seed_router_no_false_negatives() {
       assert(!route.shard_ids.empty());
       const auto direct =
           navigamer::verify_selected_shards_by_exact_blocks(
-              sequence, 5, short_router_only_manifest,
+              sequence, 5, short_manifest,
               short_packed_reference,
               route.shard_ids.data(),
               route.shard_ids.data() + route.shard_ids.size());
@@ -989,7 +1007,7 @@ void test_seed_router_no_false_negatives() {
   }
   const auto batch_results =
       navigamer::verify_selected_shards_by_exact_blocks_batch(
-          5, short_router_only_manifest, short_packed_reference,
+          5, short_manifest, short_packed_reference,
           batch_requests);
   std::vector<std::string_view> batch_sequence_views;
   for (const auto& sequence : batch_sequences) {
