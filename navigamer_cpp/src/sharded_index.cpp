@@ -55,36 +55,26 @@ class PackedReferenceFileMapping {
   size_t size() const { return size_; }
   void initialize_block_validation(size_t block_count) {
     validated_block_count_ = block_count;
-    validated_blocks_ = std::make_unique<std::atomic<uint8_t>[]>(
-        block_count);
-    for (size_t block = 0; block < block_count; ++block) {
-      validated_blocks_[block].store(0, std::memory_order_relaxed);
+    validated_word_count_ = (block_count + 63) / 64;
+    validated_words_ = std::make_unique<std::atomic<uint64_t>[]>(
+        validated_word_count_);
+    for (size_t word = 0; word < validated_word_count_; ++word) {
+      validated_words_[word].store(0, std::memory_order_relaxed);
     }
   }
   bool begin_block_validation(size_t block) const {
     if (block >= validated_block_count_) return true;
-    auto& state = validated_blocks_[block];
-    for (;;) {
-      uint8_t expected = 0;
-      if (state.compare_exchange_weak(
-              expected, 1, std::memory_order_acq_rel,
-              std::memory_order_acquire)) {
-        return true;
-      }
-      if (expected == 2) return false;
-      std::this_thread::yield();
-    }
+    const uint64_t mask = uint64_t{1} << (block & 63);
+    return (validated_words_[block >> 6].load(
+                std::memory_order_acquire) & mask) == 0;
   }
   void finish_block_validation(size_t block) const {
     if (block < validated_block_count_) {
-      validated_blocks_[block].store(2, std::memory_order_release);
+      validated_words_[block >> 6].fetch_or(
+          uint64_t{1} << (block & 63), std::memory_order_release);
     }
   }
-  void cancel_block_validation(size_t block) const {
-    if (block < validated_block_count_) {
-      validated_blocks_[block].store(0, std::memory_order_release);
-    }
-  }
+  void cancel_block_validation(size_t) const {}
   void prefetch(size_t begin, size_t end) const {
 #if defined(__unix__) || defined(__APPLE__)
 #if defined(MADV_WILLNEED)
@@ -120,7 +110,8 @@ class PackedReferenceFileMapping {
   void* address_ = nullptr;
   std::vector<uint8_t> owned_;
   size_t size_ = 0;
-  std::unique_ptr<std::atomic<uint8_t>[]> validated_blocks_;
+  std::unique_ptr<std::atomic<uint64_t>[]> validated_words_;
+  size_t validated_word_count_ = 0;
   size_t validated_block_count_ = 0;
 };
 
@@ -133,11 +124,11 @@ constexpr std::array<char, 8> kShardPackMagic = {
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '4'};
 constexpr std::array<char, 8> kPackedReferenceMagic = {
-    'N', 'G', 'R', 'E', 'F', '2', '0', '1'};
+    'N', 'G', 'R', 'E', 'F', '2', '0', '2'};
 constexpr uint32_t kShardFormatVersion = 20;
 constexpr uint32_t kShardPackFormatVersion = 13;
 constexpr uint32_t kRouterFormatVersion = 5;
-constexpr uint32_t kPackedReferenceFormatVersion = 1;
+constexpr uint32_t kPackedReferenceFormatVersion = 2;
 constexpr uint32_t kPackedReferenceBlockBases = 4096;
 constexpr size_t kPackedReferenceHeaderBytes = 88;
 constexpr size_t kRouterHeaderBytes = 80;
@@ -1363,8 +1354,7 @@ uint64_t packed_reference_metadata_checksum(
     size_t total_size,
     const std::vector<ReferenceContig>& contigs,
     const uint64_t* ambiguity_bitmap,
-    size_t bitmap_word_count,
-    const uint64_t* block_checksums) {
+    size_t bitmap_word_count) {
   uint64_t checksum = kFnvOffset;
   hash_pod<uint32_t>(&checksum, kPackedReferenceFormatVersion);
   hash_pod<uint32_t>(&checksum, kPackedReferenceBlockBases);
@@ -1383,9 +1373,6 @@ uint64_t packed_reference_metadata_checksum(
   hash_bytes(
       &checksum, ambiguity_bitmap,
       bitmap_word_count * sizeof(uint64_t));
-  hash_bytes(
-      &checksum, block_checksums,
-      block_count * sizeof(uint64_t));
   return checksum;
 }
 
@@ -1495,6 +1482,9 @@ void build_packed_reference_sidecar(
       final_block_ambiguous =
           block_idx + 1 == initial_layout.block_count && ambiguous;
       uint64_t block_checksum = kFnvOffset;
+      hash_pod<uint64_t>(&block_checksum, block_idx);
+      hash_pod<uint64_t>(&block_checksum, block_size);
+      hash_pod<uint8_t>(&block_checksum, ambiguous ? 1 : 0);
       hash_bytes(
           &block_checksum, packed_bases.data(), packed_bases.size());
       if (ambiguous) {
@@ -1533,8 +1523,7 @@ void build_packed_reference_sidecar(
             layout.block_count, ambiguous_block_count,
             fingerprint_checksum, layout.payload_begin,
             layout.total_size, reference_contigs,
-            ambiguity_bitmap.data(), layout.bitmap_word_count,
-            block_checksums.data());
+            ambiguity_bitmap.data(), layout.bitmap_word_count);
 
     out.seekp(0);
     out.write(
@@ -1962,8 +1951,7 @@ PackedReferenceFile load_packed_reference_file(
           stored_block_count, counted_ambiguous_blocks,
           fingerprint_checksum, layout.payload_begin,
           layout.total_size, reference.contigs,
-          reference.ambiguity_blocks, layout.bitmap_word_count,
-          reference.block_checksums);
+          reference.ambiguity_blocks, layout.bitmap_word_count);
   if (actual_metadata_checksum != metadata_checksum) {
     throw std::runtime_error("packed reference metadata checksum mismatch");
   }
@@ -2056,6 +2044,9 @@ bool PackedReferenceFile::slice_acgt(
     const uint8_t* mask = ambiguous ? packed + base_bytes : nullptr;
     if (mapping->begin_block_validation(block_idx)) {
       uint64_t checksum = kFnvOffset;
+      hash_pod<uint64_t>(&checksum, block_idx);
+      hash_pod<uint64_t>(&checksum, block_size);
+      hash_pod<uint8_t>(&checksum, ambiguous ? 1 : 0);
       hash_bytes(&checksum, packed, raw_size);
       if (checksum != block_checksums[block_idx]) {
         mapping->cancel_block_validation(block_idx);
@@ -2158,6 +2149,9 @@ bool PackedReferenceFile::matches_packed_acgt(
     const uint8_t* mask = ambiguous ? packed + base_bytes : nullptr;
     if (mapping->begin_block_validation(block_idx)) {
       uint64_t checksum = kFnvOffset;
+      hash_pod<uint64_t>(&checksum, block_idx);
+      hash_pod<uint64_t>(&checksum, block_size);
+      hash_pod<uint8_t>(&checksum, ambiguous ? 1 : 0);
       hash_bytes(&checksum, packed, raw_size);
       if (checksum != block_checksums[block_idx]) {
         mapping->cancel_block_validation(block_idx);

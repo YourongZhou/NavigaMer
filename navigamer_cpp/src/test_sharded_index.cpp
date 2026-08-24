@@ -1050,6 +1050,47 @@ void test_seed_router_no_false_negatives() {
     assert(position_batch_occurrences == batch_occurrences);
   }
 
+  constexpr size_t packed_reference_header_bytes = 88;
+  const size_t contig_metadata_end =
+      packed_reference_header_bytes +
+      short_packed_reference.contigs.size() * 3 * sizeof(uint32_t);
+  const size_t ambiguity_bitmap_begin =
+      (contig_metadata_end + sizeof(uint64_t) - 1) &
+      ~(sizeof(uint64_t) - 1);
+  const size_t block_checksums_begin = ambiguity_bitmap_begin +
+      ((short_packed_reference.block_count + 63) / 64) *
+          sizeof(uint64_t);
+  char original_checksum_byte = 0;
+  {
+    std::fstream damaged(
+        short_router_only_bundle.string() + ".ref2",
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(damaged.good());
+    damaged.seekg(static_cast<std::streamoff>(block_checksums_begin));
+    damaged.get(original_checksum_byte);
+    damaged.seekp(static_cast<std::streamoff>(block_checksums_begin));
+    damaged.put(static_cast<char>(original_checksum_byte ^ 1));
+  }
+  const auto checksum_damaged_reference =
+      navigamer::load_packed_reference_file(
+          short_router_only_bundle.string(),
+          short_router_only_manifest);
+  bool damaged_checksum_rejected = false;
+  try {
+    (void)checksum_damaged_reference.slice(0, 1);
+  } catch (const std::runtime_error&) {
+    damaged_checksum_rejected = true;
+  }
+  assert(damaged_checksum_rejected);
+  {
+    std::fstream restored(
+        short_router_only_bundle.string() + ".ref2",
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(restored.good());
+    restored.seekp(static_cast<std::streamoff>(block_checksums_begin));
+    restored.put(original_checksum_byte);
+  }
+
   const std::string exact = reference.substr(98, window);
   std::string ambiguous = exact;
   ambiguous[10] = 'N';
