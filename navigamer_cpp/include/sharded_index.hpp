@@ -154,11 +154,17 @@ struct ShardedSeedRouter {
       std::string_view query, int tolerance) const;
 };
 
-// Every k-mer beginning at a reference position divisible by sample_period is
-// stored with its exact reference position.  For an exact block of length at
-// least k + sample_period - 1, one of its first sample_period k-mers must begin
-// at a sampled reference position.  Looking up all of those k-mers therefore
-// enumerates every exact block occurrence without scanning logical shards.
+// Every k-mer beginning at a contig-local position divisible by sample_period
+// is stored with a losslessly packed sample-grid ordinal.  Contig sample bases
+// map that ordinal back to its exact position.  For an exact block of length
+// at least k + sample_period - 1, one of its first sample_period k-mers must
+// begin at a sampled position, so these postings enumerate every exact block
+// occurrence without scanning logical shards.
+struct SampledQgramPostingRange {
+  size_t begin = 0;
+  size_t end = 0;
+};
+
 struct SampledQgramIndex {
   std::string path;
   uint32_t k = 0;
@@ -168,11 +174,13 @@ struct SampledQgramIndex {
   size_t bucket_count = 0;
   size_t prefix_bucket_count = 0;
   size_t position_count = 0;
+  uint32_t position_bits = 0;
 
   bool enabled() const;
   bool supports(std::string_view query, int tolerance) const;
-  std::pair<const uint32_t*, const uint32_t*> posting_list(
-      uint32_t code) const;
+  SampledQgramPostingRange posting_list(uint32_t code) const;
+  uint32_t sampled_position_at(
+      size_t entry, size_t* contig_hint) const;
 
  private:
   friend SampledQgramIndex load_sampled_qgram_index(
@@ -182,7 +190,8 @@ struct SampledQgramIndex {
   const uint32_t* bucket_offsets = nullptr;
   const uint64_t* bucket_checksums = nullptr;
   const uint8_t* packed_suffixes = nullptr;
-  const uint32_t* positions = nullptr;
+  const uint8_t* packed_positions = nullptr;
+  std::vector<uint32_t> contig_sample_begins;
 };
 
 bool is_sharded_index(const std::string& path);

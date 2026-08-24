@@ -81,12 +81,11 @@ class SampledQgramFileMapping {
 namespace {
 
 constexpr std::array<char, 8> kSampledQgramMagic = {
-    'N', 'G', 'Q', 'P', 'O', 'S', '0', '7'};
-constexpr uint32_t kSampledQgramFormatVersion = 7;
+    'N', 'G', 'Q', 'P', 'O', 'S', '0', '8'};
+constexpr uint32_t kSampledQgramFormatVersion = 8;
 constexpr uint32_t kSampledQgramK = 13;
 constexpr uint32_t kSampledQgramPrefixK = 10;
 constexpr uint32_t kSampledQgramPeriod = 12;
-constexpr uint32_t kSampledQgramPositionWidth = 4;
 constexpr uint32_t kSampledQgramSuffixBits =
     2 * (kSampledQgramK - kSampledQgramPrefixK);
 constexpr size_t kSampledQgramHeaderBytes = 136;
@@ -189,7 +188,7 @@ struct SampledQgramLayout {
 
 SampledQgramLayout sampled_qgram_layout(
     size_t contig_count, size_t prefix_bucket_count,
-    size_t position_count) {
+    size_t position_count, uint32_t position_bits) {
   SampledQgramLayout layout;
   layout.offsets_begin = align_offset(
       checked_add(
@@ -213,8 +212,65 @@ SampledQgramLayout sampled_qgram_layout(
       checked_add(layout.suffixes_begin, suffix_bytes), 64);
   layout.total_size = checked_add(
       layout.positions_begin,
-      checked_multiply(position_count, sizeof(uint32_t)));
+      checked_add(
+          checked_multiply(position_count, position_bits), 7) / 8);
   return layout;
+}
+
+uint32_t packed_position_bits(size_t position_count) {
+  if (position_count <= 1) return 1;
+  uint32_t bits = 0;
+  size_t maximum = position_count - 1;
+  while (maximum != 0) {
+    ++bits;
+    maximum >>= 1;
+  }
+  return bits;
+}
+
+uint32_t packed_position_at(
+    const uint8_t* positions, size_t entry, uint32_t position_bits) {
+  const size_t bit_offset = entry * position_bits;
+  const size_t byte_offset = bit_offset >> 3;
+  const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+  const size_t byte_count = (shift + position_bits + 7) / 8;
+  uint64_t word = 0;
+  if (byte_count >= sizeof(uint32_t)) {
+    std::memcpy(&word, positions + byte_offset, sizeof(uint32_t));
+    if (byte_count == 5) {
+      word |= static_cast<uint64_t>(positions[byte_offset + 4]) << 32;
+    }
+  } else {
+    for (size_t byte = 0; byte < byte_count; ++byte) {
+      word |= static_cast<uint64_t>(positions[byte_offset + byte]) <<
+          (8 * byte);
+    }
+  }
+  const uint64_t mask = (uint64_t{1} << position_bits) - 1;
+  return static_cast<uint32_t>((word >> shift) & mask);
+}
+
+void set_packed_position(
+    uint8_t* positions, size_t entry, uint32_t position_bits,
+    uint32_t position) {
+  const size_t bit_offset = entry * position_bits;
+  const size_t byte_offset = bit_offset >> 3;
+  const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
+  const size_t byte_count = (shift + position_bits + 7) / 8;
+  const uint64_t value_mask =
+      (uint64_t{1} << position_bits) - 1;
+  const uint64_t mask = value_mask << shift;
+  uint64_t word = 0;
+  for (size_t byte = 0; byte < byte_count; ++byte) {
+    word |= static_cast<uint64_t>(positions[byte_offset + byte]) <<
+        (8 * byte);
+  }
+  word = (word & ~mask) |
+      ((static_cast<uint64_t>(position) & value_mask) << shift);
+  for (size_t byte = 0; byte < byte_count; ++byte) {
+    positions[byte_offset + byte] = static_cast<uint8_t>(
+        word >> (8 * byte));
+  }
 }
 
 uint16_t packed_suffix_at(const uint8_t* suffixes, size_t entry) {
@@ -255,14 +311,17 @@ void set_packed_suffix(
 
 uint64_t prefix_bucket_checksum(
     uint32_t prefix, const uint8_t* suffixes,
-    const uint32_t* positions, size_t begin, size_t end) {
+    const uint8_t* positions, uint32_t position_bits,
+    size_t begin, size_t end) {
   uint64_t checksum = kFnvOffset;
   hash_pod<uint32_t>(&checksum, prefix);
   hash_pod<uint64_t>(&checksum, begin);
   hash_pod<uint64_t>(&checksum, end);
   for (size_t entry = begin; entry < end; ++entry) {
     hash_pod<uint16_t>(&checksum, packed_suffix_at(suffixes, entry));
-    hash_pod<uint32_t>(&checksum, positions[entry]);
+    hash_pod<uint32_t>(
+        &checksum,
+        packed_position_at(positions, entry, position_bits));
   }
   return checksum;
 }
@@ -273,6 +332,7 @@ uint64_t metadata_checksum(
     size_t bucket_count,
     size_t prefix_bucket_count,
     size_t position_count,
+    uint32_t position_bits,
     uint64_t reference_checksum,
     const SampledQgramLayout& layout) {
   uint64_t checksum = kFnvOffset;
@@ -280,7 +340,7 @@ uint64_t metadata_checksum(
   hash_pod<uint32_t>(&checksum, kSampledQgramK);
   hash_pod<uint32_t>(&checksum, kSampledQgramPrefixK);
   hash_pod<uint32_t>(&checksum, kSampledQgramPeriod);
-  hash_pod<uint32_t>(&checksum, kSampledQgramPositionWidth);
+  hash_pod<uint32_t>(&checksum, position_bits);
   hash_pod<uint32_t>(&checksum, kSampledQgramSuffixBits);
   hash_pod<uint64_t>(&checksum, sequence_size);
   hash_pod<uint64_t>(&checksum, contigs.size());
@@ -365,6 +425,29 @@ void for_each_sampled_qgram(
       }
     }
   }
+}
+
+std::vector<uint32_t> sampled_contig_begins(
+    const std::vector<ReferenceContig>& contigs) {
+  std::vector<uint32_t> begins(contigs.size() + 1, uint32_t{0});
+  uint64_t total = 0;
+  for (size_t contig_idx = 0; contig_idx < contigs.size();
+       ++contig_idx) {
+    begins[contig_idx] = static_cast<uint32_t>(total);
+    const auto& contig = contigs[contig_idx];
+    const size_t length =
+        static_cast<size_t>(contig.end) - contig.begin;
+    if (length >= kSampledQgramK) {
+      total += (length - kSampledQgramK) /
+          kSampledQgramPeriod + 1;
+    }
+    if (total > std::numeric_limits<uint32_t>::max()) {
+      throw std::runtime_error(
+          "sampled q-gram ordinal exceeds 32-bit indexing");
+    }
+  }
+  begins.back() = static_cast<uint32_t>(total);
+  return begins;
 }
 
 void build_sampled_qgram_index(
@@ -457,8 +540,13 @@ void build_sampled_qgram_index(
     throw std::runtime_error(
         "sampled q-gram position array exceeds 32-bit indexing");
   }
+  const auto contig_sample_begins =
+      sampled_contig_begins(reference.contigs);
+  const uint32_t position_bits = packed_position_bits(
+      contig_sample_begins.back());
   const auto layout = sampled_qgram_layout(
-      reference.contigs.size(), prefix_bucket_count, position_count);
+      reference.contigs.size(), prefix_bucket_count, position_count,
+      position_bits);
   const auto temporary_path = output_path.string() + ".tmp";
   std::error_code ignored;
   std::filesystem::remove(temporary_path, ignored);
@@ -492,8 +580,7 @@ void build_sampled_qgram_index(
     auto* checksums = reinterpret_cast<uint64_t*>(
         bytes + layout.checksums_begin);
     auto* suffixes = bytes + layout.suffixes_begin;
-    auto* positions = reinterpret_cast<uint32_t*>(
-        bytes + layout.positions_begin);
+    auto* positions = bytes + layout.positions_begin;
     static const size_t page_size = [] {
       const long raw_page_size = sysconf(_SC_PAGESIZE);
       return raw_page_size > 0
@@ -607,6 +694,7 @@ void build_sampled_qgram_index(
             "sampled q-gram group count mismatch");
       }
       std::vector<uint32_t> cursors = local_counts;
+      size_t position_contig_idx = 0;
       for_each_spool_record(group, [&](const auto& record) {
         const size_t local_code = record.code - group_code_begin;
         const size_t entry = cursors[local_code]++;
@@ -614,7 +702,30 @@ void build_sampled_qgram_index(
             suffixes, entry,
             static_cast<uint16_t>(
                 record.code & (suffix_count - 1)));
-        positions[entry] = record.position;
+        while (position_contig_idx < reference.contigs.size() &&
+               record.position >=
+                   reference.contigs[position_contig_idx].end) {
+          ++position_contig_idx;
+        }
+        if (position_contig_idx == reference.contigs.size() ||
+            record.position <
+                reference.contigs[position_contig_idx].begin) {
+          throw std::runtime_error(
+              "sampled q-gram position has no contig");
+        }
+        const size_t local_position =
+            static_cast<size_t>(record.position) -
+            reference.contigs[position_contig_idx].begin;
+        if (local_position % kSampledQgramPeriod != 0) {
+          throw std::runtime_error(
+              "sampled q-gram position has invalid phase");
+        }
+        const uint32_t sample_ordinal = static_cast<uint32_t>(
+            static_cast<size_t>(
+                contig_sample_begins[position_contig_idx]) +
+            local_position / kSampledQgramPeriod);
+        set_packed_position(
+            positions, entry, position_bits, sample_ordinal);
       });
       for (size_t local_code = 0;
            local_code < local_counts.size(); ++local_code) {
@@ -631,6 +742,7 @@ void build_sampled_qgram_index(
            prefix < group_prefix_end; ++prefix) {
         checksums[prefix] = prefix_bucket_checksum(
             static_cast<uint32_t>(prefix), suffixes, positions,
+            position_bits,
             static_cast<size_t>(offsets[prefix]),
             static_cast<size_t>(offsets[prefix + 1]));
       }
@@ -644,8 +756,10 @@ void build_sampled_qgram_index(
           layout.suffixes_begin +
               (entry_end * kSampledQgramSuffixBits + 7) / 8);
       flush_and_discard_full_pages(
-          layout.positions_begin + entry_begin * sizeof(uint32_t),
-          layout.positions_begin + entry_end * sizeof(uint32_t));
+          layout.positions_begin +
+              entry_begin * position_bits / 8,
+          layout.positions_begin +
+              (entry_end * position_bits + 7) / 8);
     }
 
     uint8_t* contig_bytes = bytes + layout.contigs_begin;
@@ -663,7 +777,8 @@ void build_sampled_qgram_index(
         fingerprint_checksum(manifest.part_manifest.ref_fingerprint);
     const uint64_t stored_metadata_checksum = metadata_checksum(
         reference.sequence_size, reference.contigs, bucket_count,
-        prefix_bucket_count, position_count, reference_checksum,
+        prefix_bucket_count, position_count, position_bits,
+        reference_checksum,
         layout);
     uint8_t* cursor = bytes;
     const auto write_field = [&cursor](const auto& value) {
@@ -675,7 +790,7 @@ void build_sampled_qgram_index(
     write_field(kSampledQgramK);
     write_field(kSampledQgramPrefixK);
     write_field(kSampledQgramPeriod);
-    write_field(kSampledQgramPositionWidth);
+    write_field(position_bits);
     write_field(kSampledQgramSuffixBits);
     write_field(static_cast<uint64_t>(reference.sequence_size));
     write_field(static_cast<uint64_t>(reference.contigs.size()));
@@ -780,7 +895,8 @@ bool SampledQgramIndex::enabled() const {
          sample_period != 0 && sequence_size != 0 &&
          bucket_count != 0 && prefix_bucket_count != 0 &&
          bucket_offsets && bucket_checksums && packed_suffixes &&
-         positions;
+         packed_positions && position_bits != 0 &&
+         contig_sample_begins.size() >= 2;
 }
 
 bool SampledQgramIndex::supports(
@@ -800,7 +916,7 @@ bool SampledQgramIndex::supports(
   });
 }
 
-std::pair<const uint32_t*, const uint32_t*>
+SampledQgramPostingRange
 SampledQgramIndex::posting_list(uint32_t code) const {
   if (!enabled() || code >= bucket_count) {
     throw std::out_of_range("sampled q-gram code");
@@ -822,7 +938,8 @@ SampledQgramIndex::posting_list(uint32_t code) const {
   }
   if (mapping->begin_bucket_validation(prefix)) {
     const uint64_t actual = prefix_bucket_checksum(
-        prefix, packed_suffixes, positions, begin, end);
+        prefix, packed_suffixes, packed_positions, position_bits,
+        begin, end);
     if (actual != bucket_checksums[prefix]) {
       mapping->cancel_bucket_validation(prefix);
       throw std::runtime_error(
@@ -846,7 +963,45 @@ SampledQgramIndex::posting_list(uint32_t code) const {
   };
   const size_t exact_begin = lower_suffix(begin, end, false);
   const size_t exact_end = lower_suffix(exact_begin, end, true);
-  return {positions + exact_begin, positions + exact_end};
+  return {exact_begin, exact_end};
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+inline uint32_t SampledQgramIndex::sampled_position_at(
+    size_t entry, size_t* contig_hint) const {
+  if (!contig_hint || entry >= position_count) {
+    throw std::out_of_range("sampled q-gram position entry");
+  }
+  const uint32_t ordinal = packed_position_at(
+      packed_positions, entry, position_bits);
+  if (ordinal >= contig_sample_begins.back()) {
+    throw std::runtime_error(
+        "sampled q-gram ordinal is out of range");
+  }
+  size_t contig_idx = *contig_hint;
+  if (contig_idx + 1 >= contig_sample_begins.size() ||
+      ordinal < contig_sample_begins[contig_idx] ||
+      ordinal >= contig_sample_begins[contig_idx + 1]) {
+    const auto found = std::upper_bound(
+        contig_sample_begins.begin(),
+        contig_sample_begins.end(), ordinal);
+    if (found == contig_sample_begins.begin()) {
+      throw std::runtime_error(
+          "sampled q-gram ordinal has no contig");
+    }
+    contig_idx = static_cast<size_t>(
+        found - contig_sample_begins.begin() - 1);
+  }
+  if (contig_idx >= contig_sample_begins.size() - 1) {
+    throw std::runtime_error(
+        "sampled q-gram ordinal has no contig");
+  }
+  *contig_hint = contig_idx;
+  const size_t position = static_cast<size_t>(
+      ordinal - contig_sample_begins[contig_idx]) * sample_period;
+  return static_cast<uint32_t>(position);
 }
 
 SampledQgramIndex load_sampled_qgram_index(
@@ -958,10 +1113,14 @@ SampledQgramIndex load_sampled_qgram_index(
     throw std::runtime_error(
         "sampled q-gram sidecar exceeds this platform");
   }
+  if (position_width == 0 || position_width > 32) {
+    throw std::runtime_error(
+        "sampled q-gram position width is invalid");
+  }
   const auto layout = sampled_qgram_layout(
       static_cast<size_t>(contig_count),
       static_cast<size_t>(prefix_bucket_count),
-      static_cast<size_t>(position_count));
+      static_cast<size_t>(position_count), position_width);
   const size_t expected_bucket_count =
       size_t{1} << (2 * kSampledQgramK);
   const size_t expected_prefix_bucket_count =
@@ -971,7 +1130,6 @@ SampledQgramIndex load_sampled_qgram_index(
       k != kSampledQgramK ||
       prefix_k != kSampledQgramPrefixK ||
       sample_period != kSampledQgramPeriod ||
-      position_width != kSampledQgramPositionWidth ||
       suffix_bits != kSampledQgramSuffixBits ||
       sequence_size != reference.sequence_size ||
       contig_count != reference.contigs.size() ||
@@ -1012,13 +1170,19 @@ SampledQgramIndex load_sampled_qgram_index(
     throw std::runtime_error(
         "sampled q-gram position count exceeds offset width");
   }
+  const auto stored_contig_sample_begins =
+      sampled_contig_begins(stored_contigs);
+  if (position_width != packed_position_bits(
+          stored_contig_sample_begins.back())) {
+    throw std::runtime_error(
+        "sampled q-gram position width is inconsistent");
+  }
   const auto* offsets = reinterpret_cast<const uint32_t*>(
       mapping->data() + layout.offsets_begin);
   const auto* checksums = reinterpret_cast<const uint64_t*>(
       mapping->data() + layout.checksums_begin);
   const auto* suffixes = mapping->data() + layout.suffixes_begin;
-  const auto* positions = reinterpret_cast<const uint32_t*>(
-      mapping->data() + layout.positions_begin);
+  const auto* positions = mapping->data() + layout.positions_begin;
   if (offsets[0] != 0 ||
       offsets[prefix_bucket_count] != position_count) {
     throw std::runtime_error(
@@ -1028,7 +1192,8 @@ SampledQgramIndex load_sampled_qgram_index(
       static_cast<size_t>(sequence_size), stored_contigs,
       static_cast<size_t>(bucket_count),
       static_cast<size_t>(prefix_bucket_count),
-      static_cast<size_t>(position_count), reference_checksum,
+      static_cast<size_t>(position_count), position_width,
+      reference_checksum,
       layout);
   if (actual_metadata_checksum != stored_metadata_checksum) {
     throw std::runtime_error(
@@ -1046,11 +1211,13 @@ SampledQgramIndex load_sampled_qgram_index(
   index.prefix_bucket_count =
       static_cast<size_t>(prefix_bucket_count);
   index.position_count = static_cast<size_t>(position_count);
+  index.position_bits = position_width;
   index.mapping = std::move(mapping);
   index.bucket_offsets = offsets;
   index.bucket_checksums = checksums;
   index.packed_suffixes = suffixes;
-  index.positions = positions;
+  index.packed_positions = positions;
+  index.contig_sample_begins = stored_contig_sample_begins;
   return index;
 }
 
@@ -1113,7 +1280,7 @@ verify_by_sampled_qgram_positions_batch(
           occurrence_index.sample_period - 1;
       const size_t qgram_start_count =
           plan.query.size() - occurrence_index.k + 1;
-      std::vector<std::pair<const uint32_t*, const uint32_t*>>
+      std::vector<SampledQgramPostingRange>
           query_postings(qgram_start_count);
       std::vector<uint64_t> posting_counts(qgram_start_count);
       uint32_t rolling_qgram = 0;
@@ -1142,8 +1309,8 @@ verify_by_sampled_qgram_positions_batch(
         query_postings[qgram_start] =
             occurrence_index.posting_list(rolling_qgram);
         posting_counts[qgram_start] = static_cast<uint64_t>(
-            query_postings[qgram_start].second -
-            query_postings[qgram_start].first);
+            query_postings[qgram_start].end -
+            query_postings[qgram_start].begin);
       }
       std::vector<uint64_t> anchor_cost(
           plan.query.size() - exact_seed_span + 1);
@@ -1249,29 +1416,19 @@ verify_by_sampled_qgram_positions_batch(
           const size_t seed_offset =
               anchor_begin + shift - block_begin;
           const auto postings = query_postings[anchor_begin + shift];
-          size_t posting_contig_idx = postings.first == postings.second
-              ? reference.contigs.size()
-              : containing_contig(
-                    reference.contigs, *postings.first);
-          for (const uint32_t* posting = postings.first;
-               posting != postings.second; ++posting) {
-            while (posting_contig_idx < reference.contigs.size() &&
-                   *posting >=
-                       reference.contigs[posting_contig_idx].end) {
-              ++posting_contig_idx;
-            }
-            if (posting_contig_idx == reference.contigs.size() ||
-                *posting <
-                    reference.contigs[posting_contig_idx].begin) {
-              continue;
-            }
+          size_t posting_contig_idx = reference.contigs.size();
+          for (size_t posting_entry = postings.begin;
+               posting_entry < postings.end; ++posting_entry) {
+            const uint32_t local_sample_position =
+                occurrence_index.sampled_position_at(
+                    posting_entry, &posting_contig_idx);
             const auto& contig =
                 reference.contigs[posting_contig_idx];
-            const size_t local_position =
-                static_cast<size_t>(*posting) - contig.begin;
+            const size_t local_position = local_sample_position;
             if (local_position < seed_offset) continue;
             const size_t occurrence =
-                static_cast<size_t>(*posting) - seed_offset;
+                static_cast<size_t>(contig.begin) + local_position -
+                seed_offset;
             if (occurrence < contig.begin ||
                 block_length >
                     static_cast<size_t>(contig.end) - occurrence) {
