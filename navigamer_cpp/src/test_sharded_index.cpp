@@ -1063,7 +1063,7 @@ void test_seed_router_no_false_negatives() {
 
 void test_repetitive_sampled_qgram_batch_matches_sequential() {
   constexpr size_t window = 150;
-  constexpr size_t period_count = 17000;
+  constexpr size_t period_count = 33000;
   const std::string motif = "ACGTTGCAACGA";
   std::string reference;
   reference.reserve(period_count * motif.size() + window);

@@ -740,6 +740,41 @@ size_t containing_contig(
   return static_cast<size_t>(found - contigs.begin());
 }
 
+void sort_unique_uint32(std::vector<uint32_t>* values) {
+  if (!values || values->size() < 2) return;
+  constexpr size_t kRadixThreshold = size_t{32} << 10;
+  if (values->size() < kRadixThreshold) {
+    std::sort(values->begin(), values->end());
+  } else {
+    constexpr size_t kBucketCount = size_t{1} << 16;
+    std::vector<size_t> offsets(kBucketCount);
+    std::vector<uint32_t> scratch(values->size());
+    // Two stable 16-bit passes produce the same unsigned order as std::sort,
+    // but avoid comparison-sort growth on repeat-heavy posting lists.
+    const auto pass = [&](const std::vector<uint32_t>& source,
+                          std::vector<uint32_t>* destination,
+                          uint32_t shift) {
+      std::fill(offsets.begin(), offsets.end(), size_t{0});
+      for (uint32_t value : source) {
+        ++offsets[(value >> shift) & 0xffffU];
+      }
+      size_t begin = 0;
+      for (size_t bucket = 0; bucket < offsets.size(); ++bucket) {
+        const size_t count = offsets[bucket];
+        offsets[bucket] = begin;
+        begin += count;
+      }
+      for (uint32_t value : source) {
+        (*destination)[offsets[(value >> shift) & 0xffffU]++] = value;
+      }
+    };
+    pass(*values, &scratch, 0);
+    pass(scratch, values, 16);
+  }
+  values->erase(
+      std::unique(values->begin(), values->end()), values->end());
+}
+
 }  // namespace
 
 bool SampledQgramIndex::enabled() const {
@@ -1054,6 +1089,7 @@ verify_by_sampled_qgram_positions_batch(
   struct QueryPlan {
     std::string query;
     PreparedMyersPattern prepared;
+    PreparedMyersDnaPattern batch_prepared;
     std::vector<uint32_t> candidate_starts;
   };
   std::vector<QueryPlan> plans(queries.size());
@@ -1125,11 +1161,7 @@ verify_by_sampled_qgram_positions_batch(
                 static_cast<uint32_t>(occurrence));
           }
         }
-        std::sort(block_occurrences.begin(), block_occurrences.end());
-        block_occurrences.erase(
-            std::unique(
-              block_occurrences.begin(), block_occurrences.end()),
-            block_occurrences.end());
+        sort_unique_uint32(&block_occurrences);
         const std::string_view query_block(
             plan.query.data() + block_begin, block_length);
         const auto verify_occurrence_range = [
@@ -1225,18 +1257,13 @@ verify_by_sampled_qgram_positions_batch(
               &plan.candidate_starts);
         }
       }
-      std::sort(
-          plan.candidate_starts.begin(), plan.candidate_starts.end());
-      plan.candidate_starts.erase(
-          std::unique(
-              plan.candidate_starts.begin(),
-              plan.candidate_starts.end()),
-          plan.candidate_starts.end());
+      sort_unique_uint32(&plan.candidate_starts);
       auto& result = results[query_idx];
       result.enabled = true;
       result.candidate_window_count =
           plan.candidate_starts.size();
       plan.prepared = prepare_myers_pattern(plan.query);
+      plan.batch_prepared = prepare_myers_dna_pattern(plan.query);
     } catch (...) {
       errors[query_idx] = std::current_exception();
     }
@@ -1292,53 +1319,126 @@ verify_by_sampled_qgram_positions_batch(
     const size_t task_end =
         total_candidates * (static_cast<size_t>(thread_id) + 1) /
         active_thread_count;
-    std::string reference_window;
+    std::array<std::string, 4> reference_windows;
+    std::string combined_reference;
     try {
-      uint32_t cached_start = UINT32_MAX;
-      size_t cached_contig_idx = reference.contigs.size();
-      bool cached_window_valid = false;
-      for (size_t task = task_begin; task < task_end; ++task) {
-        const auto& candidate = candidate_tasks[task];
-        const size_t query_idx = candidate.query_idx;
+      size_t task = task_begin;
+      size_t hinted_query_idx = plans.size();
+      size_t contig_hint = reference.contigs.size();
+      while (task < task_end) {
+        const size_t query_idx = candidate_tasks[task].query_idx;
         if (query_idx >= plans.size()) {
           throw std::runtime_error(
               "sampled q-gram candidate query mismatch");
         }
-        if (candidate.start != cached_start) {
-          cached_start = candidate.start;
-          cached_contig_idx = containing_contig(
-              reference.contigs, cached_start);
-          cached_window_valid = false;
-          if (cached_contig_idx != reference.contigs.size()) {
-            const auto& contig = reference.contigs[cached_contig_idx];
-            if (manifest.window_length <=
-                static_cast<size_t>(contig.end) - cached_start) {
-              reference.slice(
-                  cached_start,
-                  static_cast<size_t>(cached_start) +
-                      manifest.window_length,
-                  &reference_window);
-              cached_window_valid = std::all_of(
-                  reference_window.begin(), reference_window.end(),
+        std::array<uint32_t, 4> starts{};
+        std::array<size_t, 4> contig_indices{};
+        size_t lane_count = 0;
+        while (task < task_end && lane_count < starts.size() &&
+               candidate_tasks[task].query_idx == query_idx) {
+          const uint32_t start = candidate_tasks[task++].start;
+          // Candidate starts are sorted within each query, so only the first
+          // start needs a binary contig lookup.
+          if (hinted_query_idx != query_idx) {
+            hinted_query_idx = query_idx;
+            contig_hint = containing_contig(reference.contigs, start);
+          } else {
+            while (contig_hint < reference.contigs.size() &&
+                   start >= reference.contigs[contig_hint].end) {
+              ++contig_hint;
+            }
+            if (contig_hint == reference.contigs.size() ||
+                start < reference.contigs[contig_hint].begin) {
+              contig_hint = containing_contig(reference.contigs, start);
+            }
+          }
+          const size_t contig_idx = contig_hint;
+          if (contig_idx == reference.contigs.size()) continue;
+          const auto& contig = reference.contigs[contig_idx];
+          if (manifest.window_length >
+              static_cast<size_t>(contig.end) - start) {
+            continue;
+          }
+          starts[lane_count] = start;
+          contig_indices[lane_count] = contig_idx;
+          ++lane_count;
+        }
+        if (lane_count == 0) continue;
+        std::array<std::string_view, 4> texts{};
+        // Nearby sorted windows overlap heavily. Decode their union once
+        // whenever it is no larger than the separate slices.
+        bool coalesced = true;
+        for (size_t lane = 1; lane < lane_count; ++lane) {
+          coalesced = coalesced &&
+              contig_indices[lane] == contig_indices[0];
+        }
+        const size_t combined_size =
+            static_cast<size_t>(starts[lane_count - 1]) - starts[0] +
+            manifest.window_length;
+        coalesced = coalesced &&
+            combined_size <= lane_count * manifest.window_length;
+        if (coalesced) {
+          reference.slice(
+              starts[0], static_cast<size_t>(starts[0]) + combined_size,
+              &combined_reference);
+          for (size_t lane = 0; lane < lane_count; ++lane) {
+            texts[lane] = std::string_view(combined_reference).substr(
+                static_cast<size_t>(starts[lane]) - starts[0],
+                manifest.window_length);
+          }
+        } else {
+          for (size_t lane = 0; lane < lane_count; ++lane) {
+            reference.slice(
+                starts[lane],
+                static_cast<size_t>(starts[lane]) +
+                    manifest.window_length,
+                &reference_windows[lane]);
+            texts[lane] = reference_windows[lane];
+          }
+        }
+        size_t valid_lane_count = 0;
+        for (size_t lane = 0; lane < lane_count; ++lane) {
+          if (!std::all_of(
+                  texts[lane].begin(), texts[lane].end(),
                   [](char base) {
                     return base == 'A' || base == 'C' ||
                            base == 'G' || base == 'T';
-                  });
-            }
+                  })) {
+            continue;
           }
+          starts[valid_lane_count] = starts[lane];
+          contig_indices[valid_lane_count] = contig_indices[lane];
+          texts[valid_lane_count] = texts[lane];
+          ++valid_lane_count;
         }
-        if (!cached_window_valid) continue;
-        ++thread_result.distance_counts[query_idx];
-        const int distance = compute_distance_bounded_myers_prepared(
-            plans[query_idx].prepared, reference_window, tolerance);
-        if (distance <= tolerance) {
-          const auto& contig = reference.contigs[cached_contig_idx];
+        lane_count = valid_lane_count;
+        if (lane_count == 0) continue;
+        thread_result.distance_counts[query_idx] += lane_count;
+
+        std::array<int, 4> distances{};
+        bool computed_batch = false;
+        if (lane_count == texts.size()) {
+          // This is the exact same Myers recurrence as the scalar fallback,
+          // evaluated for four independent texts in AVX2 lanes.
+          computed_batch =
+              compute_distance_bounded_myers_prepared_batch4_trusted_acgt(
+                  plans[query_idx].batch_prepared, texts, tolerance,
+                  distances);
+        }
+        for (size_t lane = 0; lane < lane_count; ++lane) {
+          const int distance = computed_batch
+              ? distances[lane]
+              : compute_distance_bounded_myers_prepared(
+                    plans[query_idx].prepared,
+                    texts[lane], tolerance);
+          if (distance > tolerance) continue;
+          const auto& contig = reference.contigs[contig_indices[lane]];
           thread_result.occurrences[query_idx].push_back(
-              {static_cast<uint32_t>(cached_contig_idx),
+              {static_cast<uint32_t>(contig_indices[lane]),
                static_cast<uint32_t>(
                    static_cast<size_t>(contig.source_begin) +
-                   cached_start - contig.begin),
-               distance, reference_window});
+                   starts[lane] - contig.begin),
+               distance, std::string(texts[lane])});
         }
       }
     } catch (...) {
