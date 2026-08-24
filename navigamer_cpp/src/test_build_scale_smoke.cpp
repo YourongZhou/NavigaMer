@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -581,6 +582,54 @@ int main() {
     for (uint8_t was_recovered : recovered) {
       assert(was_recovered != 0);
     }
+  }
+  const std::string direct_only_index =
+      "/tmp/navigamer_bounded_fallback_direct.navshard";
+  const std::string direct_only_build_command =
+      "OMP_NUM_THREADS=4 ./navigamer build-sharded --ref " +
+      fallback_fasta +
+      " --window 150 --stride 1 --shard-windows 8 "
+      "--shard-build-jobs 4 --router-only 1 "
+      "--primary-radii 30,15,5 --progress-interval-seconds 0 "
+      "--index " + direct_only_index +
+      " >/tmp/navigamer_direct_only_build.stdout "
+      "2>/tmp/navigamer_direct_only_build.stderr";
+  assert(std::system(direct_only_build_command.c_str()) == 0);
+  assert(!std::filesystem::exists(direct_only_index + ".route"));
+  assert(std::filesystem::exists(direct_only_index + ".qpos"));
+  const std::string direct_only_query_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index-batch --index " +
+      direct_only_index + " --reads " + route_budget_reads +
+      " --tolerance 5 --out /tmp/navigamer_direct_only.tsv "
+      ">/tmp/navigamer_direct_only.stdout "
+      "2>/tmp/navigamer_direct_only.stderr";
+  assert(std::system(direct_only_query_command.c_str()) == 0);
+  {
+    std::ifstream stderr_in("/tmp/navigamer_direct_only.stderr");
+    assert(stderr_in.good());
+    const std::string stderr_text(
+        (std::istreambuf_iterator<char>(stderr_in)),
+        std::istreambuf_iterator<char>());
+    assert(stderr_text.find("sampled_qgram_direct_queries=185") !=
+           std::string::npos);
+    assert(stderr_text.find("peak_route_ids=0") !=
+           std::string::npos);
+  }
+  const std::string direct_only_unsupported_command =
+      "OMP_NUM_THREADS=4 ./navigamer query-index --index " +
+      direct_only_index + " --query " + fallback_query +
+      " --tolerance 5 >/tmp/navigamer_direct_only_unsupported.stdout "
+      "2>/tmp/navigamer_direct_only_unsupported.stderr";
+  assert(std::system(direct_only_unsupported_command.c_str()) != 0);
+  {
+    std::ifstream stderr_in(
+        "/tmp/navigamer_direct_only_unsupported.stderr");
+    assert(stderr_in.good());
+    const std::string stderr_text(
+        (std::istreambuf_iterator<char>(stderr_in)),
+        std::istreambuf_iterator<char>());
+    assert(stderr_text.find("graph fallback is unavailable") !=
+           std::string::npos);
   }
   const std::string fallback_single_command =
       "OMP_NUM_THREADS=4 ./navigamer query-index --index " +

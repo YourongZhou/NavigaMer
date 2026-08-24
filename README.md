@@ -318,10 +318,11 @@ threads each; larger parts remain capped at four builders to contain peak
 memory. `--shard-build-jobs N` sets an explicit concurrency limit. The product
 of part jobs and their internal worker teams never exceeds the OpenMP thread
 limit, while peak build memory is bounded by the number of concurrent parts.
-`--router-only 1` skips all graph payloads and persists only the shard
-descriptors, exact-minimizer router, and a self-contained `.ref2` reference.
+`--router-only 1` skips all graph payloads and the redundant `.route` sidecar,
+persisting only shard descriptors plus self-contained `.ref2` and `.qpos`
+sidecars.
 The reference uses two bits per A/C/G/T base and adds a one-bit mask only to
-4,096-base blocks containing ambiguity symbols. Queries mmap only routed
+4,096-base blocks containing ambiguity symbols. Queries mmap only candidate
 blocks, validate their checksums, and do not require the original FASTA. This
 mode fails rather than silently omitting hits when direct verification is
 unavailable. The default full mode keeps graph payloads for fallback.

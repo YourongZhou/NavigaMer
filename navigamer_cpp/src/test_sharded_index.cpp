@@ -707,13 +707,30 @@ void test_seed_router_no_false_negatives() {
          file_manifest.total_window_count);
   assert(router_only_manifest.total_sequence_count == 0);
   assert(router_only_manifest.total_world_node_count == 0);
-  assert(router_only_manifest.router_entry_count ==
-         file_manifest.router_entry_count);
-  assert(router_only_manifest.router_checksum ==
-         file_manifest.router_checksum);
-  assert(files_equal(
+  assert(router_only_manifest.router_entry_count == 0);
+  assert(router_only_manifest.router_checksum == 0);
+  assert(!std::filesystem::exists(
+      router_only_bundle.string() + ".route"));
+  assert(std::filesystem::exists(
+      router_only_bundle.string() + ".qpos"));
+  const auto router_only_qpos_write_time =
+      std::filesystem::last_write_time(
+          router_only_bundle.string() + ".qpos");
+  std::filesystem::copy_file(
+      file_bundle.string() + ".route",
       router_only_bundle.string() + ".route",
-      file_bundle.string() + ".route"));
+      std::filesystem::copy_options::overwrite_existing);
+  const auto rebuilt_router_only_manifest =
+      navigamer::build_sharded_reference_index(
+          router_only_bundle.string(), fasta.string(), indexed_reference,
+          window, stride, shard_windows, hierarchy, range_config, 2,
+          false);
+  assert(rebuilt_router_only_manifest.router_entry_count == 0);
+  assert(!std::filesystem::exists(
+      router_only_bundle.string() + ".route"));
+  assert(std::filesystem::last_write_time(
+             router_only_bundle.string() + ".qpos") ==
+         router_only_qpos_write_time);
   for (const auto& shard : router_only_manifest.shards) {
     assert(shard.pack_id == 0);
     assert(shard.file_offset == 0);
@@ -735,7 +752,7 @@ void test_seed_router_no_false_negatives() {
   const auto router_only_router =
       navigamer::load_sharded_seed_router(
           router_only_bundle.string(), router_only_reloaded);
-  assert(router_only_router.enabled());
+  assert(!router_only_router.enabled());
 
   const auto router = navigamer::load_sharded_seed_router(
       bundle.string(), rebuilt_manifest);
@@ -848,6 +865,7 @@ void test_seed_router_no_false_negatives() {
       navigamer::load_sharded_seed_router(
           short_router_only_bundle.string(),
           short_router_only_manifest);
+  assert(!short_router_only.enabled());
   const auto short_packed_reference =
       navigamer::load_packed_reference_file(
           short_router_only_bundle.string(),
@@ -891,17 +909,12 @@ void test_seed_router_no_false_negatives() {
       const auto route = short_router.select(sequence, 5);
       assert(route.enabled);
       assert(!route.shard_ids.empty());
-      const auto router_only_route =
-          short_router_only.select(sequence, 5);
-      assert(router_only_route.enabled);
-      assert(router_only_route.shard_ids == route.shard_ids);
       const auto direct =
           navigamer::verify_selected_shards_by_exact_blocks(
               sequence, 5, short_router_only_manifest,
               short_packed_reference,
-              router_only_route.shard_ids.data(),
-              router_only_route.shard_ids.data() +
-                  router_only_route.shard_ids.size());
+              route.shard_ids.data(),
+              route.shard_ids.data() + route.shard_ids.size());
       assert(direct.enabled);
       assert(short_occurrence_index.supports(sequence, 5));
       const auto position_direct =

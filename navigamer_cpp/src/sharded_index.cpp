@@ -1263,9 +1263,10 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
     throw std::runtime_error(
         "sharded index has inconsistent empty router metadata");
   }
-  if (!has_graph_payloads && !has_router) {
+  if (!has_graph_payloads && !has_router &&
+      manifest.window_length < kRouterWindow) {
     throw std::runtime_error(
-        "router-only sharded index contains no seed router");
+        "direct-only sharded index window is too short");
   }
   size_t total_windows = 0;
   size_t total_sequences = 0;
@@ -3254,7 +3255,8 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   ShardedSeedRouter router_metadata;
   uint64_t router_checksum = 0;
   size_t router_entry_count = 0;
-  if (descriptors.size() > 1 && window_length >= kRouterWindow) {
+  if (build_graph_payloads && descriptors.size() > 1 &&
+      window_length >= kRouterWindow) {
     const auto router_path = router_output_path(bundle);
     bool router_reused = false;
     try {
@@ -3358,6 +3360,15 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
         bundle_path, manifest, packed_reference);
   }
   save_sharded_index_manifest(bundle_path, manifest);
+  if (!build_graph_payloads) {
+    std::error_code error;
+    std::filesystem::remove(router_output_path(bundle), error);
+    if (error) {
+      throw std::runtime_error(
+          "unable to remove unused router sidecar: " +
+          error.message());
+    }
+  }
   return manifest;
 }
 
