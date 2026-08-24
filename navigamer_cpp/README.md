@@ -317,8 +317,8 @@ Every bundle with windows of at least 24 bases also stores a memory-mapped
 each contig. It is used when all `d + 1` query blocks are at least 24 bases and
 contain only A/C/G/T. The pigeonhole principle leaves one block exact for every
 true hit, and any exact 24-base block contains one sampled 13-mer. The verifier
-confirms the complete block, expands its implied window start by `[-d,+d]` for
-indel displacement, applies contig/stride bounds, and finally computes exact
+confirms the complete block, expands its implied window start only over shifts
+whose indel lower bound can fit within `d`, applies contig/stride bounds, and finally computes exact
 bounded Myers distance. Consequently it can bypass both `.route` and graph
 loading without introducing false negatives. Unsupported queries use the
 existing conservative route/graph path; router-only bundles fail closed if no
@@ -332,7 +332,7 @@ lazy file mapping and one input stream; only their graph pages are decoded.
 For any non-empty routed query, an unchanged indexed
 FASTA with a current `.fai` enables a direct no-FN verification path before
 graph loading. Exact block occurrences enumerate every window start within the
-possible `[-d,+d]` indel shift; those fixed-size reference windows are checked
+possible displacement-feasible indel shifts; those fixed-size reference windows are checked
 with bounded Myers edit distance, so a successful direct pass does not load
 the routed world trees at all.
 Path, size, modification time, contigs, and coordinates are checked first; any

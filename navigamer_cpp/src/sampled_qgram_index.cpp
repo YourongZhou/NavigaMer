@@ -1270,6 +1270,33 @@ verify_by_sampled_qgram_positions_batch(
           [](unsigned char base) {
             return static_cast<char>(std::toupper(base));
           });
+      const int64_t final_displacement =
+          static_cast<int64_t>(manifest.window_length) -
+          static_cast<int64_t>(plan.query.size());
+      int minimum_candidate_shift = 0;
+      int maximum_candidate_shift = 0;
+      bool has_candidate_shift = false;
+      for (int shift = -tolerance; shift <= tolerance; ++shift) {
+        const int64_t anchor_displacement = -shift;
+        // An alignment reaching this displacement and ending at the final
+        // length displacement needs at least this many indels. Substitutions
+        // cannot change displacement, so larger shifts cannot be part of any
+        // edit-distance-`tolerance` alignment. For equal lengths this reduces
+        // the old [-d,+d] range to [-floor(d/2),+floor(d/2)].
+        const int64_t required_indels =
+            std::abs(anchor_displacement) +
+            std::abs(final_displacement - anchor_displacement);
+        if (required_indels > tolerance) continue;
+        if (!has_candidate_shift) {
+          minimum_candidate_shift = shift;
+          has_candidate_shift = true;
+        }
+        maximum_candidate_shift = shift;
+      }
+      if (!has_candidate_shift) {
+        results[query_idx].enabled = true;
+        continue;
+      }
       const size_t partition_count =
           static_cast<size_t>(tolerance) + 1;
       // The edit-distance pigeonhole proof holds for any d+1 disjoint query
@@ -1447,7 +1474,8 @@ verify_by_sampled_qgram_positions_batch(
         const auto verify_occurrence_range = [
             &block_occurrences, &reference, &manifest, query_block,
             packed_query_block, packed_query_block_supported,
-            block_begin, block_length, tolerance](
+            block_begin, block_length, minimum_candidate_shift,
+            maximum_candidate_shift](
             size_t range_begin, size_t range_end,
             std::vector<uint32_t>* candidates) {
           std::string reference_block;
@@ -1488,8 +1516,8 @@ verify_by_sampled_qgram_positions_batch(
             const int64_t nominal_start =
                 static_cast<int64_t>(occurrence) -
                 static_cast<int64_t>(block_begin);
-            for (int edit_shift = -tolerance;
-                 edit_shift <= tolerance; ++edit_shift) {
+            for (int edit_shift = minimum_candidate_shift;
+                 edit_shift <= maximum_candidate_shift; ++edit_shift) {
               const int64_t signed_start = nominal_start + edit_shift;
               if (signed_start < static_cast<int64_t>(contig.begin)) {
                 continue;

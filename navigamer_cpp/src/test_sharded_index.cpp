@@ -1040,6 +1040,14 @@ void test_seed_router_no_false_negatives() {
       reference.substr(98, 150), reference.substr(300, 150)};
   batch_sequences[0].erase(batch_sequences[0].begin() + 70);
   batch_sequences[1].insert(batch_sequences[1].begin() + 80, 'G');
+  std::string positive_displacement = reference.substr(400, 150);
+  positive_displacement.erase(40, 2);
+  positive_displacement.insert(120, "AC");
+  batch_sequences.push_back(std::move(positive_displacement));
+  std::string negative_displacement = reference.substr(450, 150);
+  negative_displacement.insert(40, "GT");
+  negative_displacement.erase(120, 2);
+  batch_sequences.push_back(std::move(negative_displacement));
   for (size_t duplicate = 0; duplicate < 6; ++duplicate) {
     batch_sequences.push_back(batch_sequences[0]);
   }

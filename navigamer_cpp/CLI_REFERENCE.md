@@ -331,10 +331,14 @@ Bundles whose windows are at least 24 bases additionally store a memory-mapped
 `.qpos` sidecar. It records exact 13-mer positions every 12 contig-local bases.
 When every one of the query's `d + 1` pigeonhole blocks is at least 24 bases
 and contains only A/C/G/T, an exact block must contain a sampled 13-mer. Query
-therefore enumerates every possible hit start directly, expands `[-d,+d]` for
-indel displacement, enforces contig and stride bounds, and runs exact bounded
+therefore enumerates every possible hit start directly, expands only shifts
+whose indel lower bound can fit within `d`, enforces contig and stride bounds, and runs exact bounded
 Myers verification. This direct path loads neither `.route` nor graph shards
 and remains no-FN-safe; unsupported queries keep the conservative fallback.
+For candidate shift `s` and final length displacement
+`delta = window_length - query_length`, the necessary bound is
+`abs(s) + abs(delta + s) <= d`; equal-length inputs therefore need only
+`[-floor(d/2), +floor(d/2)]` rather than `[-d,+d]`.
 Multi-part bundles with
 windows of at least 24 bases also store a memory-mapped `.route` sidecar of
 exact 16-mer minimizers. Sorted minimizers use exact 16-entry blocks with one
@@ -349,7 +353,7 @@ sidecar conservatively search all parts.
 Non-empty routes are additionally verified against the persisted
 reference path when it is an unchanged regular FASTA with a current `.fai`.
 Every complete pigeonhole-block occurrence generates all indexed window starts
-within its possible `[-d,+d]` indel shift, followed by exact bounded Myers
+within its displacement-feasible indel shifts, followed by exact bounded Myers
 verification. A successful pass returns those hits directly without loading
 the routed graph shards. Direct routes in the same input block are grouped by
 physical shard, avoiding duplicate reference slices without sharing or

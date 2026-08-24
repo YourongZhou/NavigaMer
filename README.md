@@ -342,8 +342,8 @@ exact 13-mer reference position every 12 bases within each contig. If every one
 of a query's `d + 1` pigeonhole blocks is at least 24 bases, query can use this
 sidecar without loading `.route` or any world-tree payload. At least one block
 of every edit-distance-`d` hit is exact; every 24-base exact block contains a
-sampled 13-mer; and all resulting starts in the `[-d,+d]` indel range are
-checked with exact bounded Myers distance. Thus this is a complete candidate
+sampled 13-mer; and all displacement-feasible starts are checked with exact
+bounded Myers distance. Thus this is a complete candidate
 enumerator, not a heuristic filter. Unsupported queries retain the existing
 conservative route/graph fallback (or fail closed for router-only bundles).
 Paired child-MBB coordinates are ranked only among quantized states permitted
