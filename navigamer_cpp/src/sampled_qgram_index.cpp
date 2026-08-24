@@ -15,7 +15,6 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <vector>
 
 #include <omp.h>
@@ -49,50 +48,41 @@ class SampledQgramFileMapping {
 
   void initialize_bucket_validation(size_t bucket_count) {
     validated_bucket_count_ = bucket_count;
-    validated_buckets_ = std::make_unique<std::atomic<uint8_t>[]>(
-        bucket_count);
-    for (size_t bucket = 0; bucket < bucket_count; ++bucket) {
-      validated_buckets_[bucket].store(0, std::memory_order_relaxed);
+    validated_word_count_ = (bucket_count + 63) / 64;
+    validated_words_ = std::make_unique<std::atomic<uint64_t>[]>(
+        validated_word_count_);
+    for (size_t word = 0; word < validated_word_count_; ++word) {
+      validated_words_[word].store(0, std::memory_order_relaxed);
     }
   }
   bool begin_bucket_validation(size_t bucket) const {
     if (bucket >= validated_bucket_count_) return true;
-    auto& state = validated_buckets_[bucket];
-    for (;;) {
-      uint8_t expected = 0;
-      if (state.compare_exchange_weak(
-              expected, 1, std::memory_order_acq_rel,
-              std::memory_order_acquire)) {
-        return true;
-      }
-      if (expected == 2) return false;
-      std::this_thread::yield();
-    }
+    const uint64_t mask = uint64_t{1} << (bucket & 63);
+    return (validated_words_[bucket >> 6].load(
+                std::memory_order_acquire) & mask) == 0;
   }
   void finish_bucket_validation(size_t bucket) const {
     if (bucket < validated_bucket_count_) {
-      validated_buckets_[bucket].store(2, std::memory_order_release);
+      validated_words_[bucket >> 6].fetch_or(
+          uint64_t{1} << (bucket & 63), std::memory_order_release);
     }
   }
-  void cancel_bucket_validation(size_t bucket) const {
-    if (bucket < validated_bucket_count_) {
-      validated_buckets_[bucket].store(0, std::memory_order_release);
-    }
-  }
+  void cancel_bucket_validation(size_t) const {}
 
  private:
   void* address_ = nullptr;
   std::vector<uint8_t> owned_;
   size_t size_ = 0;
-  std::unique_ptr<std::atomic<uint8_t>[]> validated_buckets_;
+  std::unique_ptr<std::atomic<uint64_t>[]> validated_words_;
+  size_t validated_word_count_ = 0;
   size_t validated_bucket_count_ = 0;
 };
 
 namespace {
 
 constexpr std::array<char, 8> kSampledQgramMagic = {
-    'N', 'G', 'Q', 'P', 'O', 'S', '0', '6'};
-constexpr uint32_t kSampledQgramFormatVersion = 6;
+    'N', 'G', 'Q', 'P', 'O', 'S', '0', '7'};
+constexpr uint32_t kSampledQgramFormatVersion = 7;
 constexpr uint32_t kSampledQgramK = 13;
 constexpr uint32_t kSampledQgramPrefixK = 10;
 constexpr uint32_t kSampledQgramPeriod = 12;
@@ -268,7 +258,8 @@ uint64_t prefix_bucket_checksum(
     const uint32_t* positions, size_t begin, size_t end) {
   uint64_t checksum = kFnvOffset;
   hash_pod<uint32_t>(&checksum, prefix);
-  hash_pod<uint64_t>(&checksum, end - begin);
+  hash_pod<uint64_t>(&checksum, begin);
+  hash_pod<uint64_t>(&checksum, end);
   for (size_t entry = begin; entry < end; ++entry) {
     hash_pod<uint16_t>(&checksum, packed_suffix_at(suffixes, entry));
     hash_pod<uint32_t>(&checksum, positions[entry]);
@@ -283,9 +274,7 @@ uint64_t metadata_checksum(
     size_t prefix_bucket_count,
     size_t position_count,
     uint64_t reference_checksum,
-    const SampledQgramLayout& layout,
-    const uint32_t* offsets,
-    const uint64_t* checksums) {
+    const SampledQgramLayout& layout) {
   uint64_t checksum = kFnvOffset;
   hash_pod<uint32_t>(&checksum, kSampledQgramFormatVersion);
   hash_pod<uint32_t>(&checksum, kSampledQgramK);
@@ -309,12 +298,6 @@ uint64_t metadata_checksum(
     hash_pod<uint32_t>(&checksum, contig.end);
     hash_pod<uint32_t>(&checksum, contig.source_begin);
   }
-  hash_bytes(
-      &checksum, offsets,
-      (prefix_bucket_count + 1) * sizeof(uint32_t));
-  hash_bytes(
-      &checksum, checksums,
-      prefix_bucket_count * sizeof(uint64_t));
   return checksum;
 }
 
@@ -681,7 +664,7 @@ void build_sampled_qgram_index(
     const uint64_t stored_metadata_checksum = metadata_checksum(
         reference.sequence_size, reference.contigs, bucket_count,
         prefix_bucket_count, position_count, reference_checksum,
-        layout, offsets, checksums);
+        layout);
     uint8_t* cursor = bytes;
     const auto write_field = [&cursor](const auto& value) {
       std::memcpy(cursor, &value, sizeof(value));
@@ -1041,18 +1024,12 @@ SampledQgramIndex load_sampled_qgram_index(
     throw std::runtime_error(
         "sampled q-gram offsets are inconsistent");
   }
-  for (size_t prefix = 0; prefix < prefix_bucket_count; ++prefix) {
-    if (offsets[prefix] > offsets[prefix + 1]) {
-      throw std::runtime_error(
-          "sampled q-gram offsets are not monotonic");
-    }
-  }
   const uint64_t actual_metadata_checksum = metadata_checksum(
       static_cast<size_t>(sequence_size), stored_contigs,
       static_cast<size_t>(bucket_count),
       static_cast<size_t>(prefix_bucket_count),
       static_cast<size_t>(position_count), reference_checksum,
-      layout, offsets, checksums);
+      layout);
   if (actual_metadata_checksum != stored_metadata_checksum) {
     throw std::runtime_error(
         "sampled q-gram metadata checksum mismatch");

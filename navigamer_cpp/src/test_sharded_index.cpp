@@ -1150,6 +1150,44 @@ void test_repetitive_sampled_qgram_batch_matches_sequential() {
     assert(starts(result) == expected_starts);
   }
 
+  uint32_t query_code = 0;
+  for (size_t base = 0; base < occurrence_index.k; ++base) {
+    const uint32_t code = query[base] == 'A' ? 0
+        : query[base] == 'C' ? 1
+        : query[base] == 'G' ? 2 : 3;
+    query_code = (query_code << 2) | code;
+  }
+  const uint32_t query_prefix = query_code >>
+      (2 * (occurrence_index.k - occurrence_index.prefix_k));
+  uint64_t checksums_begin = 0;
+  {
+    std::fstream damaged(
+        bundle.string() + ".qpos",
+        std::ios::in | std::ios::out | std::ios::binary);
+    assert(damaged.good());
+    damaged.seekg(96);
+    damaged.read(
+        reinterpret_cast<char*>(&checksums_begin),
+        sizeof(checksums_begin));
+    const auto checksum_offset = static_cast<std::streamoff>(
+        checksums_begin + query_prefix * sizeof(uint64_t));
+    damaged.seekg(checksum_offset);
+    char byte = 0;
+    damaged.get(byte);
+    damaged.seekp(checksum_offset);
+    damaged.put(static_cast<char>(byte ^ 1));
+  }
+  const auto damaged_occurrence_index =
+      navigamer::load_sampled_qgram_index(
+          bundle.string(), manifest, packed_reference);
+  bool damaged_bucket_rejected = false;
+  try {
+    (void)damaged_occurrence_index.posting_list(query_code);
+  } catch (const std::runtime_error&) {
+    damaged_bucket_rejected = true;
+  }
+  assert(damaged_bucket_rejected);
+
   std::filesystem::remove_all(directory);
 }
 
