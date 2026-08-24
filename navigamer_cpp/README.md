@@ -350,7 +350,9 @@ in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed
 parts, with oversized routed selections split at the same 64-shard cap. Any
 fallback query conservatively searches every part without mapping
-the whole human index at once. Batch planning and active-engine lookup use
+the whole human index at once. On machines with more than 32 OpenMP workers,
+these two commands default to 32; an explicit `OMP_NUM_THREADS` value always
+takes precedence. Batch planning and active-engine lookup use
 only the sorted IDs in the current bounded group, with no bitmap or reverse
 map proportional to the total shard count. FASTQ records and route plans are
 streamed in blocks of at most 8,192 queries; unchanged resident shard groups

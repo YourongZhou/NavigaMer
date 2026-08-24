@@ -380,6 +380,9 @@ batch, search those parts in parallel, and merge identical sequences and all
 of their occurrences before reporting results. Routed selections larger than
 64 shards use the same bounded groups. A fallback query searches every
 shard to preserve recall without mapping the complete human index at once.
+On machines with more than 32 OpenMP workers, these two commands default to
+32 because the exact-reference query path is memory-bandwidth bound; an
+explicit `OMP_NUM_THREADS` value always takes precedence.
 Large per-minimizer shard ranges are already sorted, so routing merges them
 directly into the final unique ID list. A small-sort fast path retains at most
 4,096 expanded IDs (16 KiB), bounding temporary route memory by the selected

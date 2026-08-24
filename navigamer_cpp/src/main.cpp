@@ -27,6 +27,7 @@
 #include <memory>
 #include <random>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <exception>
@@ -41,6 +42,14 @@
 #include <omp.h>
 
 namespace {
+
+void configure_default_query_threads() {
+  constexpr int kDefaultQueryThreadCap = 32;
+  if (std::getenv("OMP_NUM_THREADS") == nullptr &&
+      omp_get_max_threads() > kDefaultQueryThreadCap) {
+    omp_set_num_threads(kDefaultQueryThreadCap);
+  }
+}
 
 void usage(const char* prog) {
   std::cerr << "Usage:\n"
@@ -3932,6 +3941,7 @@ int main(int argc, char** argv) {
 	        std::cerr << "query-index requires --index and --query\n";
 	        return 1;
 	      }
+	      configure_default_query_threads();
 	      run_query(ref_input, "", query_seq, tolerance, mode, hierarchy,
 	                range_config, search_config, index_path);
 	      return 0;
@@ -3941,6 +3951,7 @@ int main(int argc, char** argv) {
 	        std::cerr << "query-index-batch requires --index, --reads, and --out\n";
 	        return 1;
 	      }
+	      configure_default_query_threads();
 	      run_query_index_batch(index_path, reads_input, tolerance, out_tsv,
 	                            path_trace_out, mode, search_config);
 	      return 0;
