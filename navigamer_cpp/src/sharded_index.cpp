@@ -24,6 +24,7 @@
 #include <queue>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -60,13 +61,28 @@ class PackedReferenceFileMapping {
       validated_blocks_[block].store(0, std::memory_order_relaxed);
     }
   }
-  bool block_validated(size_t block) const {
-    return block < validated_block_count_ &&
-           validated_blocks_[block].load(std::memory_order_acquire) != 0;
+  bool begin_block_validation(size_t block) const {
+    if (block >= validated_block_count_) return true;
+    auto& state = validated_blocks_[block];
+    for (;;) {
+      uint8_t expected = 0;
+      if (state.compare_exchange_weak(
+              expected, 1, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        return true;
+      }
+      if (expected == 2) return false;
+      std::this_thread::yield();
+    }
   }
-  void mark_block_validated(size_t block) const {
+  void finish_block_validation(size_t block) const {
     if (block < validated_block_count_) {
-      validated_blocks_[block].store(1, std::memory_order_release);
+      validated_blocks_[block].store(2, std::memory_order_release);
+    }
+  }
+  void cancel_block_validation(size_t block) const {
+    if (block < validated_block_count_) {
+      validated_blocks_[block].store(0, std::memory_order_release);
     }
   }
   void prefetch(size_t begin, size_t end) const {
@@ -1989,14 +2005,15 @@ void PackedReferenceFile::slice(
     }
     const uint8_t* packed = mapping->data() + raw_offset;
     const uint8_t* mask = ambiguous ? packed + base_bytes : nullptr;
-    if (!mapping->block_validated(block_idx)) {
+    if (mapping->begin_block_validation(block_idx)) {
       uint64_t checksum = kFnvOffset;
       hash_bytes(&checksum, packed, raw_size);
       if (checksum != block_checksums[block_idx]) {
+        mapping->cancel_block_validation(block_idx);
         throw std::runtime_error(
             "packed reference block checksum mismatch");
       }
-      mapping->mark_block_validated(block_idx);
+      mapping->finish_block_validation(block_idx);
     }
     const size_t copy_end = std::min(end, block_end);
     for (size_t position = cursor_pos;
@@ -3333,7 +3350,12 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     build_packed_reference_sidecar(
         bundle, part_manifest, reference_size, reference_contigs,
         load_slice, contiguous_reference);
-    (void)load_packed_reference_file(bundle_path, manifest);
+  }
+  const auto packed_reference =
+      load_packed_reference_file(bundle_path, manifest);
+  if (window_length >= kRouterWindow) {
+    ensure_sampled_qgram_index(
+        bundle_path, manifest, packed_reference);
   }
   save_sharded_index_manifest(bundle_path, manifest);
   return manifest;

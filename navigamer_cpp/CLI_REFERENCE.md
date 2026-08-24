@@ -327,6 +327,14 @@ Every sharded bundle also stores a self-contained `.ref2` sidecar. A/C/G/T
 use exactly two bits per base; only 4,096-base blocks containing ambiguity
 symbols add a one-bit mask. Block checksums are validated lazily on first
 access, and the file is mmap-decoded without materializing the reference.
+Bundles whose windows are at least 24 bases additionally store a memory-mapped
+`.qpos` sidecar. It records exact 13-mer positions every 12 contig-local bases.
+When every one of the query's `d + 1` pigeonhole blocks is at least 24 bases
+and contains only A/C/G/T, an exact block must contain a sampled 13-mer. Query
+therefore enumerates every possible hit start directly, expands `[-d,+d]` for
+indel displacement, enforces contig and stride bounds, and runs exact bounded
+Myers verification. This direct path loads neither `.route` nor graph shards
+and remains no-FN-safe; unsupported queries keep the conservative fallback.
 Multi-part bundles with
 windows of at least 24 bases also store a memory-mapped `.route` sidecar of
 exact 16-mer minimizers. Sorted minimizers use exact 16-entry blocks with one
@@ -352,7 +360,9 @@ block resolution followed by exact verification. Missing
 or inconsistent reference metadata disables this optional stage without
 changing the minimizer route. Batch stderr reports
 `exact_block_direct_queries`, `exact_block_shards=matched/routed`,
-`exact_block_candidate_windows`, and `exact_block_distance_calls`.
+`exact_block_candidate_windows`, `exact_block_distance_calls`, and
+`sampled_qgram_direct_queries`. When all supported queries use `.qpos`,
+`peak_route_ids` and `searched_shards` are both zero by construction.
 With `--router-only 1`, graph payloads are deliberately absent, so direct
 verification is mandatory rather than optional. A self-contained mmap-backed
 `.ref2` sidecar stores two-bit bases plus ambiguity masks only for affected
@@ -367,7 +377,7 @@ contiguously to a temporary spool, then memory-maps and k-way merges the lists
 directly into the sidecar. The spool uses exactly four bytes per minimizer and
 has no per-shard page padding; offsets are 64-bit and counts are 32-bit. This
 changes build storage and peak memory, not query-time layout.
-Compatible completed `.route` and `.ref2` sidecars are reused on restart.
+Compatible completed `.route`, `.ref2`, and `.qpos` sidecars are reused on restart.
 Before the large router spool is mapped, file-backed FASTA pages from the
 generation pass are discarded, preventing the two sequential working sets
 from adding at peak.
@@ -849,7 +859,7 @@ rebinding.
 | `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_build_timing_stats` | Construction timing field and summary smoke checks |
 | `test_build_scale_smoke` | `build-scale` CSV timing smoke check |
-| `test_sharded_index_bin` | Monolithic/sharded window and coordinate equivalence, restart/repair, substitution/indel router no-FN checks, and conservative fallback |
+| `test_sharded_index_bin` | Monolithic/sharded window and coordinate equivalence, restart/repair, substitution/indel router no-FN checks, sampled-position batch/sequential equivalence on repetitive input, and conservative fallback |
 | `test_build_progress_bin` | Timestamped build progress formatting, forced boundaries, and periodic heartbeat |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |

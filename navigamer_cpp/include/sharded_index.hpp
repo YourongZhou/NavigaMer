@@ -19,6 +19,7 @@ constexpr uint32_t kRouterCodeGroupsPerSupergroup = 256;
 struct IndexedReferenceFile;
 struct ShardedIndexManifest;
 class PackedReferenceFileMapping;
+class SampledQgramFileMapping;
 
 struct PackedReferenceFile {
   std::string path;
@@ -149,6 +150,37 @@ struct ShardedSeedRouter {
       std::string_view query, int tolerance) const;
 };
 
+// Every k-mer beginning at a reference position divisible by sample_period is
+// stored with its exact reference position.  For an exact block of length at
+// least k + sample_period - 1, one of its first sample_period k-mers must begin
+// at a sampled reference position.  Looking up all of those k-mers therefore
+// enumerates every exact block occurrence without scanning logical shards.
+struct SampledQgramIndex {
+  std::string path;
+  uint32_t k = 0;
+  uint32_t prefix_k = 0;
+  uint32_t sample_period = 0;
+  size_t sequence_size = 0;
+  size_t bucket_count = 0;
+  size_t prefix_bucket_count = 0;
+  size_t position_count = 0;
+
+  bool enabled() const;
+  bool supports(std::string_view query, int tolerance) const;
+  std::pair<const uint32_t*, const uint32_t*> posting_list(
+      uint32_t code) const;
+
+ private:
+  friend SampledQgramIndex load_sampled_qgram_index(
+      const std::string&, const ShardedIndexManifest&,
+      const PackedReferenceFile&);
+  std::shared_ptr<const SampledQgramFileMapping> mapping;
+  const uint64_t* bucket_offsets = nullptr;
+  const uint64_t* bucket_checksums = nullptr;
+  const uint8_t* packed_suffixes = nullptr;
+  const uint32_t* positions = nullptr;
+};
+
 bool is_sharded_index(const std::string& path);
 
 void save_sharded_index_manifest(
@@ -169,6 +201,32 @@ ShardedSeedRouter load_sharded_seed_router(
 PackedReferenceFile load_packed_reference_file(
     const std::string& manifest_path,
     const ShardedIndexManifest& manifest);
+
+SampledQgramIndex load_sampled_qgram_index(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference);
+
+// Build the sidecar only when an identical validated image cannot be reused.
+void ensure_sampled_qgram_index(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference);
+
+std::vector<ExactBlockVerificationResult>
+verify_by_sampled_qgram_positions_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const SampledQgramIndex& occurrence_index,
+    const std::vector<std::string_view>& queries);
+
+ExactBlockVerificationResult verify_by_sampled_qgram_positions(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const SampledQgramIndex& occurrence_index);
 
 // Use exact pigeonhole-block occurrences to enumerate every possible indexed
 // window start, then verify those windows with exact bounded edit distance.

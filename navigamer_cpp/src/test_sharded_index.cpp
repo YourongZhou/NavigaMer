@@ -268,6 +268,28 @@ void test_indexed_reference_file_slices() {
   assert(packed_reference.slice(
              first.size(), loaded.sequence.size()) ==
          loaded.sequence.substr(first.size()));
+  const auto packed_occurrence_index =
+      navigamer::load_sampled_qgram_index(
+          packed_bundle.string(), packed_manifest, packed_reference);
+  const std::string boundary_query = first.substr(first.size() - 24);
+  assert(packed_occurrence_index.supports(boundary_query, 0));
+  const auto boundary_direct =
+      navigamer::verify_by_sampled_qgram_positions(
+          boundary_query, 0, packed_manifest, packed_reference,
+          packed_occurrence_index);
+  assert(boundary_direct.enabled);
+  assert(std::any_of(
+      boundary_direct.occurrences.begin(),
+      boundary_direct.occurrences.end(),
+      [&](const navigamer::ExactBlockVerifiedOccurrence& occurrence) {
+        return occurrence.contig_id == 0 &&
+               occurrence.source_start == first.size() - 24;
+      }));
+  assert(!packed_occurrence_index.supports(
+      boundary_query.substr(0, 23), 0));
+  std::string ambiguous_query = boundary_query;
+  ambiguous_query[3] = 'N';
+  assert(!packed_occurrence_index.supports(ambiguous_query, 0));
 
   std::filesystem::remove_all(directory);
 }
@@ -604,6 +626,8 @@ void test_seed_router_no_false_negatives() {
       std::filesystem::file_size(bundle.string() + ".route"));
   const auto router_write_time =
       std::filesystem::last_write_time(bundle.string() + ".route");
+  const auto qpos_write_time =
+      std::filesystem::last_write_time(bundle.string() + ".qpos");
   assert(compact_router_bytes < raw_router_bytes);
   assert(compact_router_bytes <
          40 + manifest.router_entry_count * sizeof(uint64_t));
@@ -618,6 +642,8 @@ void test_seed_router_no_false_negatives() {
          manifest.router_checksum);
   assert(std::filesystem::last_write_time(
              bundle.string() + ".route") == router_write_time);
+  assert(std::filesystem::last_write_time(
+             bundle.string() + ".qpos") == qpos_write_time);
   assert(!std::filesystem::exists(
       bundle.string() + ".route.packed.tmp"));
   assert(!std::filesystem::exists(
@@ -826,6 +852,13 @@ void test_seed_router_no_false_negatives() {
       navigamer::load_packed_reference_file(
           short_router_only_bundle.string(),
           short_router_only_manifest);
+  const auto short_occurrence_index =
+      navigamer::load_sampled_qgram_index(
+          short_router_only_bundle.string(),
+          short_router_only_manifest, short_packed_reference);
+  assert(short_occurrence_index.enabled());
+  assert(short_occurrence_index.k == 13);
+  assert(short_occurrence_index.sample_period == 12);
   for (size_t source_pos : {size_t{0}, size_t{98}, size_t{300}}) {
     const std::string exact = reference.substr(source_pos, 150);
     for (size_t edit_case = 0; edit_case < 4; ++edit_case) {
@@ -870,6 +903,12 @@ void test_seed_router_no_false_negatives() {
               router_only_route.shard_ids.data() +
                   router_only_route.shard_ids.size());
       assert(direct.enabled);
+      assert(short_occurrence_index.supports(sequence, 5));
+      const auto position_direct =
+          navigamer::verify_by_sampled_qgram_positions(
+              sequence, 5, short_router_only_manifest,
+              short_packed_reference, short_occurrence_index);
+      assert(position_direct.enabled);
       navigamer::BioSequence query(
           "router_150_" + std::to_string(source_pos) + "_" +
           std::to_string(edit_case), sequence);
@@ -884,6 +923,13 @@ void test_seed_router_no_false_negatives() {
       }
       assert(matching_occurrences(short_shards, query, 5) ==
              direct_occurrences);
+      std::set<Occurrence> position_direct_occurrences;
+      for (const auto& occurrence : position_direct.occurrences) {
+        position_direct_occurrences.emplace(
+            short_manifest.contig_ids[occurrence.contig_id],
+            occurrence.source_start, occurrence.sequence);
+      }
+      assert(position_direct_occurrences == direct_occurrences);
       if (source_pos == 0 && edit_case == 0) {
         std::string lowercase = sequence;
         std::transform(
@@ -932,10 +978,20 @@ void test_seed_router_no_false_negatives() {
       navigamer::verify_selected_shards_by_exact_blocks_batch(
           5, short_router_only_manifest, short_packed_reference,
           batch_requests);
+  std::vector<std::string_view> batch_sequence_views;
+  for (const auto& sequence : batch_sequences) {
+    batch_sequence_views.emplace_back(sequence);
+  }
+  const auto position_batch_results =
+      navigamer::verify_by_sampled_qgram_positions_batch(
+          5, short_router_only_manifest, short_packed_reference,
+          short_occurrence_index, batch_sequence_views);
   assert(batch_results.size() == batch_sequences.size());
+  assert(position_batch_results.size() == batch_sequences.size());
   for (size_t query_idx = 0; query_idx < batch_results.size();
        ++query_idx) {
     assert(batch_results[query_idx].enabled);
+    assert(position_batch_results[query_idx].enabled);
     std::set<Occurrence> batch_occurrences;
     for (const auto& occurrence : batch_results[query_idx].occurrences) {
       batch_occurrences.emplace(
@@ -947,6 +1003,14 @@ void test_seed_router_no_false_negatives() {
         batch_sequences[query_idx]);
     assert(matching_occurrences(short_shards, query, 5) ==
            batch_occurrences);
+    std::set<Occurrence> position_batch_occurrences;
+    for (const auto& occurrence :
+         position_batch_results[query_idx].occurrences) {
+      position_batch_occurrences.emplace(
+          short_manifest.contig_ids[occurrence.contig_id],
+          occurrence.source_start, occurrence.sequence);
+    }
+    assert(position_batch_occurrences == batch_occurrences);
   }
 
   const std::string exact = reference.substr(98, window);
@@ -980,6 +1044,74 @@ void test_seed_router_no_false_negatives() {
     damaged_block_rejected = true;
   }
   assert(damaged_block_rejected);
+
+  std::filesystem::remove_all(directory);
+}
+
+void test_repetitive_sampled_qgram_batch_matches_sequential() {
+  constexpr size_t window = 150;
+  constexpr size_t period_count = 17000;
+  const std::string motif = "ACGTTGCAACGA";
+  std::string reference;
+  reference.reserve(period_count * motif.size() + window);
+  for (size_t repeat = 0; repeat < period_count; ++repeat) {
+    reference += motif;
+  }
+  reference += motif.substr(0, window % motif.size());
+  const std::vector<navigamer::ReferenceContig> contigs = {
+      {"chrRepeat", 0, static_cast<uint32_t>(reference.size()), 0}};
+  navigamer::HierarchyConfig hierarchy({8, 4, 2});
+  navigamer::BuildRangeConfig range_config;
+  range_config.emit_build_output = false;
+
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("navigamer-repetitive-qgram-test-" +
+       std::to_string(static_cast<unsigned long long>(::getpid())));
+  std::filesystem::create_directories(directory);
+  const auto bundle = directory / "reference.navshard";
+  const auto manifest = navigamer::build_sharded_reference_index(
+      bundle.string(), "literal-repetitive-reference", "chrRepeat",
+      reference, contigs, window, 1, 5000, hierarchy, range_config, 2,
+      false);
+  const auto packed_reference = navigamer::load_packed_reference_file(
+      bundle.string(), manifest);
+  const auto occurrence_index = navigamer::load_sampled_qgram_index(
+      bundle.string(), manifest, packed_reference);
+  assert(occurrence_index.position_count > 2 * (size_t{8} << 10));
+
+  const std::string query = reference.substr(0, window);
+  const auto sequential = navigamer::verify_by_sampled_qgram_positions(
+      query, 0, manifest, packed_reference, occurrence_index);
+  const std::vector<std::string_view> queries = {query, query};
+  const auto batch = navigamer::verify_by_sampled_qgram_positions_batch(
+      0, manifest, packed_reference, occurrence_index, queries);
+  assert(sequential.enabled);
+  assert(batch.size() == queries.size());
+
+  std::set<uint32_t> expected_starts;
+  for (size_t start = 0; start + window <= reference.size();
+       start += motif.size()) {
+    expected_starts.insert(static_cast<uint32_t>(start));
+  }
+  const auto starts = [&](const navigamer::ExactBlockVerificationResult& result) {
+    std::set<uint32_t> found;
+    for (const auto& occurrence : result.occurrences) {
+      assert(occurrence.contig_id == 0);
+      assert(occurrence.distance == 0);
+      assert(occurrence.sequence == query);
+      found.insert(occurrence.source_start);
+    }
+    return found;
+  };
+  assert(starts(sequential) == expected_starts);
+  for (const auto& result : batch) {
+    assert(result.enabled);
+    assert(result.candidate_window_count ==
+           sequential.candidate_window_count);
+    assert(result.distance_call_count == sequential.distance_call_count);
+    assert(starts(result) == expected_starts);
+  }
 
   std::filesystem::remove_all(directory);
 }
@@ -1140,6 +1272,7 @@ int main() {
   test_router_intersects_minimizers_within_one_partition();
   test_sharded_round_trip_and_no_false_negatives();
   test_seed_router_no_false_negatives();
+  test_repetitive_sampled_qgram_batch_matches_sequential();
   test_implicit_dense_leaf_fields();
   test_child_mbb_width_fallback_for_three_widths();
   std::cout << "sharded index tests passed\n";

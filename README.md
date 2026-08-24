@@ -336,6 +336,15 @@ router sidecar. A self-contained `.ref2` sidecar stores A/C/G/T at two bits
 per base and adds an ambiguity mask only for affected 4,096-base blocks;
 queries mmap and checksum only touched blocks. Pack entries contain only independently decodable graph
 payloads, rather than repeating the common manifest for every logical shard.
+Bundles with windows of at least 24 bases also store a `.qpos` sidecar: one
+exact 13-mer reference position every 12 bases within each contig. If every one
+of a query's `d + 1` pigeonhole blocks is at least 24 bases, query can use this
+sidecar without loading `.route` or any world-tree payload. At least one block
+of every edit-distance-`d` hit is exact; every 24-base exact block contains a
+sampled 13-mer; and all resulting starts in the `[-d,+d]` indel range are
+checked with exact bounded Myers distance. Thus this is a complete candidate
+enumerator, not a heuristic filter. Unsupported queries retain the existing
+conservative route/graph fallback (or fail closed for router-only bundles).
 Paired child-MBB coordinates are ranked only among quantized states permitted
 by their exact beacon-pair distance. This reconstructs the same conservative
 distance bins while using fewer than the former fixed seven bits whenever the

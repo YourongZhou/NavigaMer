@@ -312,6 +312,17 @@ within edit distance `d` must contain one whole block exactly. The router
 therefore intersects all minimizer postings inside each block, then unions the
 `d + 1` block results; the exact block and its true shard survive every
 intersection, so the pruning remains no-FN-safe.
+Every bundle with windows of at least 24 bases also stores a memory-mapped
+`.qpos` sidecar containing exact 13-mer positions sampled every 12 bases within
+each contig. It is used when all `d + 1` query blocks are at least 24 bases and
+contain only A/C/G/T. The pigeonhole principle leaves one block exact for every
+true hit, and any exact 24-base block contains one sampled 13-mer. The verifier
+confirms the complete block, expands its implied window start by `[-d,+d]` for
+indel displacement, applies contig/stride bounds, and finally computes exact
+bounded Myers distance. Consequently it can bypass both `.route` and graph
+loading without introducing false negatives. Unsupported queries use the
+existing conservative route/graph path; router-only bundles fail closed if no
+exact direct verifier supports the query.
 Pack paths and contig names are interned once in the manifest; logical-shard
 descriptors contain only fixed-width numeric fields and occupy 40 bytes in
 memory on the supported 64-bit build. Unsupported short/ambiguous queries or
@@ -379,7 +390,7 @@ four bytes per minimizer, with no per-shard page padding. List starts are
 implicit prefix sums, so build metadata stores only one 32-bit count per shard;
 the merge heap reserves exactly one cursor per non-empty shard, uses a 12-byte
 cursor below 2^32 entries, and advances by absolute entry index. Query-time
-layout is unchanged. Compatible `.route` and `.ref2` files are reused on
+layout is unchanged. Compatible `.route`, `.ref2`, and `.qpos` files are reused on
 restart. File-backed builds discard FASTA pages before mapping the router
 spool, so those two large sequential working sets do not overlap at peak.
 

@@ -544,9 +544,11 @@ int main() {
         (std::istreambuf_iterator<char>(stderr_in)),
         std::istreambuf_iterator<char>());
     assert(stderr_text.find("Queries: 185") != std::string::npos);
-    assert(stderr_text.find("peak_route_ids=66045") !=
+    assert(stderr_text.find("peak_route_ids=0") !=
            std::string::npos);
     assert(stderr_text.find("exact_block_direct_queries=185") !=
+           std::string::npos);
+    assert(stderr_text.find("sampled_qgram_direct_queries=185") !=
            std::string::npos);
     assert(stderr_text.find("routed_queries=185/185") !=
            std::string::npos);
