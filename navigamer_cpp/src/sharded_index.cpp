@@ -1,8 +1,11 @@
 #include "sharded_index.hpp"
 #include "io_utils.hpp"
+#include "tools.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -12,13 +15,16 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <omp.h>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -31,6 +37,84 @@
 
 namespace navigamer {
 
+class PackedReferenceFileMapping {
+ public:
+  PackedReferenceFileMapping(void* address, size_t size)
+      : address_(address), size_(size) {}
+  explicit PackedReferenceFileMapping(std::vector<uint8_t> bytes)
+      : owned_(std::move(bytes)), size_(owned_.size()) {}
+  ~PackedReferenceFileMapping() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (address_ && size_ != 0) munmap(address_, size_);
+#endif
+  }
+  const uint8_t* data() const {
+    return address_ ? static_cast<const uint8_t*>(address_)
+                    : owned_.data();
+  }
+  size_t size() const { return size_; }
+  void initialize_block_validation(size_t block_count) {
+    validated_block_count_ = block_count;
+    validated_word_count_ = (block_count + 63) / 64;
+    validated_words_ = std::make_unique<std::atomic<uint64_t>[]>(
+        validated_word_count_);
+    for (size_t word = 0; word < validated_word_count_; ++word) {
+      validated_words_[word].store(0, std::memory_order_relaxed);
+    }
+  }
+  bool begin_block_validation(size_t block) const {
+    if (block >= validated_block_count_) return true;
+    const uint64_t mask = uint64_t{1} << (block & 63);
+    return (validated_words_[block >> 6].load(
+                std::memory_order_acquire) & mask) == 0;
+  }
+  void finish_block_validation(size_t block) const {
+    if (block < validated_block_count_) {
+      validated_words_[block >> 6].fetch_or(
+          uint64_t{1} << (block & 63), std::memory_order_release);
+    }
+  }
+  void cancel_block_validation(size_t) const {}
+  void prefetch(size_t begin, size_t end) const {
+#if defined(__unix__) || defined(__APPLE__)
+#if defined(MADV_WILLNEED)
+    if (!address_ || begin >= end || begin >= size_) return;
+    end = std::min(end, size_);
+    static const size_t page_size = [] {
+      const long raw_page_size = sysconf(_SC_PAGESIZE);
+      return raw_page_size > 0
+          ? static_cast<size_t>(raw_page_size)
+          : size_t{4096};
+    }();
+    const size_t aligned_begin = begin - begin % page_size;
+    const size_t end_remainder = end % page_size;
+    const size_t end_advance = end_remainder == 0
+        ? 0
+        : page_size - end_remainder;
+    const size_t aligned_end = end_advance > size_ - end
+        ? size_
+        : end + end_advance;
+    if (aligned_begin < aligned_end) {
+      (void)madvise(
+          static_cast<uint8_t*>(address_) + aligned_begin,
+          aligned_end - aligned_begin, MADV_WILLNEED);
+    }
+#endif
+#else
+    (void)begin;
+    (void)end;
+#endif
+  }
+
+ private:
+  void* address_ = nullptr;
+  std::vector<uint8_t> owned_;
+  size_t size_ = 0;
+  std::unique_ptr<std::atomic<uint64_t>[]> validated_words_;
+  size_t validated_word_count_ = 0;
+  size_t validated_block_count_ = 0;
+};
+
 namespace {
 
 constexpr std::array<char, 8> kShardMagic = {
@@ -39,9 +123,21 @@ constexpr std::array<char, 8> kShardPackMagic = {
     'N', 'G', 'P', 'A', 'C', 'K', '1', '3'};
 constexpr std::array<char, 8> kRouterMagic = {
     'N', 'G', 'R', 'O', 'U', 'T', '0', '4'};
+constexpr std::array<char, 8> kPackedReferenceMagic = {
+    'N', 'G', 'R', 'E', 'F', '2', '0', '4'};
 constexpr uint32_t kShardFormatVersion = 20;
 constexpr uint32_t kShardPackFormatVersion = 13;
 constexpr uint32_t kRouterFormatVersion = 5;
+constexpr uint32_t kPackedReferenceFormatVersion = 4;
+constexpr uint32_t kPackedReferenceBlockBases = 4096;
+constexpr uint32_t kPackedReferenceChecksumBlockBases = 512;
+static_assert(
+    kPackedReferenceBlockBases % kPackedReferenceChecksumBlockBases == 0,
+    "checksum blocks must exactly partition ambiguity blocks");
+static_assert(
+    kPackedReferenceChecksumBlockBases % 4 == 0,
+    "checksum blocks must contain whole packed bytes");
+constexpr size_t kPackedReferenceHeaderBytes = 88;
 constexpr size_t kRouterHeaderBytes = 80;
 constexpr std::streamoff kRouterCodePayloadSizeOffset = 60;
 constexpr std::streamoff kRouterChecksumOffset = 68;
@@ -160,6 +256,94 @@ void hash_string(uint64_t* hash, const std::string& value) {
   hash_bytes(hash, value.data(), value.size());
 }
 
+size_t checked_reference_add(size_t left, size_t right) {
+  if (right > std::numeric_limits<size_t>::max() - left) {
+    throw std::runtime_error("packed reference size overflow");
+  }
+  return left + right;
+}
+
+size_t checked_reference_multiply(size_t left, size_t right) {
+  if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
+    throw std::runtime_error("packed reference size overflow");
+  }
+  return left * right;
+}
+
+size_t align_reference_offset(size_t offset, size_t alignment) {
+  const size_t remainder = offset % alignment;
+  return remainder == 0
+      ? offset
+      : checked_reference_add(offset, alignment - remainder);
+}
+
+struct PackedReferenceLayout {
+  size_t contigs_begin = kPackedReferenceHeaderBytes;
+  size_t ambiguity_bitmap_begin = 0;
+  size_t block_checksums_begin = 0;
+  size_t ambiguity_run_offsets_begin = 0;
+  size_t payload_begin = 0;
+  size_t ambiguity_runs_begin = 0;
+  size_t total_size = 0;
+  size_t block_count = 0;
+  size_t checksum_block_count = 0;
+  size_t bitmap_word_count = 0;
+};
+
+PackedReferenceLayout packed_reference_layout(
+    size_t sequence_size,
+    size_t contig_count,
+    size_t ambiguous_block_count,
+    size_t ambiguity_run_count) {
+  PackedReferenceLayout layout;
+  layout.block_count =
+      (sequence_size + kPackedReferenceBlockBases - 1) /
+      kPackedReferenceBlockBases;
+  layout.checksum_block_count =
+      (sequence_size + kPackedReferenceChecksumBlockBases - 1) /
+      kPackedReferenceChecksumBlockBases;
+  layout.bitmap_word_count = (layout.block_count + 63) / 64;
+  const size_t contig_bytes = checked_reference_multiply(
+      contig_count, size_t{3} * sizeof(uint32_t));
+  layout.ambiguity_bitmap_begin = align_reference_offset(
+      checked_reference_add(layout.contigs_begin, contig_bytes),
+      alignof(uint64_t));
+  layout.block_checksums_begin = checked_reference_add(
+      layout.ambiguity_bitmap_begin,
+      checked_reference_multiply(
+          layout.bitmap_word_count, sizeof(uint64_t)));
+  layout.ambiguity_run_offsets_begin = align_reference_offset(
+      checked_reference_add(
+          layout.block_checksums_begin,
+          checked_reference_multiply(
+              layout.checksum_block_count, sizeof(uint64_t))),
+      alignof(uint32_t));
+  layout.payload_begin = align_reference_offset(
+      checked_reference_add(
+          layout.ambiguity_run_offsets_begin,
+          checked_reference_multiply(
+              checked_reference_add(ambiguous_block_count, 1),
+              sizeof(uint32_t))),
+      64);
+  const size_t base_bytes = (sequence_size + 3) / 4;
+  layout.ambiguity_runs_begin = align_reference_offset(
+      checked_reference_add(layout.payload_begin, base_bytes),
+      alignof(PackedReferenceAmbiguityRun));
+  layout.total_size = checked_reference_add(
+      layout.ambiguity_runs_begin,
+      checked_reference_multiply(
+          ambiguity_run_count,
+          sizeof(PackedReferenceAmbiguityRun)));
+  return layout;
+}
+
+uint64_t reference_fingerprint_checksum(
+    const std::string& fingerprint) {
+  uint64_t checksum = kFnvOffset;
+  hash_string(&checksum, fingerprint);
+  return checksum;
+}
+
 void hash_build_manifest(
     uint64_t* hash, const IndexBuildManifest& manifest) {
   std::ostringstream encoded(std::ios::out | std::ios::binary);
@@ -208,6 +392,11 @@ uint64_t manifest_checksum(
 std::filesystem::path router_output_path(
     const std::filesystem::path& bundle_path) {
   return bundle_path.string() + ".route";
+}
+
+std::filesystem::path packed_reference_output_path(
+    const std::filesystem::path& bundle_path) {
+  return bundle_path.string() + ".ref2";
 }
 
 uint32_t required_shard_id_bits(uint32_t shard_count) {
@@ -1046,9 +1235,19 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
       manifest.part_manifest.world_node_count != 0 ||
       manifest.part_manifest.edge_count != 0 ||
       manifest.part_manifest.leaf_link_count != 0 ||
-      manifest.pack_paths.empty() || manifest.contig_ids.empty() ||
-      manifest.shards.empty()) {
-    throw std::runtime_error("sharded index contains no shards");
+      manifest.contig_ids.empty()) {
+    throw std::runtime_error("sharded index metadata is invalid");
+  }
+  const bool has_graph_payloads = !manifest.pack_paths.empty();
+  const bool has_router = manifest.router_entry_count != 0;
+  if (manifest.shards.empty()) {
+    if (has_graph_payloads || has_router ||
+        manifest.total_window_count == 0 ||
+        manifest.total_sequence_count != 0 ||
+        manifest.total_world_node_count != 0 ||
+        manifest.window_length < kRouterWindow) {
+      throw std::runtime_error("sharded index contains no shards");
+    }
   }
   if (manifest.pack_paths.size() > manifest.shards.size()) {
     throw std::runtime_error("sharded index has too many pack files");
@@ -1066,7 +1265,6 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
   if (manifest.shards.size() > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("sharded index has too many router targets");
   }
-  const bool has_router = manifest.router_entry_count != 0;
   if (has_router) {
     if (manifest.router_k == 0 || manifest.router_k > 16 ||
         manifest.router_window < manifest.router_k ||
@@ -1080,6 +1278,11 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
     throw std::runtime_error(
         "sharded index has inconsistent empty router metadata");
   }
+  if (!has_graph_payloads && !has_router &&
+      manifest.window_length < kRouterWindow) {
+    throw std::runtime_error(
+        "direct-only sharded index window is too short");
+  }
   size_t total_windows = 0;
   size_t total_sequences = 0;
   size_t total_nodes = 0;
@@ -1087,22 +1290,29 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
   std::vector<uint64_t> pack_ends(manifest.pack_paths.size(), 0);
   std::vector<uint8_t> pack_referenced(manifest.pack_paths.size(), 0);
   for (const auto& shard : manifest.shards) {
-    if (shard.pack_id >= manifest.pack_paths.size() ||
-        shard.contig_id >= manifest.contig_ids.size() ||
-        shard.file_offset % kShardPackAlignment != 0 ||
-        shard.file_size == 0 ||
-        shard.window_count == 0) {
+    if (shard.contig_id >= manifest.contig_ids.size() ||
+        shard.window_count == 0 ||
+        (has_graph_payloads &&
+         (shard.pack_id >= manifest.pack_paths.size() ||
+          shard.file_offset % kShardPackAlignment != 0 ||
+          shard.file_size == 0)) ||
+        (!has_graph_payloads &&
+         (shard.pack_id != 0 || shard.file_offset != 0 ||
+          shard.file_size != 0 || shard.sequence_count != 0 ||
+          shard.world_node_count != 0))) {
       throw std::runtime_error(
           "sharded index contains an invalid shard descriptor");
     }
-    if (shard.file_offset < pack_ends[shard.pack_id] ||
-        shard.file_size >
-            std::numeric_limits<uint64_t>::max() - shard.file_offset) {
-      throw std::runtime_error(
-          "sharded index contains overlapping pack ranges");
+    if (has_graph_payloads) {
+      if (shard.file_offset < pack_ends[shard.pack_id] ||
+          shard.file_size >
+              std::numeric_limits<uint64_t>::max() - shard.file_offset) {
+        throw std::runtime_error(
+            "sharded index contains overlapping pack ranges");
+      }
+      pack_ends[shard.pack_id] = shard.file_offset + shard.file_size;
+      pack_referenced[shard.pack_id] = 1;
     }
-    pack_ends[shard.pack_id] = shard.file_offset + shard.file_size;
-    pack_referenced[shard.pack_id] = 1;
     const uint64_t expected_source_end =
         static_cast<uint64_t>(shard.source_begin) +
         (static_cast<uint64_t>(shard.window_count) - 1) *
@@ -1140,11 +1350,409 @@ void validate_manifest(const ShardedIndexManifest& manifest) {
       pack_referenced.end()) {
     throw std::runtime_error("sharded index contains an unused pack file");
   }
-  if (total_windows != manifest.total_window_count ||
-      total_sequences != manifest.total_sequence_count ||
-      total_nodes != manifest.total_world_node_count) {
+  if (!manifest.shards.empty() &&
+      (total_windows != manifest.total_window_count ||
+       total_sequences != manifest.total_sequence_count ||
+       total_nodes != manifest.total_world_node_count)) {
     throw std::runtime_error(
         "sharded index aggregate counts are inconsistent");
+  }
+}
+
+uint64_t packed_reference_metadata_checksum(
+    size_t sequence_size,
+    size_t contig_count,
+    size_t block_count,
+    size_t ambiguous_block_count,
+    size_t ambiguity_run_count,
+    uint64_t fingerprint_checksum,
+    size_t payload_offset,
+    size_t total_size,
+    const std::vector<ReferenceContig>& contigs,
+    const uint64_t* ambiguity_bitmap,
+    size_t bitmap_word_count,
+    const uint32_t* ambiguity_run_offsets) {
+  uint64_t checksum = kFnvOffset;
+  hash_pod<uint32_t>(&checksum, kPackedReferenceFormatVersion);
+  hash_pod<uint32_t>(&checksum, kPackedReferenceBlockBases);
+  hash_pod<uint32_t>(
+      &checksum, kPackedReferenceChecksumBlockBases);
+  hash_pod<uint64_t>(&checksum, sequence_size);
+  hash_pod<uint64_t>(&checksum, contig_count);
+  hash_pod<uint64_t>(&checksum, block_count);
+  hash_pod<uint64_t>(&checksum, ambiguous_block_count);
+  hash_pod<uint64_t>(&checksum, ambiguity_run_count);
+  hash_pod<uint64_t>(&checksum, fingerprint_checksum);
+  hash_pod<uint64_t>(&checksum, payload_offset);
+  hash_pod<uint64_t>(&checksum, total_size);
+  for (const auto& contig : contigs) {
+    hash_pod<uint32_t>(&checksum, contig.begin);
+    hash_pod<uint32_t>(&checksum, contig.end);
+    hash_pod<uint32_t>(&checksum, contig.source_begin);
+  }
+  hash_bytes(
+      &checksum, ambiguity_bitmap,
+      bitmap_word_count * sizeof(uint64_t));
+  hash_bytes(
+      &checksum, ambiguity_run_offsets,
+      checked_reference_multiply(
+          checked_reference_add(ambiguous_block_count, 1),
+          sizeof(uint32_t)));
+  return checksum;
+}
+
+void collect_packed_reference_ambiguity_runs(
+    std::string_view sequence,
+    std::vector<PackedReferenceAmbiguityRun>* runs) {
+  runs->clear();
+  size_t pos = 0;
+  while (pos < sequence.size()) {
+    if (dna_code(sequence[pos]) >= 0) {
+      ++pos;
+      continue;
+    }
+    const size_t begin = pos;
+    do {
+      ++pos;
+    } while (pos < sequence.size() && dna_code(sequence[pos]) < 0);
+    const size_t length = pos - begin;
+    if (begin > std::numeric_limits<uint16_t>::max() ||
+        length > std::numeric_limits<uint16_t>::max()) {
+      throw std::runtime_error(
+          "packed reference ambiguity run exceeds 16-bit block storage");
+    }
+    runs->push_back({
+        static_cast<uint16_t>(begin),
+        static_cast<uint16_t>(length)});
+  }
+}
+
+void build_packed_reference_sidecar(
+    const std::filesystem::path& bundle,
+    const IndexBuildManifest& manifest,
+    size_t reference_size,
+    const std::vector<ReferenceContig>& reference_contigs,
+    const std::function<std::string(size_t, size_t)>& load_slice,
+    const std::string* contiguous_reference) {
+  const auto output_path = packed_reference_output_path(bundle);
+  const auto temporary_path = output_path.string() + ".tmp";
+  const auto ambiguity_temporary_path =
+      output_path.string() + ".ambiguity.tmp";
+  const PackedReferenceLayout shape = packed_reference_layout(
+      reference_size, reference_contigs.size(), 0, 0);
+  std::vector<uint64_t> ambiguity_bitmap(
+      shape.bitmap_word_count, uint64_t{0});
+  std::vector<uint64_t> block_checksums(
+      shape.checksum_block_count, uint64_t{0});
+  std::vector<uint32_t> ambiguity_run_offsets = {0};
+  std::error_code ignored;
+  std::filesystem::remove(temporary_path, ignored);
+  std::filesystem::remove(ambiguity_temporary_path, ignored);
+
+  size_t contig_idx = 0;
+  constexpr size_t kLoadCacheBases = size_t{4} << 20;
+  size_t cache_begin = 0;
+  size_t cache_end = 0;
+  std::string cache_sequence;
+  const auto load_block = [&](
+      size_t block_idx, std::string* sequence) {
+    const size_t block_begin =
+        block_idx * kPackedReferenceBlockBases;
+    const size_t block_end = std::min(
+        reference_size,
+        block_begin + kPackedReferenceBlockBases);
+    const size_t block_size = block_end - block_begin;
+    sequence->clear();
+    sequence->reserve(block_size);
+    if (contiguous_reference) {
+      sequence->assign(
+          contiguous_reference->data() + block_begin, block_size);
+    } else {
+      size_t cursor = block_begin;
+      while (cursor < block_end) {
+        while (contig_idx < reference_contigs.size() &&
+               cursor >= reference_contigs[contig_idx].end) {
+          ++contig_idx;
+        }
+        if (contig_idx >= reference_contigs.size() ||
+            cursor < reference_contigs[contig_idx].begin) {
+          throw std::runtime_error(
+              "packed reference contig coverage is inconsistent");
+        }
+        if (cursor < cache_begin || cursor >= cache_end) {
+          cache_begin = cursor;
+          cache_end = std::min<size_t>(
+              reference_contigs[contig_idx].end,
+              cursor + kLoadCacheBases);
+          cache_sequence = load_slice(cache_begin, cache_end);
+          if (cache_sequence.size() != cache_end - cache_begin) {
+            throw std::runtime_error(
+                "packed reference slice has the wrong length");
+          }
+        }
+        const size_t piece_end = std::min(block_end, cache_end);
+        sequence->append(
+            cache_sequence.data() + (cursor - cache_begin),
+            piece_end - cursor);
+        cursor = piece_end;
+      }
+    }
+    if (sequence->size() != block_size) {
+      throw std::runtime_error(
+          "packed reference block has the wrong length");
+    }
+  };
+
+  try {
+    std::ofstream ambiguity_out(
+        ambiguity_temporary_path,
+        std::ios::binary | std::ios::trunc);
+    if (!ambiguity_out) {
+      throw std::runtime_error(
+          "unable to create packed reference ambiguity spool");
+    }
+    std::string sequence;
+    std::vector<PackedReferenceAmbiguityRun> ambiguity_runs;
+    size_t ambiguity_run_count = 0;
+    for (size_t block_idx = 0;
+         block_idx < shape.block_count; ++block_idx) {
+      load_block(block_idx, &sequence);
+      collect_packed_reference_ambiguity_runs(
+          sequence, &ambiguity_runs);
+      if (ambiguity_runs.empty()) continue;
+      if (ambiguity_runs.size() >
+          std::numeric_limits<uint32_t>::max() -
+              ambiguity_run_count) {
+        throw std::runtime_error(
+            "packed reference ambiguity runs exceed 32-bit storage");
+      }
+      ambiguity_bitmap[block_idx >> 6] |=
+          uint64_t{1} << (block_idx & 63);
+      ambiguity_run_count += ambiguity_runs.size();
+      ambiguity_run_offsets.push_back(
+          static_cast<uint32_t>(ambiguity_run_count));
+      ambiguity_out.write(
+          reinterpret_cast<const char*>(ambiguity_runs.data()),
+          static_cast<std::streamsize>(
+              ambiguity_runs.size() *
+              sizeof(PackedReferenceAmbiguityRun)));
+    }
+    ambiguity_out.close();
+    if (!ambiguity_out) {
+      throw std::runtime_error(
+          "unable to write packed reference ambiguity spool");
+    }
+
+    const size_t ambiguous_block_count =
+        ambiguity_run_offsets.size() - 1;
+    const PackedReferenceLayout layout = packed_reference_layout(
+        reference_size, reference_contigs.size(),
+        ambiguous_block_count, ambiguity_run_count);
+    std::ofstream out(
+        temporary_path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      throw std::runtime_error(
+          "unable to create packed reference sidecar");
+    }
+    std::array<char, 65536> zeros{};
+    size_t zero_bytes = layout.payload_begin;
+    while (zero_bytes != 0) {
+      const size_t count = std::min(zero_bytes, zeros.size());
+      out.write(zeros.data(), static_cast<std::streamsize>(count));
+      zero_bytes -= count;
+    }
+    if (!out) {
+      throw std::runtime_error(
+          "unable to reserve packed reference metadata");
+    }
+
+    contig_idx = 0;
+    cache_begin = 0;
+    cache_end = 0;
+    cache_sequence.clear();
+    size_t ambiguous_idx = 0;
+    std::vector<uint8_t> packed_bases;
+    for (size_t block_idx = 0;
+         block_idx < layout.block_count; ++block_idx) {
+      load_block(block_idx, &sequence);
+      collect_packed_reference_ambiguity_runs(
+          sequence, &ambiguity_runs);
+      const size_t block_size = sequence.size();
+      packed_bases.assign((block_size + 3) / 4, uint8_t{0});
+      for (size_t pos = 0; pos < block_size; ++pos) {
+        const int code = dna_code(sequence[pos]);
+        if (code >= 0) {
+          packed_bases[pos >> 2] |= static_cast<uint8_t>(
+              static_cast<uint8_t>(code) << (2 * (pos & 3)));
+        }
+      }
+
+      if (!ambiguity_runs.empty()) {
+        if (ambiguous_idx >= ambiguous_block_count ||
+            ambiguity_run_offsets[ambiguous_idx + 1] -
+                    ambiguity_run_offsets[ambiguous_idx] !=
+                ambiguity_runs.size()) {
+          throw std::runtime_error(
+              "packed reference ambiguity pass mismatch");
+        }
+        ++ambiguous_idx;
+      }
+      for (size_t local_begin = 0; local_begin < block_size;
+           local_begin += kPackedReferenceChecksumBlockBases) {
+        const size_t checksum_size = std::min<size_t>(
+            kPackedReferenceChecksumBlockBases,
+            block_size - local_begin);
+        const size_t local_end = local_begin + checksum_size;
+        const size_t checksum_idx =
+            (block_idx * kPackedReferenceBlockBases + local_begin) /
+            kPackedReferenceChecksumBlockBases;
+        uint32_t overlapping_run_count = 0;
+        for (const auto& run : ambiguity_runs) {
+          const size_t run_end =
+              static_cast<size_t>(run.begin) + run.length;
+          if (std::max(local_begin, static_cast<size_t>(run.begin)) <
+              std::min(local_end, run_end)) {
+            ++overlapping_run_count;
+          }
+        }
+        uint64_t checksum = kFnvOffset;
+        hash_pod<uint64_t>(&checksum, checksum_idx);
+        hash_pod<uint64_t>(&checksum, checksum_size);
+        hash_pod<uint32_t>(&checksum, overlapping_run_count);
+        hash_bytes(
+            &checksum, packed_bases.data() + local_begin / 4,
+            (checksum_size + 3) / 4);
+        for (const auto& run : ambiguity_runs) {
+          const size_t run_end =
+              static_cast<size_t>(run.begin) + run.length;
+          if (std::max(local_begin, static_cast<size_t>(run.begin)) <
+              std::min(local_end, run_end)) {
+            hash_bytes(&checksum, &run, sizeof(run));
+          }
+        }
+        block_checksums[checksum_idx] = checksum;
+      }
+      out.write(
+          reinterpret_cast<const char*>(packed_bases.data()),
+          static_cast<std::streamsize>(packed_bases.size()));
+      if (!out) {
+        throw std::runtime_error(
+            "unable to write packed reference base payload");
+      }
+    }
+    if (ambiguous_idx != ambiguous_block_count) {
+      throw std::runtime_error(
+          "packed reference base layout accounting mismatch");
+    }
+    while (static_cast<uint64_t>(out.tellp()) <
+           layout.ambiguity_runs_begin) {
+      out.put(0);
+    }
+    if (!out || static_cast<uint64_t>(out.tellp()) !=
+                    layout.ambiguity_runs_begin) {
+      throw std::runtime_error(
+          "packed reference base layout accounting mismatch");
+    }
+
+    std::ifstream ambiguity_in(
+        ambiguity_temporary_path, std::ios::binary);
+    if (!ambiguity_in) {
+      throw std::runtime_error(
+          "unable to reopen packed reference ambiguity spool");
+    }
+    std::array<char, 65536> buffer{};
+    size_t ambiguity_bytes = 0;
+    while (ambiguity_in) {
+      ambiguity_in.read(
+          buffer.data(),
+          static_cast<std::streamsize>(buffer.size()));
+      const size_t count =
+          static_cast<size_t>(ambiguity_in.gcount());
+      if (count != 0) {
+        out.write(buffer.data(), static_cast<std::streamsize>(count));
+        ambiguity_bytes += count;
+      }
+    }
+    if (!ambiguity_in.eof() ||
+        ambiguity_bytes !=
+            ambiguity_run_count *
+                sizeof(PackedReferenceAmbiguityRun) ||
+        static_cast<uint64_t>(out.tellp()) != layout.total_size) {
+      throw std::runtime_error(
+          "packed reference ambiguity payload accounting mismatch");
+    }
+    ambiguity_in.close();
+
+    const uint64_t fingerprint_checksum =
+        reference_fingerprint_checksum(manifest.ref_fingerprint);
+    const uint64_t metadata_checksum =
+        packed_reference_metadata_checksum(
+            reference_size, reference_contigs.size(),
+            layout.checksum_block_count, ambiguous_block_count,
+            ambiguity_run_count, fingerprint_checksum,
+            layout.payload_begin, layout.total_size,
+            reference_contigs, ambiguity_bitmap.data(),
+            layout.bitmap_word_count,
+            ambiguity_run_offsets.data());
+
+    out.seekp(0);
+    out.write(
+        kPackedReferenceMagic.data(),
+        static_cast<std::streamsize>(kPackedReferenceMagic.size()));
+    write_pod<uint32_t>(out, kPackedReferenceFormatVersion);
+    write_pod<uint32_t>(out, kPackedReferenceChecksumBlockBases);
+    write_pod<uint64_t>(out, reference_size);
+    write_pod<uint64_t>(out, reference_contigs.size());
+    write_pod<uint64_t>(out, layout.checksum_block_count);
+    write_pod<uint64_t>(out, ambiguous_block_count);
+    write_pod<uint64_t>(out, fingerprint_checksum);
+    write_pod<uint64_t>(out, metadata_checksum);
+    write_pod<uint64_t>(out, layout.payload_begin);
+    write_pod<uint64_t>(out, layout.total_size);
+    write_pod<uint64_t>(out, ambiguity_run_count);
+    for (const auto& contig : reference_contigs) {
+      write_pod<uint32_t>(out, contig.begin);
+      write_pod<uint32_t>(out, contig.end);
+      write_pod<uint32_t>(out, contig.source_begin);
+    }
+    out.seekp(static_cast<std::streamoff>(
+        layout.ambiguity_bitmap_begin));
+    out.write(
+        reinterpret_cast<const char*>(ambiguity_bitmap.data()),
+        static_cast<std::streamsize>(
+            ambiguity_bitmap.size() * sizeof(uint64_t)));
+    out.seekp(static_cast<std::streamoff>(
+        layout.block_checksums_begin));
+    out.write(
+        reinterpret_cast<const char*>(block_checksums.data()),
+        static_cast<std::streamsize>(
+            block_checksums.size() * sizeof(uint64_t)));
+    out.seekp(static_cast<std::streamoff>(
+        layout.ambiguity_run_offsets_begin));
+    out.write(
+        reinterpret_cast<const char*>(
+            ambiguity_run_offsets.data()),
+        static_cast<std::streamsize>(
+            ambiguity_run_offsets.size() * sizeof(uint32_t)));
+    out.close();
+    if (!out) {
+      throw std::runtime_error(
+          "unable to finalize packed reference sidecar");
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary_path, output_path, error);
+    if (error) {
+      throw std::runtime_error(
+          "unable to install packed reference sidecar: " +
+          error.message());
+    }
+    std::filesystem::remove(
+        ambiguity_temporary_path, ignored);
+  } catch (...) {
+    std::filesystem::remove(temporary_path, ignored);
+    std::filesystem::remove(
+        ambiguity_temporary_path, ignored);
+    throw;
   }
 }
 
@@ -1253,7 +1861,7 @@ ShardedIndexManifest read_sharded_index_manifest(
   manifest.part_manifest = read_index_build_manifest(in);
   const uint64_t pack_count =
       read_pod<uint64_t>(in, "pack_count");
-  if (pack_count == 0 || pack_count > kMaxShardCount) {
+  if (pack_count > kMaxShardCount) {
     throw std::runtime_error("invalid sharded index pack count");
   }
   manifest.pack_paths.reserve(static_cast<size_t>(pack_count));
@@ -1273,7 +1881,7 @@ ShardedIndexManifest read_sharded_index_manifest(
   }
   const uint64_t shard_count =
       read_pod<uint64_t>(in, "shard_count");
-  if (shard_count == 0 || shard_count > kMaxShardCount) {
+  if (shard_count > kMaxShardCount) {
     throw std::runtime_error("invalid sharded index shard count");
   }
   manifest.shards.reserve(static_cast<size_t>(shard_count));
@@ -1314,6 +1922,606 @@ std::string resolve_index_shard_path(
   if (part.is_absolute()) return part.string();
   return (std::filesystem::path(manifest_path).parent_path() /
           part).string();
+}
+
+PackedReferenceFile load_packed_reference_file(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest) {
+  validate_manifest(manifest);
+  const auto path = packed_reference_output_path(manifest_path);
+  std::shared_ptr<PackedReferenceFileMapping> mapping;
+#if defined(__unix__) || defined(__APPLE__)
+  const int fd = open(path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    throw std::runtime_error("unable to open packed reference sidecar");
+  }
+  struct stat status {};
+  if (fstat(fd, &status) != 0 || status.st_size < 0 ||
+      static_cast<uint64_t>(status.st_size) >
+          std::numeric_limits<size_t>::max()) {
+    close(fd);
+    throw std::runtime_error("invalid packed reference sidecar size");
+  }
+  const size_t mapped_size = static_cast<size_t>(status.st_size);
+  void* address = mapped_size == 0
+      ? MAP_FAILED
+      : mmap(nullptr, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  close(fd);
+  if (address == MAP_FAILED) {
+    throw std::runtime_error("unable to map packed reference sidecar");
+  }
+  // Shard groups are sorted by reference position before verification.
+  // Keep the kernel's normal readahead policy for this mapping; MADV_RANDOM
+  // turns a cold network-backed query into one fault per small shard range.
+  mapping = std::make_shared<PackedReferenceFileMapping>(
+      address, mapped_size);
+#else
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in || in.tellg() < 0 ||
+      static_cast<uint64_t>(in.tellg()) >
+          std::numeric_limits<size_t>::max()) {
+    throw std::runtime_error("unable to open packed reference sidecar");
+  }
+  std::vector<uint8_t> bytes(static_cast<size_t>(in.tellg()));
+  in.seekg(0);
+  in.read(
+      reinterpret_cast<char*>(bytes.data()),
+      static_cast<std::streamsize>(bytes.size()));
+  if (!in) {
+    throw std::runtime_error("unable to read packed reference sidecar");
+  }
+  mapping = std::make_shared<PackedReferenceFileMapping>(
+      std::move(bytes));
+#endif
+  if (mapping->size() < kPackedReferenceHeaderBytes) {
+    throw std::runtime_error("truncated packed reference header");
+  }
+  const uint8_t* cursor = mapping->data();
+  const auto read_field = [&cursor](auto* value) {
+    std::memcpy(value, cursor, sizeof(*value));
+    cursor += sizeof(*value);
+  };
+  std::array<char, 8> magic{};
+  uint32_t version = 0;
+  uint32_t block_bases = 0;
+  uint64_t sequence_size = 0;
+  uint64_t contig_count = 0;
+  uint64_t block_count = 0;
+  uint64_t ambiguous_block_count = 0;
+  uint64_t fingerprint_checksum = 0;
+  uint64_t metadata_checksum = 0;
+  uint64_t payload_offset = 0;
+  uint64_t stored_file_size = 0;
+  uint64_t ambiguity_run_count = 0;
+  read_field(&magic);
+  read_field(&version);
+  read_field(&block_bases);
+  read_field(&sequence_size);
+  read_field(&contig_count);
+  read_field(&block_count);
+  read_field(&ambiguous_block_count);
+  read_field(&fingerprint_checksum);
+  read_field(&metadata_checksum);
+  read_field(&payload_offset);
+  read_field(&stored_file_size);
+  read_field(&ambiguity_run_count);
+  if (magic != kPackedReferenceMagic ||
+      version != kPackedReferenceFormatVersion ||
+      block_bases != kPackedReferenceChecksumBlockBases ||
+      sequence_size == 0 ||
+      sequence_size > std::numeric_limits<size_t>::max() ||
+      contig_count != manifest.contig_ids.size() ||
+      contig_count > std::numeric_limits<size_t>::max() ||
+      block_count > std::numeric_limits<size_t>::max() ||
+      ambiguous_block_count > std::numeric_limits<uint32_t>::max() ||
+      ambiguity_run_count > std::numeric_limits<uint32_t>::max() ||
+      ambiguity_run_count < ambiguous_block_count ||
+      fingerprint_checksum != reference_fingerprint_checksum(
+          manifest.part_manifest.ref_fingerprint) ||
+      payload_offset > std::numeric_limits<size_t>::max() ||
+      stored_file_size != mapping->size()) {
+    throw std::runtime_error("packed reference metadata mismatch");
+  }
+  const size_t stored_sequence_size =
+      static_cast<size_t>(sequence_size);
+  const size_t stored_contig_count =
+      static_cast<size_t>(contig_count);
+  const size_t stored_block_count =
+      static_cast<size_t>(block_count);
+  const size_t stored_ambiguity_run_count =
+      static_cast<size_t>(ambiguity_run_count);
+  const PackedReferenceLayout preliminary_layout =
+      packed_reference_layout(
+          stored_sequence_size, stored_contig_count,
+          static_cast<size_t>(ambiguous_block_count),
+          stored_ambiguity_run_count);
+  if (stored_block_count != preliminary_layout.checksum_block_count ||
+      ambiguous_block_count > preliminary_layout.block_count ||
+      payload_offset != preliminary_layout.payload_begin ||
+      preliminary_layout.payload_begin > mapping->size()) {
+    throw std::runtime_error("invalid packed reference layout");
+  }
+
+  PackedReferenceFile reference;
+  reference.path = path.string();
+  reference.sequence_size = stored_sequence_size;
+  reference.block_bases = kPackedReferenceBlockBases;
+  reference.block_count = preliminary_layout.block_count;
+  reference.checksum_block_bases =
+      kPackedReferenceChecksumBlockBases;
+  reference.checksum_block_count = stored_block_count;
+  reference.payload_offset = preliminary_layout.payload_begin;
+  reference.mapping = mapping;
+  reference.contigs.reserve(stored_contig_count);
+  cursor = mapping->data() + preliminary_layout.contigs_begin;
+  uint32_t expected_begin = 0;
+  for (size_t contig_idx = 0;
+       contig_idx < stored_contig_count; ++contig_idx) {
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    uint32_t source_begin = 0;
+    read_field(&begin);
+    read_field(&end);
+    read_field(&source_begin);
+    if (begin != expected_begin || end < begin ||
+        end > stored_sequence_size) {
+      throw std::runtime_error(
+          "invalid packed reference contig coordinates");
+    }
+    reference.contigs.push_back(
+        {manifest.contig_ids[contig_idx], begin, end, source_begin});
+    expected_begin = end;
+  }
+  if (expected_begin != stored_sequence_size) {
+    throw std::runtime_error(
+        "packed reference contigs do not cover the sequence");
+  }
+  if (manifest.shards.empty()) {
+    size_t expected_window_count = 0;
+    for (const auto& contig : reference.contigs) {
+      const size_t contig_size =
+          static_cast<size_t>(contig.end) - contig.begin;
+      if (contig_size < manifest.window_length) continue;
+      const size_t contig_window_count =
+          1 + (contig_size - manifest.window_length) /
+                  manifest.stride;
+      if (contig_window_count >
+          std::numeric_limits<size_t>::max() - expected_window_count) {
+        throw std::runtime_error(
+            "packed reference window count overflow");
+      }
+      expected_window_count += contig_window_count;
+    }
+    if (expected_window_count != manifest.total_window_count) {
+      throw std::runtime_error(
+          "direct-only window count is inconsistent");
+    }
+  }
+  reference.ambiguity_blocks = reinterpret_cast<const uint64_t*>(
+      mapping->data() + preliminary_layout.ambiguity_bitmap_begin);
+  reference.block_checksums = reinterpret_cast<const uint64_t*>(
+      mapping->data() + preliminary_layout.block_checksums_begin);
+  reference.ambiguity_run_offsets =
+      reinterpret_cast<const uint32_t*>(
+          mapping->data() +
+          preliminary_layout.ambiguity_run_offsets_begin);
+  reference.ambiguity_runs =
+      reinterpret_cast<const PackedReferenceAmbiguityRun*>(
+          mapping->data() + preliminary_layout.ambiguity_runs_begin);
+  reference.ambiguity_run_count = stored_ambiguity_run_count;
+  reference.ambiguity_rank.resize(
+      preliminary_layout.bitmap_word_count + 1, 0);
+  size_t counted_ambiguous_blocks = 0;
+  for (size_t word = 0;
+       word < preliminary_layout.bitmap_word_count; ++word) {
+    reference.ambiguity_rank[word] = static_cast<uint32_t>(
+        counted_ambiguous_blocks);
+    counted_ambiguous_blocks += static_cast<size_t>(
+        __builtin_popcountll(reference.ambiguity_blocks[word]));
+  }
+  reference.ambiguity_rank.back() = static_cast<uint32_t>(
+      counted_ambiguous_blocks);
+  if (counted_ambiguous_blocks != ambiguous_block_count) {
+    throw std::runtime_error(
+        "packed reference ambiguity count mismatch");
+  }
+  if (reference.ambiguity_run_offsets[0] != 0 ||
+      reference.ambiguity_run_offsets[counted_ambiguous_blocks] !=
+          stored_ambiguity_run_count) {
+    throw std::runtime_error(
+        "packed reference ambiguity offsets mismatch");
+  }
+  for (size_t idx = 0; idx < counted_ambiguous_blocks; ++idx) {
+    if (reference.ambiguity_run_offsets[idx] >=
+        reference.ambiguity_run_offsets[idx + 1]) {
+      throw std::runtime_error(
+          "packed reference ambiguity offsets are not increasing");
+    }
+  }
+  if (reference.block_count % 64 != 0 &&
+      preliminary_layout.bitmap_word_count != 0) {
+    const uint64_t unused_mask =
+        ~((uint64_t{1} << (reference.block_count % 64)) - 1);
+    if ((reference.ambiguity_blocks[
+             preliminary_layout.bitmap_word_count - 1] &
+         unused_mask) != 0) {
+      throw std::runtime_error(
+          "packed reference ambiguity bitmap has trailing bits");
+    }
+  }
+  const PackedReferenceLayout layout = packed_reference_layout(
+      stored_sequence_size, stored_contig_count,
+      counted_ambiguous_blocks, stored_ambiguity_run_count);
+  if (layout.total_size != mapping->size()) {
+    throw std::runtime_error("packed reference file size mismatch");
+  }
+  const uint64_t actual_metadata_checksum =
+      packed_reference_metadata_checksum(
+          stored_sequence_size, stored_contig_count,
+          stored_block_count, counted_ambiguous_blocks,
+          stored_ambiguity_run_count, fingerprint_checksum,
+          layout.payload_begin,
+          layout.total_size, reference.contigs,
+          reference.ambiguity_blocks, layout.bitmap_word_count,
+          reference.ambiguity_run_offsets);
+  if (actual_metadata_checksum != metadata_checksum) {
+    throw std::runtime_error("packed reference metadata checksum mismatch");
+  }
+  mapping->initialize_block_validation(
+      preliminary_layout.checksum_block_count);
+  return reference;
+}
+
+void PackedReferenceFile::validate_checksum_range(
+    size_t begin, size_t end) const {
+  if (begin >= end) return;
+  const size_t first = begin / checksum_block_bases;
+  const size_t last = (end - 1) / checksum_block_bases;
+  if (last >= checksum_block_count) {
+    throw std::runtime_error(
+        "packed reference checksum range is invalid");
+  }
+  for (size_t checksum_idx = first;
+       checksum_idx <= last; ++checksum_idx) {
+    if (!mapping->begin_block_validation(checksum_idx)) continue;
+    const size_t checksum_begin =
+        checksum_idx * checksum_block_bases;
+    const size_t checksum_size = std::min(
+        checksum_block_bases, sequence_size - checksum_begin);
+    const size_t checksum_end = checksum_begin + checksum_size;
+    const size_t parent_idx = checksum_begin / block_bases;
+    const size_t parent_begin = parent_idx * block_bases;
+    const size_t parent_size = std::min(
+        block_bases, sequence_size - parent_begin);
+    const size_t word = parent_idx >> 6;
+    const size_t bit = parent_idx & 63;
+    const uint64_t lower_mask = bit == 0
+        ? uint64_t{0}
+        : (uint64_t{1} << bit) - 1;
+    const bool ambiguous =
+        (ambiguity_blocks[word] & (uint64_t{1} << bit)) != 0;
+    const size_t ambiguity_before = ambiguous
+        ? ambiguity_rank[word] + static_cast<size_t>(
+              __builtin_popcountll(
+                  ambiguity_blocks[word] & lower_mask))
+        : 0;
+    const uint32_t run_begin = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before]
+        : 0;
+    const uint32_t run_end = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before + 1]
+        : 0;
+    if (run_begin > run_end || run_end > ambiguity_run_count) {
+      mapping->cancel_block_validation(checksum_idx);
+      throw std::runtime_error(
+          "packed reference ambiguity range is invalid");
+    }
+    const auto* runs = ambiguity_runs + run_begin;
+    const size_t run_count = run_end - run_begin;
+    size_t previous_end = 0;
+    uint32_t overlapping_run_count = 0;
+    for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+      const size_t current_begin = runs[run_idx].begin;
+      const size_t current_end =
+          current_begin + runs[run_idx].length;
+      if (runs[run_idx].length == 0 ||
+          current_begin < previous_end ||
+          current_end > parent_size) {
+        mapping->cancel_block_validation(checksum_idx);
+        throw std::runtime_error(
+            "packed reference ambiguity run is invalid");
+      }
+      previous_end = current_end;
+      if (std::max(checksum_begin, parent_begin + current_begin) <
+          std::min(checksum_end, parent_begin + current_end)) {
+        ++overlapping_run_count;
+      }
+    }
+    const size_t raw_offset = checked_reference_add(
+        payload_offset, checksum_begin / 4);
+    const size_t checksum_bytes = (checksum_size + 3) / 4;
+    if (raw_offset > mapping->size() ||
+        checksum_bytes > mapping->size() - raw_offset) {
+      mapping->cancel_block_validation(checksum_idx);
+      throw std::runtime_error(
+          "packed reference checksum block lies outside its file");
+    }
+    uint64_t checksum = kFnvOffset;
+    hash_pod<uint64_t>(&checksum, checksum_idx);
+    hash_pod<uint64_t>(&checksum, checksum_size);
+    hash_pod<uint32_t>(&checksum, overlapping_run_count);
+    hash_bytes(
+        &checksum, mapping->data() + raw_offset, checksum_bytes);
+    for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+      const size_t current_begin = runs[run_idx].begin;
+      const size_t current_end =
+          current_begin + runs[run_idx].length;
+      if (std::max(checksum_begin, parent_begin + current_begin) <
+          std::min(checksum_end, parent_begin + current_end)) {
+        hash_bytes(&checksum, &runs[run_idx], sizeof(runs[run_idx]));
+      }
+    }
+    if (checksum != block_checksums[checksum_idx]) {
+      mapping->cancel_block_validation(checksum_idx);
+      throw std::runtime_error(
+          "packed reference block checksum mismatch");
+    }
+    mapping->finish_block_validation(checksum_idx);
+  }
+}
+
+std::string PackedReferenceFile::slice(
+    size_t begin, size_t end) const {
+  std::string output;
+  slice(begin, end, &output);
+  return output;
+}
+
+void PackedReferenceFile::slice(
+    size_t begin, size_t end, std::string* output) const {
+  (void)slice_acgt(begin, end, output);
+}
+
+bool PackedReferenceFile::slice_acgt(
+    size_t begin, size_t end, std::string* output) const {
+  if (!output) {
+    throw std::invalid_argument(
+        "packed reference slice output must not be null");
+  }
+  if (!mapping || begin > end || end > sequence_size) {
+    throw std::out_of_range("packed reference slice is out of range");
+  }
+  if (begin != end) {
+    const auto contig = std::lower_bound(
+        contigs.begin(), contigs.end(), begin,
+        [](const ReferenceContig& candidate, size_t position) {
+          return candidate.end <= position;
+        });
+    if (contig == contigs.end() || begin < contig->begin ||
+        end > contig->end) {
+      throw std::out_of_range(
+          "packed reference slice crosses a contig boundary");
+    }
+  }
+  validate_checksum_range(begin, end);
+  output->resize(end - begin);
+  static constexpr std::array<char, 4> bases = {'A', 'C', 'G', 'T'};
+  static const auto unpacked_bases = [] {
+    std::array<std::array<char, 4>, 256> table{};
+    for (size_t packed_byte = 0; packed_byte < table.size();
+         ++packed_byte) {
+      for (size_t base = 0; base < 4; ++base) {
+        table[packed_byte][base] =
+            bases[(packed_byte >> (2 * base)) & 3];
+      }
+    }
+    return table;
+  }();
+
+  bool all_acgt = true;
+  size_t output_pos = 0;
+  size_t cursor_pos = begin;
+  while (cursor_pos < end) {
+    const size_t block_idx = cursor_pos / block_bases;
+    const size_t block_begin = block_idx * block_bases;
+    const size_t block_size = std::min(
+        block_bases, sequence_size - block_begin);
+    const size_t block_end = block_begin + block_size;
+    const size_t word = block_idx >> 6;
+    const size_t bit = block_idx & 63;
+    const uint64_t lower_mask = bit == 0
+        ? uint64_t{0}
+        : (uint64_t{1} << bit) - 1;
+    const bool ambiguous =
+        (ambiguity_blocks[word] & (uint64_t{1} << bit)) != 0;
+    const size_t ambiguity_before = ambiguous
+        ? ambiguity_rank[word] + static_cast<size_t>(
+              __builtin_popcountll(
+                  ambiguity_blocks[word] & lower_mask))
+        : 0;
+    const uint32_t run_begin = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before]
+        : 0;
+    const uint32_t run_end = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before + 1]
+        : 0;
+    if (run_begin > run_end || run_end > ambiguity_run_count) {
+      throw std::runtime_error(
+          "packed reference ambiguity range is invalid");
+    }
+    const auto* runs = ambiguity_runs + run_begin;
+    const size_t run_count = run_end - run_begin;
+
+    const size_t base_bytes = (block_size + 3) / 4;
+    const size_t raw_offset = checked_reference_add(
+        payload_offset,
+        checked_reference_multiply(
+            block_idx, block_bases / size_t{4}));
+    if (raw_offset > mapping->size() ||
+        base_bytes > mapping->size() - raw_offset) {
+      throw std::runtime_error(
+          "packed reference block lies outside its file");
+    }
+    const uint8_t* packed = mapping->data() + raw_offset;
+    const size_t copy_begin = cursor_pos;
+    const size_t copy_end = std::min(end, block_end);
+    const size_t block_output_begin = output_pos;
+    size_t local = cursor_pos - block_begin;
+    while (local < block_size && (local & 3) != 0 &&
+           cursor_pos < copy_end) {
+      (*output)[output_pos++] = bases[
+          (packed[local >> 2] >> (2 * (local & 3))) & 3];
+      ++local;
+      ++cursor_pos;
+    }
+    while (copy_end - cursor_pos >= 4) {
+      std::memcpy(
+          output->data() + output_pos,
+          unpacked_bases[packed[local >> 2]].data(), 4);
+      output_pos += 4;
+      local += 4;
+      cursor_pos += 4;
+    }
+    while (cursor_pos < copy_end) {
+      (*output)[output_pos++] = bases[
+          (packed[local >> 2] >> (2 * (local & 3))) & 3];
+      ++local;
+      ++cursor_pos;
+    }
+
+    const size_t copy_local_begin = copy_begin - block_begin;
+    const size_t copy_local_end = copy_end - block_begin;
+    for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+      const size_t current_begin = runs[run_idx].begin;
+      const size_t current_end =
+          current_begin + runs[run_idx].length;
+      const size_t overlap_begin =
+          std::max(copy_local_begin, current_begin);
+      const size_t overlap_end =
+          std::min(copy_local_end, current_end);
+      if (overlap_begin >= overlap_end) continue;
+      std::memset(
+          output->data() + block_output_begin +
+              overlap_begin - copy_local_begin,
+          'N', overlap_end - overlap_begin);
+      all_acgt = false;
+    }
+  }
+  return all_acgt;
+}
+bool PackedReferenceFile::matches_packed_acgt(
+    size_t contig_idx, size_t begin,
+    uint64_t packed_expected, size_t length) const {
+  if (!mapping || contig_idx >= contigs.size() || length > 32) {
+    return false;
+  }
+  const auto& contig = contigs[contig_idx];
+  if (begin < contig.begin || begin > contig.end ||
+      length > static_cast<size_t>(contig.end) - begin) {
+    return false;
+  }
+  validate_checksum_range(begin, begin + length);
+
+  size_t cursor_pos = begin;
+  size_t expected_pos = 0;
+  const size_t end = begin + length;
+  while (cursor_pos < end) {
+    const size_t block_idx = cursor_pos / block_bases;
+    const size_t block_begin = block_idx * block_bases;
+    const size_t block_size = std::min(
+        block_bases, sequence_size - block_begin);
+    const size_t block_end = block_begin + block_size;
+    const size_t word = block_idx >> 6;
+    const size_t bit = block_idx & 63;
+    const uint64_t lower_mask = bit == 0
+        ? uint64_t{0}
+        : (uint64_t{1} << bit) - 1;
+    const bool ambiguous =
+        (ambiguity_blocks[word] & (uint64_t{1} << bit)) != 0;
+    const size_t ambiguity_before = ambiguous
+        ? ambiguity_rank[word] + static_cast<size_t>(
+              __builtin_popcountll(
+                  ambiguity_blocks[word] & lower_mask))
+        : 0;
+    const uint32_t run_begin = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before]
+        : 0;
+    const uint32_t run_end = ambiguous
+        ? ambiguity_run_offsets[ambiguity_before + 1]
+        : 0;
+    if (run_begin > run_end || run_end > ambiguity_run_count) {
+      throw std::runtime_error(
+          "packed reference ambiguity range is invalid");
+    }
+    const auto* runs = ambiguity_runs + run_begin;
+    const size_t run_count = run_end - run_begin;
+
+    const size_t base_bytes = (block_size + 3) / 4;
+    const size_t raw_offset = checked_reference_add(
+        payload_offset,
+        checked_reference_multiply(
+            block_idx, block_bases / size_t{4}));
+    if (raw_offset > mapping->size() ||
+        base_bytes > mapping->size() - raw_offset) {
+      throw std::runtime_error(
+          "packed reference block lies outside its file");
+    }
+    const uint8_t* packed = mapping->data() + raw_offset;
+    const size_t copy_end = std::min(end, block_end);
+    const size_t local_begin = cursor_pos - block_begin;
+    const size_t local_end = copy_end - block_begin;
+    for (size_t run_idx = 0; run_idx < run_count; ++run_idx) {
+      const size_t current_begin = runs[run_idx].begin;
+      const size_t current_end =
+          current_begin + runs[run_idx].length;
+      if (std::max(local_begin, current_begin) <
+          std::min(local_end, current_end)) {
+        return false;
+      }
+    }
+
+    while (cursor_pos < copy_end) {
+      const size_t local = cursor_pos - block_begin;
+      const size_t base_shift = 2 * (local & 3);
+      const size_t chunk_bases = std::min(
+          copy_end - cursor_pos, (size_t{64} - base_shift) / 2);
+      const size_t chunk_bits = 2 * chunk_bases;
+      const uint64_t chunk_mask = chunk_bits == 64
+          ? std::numeric_limits<uint64_t>::max()
+          : (uint64_t{1} << chunk_bits) - 1;
+      uint64_t reference_word = 0;
+      const size_t base_byte = local >> 2;
+      std::memcpy(
+          &reference_word, packed + base_byte,
+          std::min(sizeof(reference_word), base_bytes - base_byte));
+      reference_word = (reference_word >> base_shift) & chunk_mask;
+      const uint64_t expected_word =
+          (packed_expected >> (2 * expected_pos)) & chunk_mask;
+      if (reference_word != expected_word) return false;
+      cursor_pos += chunk_bases;
+      expected_pos += chunk_bases;
+    }
+  }
+  return true;
+}
+void PackedReferenceFile::prefetch(
+    size_t begin, size_t end) const {
+  if (!mapping || begin >= end || end > sequence_size) return;
+  const auto block_raw_offset = [&](size_t block_idx) {
+    return checked_reference_add(
+        payload_offset,
+        checked_reference_multiply(
+            block_idx, block_bases / size_t{4}));
+  };
+  const size_t first_block = begin / block_bases;
+  const size_t last_block = (end - 1) / block_bases;
+  const size_t last_block_size = std::min(
+      block_bases, sequence_size - last_block * block_bases);
+  const size_t raw_begin = block_raw_offset(first_block);
+  const size_t raw_end = checked_reference_add(
+      block_raw_offset(last_block),
+      (last_block_size + 3) / 4);
+  mapping->prefetch(raw_begin, raw_end);
 }
 
 ShardedSeedRouter load_sharded_seed_router(
@@ -1551,6 +2759,514 @@ ShardedSeedRouter load_sharded_seed_router(
   return router;
 }
 
+template <typename Reference>
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch_impl(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const Reference& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests) {
+  std::vector<ExactBlockVerificationResult> results(requests.size());
+  if (requests.empty()) return results;
+  if (tolerance < 0 || manifest.stride == 0 ||
+      requests.size() > std::numeric_limits<uint32_t>::max() ||
+      reference.contigs.size() != manifest.contig_ids.size()) {
+    return results;
+  }
+  for (size_t contig_id = 0; contig_id < manifest.contig_ids.size();
+       ++contig_id) {
+    const auto& contig = reference.contigs[contig_id];
+    if (contig.id != manifest.contig_ids[contig_id] ||
+        contig.begin > contig.end || contig.end > reference.sequence_size) {
+      return results;
+    }
+  }
+
+  struct QueryPlan {
+    std::string normalized_query;
+    std::vector<std::pair<size_t, size_t>> blocks;
+    PreparedMyersPattern prepared;
+  };
+  std::vector<QueryPlan> query_plans(requests.size());
+  const size_t partition_count = static_cast<size_t>(tolerance) + 1;
+  size_t total_task_count = 0;
+  for (size_t query_idx = 0; query_idx < requests.size(); ++query_idx) {
+    const auto& request = requests[query_idx];
+    if (!request.shard_ids_begin || !request.shard_ids_end ||
+        request.shard_ids_begin >= request.shard_ids_end ||
+        request.query.empty() || partition_count == 0 ||
+        partition_count > request.query.size()) {
+      return results;
+    }
+    QueryPlan& plan = query_plans[query_idx];
+    plan.normalized_query.assign(request.query);
+    for (char& base : plan.normalized_query) {
+      base = static_cast<char>(
+          std::toupper(static_cast<unsigned char>(base)));
+      if (base != 'A' && base != 'C' && base != 'G' && base != 'T') {
+        return results;
+      }
+    }
+    plan.blocks.reserve(partition_count);
+    for (size_t partition = 0; partition < partition_count; ++partition) {
+      const size_t begin =
+          partition * plan.normalized_query.size() / partition_count;
+      const size_t end =
+          (partition + 1) * plan.normalized_query.size() /
+          partition_count;
+      if (begin == end) return results;
+      plan.blocks.emplace_back(begin, end);
+    }
+    plan.prepared = prepare_myers_pattern(plan.normalized_query);
+    const size_t request_task_count = static_cast<size_t>(
+        request.shard_ids_end - request.shard_ids_begin);
+    if (request_task_count >
+        std::numeric_limits<size_t>::max() - total_task_count) {
+      return results;
+    }
+    total_task_count += request_task_count;
+  }
+
+  struct ExactBlockOutput {
+    uint32_t query_idx = 0;
+    size_t query_begin = 0;
+    size_t length = 0;
+  };
+  struct ExactBlockNode {
+    std::array<uint32_t, 4> next = {
+        UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+    uint32_t failure = 0;
+    std::vector<ExactBlockOutput> outputs;
+  };
+  const auto base_index = [](char base) -> int {
+    switch (base) {
+      case 'A': return 0;
+      case 'C': return 1;
+      case 'G': return 2;
+      case 'T': return 3;
+      default: return -1;
+    }
+  };
+  std::vector<ExactBlockNode> block_automaton(1);
+  for (size_t query_idx = 0; query_idx < query_plans.size(); ++query_idx) {
+    const auto& plan = query_plans[query_idx];
+    for (const auto& block : plan.blocks) {
+      uint32_t state = 0;
+      for (size_t pos = block.first; pos < block.second; ++pos) {
+        const size_t base = static_cast<size_t>(
+            base_index(plan.normalized_query[pos]));
+        uint32_t next = block_automaton[state].next[base];
+        if (next == UINT32_MAX) {
+          if (block_automaton.size() == UINT32_MAX) return results;
+          next = static_cast<uint32_t>(block_automaton.size());
+          block_automaton[state].next[base] = next;
+          block_automaton.emplace_back();
+        }
+        state = next;
+      }
+      block_automaton[state].outputs.push_back(
+          {static_cast<uint32_t>(query_idx), block.first,
+           block.second - block.first});
+    }
+  }
+  std::queue<uint32_t> pending_states;
+  for (size_t base = 0; base < 4; ++base) {
+    uint32_t& next = block_automaton[0].next[base];
+    if (next == UINT32_MAX) {
+      next = 0;
+    } else {
+      pending_states.push(next);
+    }
+  }
+  while (!pending_states.empty()) {
+    const uint32_t state = pending_states.front();
+    pending_states.pop();
+    const uint32_t failure = block_automaton[state].failure;
+    const auto& failure_outputs = block_automaton[failure].outputs;
+    block_automaton[state].outputs.insert(
+        block_automaton[state].outputs.end(),
+        failure_outputs.begin(), failure_outputs.end());
+    for (size_t base = 0; base < 4; ++base) {
+      uint32_t& next = block_automaton[state].next[base];
+      if (next == UINT32_MAX) {
+        next = block_automaton[failure].next[base];
+      } else {
+        block_automaton[next].failure =
+            block_automaton[failure].next[base];
+        pending_states.push(next);
+      }
+    }
+  }
+
+  struct ShardQueryTask {
+    uint32_t shard_id = 0;
+    uint32_t query_idx = 0;
+  };
+  std::vector<ShardQueryTask> tasks;
+  tasks.reserve(total_task_count);
+  for (size_t query_idx = 0; query_idx < requests.size(); ++query_idx) {
+    const auto& request = requests[query_idx];
+    for (const uint32_t* shard = request.shard_ids_begin;
+         shard != request.shard_ids_end; ++shard) {
+      if (*shard >= manifest.shards.size()) {
+        return results;
+      }
+      tasks.push_back({*shard, static_cast<uint32_t>(query_idx)});
+    }
+  }
+  std::sort(
+      tasks.begin(), tasks.end(),
+      [](const ShardQueryTask& left, const ShardQueryTask& right) {
+        if (left.shard_id != right.shard_id) {
+          return left.shard_id < right.shard_id;
+        }
+        return left.query_idx < right.query_idx;
+      });
+  tasks.erase(
+      std::unique(
+          tasks.begin(), tasks.end(),
+          [](const ShardQueryTask& left, const ShardQueryTask& right) {
+            return left.shard_id == right.shard_id &&
+                   left.query_idx == right.query_idx;
+          }),
+      tasks.end());
+
+  std::vector<size_t> shard_task_offsets;
+  shard_task_offsets.reserve(tasks.size() + 1);
+  shard_task_offsets.push_back(0);
+  for (size_t task_idx = 0; task_idx < tasks.size(); ++task_idx) {
+    if (task_idx != 0 &&
+        tasks[task_idx].shard_id != tasks[task_idx - 1].shard_id) {
+      shard_task_offsets.push_back(task_idx);
+    }
+  }
+  shard_task_offsets.push_back(tasks.size());
+  for (size_t shard_group = 0;
+       shard_group + 1 < shard_task_offsets.size(); ++shard_group) {
+    const auto& descriptor = manifest.shards[
+        tasks[shard_task_offsets[shard_group]].shard_id];
+    if (descriptor.contig_id >= reference.contigs.size() ||
+        descriptor.window_count == 0) {
+      return results;
+    }
+    const auto& contig = reference.contigs[descriptor.contig_id];
+    if (descriptor.source_begin < contig.source_begin) {
+      return results;
+    }
+    const uint64_t local_source_begin =
+        static_cast<uint64_t>(descriptor.source_begin) -
+        contig.source_begin;
+    const uint64_t local_end =
+        local_source_begin +
+        (static_cast<uint64_t>(descriptor.window_count) - 1) *
+            manifest.stride + manifest.window_length;
+    if (local_end >
+        static_cast<uint64_t>(contig.end) - contig.begin) {
+      return results;
+    }
+  }
+
+  struct PartialResult {
+    size_t matched_shards = 0;
+    size_t candidate_windows = 0;
+    size_t distance_calls = 0;
+    std::vector<ExactBlockVerifiedOccurrence> occurrences;
+  };
+  struct ThreadResult {
+    std::vector<PartialResult> queries;
+    std::exception_ptr error;
+  };
+  const int thread_count = std::max(1, omp_get_max_threads());
+  std::vector<ThreadResult> thread_results(
+      static_cast<size_t>(thread_count));
+  for (auto& thread_result : thread_results) {
+    thread_result.queries.resize(requests.size());
+  }
+  const size_t shard_group_count = shard_task_offsets.size() - 1;
+  constexpr long double kAutomatonMinimumScanRatio = 8.0L;
+  const bool use_block_automaton =
+      static_cast<long double>(tasks.size()) * partition_count >=
+      static_cast<long double>(shard_group_count) *
+          kAutomatonMinimumScanRatio;
+#pragma omp parallel
+  {
+    const int thread_id = omp_get_thread_num();
+    auto& thread_result =
+        thread_results[static_cast<size_t>(thread_id)];
+    std::string reference_slice;
+    std::vector<std::vector<uint32_t>> candidate_starts(
+        requests.size());
+    std::vector<uint32_t> active_epochs(requests.size(), uint32_t{0});
+    std::vector<uint32_t> candidate_epochs(
+        requests.size(), uint32_t{0});
+    std::vector<uint32_t> touched_queries;
+    uint32_t epoch = 1;
+    const size_t active_thread_count = static_cast<size_t>(
+        omp_get_num_threads());
+    const size_t worker_group_begin =
+        shard_group_count * static_cast<size_t>(thread_id) /
+        active_thread_count;
+    const size_t worker_group_end =
+        shard_group_count * (static_cast<size_t>(thread_id) + 1) /
+        active_thread_count;
+    if constexpr (std::is_same<Reference, PackedReferenceFile>::value) {
+      if (worker_group_begin < worker_group_end) {
+        const auto& first_descriptor = manifest.shards[
+            tasks[shard_task_offsets[worker_group_begin]].shard_id];
+        const auto& last_descriptor = manifest.shards[
+            tasks[shard_task_offsets[worker_group_end - 1]].shard_id];
+        const auto& first_contig =
+            reference.contigs[first_descriptor.contig_id];
+        const auto& last_contig =
+            reference.contigs[last_descriptor.contig_id];
+        const size_t prefetch_begin =
+            static_cast<size_t>(first_contig.begin) +
+            static_cast<size_t>(first_descriptor.source_begin) -
+            first_contig.source_begin;
+        const size_t prefetch_end =
+            static_cast<size_t>(last_contig.begin) +
+            static_cast<size_t>(last_descriptor.source_begin) -
+            last_contig.source_begin +
+            (static_cast<size_t>(last_descriptor.window_count) - 1) *
+                manifest.stride +
+            manifest.window_length;
+        reference.prefetch(prefetch_begin, prefetch_end);
+      }
+    }
+    for (size_t shard_group = worker_group_begin;
+         shard_group < worker_group_end; ++shard_group) {
+      if (thread_result.error) continue;
+      try {
+        const size_t task_begin = shard_task_offsets[shard_group];
+        const size_t task_end = shard_task_offsets[shard_group + 1];
+        const auto& descriptor =
+            manifest.shards[tasks[task_begin].shard_id];
+        const auto& contig = reference.contigs[descriptor.contig_id];
+        const size_t local_source_begin =
+            static_cast<size_t>(descriptor.source_begin) -
+            contig.source_begin;
+        const size_t slice_begin =
+            static_cast<size_t>(contig.begin) + local_source_begin;
+        const size_t maximum_window_start =
+            (static_cast<size_t>(descriptor.window_count) - 1) *
+            manifest.stride;
+        const size_t slice_size =
+            maximum_window_start + manifest.window_length;
+        reference.slice(
+            slice_begin, slice_begin + slice_size, &reference_slice);
+
+        const auto verify_candidates =
+            [&](uint32_t query_idx, std::vector<uint32_t>* starts) {
+          if (!starts || starts->empty()) return;
+          const auto& plan = query_plans[query_idx];
+          auto& partial = thread_result.queries[query_idx];
+          ++partial.matched_shards;
+          std::sort(starts->begin(), starts->end());
+          starts->erase(
+              std::unique(starts->begin(), starts->end()), starts->end());
+          partial.candidate_windows += starts->size();
+          for (uint32_t start : *starts) {
+            const std::string_view reference_window =
+                std::string_view(reference_slice).substr(
+                    start, manifest.window_length);
+            if (std::any_of(
+                    reference_window.begin(), reference_window.end(),
+                    [](char base) {
+                      return base != 'A' && base != 'C' &&
+                             base != 'G' && base != 'T';
+                    })) {
+              continue;
+            }
+            ++partial.distance_calls;
+            const int distance =
+                compute_distance_bounded_myers_prepared(
+                    plan.prepared, reference_window, tolerance);
+            if (distance <= tolerance) {
+              partial.occurrences.push_back(
+                  {descriptor.contig_id,
+                   static_cast<uint32_t>(
+                       descriptor.source_begin + start),
+                   distance, std::string(reference_window)});
+            }
+          }
+          starts->clear();
+        };
+
+        if (use_block_automaton) {
+          for (size_t task_idx = task_begin; task_idx < task_end;
+               ++task_idx) {
+            active_epochs[tasks[task_idx].query_idx] = epoch;
+          }
+          touched_queries.clear();
+          uint32_t state = 0;
+          for (size_t reference_pos = 0;
+               reference_pos < reference_slice.size(); ++reference_pos) {
+            const int base = base_index(reference_slice[reference_pos]);
+            if (base < 0) {
+              state = 0;
+              continue;
+            }
+            state = block_automaton[state].next[
+                static_cast<size_t>(base)];
+            for (const auto& output : block_automaton[state].outputs) {
+              if (active_epochs[output.query_idx] != epoch) continue;
+              if (candidate_epochs[output.query_idx] != epoch) {
+                candidate_epochs[output.query_idx] = epoch;
+                touched_queries.push_back(output.query_idx);
+              }
+              const size_t occurrence =
+                  reference_pos + 1 - output.length;
+              const int64_t nominal_start =
+                  static_cast<int64_t>(occurrence) -
+                  static_cast<int64_t>(output.query_begin);
+              auto& starts = candidate_starts[output.query_idx];
+              for (int shift = -tolerance; shift <= tolerance; ++shift) {
+                const int64_t signed_start = nominal_start + shift;
+                if (signed_start < 0) continue;
+                const size_t start = static_cast<size_t>(signed_start);
+                if (start <= maximum_window_start &&
+                    start % manifest.stride == 0) {
+                  starts.push_back(static_cast<uint32_t>(start));
+                }
+              }
+            }
+          }
+          for (uint32_t query_idx : touched_queries) {
+            verify_candidates(
+                query_idx, &candidate_starts[query_idx]);
+          }
+          ++epoch;
+          if (epoch == 0) {
+            std::fill(active_epochs.begin(), active_epochs.end(), 0);
+            std::fill(candidate_epochs.begin(), candidate_epochs.end(), 0);
+            epoch = 1;
+          }
+        } else {
+          for (size_t task_idx = task_begin; task_idx < task_end;
+               ++task_idx) {
+            const uint32_t query_idx = tasks[task_idx].query_idx;
+            const auto& plan = query_plans[query_idx];
+            auto& starts = candidate_starts[query_idx];
+            for (const auto& block : plan.blocks) {
+              const std::string_view block_sequence(
+                  plan.normalized_query.data() + block.first,
+                  block.second - block.first);
+              size_t occurrence = reference_slice.find(block_sequence);
+              while (occurrence != std::string::npos) {
+                const int64_t nominal_start =
+                    static_cast<int64_t>(occurrence) -
+                    static_cast<int64_t>(block.first);
+                for (int shift = -tolerance; shift <= tolerance; ++shift) {
+                  const int64_t signed_start = nominal_start + shift;
+                  if (signed_start < 0) continue;
+                  const size_t start = static_cast<size_t>(signed_start);
+                  if (start <= maximum_window_start &&
+                      start % manifest.stride == 0) {
+                    starts.push_back(static_cast<uint32_t>(start));
+                  }
+                }
+                occurrence = reference_slice.find(
+                    block_sequence, occurrence + 1);
+              }
+            }
+            verify_candidates(query_idx, &starts);
+          }
+        }
+      } catch (...) {
+        thread_result.error = std::current_exception();
+      }
+    }
+  }
+  for (const auto& thread_result : thread_results) {
+    if (thread_result.error) std::rethrow_exception(thread_result.error);
+  }
+  for (auto& result : results) result.enabled = true;
+  for (auto& thread_result : thread_results) {
+    for (size_t query_idx = 0; query_idx < requests.size(); ++query_idx) {
+      auto& partial = thread_result.queries[query_idx];
+      auto& result = results[query_idx];
+      result.matched_shard_count += partial.matched_shards;
+      result.candidate_window_count += partial.candidate_windows;
+      result.distance_call_count += partial.distance_calls;
+      result.occurrences.insert(
+          result.occurrences.end(),
+          std::make_move_iterator(partial.occurrences.begin()),
+          std::make_move_iterator(partial.occurrences.end()));
+    }
+  }
+  for (auto& result : results) {
+    std::sort(
+        result.occurrences.begin(), result.occurrences.end(),
+        [](const ExactBlockVerifiedOccurrence& left,
+           const ExactBlockVerifiedOccurrence& right) {
+          if (left.contig_id != right.contig_id) {
+            return left.contig_id < right.contig_id;
+          }
+          return left.source_start < right.source_start;
+        });
+    result.occurrences.erase(
+        std::unique(
+            result.occurrences.begin(), result.occurrences.end(),
+            [](const ExactBlockVerifiedOccurrence& left,
+               const ExactBlockVerifiedOccurrence& right) {
+              return left.contig_id == right.contig_id &&
+                     left.source_start == right.source_start;
+            }),
+        result.occurrences.end());
+  }
+  return results;
+}
+
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const IndexedReferenceFile& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests) {
+  return verify_selected_shards_by_exact_blocks_batch_impl(
+      tolerance, manifest, reference, requests);
+}
+
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests) {
+  return verify_selected_shards_by_exact_blocks_batch_impl(
+      tolerance, manifest, reference, requests);
+}
+
+ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const IndexedReferenceFile& reference,
+    const uint32_t* shard_ids_begin,
+    const uint32_t* shard_ids_end) {
+  const std::vector<ExactBlockVerificationRequest> requests = {
+      {query, shard_ids_begin, shard_ids_end}};
+  auto results = verify_selected_shards_by_exact_blocks_batch(
+      tolerance, manifest, reference, requests);
+  return results.empty() ? ExactBlockVerificationResult{}
+                         : std::move(results.front());
+}
+
+ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const uint32_t* shard_ids_begin,
+    const uint32_t* shard_ids_end) {
+  const std::vector<ExactBlockVerificationRequest> requests = {
+      {query, shard_ids_begin, shard_ids_end}};
+  auto results = verify_selected_shards_by_exact_blocks_batch(
+      tolerance, manifest, reference, requests);
+  return results.empty() ? ExactBlockVerificationResult{}
+                         : std::move(results.front());
+}
+
 static ShardedIndexManifest build_sharded_reference_index_impl(
     const std::string& bundle_path,
     const std::string& ref_input,
@@ -1559,12 +3275,14 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     const std::vector<ReferenceContig>& reference_contigs,
     const std::function<std::string(size_t, size_t)>& load_slice,
     const std::string* contiguous_reference,
+    const std::function<void()>& discard_source_cache,
     size_t window_length,
     size_t stride,
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs) {
+    size_t build_jobs,
+    bool build_graph_payloads) {
   if (bundle_path.empty()) {
     throw std::invalid_argument(
         "sharded index output path must not be empty");
@@ -1659,6 +3377,7 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     throw std::runtime_error(
         "reference requires more than 2^32 logical shards");
   }
+  if (discard_source_cache) discard_source_cache();
 
   const size_t available_threads = static_cast<size_t>(
       std::max(1, omp_get_max_threads()));
@@ -1791,8 +3510,9 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     }
   };
 
-  const size_t pack_count =
-      (descriptors.size() + kShardsPerPack - 1) / kShardsPerPack;
+  const size_t pack_count = build_graph_payloads
+      ? (descriptors.size() + kShardsPerPack - 1) / kShardsPerPack
+      : 0;
   std::vector<std::string> pack_paths(pack_count);
   for (size_t pack_idx = 0; pack_idx < pack_count; ++pack_idx) {
     const std::filesystem::path pack_path =
@@ -1992,35 +3712,72 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
   ShardedSeedRouter router_metadata;
   uint64_t router_checksum = 0;
   size_t router_entry_count = 0;
-  if (descriptors.size() > 1 && window_length >= kRouterWindow) {
+  if (build_graph_payloads && descriptors.size() > 1 &&
+      window_length >= kRouterWindow) {
     const auto router_path = router_output_path(bundle);
-    auto router_data = contiguous_reference
-        ? build_router_data(
-              descriptors, kRouterK, kRouterWindow,
-              router_path.string() + ".codes.tmp",
-              [&](const IndexShardDescriptor& descriptor) {
-                const size_t slice_begin =
-                    descriptor_slice_begin(descriptor);
-                return std::string_view(
-                    contiguous_reference->data() + slice_begin,
-                    descriptor_slice_end(descriptor) - slice_begin);
-              })
-        : build_router_data(
-              descriptors, kRouterK, kRouterWindow,
-              router_path.string() + ".codes.tmp",
-              [&](const IndexShardDescriptor& descriptor) {
-                return load_slice(descriptor_slice_begin(descriptor),
-                                  descriptor_slice_end(descriptor));
-              });
-    if (router_data.entry_count != 0) {
-      router_metadata.k = kRouterK;
-      router_metadata.window = kRouterWindow;
-      router_entry_count = router_data.entry_count;
-      router_checksum = save_router_sidecar(
-          router_path, router_metadata.k,
-          router_metadata.window,
-          static_cast<uint32_t>(descriptors.size()),
-          router_data);
+    bool router_reused = false;
+    try {
+      const auto previous =
+          read_sharded_index_manifest(bundle_path);
+      bool coordinates_match =
+          previous.window_length == window_length &&
+          previous.stride == stride &&
+          previous.part_manifest.signature == part_manifest.signature &&
+          previous.contig_ids == contig_ids &&
+          previous.shards.size() == descriptors.size() &&
+          previous.router_k == kRouterK &&
+          previous.router_window == kRouterWindow &&
+          previous.router_entry_count != 0;
+      for (size_t shard_idx = 0;
+           coordinates_match && shard_idx < descriptors.size();
+           ++shard_idx) {
+        const auto& old_shard = previous.shards[shard_idx];
+        const auto& new_shard = descriptors[shard_idx];
+        coordinates_match =
+            old_shard.contig_id == new_shard.contig_id &&
+            old_shard.source_begin == new_shard.source_begin &&
+            old_shard.window_count == new_shard.window_count;
+      }
+      if (coordinates_match) {
+        (void)load_sharded_seed_router(bundle_path, previous);
+        router_metadata.k = previous.router_k;
+        router_metadata.window = previous.router_window;
+        router_entry_count = previous.router_entry_count;
+        router_checksum = previous.router_checksum;
+        router_reused = true;
+      }
+    } catch (const std::exception&) {
+    }
+    if (!router_reused) {
+      auto router_data = contiguous_reference
+          ? build_router_data(
+                descriptors, kRouterK, kRouterWindow,
+                router_path.string() + ".codes.tmp",
+                [&](const IndexShardDescriptor& descriptor) {
+                  const size_t slice_begin =
+                      descriptor_slice_begin(descriptor);
+                  return std::string_view(
+                      contiguous_reference->data() + slice_begin,
+                      descriptor_slice_end(descriptor) - slice_begin);
+                })
+          : build_router_data(
+                descriptors, kRouterK, kRouterWindow,
+                router_path.string() + ".codes.tmp",
+                [&](const IndexShardDescriptor& descriptor) {
+                  return load_slice(descriptor_slice_begin(descriptor),
+                                    descriptor_slice_end(descriptor));
+                });
+      if (discard_source_cache) discard_source_cache();
+      if (router_data.entry_count != 0) {
+        router_metadata.k = kRouterK;
+        router_metadata.window = kRouterWindow;
+        router_entry_count = router_data.entry_count;
+        router_checksum = save_router_sidecar(
+            router_path, router_metadata.k,
+            router_metadata.window,
+            static_cast<uint32_t>(descriptors.size()),
+            router_data);
+      }
     }
   }
 
@@ -2035,14 +3792,42 @@ static ShardedIndexManifest build_sharded_reference_index_impl(
     manifest.total_sequence_count += descriptor.sequence_count;
     manifest.total_world_node_count += descriptor.world_node_count;
   }
-  manifest.shards = std::move(descriptors);
+  if (build_graph_payloads) {
+    manifest.shards = std::move(descriptors);
+  }
   if (router_entry_count != 0) {
     manifest.router_k = router_metadata.k;
     manifest.router_window = router_metadata.window;
     manifest.router_entry_count = router_entry_count;
     manifest.router_checksum = router_checksum;
   }
+  bool packed_reference_reusable = false;
+  try {
+    (void)load_packed_reference_file(bundle_path, manifest);
+    packed_reference_reusable = true;
+  } catch (const std::exception&) {
+  }
+  if (!packed_reference_reusable) {
+    build_packed_reference_sidecar(
+        bundle, part_manifest, reference_size, reference_contigs,
+        load_slice, contiguous_reference);
+  }
+  const auto packed_reference =
+      load_packed_reference_file(bundle_path, manifest);
+  if (window_length >= kRouterWindow) {
+    ensure_sampled_qgram_index(
+        bundle_path, manifest, packed_reference);
+  }
   save_sharded_index_manifest(bundle_path, manifest);
+  if (!build_graph_payloads) {
+    std::error_code error;
+    std::filesystem::remove(router_output_path(bundle), error);
+    if (error) {
+      throw std::runtime_error(
+          "unable to remove unused router sidecar: " +
+          error.message());
+    }
+  }
   return manifest;
 }
 
@@ -2057,15 +3842,17 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs) {
+    size_t build_jobs,
+    bool build_graph_payloads) {
   return build_sharded_reference_index_impl(
       bundle_path, ref_input, reference_id,
       reference_sequence.size(), reference_contigs,
       [&](size_t begin, size_t end) {
         return reference_sequence.substr(begin, end - begin);
       },
-      &reference_sequence, window_length, stride,
-      max_shard_windows, hierarchy, range_config, build_jobs);
+      &reference_sequence, {}, window_length, stride,
+      max_shard_windows, hierarchy, range_config, build_jobs,
+      build_graph_payloads);
 }
 
 ShardedIndexManifest build_sharded_reference_index(
@@ -2077,35 +3864,23 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs) {
+    size_t build_jobs,
+    bool build_graph_payloads) {
   return build_sharded_reference_index_impl(
       bundle_path, ref_input, reference.id,
       reference.sequence_size, reference.contigs,
       [&](size_t begin, size_t end) {
         return reference.slice(begin, end);
       },
-      nullptr, window_length, stride, max_shard_windows,
-      hierarchy, range_config, build_jobs);
+      nullptr, [&reference]() { reference.discard_cached_pages(); },
+      window_length, stride, max_shard_windows,
+      hierarchy, range_config, build_jobs, build_graph_payloads);
 }
 
-LoadedIndex load_sharded_index_part(
-    const std::string& manifest_path,
+void validate_loaded_sharded_index_part(
     const ShardedIndexManifest& manifest,
-    uint32_t shard_id) {
-  if (shard_id >= manifest.shards.size()) {
-    throw std::out_of_range("sharded index part ID is out of range");
-  }
-  const auto& descriptor = manifest.shards[shard_id];
-  if (descriptor.pack_id >= manifest.pack_paths.size() ||
-      descriptor.contig_id >= manifest.contig_ids.size()) {
-    throw std::runtime_error("sharded index part has invalid interned ID");
-  }
-  LoadedIndex loaded = load_index_payload_range(
-      resolve_index_shard_path(
-          manifest_path, manifest.pack_paths[descriptor.pack_id]),
-      descriptor.file_offset, descriptor.file_size,
-      manifest.part_manifest,
-      IndexLoadValidation::Structural);
+    const IndexShardDescriptor& descriptor,
+    const LoadedIndex& loaded) {
   const auto& store = loaded.builder.sequence_store();
   if (!store.reference_backed ||
       loaded.manifest.signature != manifest.part_manifest.signature ||
@@ -2131,6 +3906,32 @@ LoadedIndex load_sharded_index_part(
     throw std::runtime_error(
         "sharded index part does not match its descriptor");
   }
+}
+
+LoadedIndex load_sharded_index_part(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    uint32_t shard_id) {
+  if (shard_id >= manifest.shards.size()) {
+    throw std::out_of_range("sharded index part ID is out of range");
+  }
+  if (manifest.pack_paths.empty()) {
+    throw std::runtime_error(
+        "router-only index requires its unchanged reference; "
+        "graph fallback is unavailable");
+  }
+  const auto& descriptor = manifest.shards[shard_id];
+  if (descriptor.pack_id >= manifest.pack_paths.size() ||
+      descriptor.contig_id >= manifest.contig_ids.size()) {
+    throw std::runtime_error("sharded index part has invalid interned ID");
+  }
+  LoadedIndex loaded = load_index_payload_range(
+      resolve_index_shard_path(
+          manifest_path, manifest.pack_paths[descriptor.pack_id]),
+      descriptor.file_offset, descriptor.file_size,
+      manifest.part_manifest,
+      IndexLoadValidation::Structural);
+  validate_loaded_sharded_index_part(manifest, descriptor, loaded);
   return loaded;
 }
 
@@ -2139,11 +3940,83 @@ std::vector<LoadedIndex> load_sharded_index(
     const ShardedIndexManifest& manifest,
     const std::vector<uint32_t>& shard_ids) {
   validate_manifest(manifest);
+  if (manifest.pack_paths.empty()) {
+    throw std::runtime_error(
+        "router-only index requires its unchanged reference; "
+        "graph fallback is unavailable");
+  }
+
+  struct PackRequest {
+    size_t output_index = 0;
+    uint32_t shard_id = 0;
+    IndexPayloadRange range;
+  };
+  struct PackBatch {
+    uint32_t pack_id = 0;
+    std::vector<PackRequest> requests;
+  };
+  constexpr size_t kNoPackBatch =
+      std::numeric_limits<size_t>::max();
+  std::vector<size_t> pack_batch_indices(
+      manifest.pack_paths.size(), kNoPackBatch);
+  std::vector<PackBatch> pack_batches;
+  pack_batches.reserve(std::min(
+      shard_ids.size(), manifest.pack_paths.size()));
+  for (size_t output_index = 0; output_index < shard_ids.size();
+       ++output_index) {
+    const uint32_t shard_id = shard_ids[output_index];
+    if (shard_id >= manifest.shards.size()) {
+      throw std::out_of_range("sharded index part ID is out of range");
+    }
+    const auto& descriptor = manifest.shards[shard_id];
+    if (descriptor.pack_id >= manifest.pack_paths.size() ||
+        descriptor.contig_id >= manifest.contig_ids.size()) {
+      throw std::runtime_error("sharded index part has invalid interned ID");
+    }
+    size_t& pack_batch_index = pack_batch_indices[descriptor.pack_id];
+    if (pack_batch_index == kNoPackBatch) {
+      pack_batch_index = pack_batches.size();
+      pack_batches.push_back({descriptor.pack_id, {}});
+    }
+    pack_batches[pack_batch_index].requests.push_back(
+        {output_index, shard_id,
+         {descriptor.file_offset, descriptor.file_size}});
+  }
+
+  std::vector<std::optional<LoadedIndex>> loaded_by_output(
+      shard_ids.size());
+  for (const auto& pack_batch : pack_batches) {
+    const auto& requests = pack_batch.requests;
+    std::vector<IndexPayloadRange> ranges;
+    ranges.reserve(requests.size());
+    for (const auto& request : requests) ranges.push_back(request.range);
+    auto pack_loaded = load_index_payload_ranges(
+        resolve_index_shard_path(
+            manifest_path, manifest.pack_paths[pack_batch.pack_id]),
+        ranges, manifest.part_manifest,
+        IndexLoadValidation::Structural);
+    if (pack_loaded.size() != requests.size()) {
+      throw std::runtime_error(
+          "sharded index pack load returned the wrong part count");
+    }
+    for (size_t request_index = 0; request_index < requests.size();
+         ++request_index) {
+      const auto& request = requests[request_index];
+      validate_loaded_sharded_index_part(
+          manifest, manifest.shards[request.shard_id],
+          pack_loaded[request_index]);
+      loaded_by_output[request.output_index].emplace(
+          std::move(pack_loaded[request_index]));
+    }
+  }
+
   std::vector<LoadedIndex> loaded;
   loaded.reserve(shard_ids.size());
-  for (uint32_t shard_id : shard_ids) {
-    loaded.push_back(load_sharded_index_part(
-        manifest_path, manifest, shard_id));
+  for (auto& output : loaded_by_output) {
+    if (!output) {
+      throw std::runtime_error("sharded index pack load omitted a part");
+    }
+    loaded.push_back(std::move(*output));
   }
   return loaded;
 }

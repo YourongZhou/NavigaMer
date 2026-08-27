@@ -27,6 +27,7 @@
 #include <memory>
 #include <random>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <exception>
@@ -42,12 +43,20 @@
 
 namespace {
 
+void configure_default_query_threads() {
+  constexpr int kDefaultQueryThreadCap = 32;
+  if (std::getenv("OMP_NUM_THREADS") == nullptr &&
+      omp_get_max_threads() > kDefaultQueryThreadCap) {
+    omp_set_num_threads(kDefaultQueryThreadCap);
+  }
+}
+
 void usage(const char* prog) {
   std::cerr << "Usage:\n"
             << "  " << prog << " demo [--size N] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build --ref <path|seq> --reads <path|seq> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " build-scale --ref <path|seq> --window 250 --stride 1 --prefix-lengths csv --out <csv> [--index <file>] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
-            << "  " << prog << " build-sharded --ref <path|seq> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --index <manifest> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
+            << "  " << prog << " build-sharded --ref <path|seq> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --router-only 0|1 --index <manifest> [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query --ref <path|seq> --reads <path|seq> --query <seq> [--index <file>] [--tolerance 2] [--mode adaptive] [--primary-radii csv | --r-sw 5 --r-mw 15 --r-lw 30]\n"
             << "  " << prog << " query-index --index <file> --query <seq> [--tolerance 2] [--mode adaptive]\n"
             << "  " << prog << " query-index-batch --index <file> --reads <fastq> [--tolerance 2] [--out <tsv>] [--path-trace-out <tsv>] [--mode adaptive]\n"
@@ -810,6 +819,7 @@ void run_build_sharded(
     int stride,
     size_t max_shard_windows,
     size_t shard_build_jobs,
+    bool router_only,
     const std::string& index_path,
     const navigamer::HierarchyConfig& hierarchy,
     const navigamer::BuildRangeConfig& range_config) {
@@ -838,7 +848,9 @@ void run_build_sharded(
                       ? std::string("auto")
                       : std::to_string(shard_build_jobs))
               << " window=" << window_size
-              << " stride=" << stride << "\n";
+              << " stride=" << stride
+              << " router_only=" << (router_only ? "true" : "false")
+              << "\n";
   };
   if (reference_is_regular_file) {
     constexpr size_t kMinCheckpointStride = size_t{4} << 10;
@@ -857,11 +869,12 @@ void run_build_sharded(
       throw std::runtime_error("build-sharded reference is empty");
     }
     print_start(reference_bases);
+    reference.discard_cached_pages();
     manifest = build_sharded_reference_index(
         index_path, ref_input, reference,
         static_cast<size_t>(window_size),
         static_cast<size_t>(stride), max_shard_windows,
-        hierarchy, range_config, shard_build_jobs);
+        hierarchy, range_config, shard_build_jobs, !router_only);
   } else {
     auto reference = load_reference_genome(ref_input);
     reference_bases = reference.sequence.size();
@@ -873,7 +886,7 @@ void run_build_sharded(
         index_path, ref_input, reference.id, reference.sequence,
         reference.contigs, static_cast<size_t>(window_size),
         static_cast<size_t>(stride), max_shard_windows,
-        hierarchy, range_config, shard_build_jobs);
+        hierarchy, range_config, shard_build_jobs, !router_only);
   }
   std::cerr << "Sharded index saved: " << index_path
             << " shards=" << manifest.shards.size()
@@ -1064,11 +1077,129 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
                   << " (searching all shards)\n";
       }
       BioSequence query("query", query_seq);
-      const auto route = shard_router.select(query.seq, tolerance);
       struct DisplayHit {
         std::string id;
         std::string sequence;
       };
+      const char* mode_label =
+          mode == "greedy"
+              ? "Greedy"
+              : mode == "exhaustive"
+                    ? "Exhaustive"
+                    : "Adaptive";
+      try {
+        const auto packed_reference =
+            load_packed_reference_file(index_path, manifest);
+        const auto occurrence_index =
+            load_sampled_qgram_index(
+                index_path, manifest, packed_reference);
+        if (occurrence_index.supports(query.seq, tolerance)) {
+          const auto direct_start =
+              std::chrono::high_resolution_clock::now();
+          const auto direct = verify_by_sampled_qgram_positions(
+              query.seq, tolerance, manifest, packed_reference,
+              occurrence_index);
+          const double direct_ms =
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::high_resolution_clock::now() -
+                  direct_start)
+                  .count();
+          if (direct.enabled) {
+            std::vector<DisplayHit> direct_hits;
+            std::unordered_set<std::string> seen_sequences;
+            for (const auto& occurrence : direct.occurrences) {
+              if (!seen_sequences.insert(occurrence.sequence).second) {
+                continue;
+              }
+              direct_hits.push_back(
+                  {manifest.contig_ids[occurrence.contig_id] + "_" +
+                       std::to_string(occurrence.source_start),
+                   occurrence.sequence});
+            }
+            std::cerr << "Loaded sharded index: " << index_path
+                      << " shards=0/" << manifest.shards.size()
+                      << " sampled_qgram_positions="
+                      << occurrence_index.position_count
+                      << " sequences="
+                      << manifest.total_sequence_count
+                      << " world_nodes="
+                      << manifest.total_world_node_count << "\n";
+            std::cout << mode_label << " hits: "
+                      << direct_hits.size() << " (shards=0/"
+                      << manifest.shards.size() << " dist_calcs="
+                      << direct.distance_call_count
+                      << " query_time_ms="
+                      << format_double(direct_ms) << ")\n";
+            for (const auto& hit : direct_hits) {
+              std::cout << "  " << hit.id << " dist="
+                        << compute_distance(query_seq, hit.sequence)
+                        << "\n";
+            }
+            return;
+          }
+        }
+      } catch (const std::exception& error) {
+        std::cerr << "Sampled q-gram direct verification disabled: "
+                  << error.what() << "\n";
+      }
+      const auto route = shard_router.select(query.seq, tolerance);
+      if (route.enabled && !route.shard_ids.empty()) {
+        try {
+          const auto packed_reference =
+              load_packed_reference_file(index_path, manifest);
+          const auto direct_start =
+              std::chrono::high_resolution_clock::now();
+          const auto direct =
+              verify_selected_shards_by_exact_blocks(
+                  query.seq, tolerance, manifest, packed_reference,
+                  route.shard_ids.data(),
+                  route.shard_ids.data() + route.shard_ids.size());
+          const double direct_ms =
+              std::chrono::duration<double, std::milli>(
+                  std::chrono::high_resolution_clock::now() -
+                  direct_start)
+                  .count();
+          if (direct.enabled) {
+            std::vector<DisplayHit> direct_hits;
+            std::unordered_set<std::string> seen_sequences;
+            for (const auto& occurrence : direct.occurrences) {
+              if (!seen_sequences.insert(occurrence.sequence).second) {
+                continue;
+              }
+              direct_hits.push_back(
+                  {manifest.contig_ids[occurrence.contig_id] + "_" +
+                       std::to_string(occurrence.source_start),
+                   occurrence.sequence});
+            }
+            std::cerr << "Loaded sharded index: " << index_path
+                      << " shards=0/" << manifest.shards.size()
+                      << " direct_shards="
+                      << direct.matched_shard_count << "/"
+                      << route.shard_ids.size()
+                      << " sequences="
+                      << manifest.total_sequence_count
+                      << " world_nodes="
+                      << manifest.total_world_node_count << "\n";
+            std::cout << mode_label << " hits: "
+                      << direct_hits.size() << " (shards="
+                      << route.shard_ids.size() << "/"
+                      << manifest.shards.size() << " dist_calcs="
+                      << direct.distance_call_count
+                      << " query_time_ms="
+                      << format_double(direct_ms) << ")\n";
+            for (const auto& hit : direct_hits) {
+              std::cout << "  " << hit.id << " dist="
+                        << compute_distance(
+                               query_seq, hit.sequence)
+                        << "\n";
+            }
+            return;
+          }
+        } catch (const std::exception& error) {
+          std::cerr << "Exact-block direct verification disabled: "
+                    << error.what() << "\n";
+        }
+      }
       std::vector<DisplayHit> hits;
       std::unordered_multimap<size_t, size_t> hit_by_hash;
       size_t distance_calculations = 0;
@@ -1077,6 +1208,11 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
       const size_t active_shard_count =
           route.enabled ? route.shard_ids.size()
                         : manifest.shards.size();
+      if (active_shard_count == 0 && manifest.pack_paths.empty()) {
+        throw std::runtime_error(
+            "router-only index requires its unchanged reference; "
+            "graph fallback is unavailable");
+      }
       size_t peak_loaded_shards = 0;
       std::vector<uint32_t> shard_group_ids;
       shard_group_ids.reserve(kMaxResidentQueryShards);
@@ -1181,12 +1317,6 @@ void run_query(const std::string& ref_input, const std::string& reads_input,
                 << " sequences=" << manifest.total_sequence_count
                 << " world_nodes="
                 << manifest.total_world_node_count << "\n";
-      const char* mode_label =
-          mode == "greedy"
-              ? "Greedy"
-              : mode == "exhaustive"
-                    ? "Exhaustive"
-                    : "Adaptive";
       std::cout << mode_label << " hits: " << hits.size()
                 << " (shards="
                 << active_shard_count
@@ -1842,6 +1972,16 @@ void run_query_index_batch(const std::string& index_path,
     size_t searched_shards = 0;
     size_t peak_loaded_shards = 0;
     size_t peak_planned_route_ids = 0;
+    size_t exact_block_direct_queries = 0;
+    size_t exact_block_routed_shards = 0;
+    size_t exact_block_matched_shards = 0;
+    size_t exact_block_candidate_windows = 0;
+    size_t exact_block_distance_calls = 0;
+    size_t sampled_qgram_direct_queries = 0;
+    bool exact_block_reference_attempted = false;
+    std::unique_ptr<PackedReferenceFile> exact_block_packed_reference;
+    std::unique_ptr<IndexedReferenceFile> exact_block_external_reference;
+    std::unique_ptr<SampledQgramIndex> sampled_qgram_index;
     std::vector<uint32_t> cached_shard_ids;
     std::vector<LoadedIndex> cached_loaded_shards;
     std::vector<std::unique_ptr<BioGeometrySearchEngine>> cached_engines;
@@ -1851,7 +1991,108 @@ void run_query_index_batch(const std::string& index_path,
       cached_shard_ids.clear();
     };
 
+    try {
+      exact_block_packed_reference =
+          std::make_unique<PackedReferenceFile>(
+              load_packed_reference_file(
+                  index_path, shard_manifest));
+      exact_block_reference_attempted = true;
+      sampled_qgram_index = std::make_unique<SampledQgramIndex>(
+          load_sampled_qgram_index(
+              index_path, shard_manifest,
+              *exact_block_packed_reference));
+    } catch (const std::exception& error) {
+      sampled_qgram_index.reset();
+      std::cerr << "Sampled q-gram direct verification disabled: "
+                << error.what() << "\n";
+    }
+
     do {
+    if (sampled_qgram_index && exact_block_packed_reference &&
+        std::all_of(
+            queries.begin(), queries.end(),
+            [&](const QuerySequence& query) {
+              return sampled_qgram_index->supports(
+                  query.seq, tolerance);
+            })) {
+      std::vector<std::string_view> query_views;
+      query_views.reserve(queries.size());
+      for (const auto& query : queries) {
+        query_views.emplace_back(query.seq);
+      }
+      const auto direct_start =
+          std::chrono::high_resolution_clock::now();
+      std::vector<ExactBlockVerificationResult> verified_results;
+      try {
+        verified_results = verify_by_sampled_qgram_positions_batch(
+            tolerance, shard_manifest,
+            *exact_block_packed_reference, *sampled_qgram_index,
+            query_views);
+      } catch (const std::exception& error) {
+        sampled_qgram_index.reset();
+        std::cerr << "Sampled q-gram direct verification disabled: "
+                  << error.what() << "\n";
+      }
+      const double direct_batch_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::high_resolution_clock::now() - direct_start)
+              .count();
+      const bool direct_enabled =
+          verified_results.size() == queries.size() &&
+          std::all_of(
+              verified_results.begin(), verified_results.end(),
+              [](const ExactBlockVerificationResult& result) {
+                return result.enabled;
+              });
+      if (direct_enabled) {
+        for (size_t query_idx = 0; query_idx < queries.size();
+             ++query_idx) {
+          auto& verified = verified_results[query_idx];
+          SearchStats combined;
+          combined.dist_calc_count = verified.distance_call_count;
+          combined.leaf_verify_count = verified.distance_call_count;
+          combined.candidate_count_for_prune =
+              verified.candidate_window_count;
+          std::vector<BioSequence> combined_hits;
+          std::unordered_map<std::string, size_t> hit_by_sequence;
+          hit_by_sequence.reserve(verified.occurrences.size());
+          for (const auto& occurrence : verified.occurrences) {
+            auto inserted = hit_by_sequence.emplace(
+                occurrence.sequence, combined_hits.size());
+            if (inserted.second) {
+              combined_hits.emplace_back(
+                  shard_manifest.contig_ids[occurrence.contig_id] + "_" +
+                      std::to_string(occurrence.source_start),
+                  occurrence.sequence);
+            }
+            combined_hits[inserted.first->second].add_occurrence(
+                shard_manifest.contig_ids[occurrence.contig_id],
+                static_cast<int>(occurrence.source_start),
+                static_cast<int>(occurrence.source_start +
+                                 occurrence.sequence.size()),
+                "+");
+          }
+          emit_query_hits(
+              queries[query_idx], combined, combined_hits,
+              direct_batch_ms);
+          exact_block_candidate_windows +=
+              verified.candidate_window_count;
+          exact_block_distance_calls += verified.distance_call_count;
+        }
+        total_query_count += queries.size();
+        ++total_batch_count;
+        routed_queries += queries.size();
+        exact_block_direct_queries += queries.size();
+        sampled_qgram_direct_queries += queries.size();
+        continue;
+      }
+    }
+    if (shard_manifest.shards.empty() &&
+        shard_manifest.pack_paths.empty()) {
+      throw std::runtime_error(
+          "router-only index requires its unchanged reference; "
+          "graph fallback is unavailable");
+    }
     size_t query_block_begin = 0;
     while (query_block_begin < queries.size()) {
     constexpr size_t kMaxPlannedRouteIds = 65536;
@@ -1867,14 +2108,98 @@ void run_query_index_batch(const std::string& index_path,
         uint8_t{0});
     std::vector<float> query_route_ms;
     query_route_ms.reserve(queries.size() - query_block_begin);
+    std::vector<std::unique_ptr<ExactBlockVerificationResult>>
+        query_direct_results;
+    query_direct_results.reserve(queries.size() - query_block_begin);
+    std::vector<std::vector<uint32_t>> query_direct_routes;
+    query_direct_routes.reserve(queries.size() - query_block_begin);
     size_t query_block_end = query_block_begin;
+    size_t planned_direct_route_ids = 0;
     while (query_block_end < queries.size()) {
       const size_t query_idx = query_block_end - query_block_begin;
       const auto& query = queries[query_block_end];
       const auto route_start =
           std::chrono::high_resolution_clock::now();
+      const size_t route_id_begin = query_route_shard_ids.size();
       const bool routed = shard_router.append_selected_shards(
           query.seq, tolerance, &query_route_shard_ids);
+      std::vector<uint32_t> direct_route;
+      constexpr size_t kExactBlockDirectMinShards = 1;
+      const size_t route_count =
+          query_route_shard_ids.size() - route_id_begin;
+      if (routed && route_count >= kExactBlockDirectMinShards) {
+        if (!exact_block_reference_attempted) {
+          exact_block_reference_attempted = true;
+          std::string packed_reference_error;
+          try {
+            exact_block_packed_reference =
+                std::make_unique<PackedReferenceFile>(
+                    load_packed_reference_file(
+                        index_path, shard_manifest));
+          } catch (const std::exception& error) {
+            packed_reference_error = error.what();
+          }
+          if (!exact_block_packed_reference) try {
+            const std::string& reference_path =
+                shard_manifest.part_manifest.ref_input;
+            if (!std::filesystem::is_regular_file(reference_path)) {
+              throw std::runtime_error(
+                  "persisted reference path is unavailable");
+            }
+            const std::string fingerprint_prefix =
+                "file:" + reference_path + ":";
+            const std::string& stored_fingerprint =
+                shard_manifest.part_manifest.ref_fingerprint;
+            const size_t hash_separator =
+                stored_fingerprint.rfind(':');
+            if (stored_fingerprint.compare(
+                    0, fingerprint_prefix.size(),
+                    fingerprint_prefix) != 0 ||
+                hash_separator == std::string::npos ||
+                hash_separator <= fingerprint_prefix.size()) {
+              throw std::runtime_error(
+                  "persisted reference fingerprint is incompatible");
+            }
+            const uint64_t expected_file_size = std::stoull(
+                stored_fingerprint.substr(
+                    fingerprint_prefix.size(),
+                    hash_separator - fingerprint_prefix.size()));
+            if (std::filesystem::file_size(reference_path) !=
+                    expected_file_size ||
+                std::filesystem::last_write_time(reference_path) >
+                    std::filesystem::last_write_time(index_path)) {
+              throw std::runtime_error(
+                  "persisted reference file changed after index build");
+            }
+            const std::string fai_path = reference_path + ".fai";
+            if (!std::filesystem::is_regular_file(fai_path) ||
+                std::filesystem::last_write_time(fai_path) <
+                    std::filesystem::last_write_time(reference_path)) {
+              throw std::runtime_error(
+                  "current FASTA .fai is unavailable");
+            }
+            exact_block_external_reference =
+                std::make_unique<IndexedReferenceFile>(
+                    index_reference_genome_file(reference_path));
+          } catch (const std::exception& error) {
+            std::cerr << "Exact-block direct verification disabled: "
+                      << "packed sidecar: "
+                      << packed_reference_error
+                      << "; external FASTA: "
+                      << error.what() << "\n";
+          }
+        }
+        if (exact_block_packed_reference ||
+            exact_block_external_reference) {
+          direct_route.assign(
+              query_route_shard_ids.begin() + route_id_begin,
+              query_route_shard_ids.end());
+          planned_direct_route_ids += direct_route.size();
+          query_route_shard_ids.resize(route_id_begin);
+        }
+      }
+      query_direct_results.push_back(nullptr);
+      query_direct_routes.push_back(std::move(direct_route));
       const auto route_end =
           std::chrono::high_resolution_clock::now();
       query_route_ms.push_back(static_cast<float>(
@@ -1888,14 +2213,119 @@ void run_query_index_batch(const std::string& index_path,
       }
       query_route_offsets.push_back(query_route_shard_ids.size());
       ++query_block_end;
-      if (query_route_shard_ids.size() >= kMaxPlannedRouteIds) {
+      constexpr size_t kMaxPlannedDirectRouteIds = size_t{1} << 20;
+      if (query_route_shard_ids.size() >= kMaxPlannedRouteIds ||
+          planned_direct_route_ids >= kMaxPlannedDirectRouteIds) {
         break;
+      }
+    }
+    std::vector<size_t> direct_query_indices;
+    std::vector<ExactBlockVerificationRequest> direct_requests;
+    direct_query_indices.reserve(query_direct_routes.size());
+    direct_requests.reserve(query_direct_routes.size());
+    for (size_t query_idx = 0;
+         query_idx < query_direct_routes.size(); ++query_idx) {
+      const auto& route = query_direct_routes[query_idx];
+      if (route.empty()) continue;
+      direct_query_indices.push_back(query_idx);
+      direct_requests.push_back(
+          {queries[query_block_begin + query_idx].seq,
+           route.data(), route.data() + route.size()});
+    }
+    if (!direct_requests.empty()) {
+      const auto direct_start =
+          std::chrono::high_resolution_clock::now();
+      std::vector<ExactBlockVerificationResult> verified_results;
+      try {
+        verified_results = exact_block_packed_reference
+            ? verify_selected_shards_by_exact_blocks_batch(
+                  tolerance, shard_manifest,
+                  *exact_block_packed_reference, direct_requests)
+            : verify_selected_shards_by_exact_blocks_batch(
+                  tolerance, shard_manifest,
+                  *exact_block_external_reference, direct_requests);
+      } catch (const std::exception& error) {
+        exact_block_packed_reference.reset();
+        exact_block_external_reference.reset();
+        std::cerr << "Exact-block direct verification disabled: "
+                  << error.what() << "\n";
+      }
+      const auto direct_end =
+          std::chrono::high_resolution_clock::now();
+      const float direct_batch_ms = static_cast<float>(
+          std::chrono::duration<double, std::milli>(
+              direct_end - direct_start)
+              .count());
+      const bool direct_enabled =
+          verified_results.size() == direct_requests.size() &&
+          std::all_of(
+              verified_results.begin(), verified_results.end(),
+              [](const ExactBlockVerificationResult& result) {
+                return result.enabled;
+              });
+      if (direct_enabled) {
+        for (size_t request_idx = 0;
+             request_idx < verified_results.size(); ++request_idx) {
+          const size_t query_idx = direct_query_indices[request_idx];
+          auto& verified = verified_results[request_idx];
+          ++exact_block_direct_queries;
+          exact_block_routed_shards +=
+              query_direct_routes[query_idx].size();
+          exact_block_matched_shards += verified.matched_shard_count;
+          exact_block_candidate_windows +=
+              verified.candidate_window_count;
+          exact_block_distance_calls += verified.distance_call_count;
+          query_route_ms[query_idx] += direct_batch_ms;
+          query_direct_results[query_idx] =
+              std::make_unique<ExactBlockVerificationResult>(
+                  std::move(verified));
+        }
+      } else {
+        std::vector<uint32_t> restored_shard_ids;
+        restored_shard_ids.reserve(
+            query_route_shard_ids.size() +
+            std::accumulate(
+                query_direct_routes.begin(), query_direct_routes.end(),
+                size_t{0},
+                [](size_t total, const std::vector<uint32_t>& route) {
+                  return total + route.size();
+                }));
+        std::vector<size_t> restored_offsets;
+        restored_offsets.reserve(query_route_offsets.size());
+        restored_offsets.push_back(0);
+        for (size_t query_idx = 0;
+             query_idx < query_direct_routes.size(); ++query_idx) {
+          const auto& direct_route = query_direct_routes[query_idx];
+          if (!direct_route.empty()) {
+            restored_shard_ids.insert(
+                restored_shard_ids.end(), direct_route.begin(),
+                direct_route.end());
+          } else {
+            restored_shard_ids.insert(
+                restored_shard_ids.end(),
+                query_route_shard_ids.begin() +
+                    query_route_offsets[query_idx],
+                query_route_shard_ids.begin() +
+                    query_route_offsets[query_idx + 1]);
+          }
+          restored_offsets.push_back(restored_shard_ids.size());
+        }
+        query_route_shard_ids.swap(restored_shard_ids);
+        query_route_offsets.swap(restored_offsets);
+        if (exact_block_packed_reference ||
+            exact_block_external_reference) {
+          exact_block_packed_reference.reset();
+          exact_block_external_reference.reset();
+          std::cerr << "Exact-block direct verification disabled: "
+                       "reference metadata does not match the bundle\n";
+        }
       }
     }
     const size_t planned_query_count =
         query_block_end - query_block_begin;
     peak_planned_route_ids = std::max(
-        peak_planned_route_ids, query_route_shard_ids.size());
+        peak_planned_route_ids,
+        query_route_shard_ids.size() + planned_direct_route_ids);
     const auto query_is_routed = [&](size_t query_idx) {
       return (query_routed_bits[query_idx >> 3] &
               static_cast<uint8_t>(uint8_t{1} << (query_idx & 7))) != 0;
@@ -1907,6 +2337,7 @@ void run_query_index_batch(const std::string& index_path,
       std::vector<uint32_t> shard_ids;
       bool full_scan = false;
       bool oversized_route_scan = false;
+      bool direct_verified = false;
 
       bool empty() const { return query_begin == query_end; }
     };
@@ -1942,6 +2373,15 @@ void run_query_index_batch(const std::string& index_path,
         merged_shard_ids;
     for (size_t query_idx = 0; query_idx < planned_query_count;
          ++query_idx) {
+      if (query_direct_results[query_idx]) {
+        flush_batch();
+        ShardQueryBatch direct_batch;
+        direct_batch.query_begin = query_idx;
+        direct_batch.query_end = query_idx + 1;
+        direct_batch.direct_verified = true;
+        shard_query_batches.push_back(std::move(direct_batch));
+        continue;
+      }
       if (!query_is_routed(query_idx)) {
         flush_batch();
         append_full_scan_query(query_idx);
@@ -1989,6 +2429,47 @@ void run_query_index_batch(const std::string& index_path,
     }
 
     for (const auto& shard_batch : shard_query_batches) {
+      if (shard_batch.direct_verified) {
+        clear_shard_cache();
+        const size_t query_idx = shard_batch.query_begin;
+        auto& verified = *query_direct_results[query_idx];
+        SearchStats combined;
+        combined.dist_calc_count = verified.distance_call_count;
+        combined.leaf_verify_count = verified.distance_call_count;
+        combined.candidate_count_for_prune =
+            verified.candidate_window_count;
+        std::vector<BioSequence> combined_hits;
+        std::unordered_map<std::string, size_t> hit_by_sequence;
+        hit_by_sequence.reserve(verified.occurrences.size());
+        for (const auto& occurrence : verified.occurrences) {
+          if (occurrence.contig_id >= shard_manifest.contig_ids.size() ||
+              occurrence.source_start >
+                  static_cast<uint32_t>(
+                      std::numeric_limits<int>::max()) -
+                      occurrence.sequence.size()) {
+            throw std::runtime_error(
+                "directly verified occurrence is out of range");
+          }
+          auto inserted = hit_by_sequence.emplace(
+              occurrence.sequence, combined_hits.size());
+          if (inserted.second) {
+            combined_hits.emplace_back(
+                shard_manifest.contig_ids[occurrence.contig_id] + "_" +
+                    std::to_string(occurrence.source_start),
+                occurrence.sequence);
+          }
+          combined_hits[inserted.first->second].add_occurrence(
+              shard_manifest.contig_ids[occurrence.contig_id],
+              static_cast<int>(occurrence.source_start),
+              static_cast<int>(occurrence.source_start +
+                               occurrence.sequence.size()),
+              "+");
+        }
+        emit_query_hits(
+            queries[query_block_begin + query_idx], combined,
+            combined_hits, query_route_ms[query_idx]);
+        continue;
+      }
       if (shard_batch.full_scan ||
           shard_batch.oversized_route_scan) {
         clear_shard_cache();
@@ -2324,6 +2805,17 @@ void run_query_index_batch(const std::string& index_path,
               << " searched_shards=" << searched_shards
               << "/" <<
                   total_query_count * shard_manifest.shards.size()
+              << " exact_block_direct_queries="
+              << exact_block_direct_queries
+              << " sampled_qgram_direct_queries="
+              << sampled_qgram_direct_queries
+              << " exact_block_shards="
+              << exact_block_matched_shards << "/"
+              << exact_block_routed_shards
+              << " exact_block_candidate_windows="
+              << exact_block_candidate_windows
+              << " exact_block_distance_calls="
+              << exact_block_distance_calls
               << "\n";
     return;
   }
@@ -2882,7 +3374,7 @@ int main(int argc, char** argv) {
   int router_hint_qgram_q = 5;
   int router_hint_minimizer_k = 4;
   int router_hint_minimizer_w = 8;
-  bool path_reuse_enabled = true;
+  bool path_reuse_enabled = false;
   bool local_router_enabled = false;
   size_t local_router_max_anchors = 4;
   size_t local_router_max_children = 64;
@@ -2916,6 +3408,7 @@ int main(int argc, char** argv) {
   size_t phase1_qgram_max_touched = 250000;
   size_t max_shard_windows = 0;
   size_t shard_build_jobs = 0;
+  bool router_only = false;
   int progress_interval_seconds = 600;
   int r_sw = navigamer::R_SW;
   int r_mw = navigamer::R_MW;
@@ -3082,6 +3575,10 @@ int main(int argc, char** argv) {
     if (a == "--shard-build-jobs" && i + 1 < argc) {
       shard_build_jobs =
           parse_positive_size(argv[++i], "--shard-build-jobs");
+      continue;
+    }
+    if (a == "--router-only" && i + 1 < argc) {
+      router_only = parse_zero_one(argv[++i], "--router-only");
       continue;
     }
     if (a == "--primary-radii" && i + 1 < argc) { primary_radii_csv = argv[++i]; continue; }
@@ -3426,7 +3923,8 @@ int main(int argc, char** argv) {
       }
       run_build_sharded(
           ref_input, window_size, stride, max_shard_windows,
-          shard_build_jobs, index_path, hierarchy, range_config);
+          shard_build_jobs, router_only, index_path, hierarchy,
+          range_config);
       return 0;
     }
     if (cmd == "query") {
@@ -3443,6 +3941,7 @@ int main(int argc, char** argv) {
 	        std::cerr << "query-index requires --index and --query\n";
 	        return 1;
 	      }
+	      configure_default_query_threads();
 	      run_query(ref_input, "", query_seq, tolerance, mode, hierarchy,
 	                range_config, search_config, index_path);
 	      return 0;
@@ -3452,6 +3951,7 @@ int main(int argc, char** argv) {
 	        std::cerr << "query-index-batch requires --index, --reads, and --out\n";
 	        return 1;
 	      }
+	      configure_default_query_threads();
 	      run_query_index_batch(index_path, reads_input, tolerance, out_tsv,
 	                            path_trace_out, mode, search_config);
 	      return 0;

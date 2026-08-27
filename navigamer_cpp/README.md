@@ -20,7 +20,7 @@ Output: `./navigamer` (Makefile) or `build/navigamer` (CMake).
 ./navigamer demo   [--size N] [--primary-radii 30,15,5 | --r-sw 5 --r-mw 15 --r-lw 30]
 ./navigamer build  --ref <fasta|sequence> --reads <fastq|sequence> [--index index.navidx] [same primary-layer flags]
 ./navigamer build-scale --ref <fasta|sequence> --window 250 --stride 1 --prefix-lengths 50000 --out build_scale.csv [--index index.navidx] [same primary-layer flags]
-./navigamer build-sharded --ref <fasta|sequence> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --index index.navshard [same primary-layer flags]
+./navigamer build-sharded --ref <fasta|sequence> --window 250 --stride 1 --shard-windows N --shard-build-jobs N --router-only 0|1 --index index.navshard [same primary-layer flags]
 ./navigamer query  --reads <fastq|sequence> --query <sequence> [--index index.navidx] [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer query-index --index <index.navidx|index.navshard> --query <sequence> [--tolerance 2] [--mode adaptive|greedy|exhaustive]
 ./navigamer query-index-batch --index <index.navidx|index.navshard> --reads <fastq> [--tolerance 2] [--out out.tsv] [--path-trace-out trace.tsv]
@@ -68,7 +68,7 @@ Adaptive profiling additionally accepts `--query-profile 0|1` (default `0`) and
 records per-query timing/counter buckets in `SearchStats`, `benchmark`, and
 `query-benchmark` output without changing search results.
 
-Adaptive path reuse additionally accepts `--path-reuse 0|1` (default `1`).
+Adaptive path reuse additionally accepts `--path-reuse 0|1` (default `0`).
 When enabled, adaptive search keeps thread-local warm-start caches for exact
 parent-local anchor-distance vectors on repeated queries and cached child
 shortlists keyed by cheap query-derived fingerprints. This remains an
@@ -86,6 +86,8 @@ exact verification, and records `path_reuse_attempt_count`,
 	rebuilding the index.
 	Batch-oriented commands group queries by the same query-derived fingerprint
 while keeping emitted output rows in original query order.
+Path reuse is experimental and should remain disabled for sharded batch query
+workloads until cache ownership is tied to a stable shard engine identity.
 
 Adaptive router hints additionally accept `--router-hints 0|1`,
 `--router-hint-qgram-q N`, `--router-hint-minimizer-k N`, and
@@ -179,6 +181,15 @@ aggregate memory; nested teams remain inside the original OpenMP thread
 budget. Parallel builders suppress per-part progress/summary output, avoiding
 large contended stderr streams at human-genome shard counts while retaining the
 outer completed-index summary.
+`--router-only 1` omits every graph payload and the redundant `.route`
+sidecar, writing only shard descriptors plus self-contained `.ref2` and
+`.qpos` sidecars. The reference stores two bits per base plus a block bitmap
+and compact 16-bit offset/length runs for non-ACGT intervals. It is mmap-decoded
+by candidate window and each touched block is checksum
+verified. Direct exact-block verification remains no-FN without the original
+FASTA; unsupported routing or a damaged block fails instead of returning a
+partial result. The default `--router-only 0` retains graph payloads as an
+additional conservative fallback.
 For a human stride-1 build, `--shard-windows 5000` is the recommended
 starting point when construction time and peak memory matter. Packing keeps
 the resulting logical-shard count manageable, while smaller bounded parts
@@ -293,33 +304,66 @@ points to independently loadable graph-payload byte ranges in `.navpack`
 containers. This removes the repeated manifest from every logical shard without
 changing its mapped graph arrays. When the bundle
 has multiple shards and windows of at least 24 bases, a memory-mapped
-`.route` sidecar. The router uses 16-mer minimizers from 24- to 64-base seeds
-in `d + 1` disjoint query blocks. Sorted keys use exact 16-entry blocks with
+`.route` sidecar. The router uses every 24-base-window 16-mer minimizer in
+each of `d + 1` disjoint query blocks. Sorted keys use exact 16-entry blocks with
 one 32-bit base and minimum-width packed adjacent deltas; the parallel shard
 IDs use exactly `ceil(log2(shard_count))` bits per entry. Any target
-within edit distance `d` must contain one whole block exactly, so omitting
-shards without any of those minimizers is no-FN-safe.
+within edit distance `d` must contain one whole block exactly. The router
+therefore intersects all minimizer postings inside each block, then unions the
+`d + 1` block results; the exact block and its true shard survive every
+intersection, so the pruning remains no-FN-safe.
+Every bundle with windows of at least 24 bases also stores a memory-mapped
+`.qpos` sidecar containing exact 13-mer positions sampled every 12 bases within
+each contig. It is used when all `d + 1` query blocks are at least 24 bases and
+contain only A/C/G/T. The pigeonhole principle leaves one block exact for every
+true hit, and any exact 24-base block contains one sampled 13-mer. The verifier
+confirms the complete block, expands its implied window start only over shifts
+whose indel lower bound can fit within `d`, applies contig/stride bounds, and finally computes exact
+bounded Myers distance. Consequently it can bypass both `.route` and graph
+loading without introducing false negatives. Unsupported queries use the
+existing conservative route/graph path; router-only bundles fail closed if no
+exact direct verifier supports the query.
 Pack paths and contig names are interned once in the manifest; logical-shard
 descriptors contain only fixed-width numeric fields and occupy 40 bytes in
 memory on the supported 64-bit build. Unsupported short/ambiguous queries or
 an unavailable sidecar fall back to an exact scan of every part in groups of
-at most 64 resident shards. Selected ranges are memory-mapped directly rather than loading
-their whole pack. `query-index` and `query-index-batch` search selected parts
+at most 64 resident shards. Selected payloads from the same pack share one
+lazy file mapping and one input stream; only their graph pages are decoded.
+For any non-empty routed query, an unchanged indexed
+FASTA with a current `.fai` enables a direct no-FN verification path before
+graph loading. Exact block occurrences enumerate every window start within the
+possible displacement-feasible indel shifts; those fixed-size reference windows are checked
+with bounded Myers edit distance, so a successful direct pass does not load
+the routed world trees at all.
+Path, size, modification time, contigs, and coordinates are checked first; any
+unsupported or inconsistent reference metadata keeps the minimizer-only route.
+Reference-span checks run in parallel with one reusable slice buffer per
+worker. Within one query block, direct routes are grouped by physical shard,
+so a shard shared by several queries is sliced once while every query still
+runs its own complete exact-block and edit-distance checks. When at least eight
+per-query block scans are projected per physical shard scan, one exact
+multi-pattern automaton matches all active blocks in a single pass; lower
+reuse keeps the faster long-pattern search. Both paths enumerate the same
+exact-block occurrences.
+`query-index` and `query-index-batch` search selected parts
 in parallel and merge identical sequences and their occurrences. Single-query
 loading maps only routed parts; batch loading maps the union of all routed
 parts, with oversized routed selections split at the same 64-shard cap. Any
 fallback query conservatively searches every part without mapping
-the whole human index at once. Batch planning and active-engine lookup use
+the whole human index at once. On machines with more than 32 OpenMP workers,
+these two commands default to 32; an explicit `OMP_NUM_THREADS` value always
+takes precedence. Batch planning and active-engine lookup use
 only the sorted IDs in the current bounded group, with no bitmap or reverse
 map proportional to the total shard count. FASTQ records and route plans are
 streamed in blocks of at most 8,192 queries; unchanged resident shard groups
 are reused across block boundaries, so memory is independent of total FASTQ
 record count. Each block is executed in online subplans that stop after at
-least 65,536 selected shard IDs. A query route is never split, bounding the
-route table by that budget plus one complete route; stderr reports
-`peak_route_ids`. Large sorted per-minimizer shard ranges are merged directly
-into that unique route; the ordinary small-sort path expands at most 4,096 IDs
-(16 KiB). Single-shard results bypass cross-shard hash merging. Non-sharded
+least 65,536 graph-search shard IDs or 1,048,576 direct-verification route
+IDs. A query route is never split, bounding either route table by its budget
+plus one complete route; stderr `peak_route_ids` reports the graph-search
+table. Per-block posting intersections start with the rarest
+minimizer, bounding temporary candidate IDs by its posting length.
+Single-shard results bypass cross-shard hash merging. Non-sharded
 queries stream one record at a time, and path tracing retains only the previous
 query trace needed for overlap statistics. Bundle query
 loading validates signatures, counts, mapped pack bounds, layer ranges, shard coordinates, and
@@ -348,7 +392,9 @@ four bytes per minimizer, with no per-shard page padding. List starts are
 implicit prefix sums, so build metadata stores only one 32-bit count per shard;
 the merge heap reserves exactly one cursor per non-empty shard, uses a 12-byte
 cursor below 2^32 entries, and advances by absolute entry index. Query-time
-layout is unchanged.
+layout is unchanged. Compatible `.route`, `.ref2`, and `.qpos` files are reused on
+restart. File-backed builds discard FASTA pages before mapping the router
+spool, so those two large sequential working sets do not overlap at peak.
 
 Reference-window deduplication uses a contiguous exact open-addressed table with
 one 64-bit slot per bucket and a maximum load of 7/8. The stored 32-bit hash is

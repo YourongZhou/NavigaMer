@@ -44,7 +44,7 @@ Used by all pipelines that build the index:
 | `--search-qgram-prefilter` | `off` | Safe child-world center q-gram prefilter: `off` or `on` |
 | `--search-qgram-q` | `5` | Search-only q-gram length; non-positive values disable the prefilter |
 | `--query-profile` | `0` | Enable (`1`) or disable (`0`) per-query profiling timers in adaptive search; counters remain available either way |
-| `--path-reuse` | `1` | Enable (`1`) or disable (`0`) thread-local warm-start caches and query-derived batch scheduling hints |
+| `--path-reuse` | `0` | Enable (`1`) or disable (`0`) experimental thread-local warm-start caches and query-derived batch scheduling hints; keep disabled for sharded batch queries |
 | `--router-hints` | `0` | Enable (`1`) or disable (`0`) q-gram/minimizer/pigeonhole router hints before local-router / best-first ordering |
 | `--router-hint-qgram-q` | `5` | Router-hint q-gram length used for cached child-center signatures and parent-local range hints |
 | `--router-hint-minimizer-k` | `4` | Router-hint minimizer k-mer length |
@@ -323,16 +323,56 @@ manifest stores pack IDs and byte ranges and is written only after all parts
 are valid. Query loading mmaps only the selected ranges, not whole packs.
 Pack paths and contig names are interned once, leaving a fixed 48-byte numeric
 descriptor per logical shard in memory.
+Every sharded bundle also stores a self-contained `.ref2` sidecar. Bases use
+exactly two bits plus a block bitmap and compact 16-bit offset/length runs for
+non-ACGT intervals. Block checksums are validated lazily on first
+access, and the file is mmap-decoded without materializing the reference.
+Bundles whose windows are at least 24 bases additionally store a memory-mapped
+`.qpos` sidecar. It records exact 13-mer positions every 12 contig-local bases.
+When every one of the query's `d + 1` pigeonhole blocks is at least 24 bases
+and contains only A/C/G/T, an exact block must contain a sampled 13-mer. Query
+therefore enumerates every possible hit start directly, expands only shifts
+whose indel lower bound can fit within `d`, enforces contig and stride bounds, and runs exact bounded
+Myers verification. This direct path loads neither `.route` nor graph shards
+and remains no-FN-safe; unsupported queries keep the conservative fallback.
+For candidate shift `s` and final length displacement
+`delta = window_length - query_length`, the necessary bound is
+`abs(s) + abs(delta + s) <= d`; equal-length inputs therefore need only
+`[-floor(d/2), +floor(d/2)]` rather than `[-d,+d]`.
 Multi-part bundles with
 windows of at least 24 bases also store a memory-mapped `.route` sidecar of
 exact 16-mer minimizers. Sorted minimizers use exact 16-entry blocks with one
 32-bit base and minimum-width packed adjacent deltas; parallel shard IDs use
-exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, one
-24- to 64-base seed is taken from each of `d + 1` disjoint query blocks; only
-shards containing at least one seed minimizer are searched. This is a pigeonhole
-necessary condition for an exact edit-distance hit. Unsupported
+exactly `ceil(log2(shard_count))` bits per entry. At tolerance `d`, every
+24-base-window minimizer is taken from each of `d + 1` disjoint query blocks.
+Posting lists are intersected within each block and the block results are
+unioned. At least one block is exact for every edit-distance hit, so its true
+shard survives all of that block's intersections. Unsupported
 short/ambiguous queries or an unavailable
 sidecar conservatively search all parts.
+Non-empty routes are additionally verified against the persisted
+reference path when it is an unchanged regular FASTA with a current `.fai`.
+Every complete pigeonhole-block occurrence generates all indexed window starts
+within its displacement-feasible indel shifts, followed by exact bounded Myers
+verification. A successful pass returns those hits directly without loading
+the routed graph shards. Direct routes in the same input block are grouped by
+physical shard, avoiding duplicate reference slices without sharing or
+dropping any query's candidates. High-reuse batches match all active exact
+blocks in one multi-pattern pass; low-reuse batches retain independent
+long-pattern searches. This is the same no-FN necessary condition at full
+block resolution followed by exact verification. Missing
+or inconsistent reference metadata disables this optional stage without
+changing the minimizer route. Batch stderr reports
+`exact_block_direct_queries`, `exact_block_shards=matched/routed`,
+`exact_block_candidate_windows`, `exact_block_distance_calls`, and
+`sampled_qgram_direct_queries`. When all supported queries use `.qpos`,
+`peak_route_ids` and `searched_shards` are both zero by construction.
+With `--router-only 1`, graph payloads are deliberately absent, so direct
+verification is mandatory rather than optional. A self-contained mmap-backed
+`.ref2` sidecar stores two-bit bases plus compact non-ACGT runs for affected
+4,096-base blocks, so the original FASTA is not required at query time.
+Unsupported queries, inconsistent metadata, or a damaged selected reference
+block fail closed instead of emitting an incomplete result.
 `query-index` loads only the routed parts. `query-index-batch` loads the union
 of routed parts required by the input reads; if any read cannot be routed, it
 loads all parts for the no-FN fallback.
@@ -341,6 +381,10 @@ contiguously to a temporary spool, then memory-maps and k-way merges the lists
 directly into the sidecar. The spool uses exactly four bytes per minimizer and
 has no per-shard page padding; offsets are 64-bit and counts are 32-bit. This
 changes build storage and peak memory, not query-time layout.
+Compatible completed `.route`, `.ref2`, and `.qpos` sidecars are reused on restart.
+Before the large router spool is mapped, file-backed FASTA pages from the
+generation pass are discarded, preventing the two sequential working sets
+from adding at peak.
 
 Within each shard, reference-window deduplication uses a contiguous 64-bit-slot
 open-addressed table at no more than 7/8 load instead of a node-allocated
@@ -364,6 +408,7 @@ length-compatible candidate superset without allocating a q-gram posting index.
 | `--stride` | `1` | Step between window starts |
 | `--shard-windows` | *(required)* | Maximum window starts per logical shard; `5000` is the recommended human stride-1 starting point when construction time/RAM matter (`10000` trades that for fewer logical shards), then benchmark nearby sizes |
 | `--shard-build-jobs` | auto | Maximum concurrently built parts; auto uses one below 8 OpenMP threads, two at 8--15, up to 20 for parts of at most 8,192 windows, up to 16 through 16,384 windows, otherwise up to four; it divides the thread budget among internal teams |
+| `--router-only` | `0` | With `1`, omit graph payloads and `.route`, retaining shard descriptors plus compact self-contained `.ref2` and `.qpos` sidecars; unsupported queries fail closed instead of returning partial hits |
 | `--index` | *(required)* | Output `.navshard` manifest; packed part containers are created beside it |
 | `--progress-interval-seconds` | `600` | Periodic progress interval for a serial shard build; parallel shard builds suppress per-part diagnostics and retain only the outer summary |
 
@@ -818,7 +863,7 @@ rebinding.
 | `test_build_range_equivalence` | Full vs q-gram/hybrid/auto construction and search-result equivalence |
 | `test_build_timing_stats` | Construction timing field and summary smoke checks |
 | `test_build_scale_smoke` | `build-scale` CSV timing smoke check |
-| `test_sharded_index_bin` | Monolithic/sharded window and coordinate equivalence, restart/repair, substitution/indel router no-FN checks, and conservative fallback |
+| `test_sharded_index_bin` | Monolithic/sharded window and coordinate equivalence, restart/repair, substitution/indel router no-FN checks, sampled-position batch/sequential equivalence on repetitive input, and conservative fallback |
 | `test_build_progress_bin` | Timestamped build progress formatting, forced boundaries, and periodic heartbeat |
 | `test_mbb_rect_index` | Exact rectangle intersection and randomized naive-scan equivalence |
 | `test_mbb_filter_equivalence` | Adaptive scan/rect result equality, recall, counters, and fallback |

@@ -1618,10 +1618,7 @@ LoadedIndex load_index_range(
   return {std::move(builder), std::move(manifest)};
 }
 
-LoadedIndex load_index_payload_range(
-    const std::string& path, uint64_t offset, uint64_t length,
-    const IndexBuildManifest& shared_manifest,
-    IndexLoadValidation validation) {
+static void validate_index_payload_range(uint64_t offset, uint64_t length) {
   if (length == 0 || offset % kMappedArrayAlignment != 0 ||
       offset > static_cast<uint64_t>(
                    std::numeric_limits<std::streamoff>::max()) ||
@@ -1630,20 +1627,18 @@ LoadedIndex load_index_payload_range(
     throw std::invalid_argument(
         "embedded index payload range must be non-empty, aligned, and seekable");
   }
-  validate_manifest_signature(shared_manifest);
-  const auto mapping = map_index_file(path, offset, length);
-#if defined(__unix__) || defined(__APPLE__)
-  if (!mapping) {
-    throw std::runtime_error("unable to map index payload range: " + path);
-  }
-#endif
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    throw std::runtime_error("unable to open index payload file: " + path);
-  }
+}
+
+static LoadedIndex read_index_payload_range(
+    std::istream& in,
+    const std::shared_ptr<MappedIndexFile>& mapping,
+    uint64_t offset, uint64_t length,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation) {
+  in.clear();
   in.seekg(static_cast<std::streamoff>(offset));
   if (!in) {
-    throw std::runtime_error("unable to seek to index payload range: " + path);
+    throw std::runtime_error("unable to seek to index payload range");
   }
   read_payload_magic(in);
 
@@ -1676,6 +1671,57 @@ LoadedIndex load_index_payload_range(
     throw std::runtime_error("embedded index payload exceeds its declared range");
   }
   return {std::move(builder), std::move(manifest)};
+}
+
+LoadedIndex load_index_payload_range(
+    const std::string& path, uint64_t offset, uint64_t length,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation) {
+  validate_index_payload_range(offset, length);
+  validate_manifest_signature(shared_manifest);
+  const auto mapping = map_index_file(path, offset, length);
+#if defined(__unix__) || defined(__APPLE__)
+  if (!mapping) {
+    throw std::runtime_error("unable to map index payload range: " + path);
+  }
+#endif
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("unable to open index payload file: " + path);
+  }
+  return read_index_payload_range(
+      in, mapping, offset, length, shared_manifest, validation);
+}
+
+std::vector<LoadedIndex> load_index_payload_ranges(
+    const std::string& path,
+    const std::vector<IndexPayloadRange>& ranges,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation) {
+  if (ranges.empty()) return {};
+  for (const auto& range : ranges) {
+    validate_index_payload_range(range.offset, range.length);
+  }
+  validate_manifest_signature(shared_manifest);
+  const auto mapping = map_index_file(path, 0, 0);
+#if defined(__unix__) || defined(__APPLE__)
+  if (!mapping) {
+    throw std::runtime_error("unable to map index payload container: " + path);
+  }
+#endif
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("unable to open index payload container: " + path);
+  }
+
+  std::vector<LoadedIndex> loaded;
+  loaded.reserve(ranges.size());
+  for (const auto& range : ranges) {
+    loaded.push_back(read_index_payload_range(
+        in, mapping, range.offset, range.length,
+        shared_manifest, validation));
+  }
+  return loaded;
 }
 
 LoadedIndex load_index_payload(

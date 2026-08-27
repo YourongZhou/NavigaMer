@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,6 +17,47 @@ constexpr uint32_t kRouterCodeBlocksPerGroup = 4;
 constexpr uint32_t kRouterCodeGroupsPerSupergroup = 256;
 
 struct IndexedReferenceFile;
+struct ShardedIndexManifest;
+class PackedReferenceFileMapping;
+class SampledQgramFileMapping;
+
+struct PackedReferenceAmbiguityRun {
+  uint16_t begin = 0;
+  uint16_t length = 0;
+};
+static_assert(sizeof(PackedReferenceAmbiguityRun) == 4,
+              "packed reference ambiguity runs must remain four bytes");
+
+struct PackedReferenceFile {
+  std::string path;
+  size_t sequence_size = 0;
+  size_t block_bases = 0;
+  size_t block_count = 0;
+  size_t payload_offset = 0;
+  std::vector<ReferenceContig> contigs;
+
+  std::string slice(size_t begin, size_t end) const;
+  void slice(size_t begin, size_t end, std::string* output) const;
+  bool slice_acgt(size_t begin, size_t end, std::string* output) const;
+  bool matches_packed_acgt(
+      size_t contig_idx, size_t begin,
+      uint64_t packed_expected, size_t length) const;
+  void prefetch(size_t begin, size_t end) const;
+
+ private:
+  friend PackedReferenceFile load_packed_reference_file(
+      const std::string&, const ShardedIndexManifest&);
+  void validate_checksum_range(size_t begin, size_t end) const;
+  std::shared_ptr<const PackedReferenceFileMapping> mapping;
+  const uint64_t* ambiguity_blocks = nullptr;
+  const uint64_t* block_checksums = nullptr;
+  const uint32_t* ambiguity_run_offsets = nullptr;
+  const PackedReferenceAmbiguityRun* ambiguity_runs = nullptr;
+  size_t ambiguity_run_count = 0;
+  size_t checksum_block_bases = 0;
+  size_t checksum_block_count = 0;
+  std::vector<uint32_t> ambiguity_rank;
+};
 
 struct IndexShardDescriptor {
   uint64_t file_offset = 0;
@@ -52,10 +94,33 @@ struct ShardRouteSelection {
   std::vector<uint32_t> shard_ids;
 };
 
+struct ExactBlockVerifiedOccurrence {
+  uint32_t contig_id = 0;
+  uint32_t source_start = 0;
+  int distance = 0;
+  std::string sequence;
+};
+
+struct ExactBlockVerificationResult {
+  bool enabled = false;
+  size_t matched_shard_count = 0;
+  size_t candidate_window_count = 0;
+  size_t distance_call_count = 0;
+  std::vector<ExactBlockVerifiedOccurrence> occurrences;
+};
+
+struct ExactBlockVerificationRequest {
+  std::string_view query;
+  const uint32_t* shard_ids_begin = nullptr;
+  const uint32_t* shard_ids_end = nullptr;
+};
+
 // Sorted minimizer codes are stored as exact adjacent-delta blocks and shard
 // IDs as a bit-packed parallel array. Both are memory-mapped from the router
-// sidecar. Exact query blocks provide a no-false-negative necessary
-// condition; unsupported queries conservatively disable routing.
+// sidecar. Every minimizer within one exact pigeonhole block is a
+// no-false-negative necessary condition, so their posting lists are
+// intersected within a block and block results are unioned. Unsupported
+// queries conservatively disable routing.
 struct ShardedSeedRouter {
   uint32_t k = 0;
   uint32_t window = 0;
@@ -102,6 +167,46 @@ struct ShardedSeedRouter {
       std::string_view query, int tolerance) const;
 };
 
+// Every k-mer beginning at a contig-local position divisible by sample_period
+// is stored with a losslessly packed sample-grid ordinal.  Contig sample bases
+// map that ordinal back to its exact position.  For an exact block of length
+// at least k + sample_period - 1, one of its first sample_period k-mers must
+// begin at a sampled position, so these postings enumerate every exact block
+// occurrence without scanning logical shards.
+struct SampledQgramPostingRange {
+  size_t begin = 0;
+  size_t end = 0;
+};
+
+struct SampledQgramIndex {
+  std::string path;
+  uint32_t k = 0;
+  uint32_t prefix_k = 0;
+  uint32_t sample_period = 0;
+  size_t sequence_size = 0;
+  size_t bucket_count = 0;
+  size_t prefix_bucket_count = 0;
+  size_t position_count = 0;
+  uint32_t position_bits = 0;
+
+  bool enabled() const;
+  bool supports(std::string_view query, int tolerance) const;
+  SampledQgramPostingRange posting_list(uint32_t code) const;
+  uint32_t sampled_position_at(
+      size_t entry, size_t* contig_hint) const;
+
+ private:
+  friend SampledQgramIndex load_sampled_qgram_index(
+      const std::string&, const ShardedIndexManifest&,
+      const PackedReferenceFile&);
+  std::shared_ptr<const SampledQgramFileMapping> mapping;
+  const uint32_t* bucket_offsets = nullptr;
+  const uint64_t* bucket_checksums = nullptr;
+  const uint8_t* packed_suffixes = nullptr;
+  const uint8_t* packed_positions = nullptr;
+  std::vector<uint32_t> contig_sample_begins;
+};
+
 bool is_sharded_index(const std::string& path);
 
 void save_sharded_index_manifest(
@@ -119,6 +224,72 @@ ShardedSeedRouter load_sharded_seed_router(
     const std::string& manifest_path,
     const ShardedIndexManifest& manifest);
 
+PackedReferenceFile load_packed_reference_file(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest);
+
+SampledQgramIndex load_sampled_qgram_index(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference);
+
+// Build the sidecar only when an identical validated image cannot be reused.
+void ensure_sampled_qgram_index(
+    const std::string& manifest_path,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference);
+
+std::vector<ExactBlockVerificationResult>
+verify_by_sampled_qgram_positions_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const SampledQgramIndex& occurrence_index,
+    const std::vector<std::string_view>& queries);
+
+ExactBlockVerificationResult verify_by_sampled_qgram_positions(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const SampledQgramIndex& occurrence_index);
+
+// Use exact pigeonhole-block occurrences to enumerate every possible indexed
+// window start, then verify those windows with exact bounded edit distance.
+// This can replace graph search for a large minimizer route without FN.
+ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const IndexedReferenceFile& reference,
+    const uint32_t* shard_ids_begin,
+    const uint32_t* shard_ids_end);
+
+ExactBlockVerificationResult verify_selected_shards_by_exact_blocks(
+    std::string_view query,
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const uint32_t* shard_ids_begin,
+    const uint32_t* shard_ids_end);
+
+// Batch form of the direct verifier. The reference slice for a shard routed
+// by multiple queries is loaded once, while each query keeps its complete
+// pigeonhole blocks and independent exact-distance verification.
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const IndexedReferenceFile& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests);
+
+std::vector<ExactBlockVerificationResult>
+verify_selected_shards_by_exact_blocks_batch(
+    int tolerance,
+    const ShardedIndexManifest& manifest,
+    const PackedReferenceFile& reference,
+    const std::vector<ExactBlockVerificationRequest>& requests);
+
 ShardedIndexManifest build_sharded_reference_index(
     const std::string& bundle_path,
     const std::string& ref_input,
@@ -130,7 +301,8 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs = 0);
+    size_t build_jobs = 0,
+    bool build_graph_payloads = true);
 
 ShardedIndexManifest build_sharded_reference_index(
     const std::string& bundle_path,
@@ -141,7 +313,8 @@ ShardedIndexManifest build_sharded_reference_index(
     size_t max_shard_windows,
     const HierarchyConfig& hierarchy,
     const BuildRangeConfig& range_config,
-    size_t build_jobs = 0);
+    size_t build_jobs = 0,
+    bool build_graph_payloads = true);
 
 std::vector<LoadedIndex> load_sharded_index(
     const std::string& manifest_path,

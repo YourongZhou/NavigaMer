@@ -209,7 +209,7 @@ cd navigamer_cpp
 ./navigamer query --reads ACGTACGTACGTACGT --query ACGTACGTACGTACGT --tolerance 2 --search-qgram-prefilter on --search-qgram-q 5
 ./navigamer build --ref ref --reads ACGTACGTACGTACGT --index /tmp/navigamer.navidx
 ./navigamer query-index --index /tmp/navigamer.navidx --query ACGTACGTACGTACGT --tolerance 2
-./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000 --index /tmp/human.navshard
+./navigamer build-sharded --ref ../data/human/chr1_subset --window 250 --stride 1 --shard-windows 10000 --router-only 0 --index /tmp/human.navshard
 ./navigamer query-index-batch --index /tmp/human.navshard --reads reads.fastq --tolerance 2 --out /tmp/hits.tsv
 ./navigamer demo --size 200 --range-candidate-mode hybrid --qgram-q 5
 ./navigamer demo --size 200
@@ -318,6 +318,14 @@ threads each; larger parts remain capped at four builders to contain peak
 memory. `--shard-build-jobs N` sets an explicit concurrency limit. The product
 of part jobs and their internal worker teams never exceeds the OpenMP thread
 limit, while peak build memory is bounded by the number of concurrent parts.
+`--router-only 1` skips all graph payloads and the redundant `.route` sidecar,
+persisting only shard descriptors plus self-contained `.ref2` and `.qpos`
+sidecars.
+The reference uses two bits per base plus a block bitmap and compact 16-bit
+offset/length runs for non-ACGT intervals. Queries mmap only candidate blocks,
+validate their checksums, and do not require the original FASTA. This
+mode fails rather than silently omitting hits when direct verification is
+unavailable. The default full mode keeps graph payloads for fallback.
 Logical shards are grouped 1,024 at a time into atomic `.navpack` containers.
 Each container has a checked offset/length directory, and completed containers
 are content- and parameter-validated and reused after an interrupted build.
@@ -325,8 +333,19 @@ During a rebuild only the current group's atomic temporary pack exists; shard
 payloads are written directly into it, without per-shard temporary files. The final v20
 `.navshard` manifest stores the common construction manifest once, then each
 logical shard's pack ID and byte range plus a memory-mapped exact-minimizer
-router sidecar. Pack entries contain only independently decodable graph
+router sidecar. A self-contained `.ref2` sidecar stores bases at two bits and
+records non-ACGT intervals as compact runs for affected 4,096-base blocks;
+queries mmap and checksum only touched blocks. Pack entries contain only independently decodable graph
 payloads, rather than repeating the common manifest for every logical shard.
+Bundles with windows of at least 24 bases also store a `.qpos` sidecar: one
+exact 13-mer reference position every 12 bases within each contig. If every one
+of a query's `d + 1` pigeonhole blocks is at least 24 bases, query can use this
+sidecar without loading `.route` or any world-tree payload. At least one block
+of every edit-distance-`d` hit is exact; every 24-base exact block contains a
+sampled 13-mer; and all displacement-feasible starts are checked with exact
+bounded Myers distance. Thus this is a complete candidate
+enumerator, not a heuristic filter. Unsupported queries retain the existing
+conservative route/graph fallback (or fail closed for router-only bundles).
 Paired child-MBB coordinates are ranked only among quantized states permitted
 by their exact beacon-pair distance. This reconstructs the same conservative
 distance bins while using fewer than the former fixed seven bits whenever the
@@ -347,7 +366,9 @@ minimum-width packed adjacent deltas. Shard IDs use exactly
 `ceil(log2(shard_count))` bits per entry. During construction, per-shard
 minimizer lists are contiguous in the
 spool, so their starts are implicit prefix sums and only one 32-bit count is
-retained per shard. For a query at tolerance `d`, the router takes one seed of
+retained per shard. Compatible router and packed-reference sidecars are reused
+on restart, and FASTA pages are dropped before the large router spool is
+mapped. For a query at tolerance `d`, the router takes one seed of
 32 to 64 bases from each of `d + 1` disjoint query blocks and searches only
 shards containing at least one seed minimizer. The pigeonhole principle makes
 this a necessary condition for an edit-distance
@@ -359,6 +380,9 @@ batch, search those parts in parallel, and merge identical sequences and all
 of their occurrences before reporting results. Routed selections larger than
 64 shards use the same bounded groups. A fallback query searches every
 shard to preserve recall without mapping the complete human index at once.
+On machines with more than 32 OpenMP workers, these two commands default to
+32 because the exact-reference query path is memory-bandwidth bound; an
+explicit `OMP_NUM_THREADS` value always takes precedence.
 Large per-minimizer shard ranges are already sorted, so routing merges them
 directly into the final unique ID list. A small-sort fast path retains at most
 4,096 expanded IDs (16 KiB), bounding temporary route memory by the selected
@@ -478,7 +502,7 @@ calls, center distance calls, and raw candidate counts. The `benchmark` and
 `query-benchmark` commands surface these values in TSV output and print query
 time/world-access summaries to stderr.
 
-Adaptive path reuse supports `--path-reuse 0|1` (default `1`). When enabled,
+Adaptive path reuse supports `--path-reuse 0|1` (default `0`). When enabled,
 adaptive search keeps thread-local warm-start caches for exact per-parent
 anchor-distance vectors on repeated queries and cached child shortlists keyed by
 query-derived fingerprints. These caches affect ordering or exact memoization
@@ -490,6 +514,8 @@ only, never become a pruning reason, and record counters such as
 `source_pos=` FASTQ annotations when present, otherwise by a cheap query-derived
 fingerprint, while preserving output order so related queries are more likely to
 hit the same thread-local warm cache.
+Path reuse is experimental and should remain disabled for sharded batch query
+workloads until cache ownership is tied to a stable shard engine identity.
 
 Adaptive local routing accepts `--local-router 0|1`,
 `--local-router-max-anchors N`, `--local-router-max-children N`, and

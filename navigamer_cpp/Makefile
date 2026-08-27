@@ -11,7 +11,7 @@ LDLIBS =
 EDLIB_SRC = third_party/edlib/src/edlib.cpp
 EDLIB_OBJ = $(EDLIB_SRC:.cpp=.o)
 EDLIB_DEP = $(EDLIB_OBJ:.o=.d)
-SRC = src/structure.cpp src/tools.cpp src/search_engine.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp src/index_persistence.cpp src/sharded_index.cpp src/shard_router.cpp src/candidate_verifier.cpp $(EDLIB_SRC) src/main.cpp
+SRC = src/structure.cpp src/tools.cpp src/search_engine.cpp src/qgram_filter.cpp src/range_join.cpp src/phase1_seed_index.cpp src/phase2_distance_verifier.cpp src/build_progress.cpp src/mbb_rect_index.cpp src/simd_mbb_filter.cpp src/index_builder.cpp src/io_utils.cpp src/experiment_utils.cpp src/map150.cpp src/query_benchmark.cpp src/index_persistence.cpp src/sharded_index.cpp src/shard_router.cpp src/sampled_qgram_index.cpp src/candidate_verifier.cpp $(EDLIB_SRC) src/main.cpp
 OBJ = $(SRC:.cpp=.o)
 DEP = $(OBJ:.o=.d)
 TARGET = navigamer
@@ -202,7 +202,7 @@ EXP_SRC = src/experiment_utils.cpp
 EXP_OBJ = $(EXP_SRC:.cpp=.o)
 EXP_DEP = $(EXP_OBJ:.cpp=.d)
 
-LIB_SRC += $(EXP_SRC) src/query_benchmark.cpp src/index_persistence.cpp src/sharded_index.cpp src/shard_router.cpp
+LIB_SRC += $(EXP_SRC) src/query_benchmark.cpp src/index_persistence.cpp src/sharded_index.cpp src/shard_router.cpp src/sampled_qgram_index.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
 
 .PHONY: all clean test test_dist test_hierarchy test_search_stats test_query_profile test_local_router test_best_first test_router_hints test_path_reuse test_safe_child_router test_query_planner test_map150 test_bounded test_bounded_myers test_qgram test_range_join_check test_build_range test_build_distance_mode test_mbb_rect test_mbb_filter test_search_qgram test_query_benchmark test_candidate_verifier test_epoch_visited test_search_graph_view test_search_distance_mode test_simd_mbb_filter test_simd_leaf_beacon_filter test_build_timing_stats_check test_build_scale_smoke_check test_phase1_hybrid test_phase1_seed_index_check test_index_persistence test_phase2_distance_verifier test_build_progress test_sharded_index test_all

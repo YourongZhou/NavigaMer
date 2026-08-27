@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -199,6 +200,93 @@ IndexedReferenceFile index_reference_genome_file(
   }
 #endif
 
+  // A standard samtools .fai already contains the exact byte geometry needed
+  // by slice(). Reconstruct sparse checkpoints in O(contigs + checkpoints)
+  // instead of rescanning a multi-gigabase FASTA on every query process.
+  const std::string fai_path = path + ".fai";
+  std::error_code time_error;
+  const uint64_t reference_file_size =
+      std::filesystem::file_size(path, time_error);
+  const auto reference_time = std::filesystem::last_write_time(
+      path, time_error);
+  if (!time_error) {
+    const auto fai_time = std::filesystem::last_write_time(
+        fai_path, time_error);
+    if (!time_error && fai_time >= reference_time) {
+      std::ifstream fai(fai_path);
+      std::vector<ReferenceContig> fai_contigs;
+      std::vector<uint32_t> fai_checkpoint_begins;
+      std::vector<uint64_t> fai_checkpoint_positions;
+      uint64_t flattened_begin = 0;
+      bool valid_fai = static_cast<bool>(fai);
+      std::string fai_line;
+      while (valid_fai && std::getline(fai, fai_line)) {
+        std::istringstream fields(fai_line);
+        std::string name;
+        uint64_t length = 0;
+        uint64_t file_offset = 0;
+        uint64_t line_bases = 0;
+        uint64_t line_width = 0;
+        if (!(fields >> name >> length >> file_offset >>
+              line_bases >> line_width) || name.empty() || length == 0 ||
+            line_bases == 0 || line_width < line_bases ||
+            length > UINT32_MAX - flattened_begin ||
+            fai_checkpoint_positions.size() > UINT32_MAX) {
+          valid_fai = false;
+          break;
+        }
+        const auto raw_position = [&](uint64_t local, uint64_t* raw) {
+          const uint64_t row = local / line_bases;
+          const uint64_t column = local % line_bases;
+          if (file_offset >
+                  std::numeric_limits<uint64_t>::max() - column ||
+              row >
+              (std::numeric_limits<uint64_t>::max() - file_offset - column) /
+                  line_width) {
+            return false;
+          }
+          *raw = file_offset + row * line_width + column;
+          return *raw < reference_file_size;
+        };
+        const uint64_t final_local = length - 1;
+        uint64_t final_raw = 0;
+        if (!raw_position(final_local, &final_raw) ||
+            (reference.mapping && final_raw >= reference.mapping->size())) {
+          valid_fai = false;
+          break;
+        }
+        fai_checkpoint_begins.push_back(static_cast<uint32_t>(
+            fai_checkpoint_positions.size()));
+        for (uint64_t local = 0; local < length;
+             local += checkpoint_stride) {
+          uint64_t raw = 0;
+          if (!raw_position(local, &raw)) {
+            valid_fai = false;
+            break;
+          }
+          fai_checkpoint_positions.push_back(raw);
+          if (length - local <= checkpoint_stride) break;
+        }
+        if (!valid_fai) break;
+        fai_contigs.push_back(
+            {name, static_cast<uint32_t>(flattened_begin),
+             static_cast<uint32_t>(flattened_begin + length), 0});
+        flattened_begin += length;
+      }
+      if (valid_fai && !fai_contigs.empty() && fai.eof() &&
+          fai_contigs.size() == fai_checkpoint_begins.size()) {
+        reference.id = fai_contigs.front().id;
+        reference.sequence_size = static_cast<size_t>(flattened_begin);
+        reference.contigs = std::move(fai_contigs);
+        reference.contig_checkpoint_begins =
+            std::move(fai_checkpoint_begins);
+        reference.checkpoint_file_positions =
+            std::move(fai_checkpoint_positions);
+        return reference;
+      }
+    }
+  }
+
   if (reference.mapping) {
     constexpr size_t kDiscardStride = size_t{16} << 20;
     const char* data = reference.mapping->data();
@@ -257,10 +345,23 @@ IndexedReferenceFile index_reference_genome_file(
 }
 
 std::string IndexedReferenceFile::slice(size_t begin, size_t end) const {
+  std::string result;
+  slice(begin, end, &result);
+  return result;
+}
+
+void IndexedReferenceFile::slice(
+    size_t begin, size_t end, std::string* result) const {
+  if (!result) {
+    throw std::invalid_argument("reference file slice output is null");
+  }
   if (begin > end || end > sequence_size) {
     throw std::out_of_range("reference file slice is out of bounds");
   }
-  if (begin == end) return {};
+  if (begin == end) {
+    result->clear();
+    return;
+  }
   const auto contig_it = std::upper_bound(
       contigs.begin(), contigs.end(), begin,
       [](size_t position, const ReferenceContig& contig) {
@@ -294,7 +395,7 @@ std::string IndexedReferenceFile::slice(size_t begin, size_t end) const {
   const uint64_t checkpoint_file_pos =
       checkpoint_file_positions[checkpoint_idx];
 
-  std::string result(end - begin, '\0');
+  result->resize(end - begin);
   size_t sequence_pos = checkpoint_sequence_pos;
   bool at_line_start = false;
   const auto& byte_table = reference_byte_table();
@@ -310,7 +411,7 @@ std::string IndexedReferenceFile::slice(size_t begin, size_t end) const {
     at_line_start = false;
     if (byte_table.whitespace[byte]) return;
     if (sequence_pos >= begin) {
-      result[sequence_pos - begin] = byte_table.uppercase[byte];
+      (*result)[sequence_pos - begin] = byte_table.uppercase[byte];
     }
     ++sequence_pos;
   };
@@ -345,7 +446,10 @@ std::string IndexedReferenceFile::slice(size_t begin, size_t end) const {
   if (sequence_pos != end) {
     throw std::runtime_error("truncated reference file slice: " + path);
   }
-  return result;
+}
+
+void IndexedReferenceFile::discard_cached_pages() const {
+  if (mapping) mapping->discard(0, mapping->size());
 }
 
 static bool parse_source_pos(const std::string& header, size_t* source_pos) {
@@ -440,6 +544,10 @@ void load_read_records(const std::string& path_or_string,
     std::string s = path_or_string;
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(0, 1);
+    const auto& byte_table = reference_byte_table();
+    for (char& base : s) {
+      base = byte_table.uppercase[static_cast<unsigned char>(base)];
+    }
     emit_read("query_0", std::move(s), false, size_t{0});
     return;
   }
@@ -459,6 +567,10 @@ void load_read_records(const std::string& path_or_string,
     std::getline(f, line);  // +
     std::getline(f, line);   // qual
     if (!sequence.empty()) {
+      const auto& byte_table = reference_byte_table();
+      for (char& base : sequence) {
+        base = byte_table.uppercase[static_cast<unsigned char>(base)];
+      }
       size_t source_pos = 0;
       const bool has_source_pos =
           parse_source_pos(header_body, &source_pos);
@@ -510,6 +622,10 @@ bool QuerySequenceReader::next(QuerySequence* query) {
   if (literal_pending_) {
     query->id = "query_0";
     query->seq = std::move(literal_);
+    const auto& byte_table = reference_byte_table();
+    for (char& base : query->seq) {
+      base = byte_table.uppercase[static_cast<unsigned char>(base)];
+    }
     literal_pending_ = false;
     return true;
   }
@@ -532,6 +648,10 @@ bool QuerySequenceReader::next(QuerySequence* query) {
     std::getline(input_, line_);  // +
     std::getline(input_, line_);  // quality
     if (query->seq.empty()) continue;
+    const auto& byte_table = reference_byte_table();
+    for (char& base : query->seq) {
+      base = byte_table.uppercase[static_cast<unsigned char>(base)];
+    }
     query->id = std::move(sequence_id);
     return true;
   }

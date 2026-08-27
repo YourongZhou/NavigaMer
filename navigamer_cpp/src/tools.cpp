@@ -452,6 +452,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
   __m256i ph[4] = {};
   __m256i mh[4] = {};
   __m256i masks[4] = {};
+#pragma GCC unroll 4
   for (size_t block = 0; block < block_count; ++block) {
     masks[block] = _mm256_set1_epi64x(
         static_cast<long long>(pattern.masks[block]));
@@ -478,6 +479,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
     const size_t code3 = code(3);
 
     __m256i carry = zero;
+#pragma GCC unroll 4
     for (size_t block = 0; block < block_count; ++block) {
       const __m256i eq = _mm256_set_epi64x(
           static_cast<long long>(pattern.peq[block][code3]),
@@ -522,6 +524,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
 
     __m256i ph_carry = one;
     __m256i mh_carry = zero;
+#pragma GCC unroll 4
     for (size_t block = 0; block < block_count; ++block) {
       const __m256i next_ph_carry =
           _mm256_srli_epi64(ph[block], 63);
@@ -539,6 +542,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
       mh_carry = next_mh_carry;
     }
 
+#pragma GCC unroll 4
     for (size_t block = 0; block < block_count; ++block) {
       mv[block] = _mm256_and_si256(
           _mm256_and_si256(ph[block], xv[block]), masks[block]);

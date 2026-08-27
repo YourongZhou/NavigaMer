@@ -49,6 +49,11 @@ struct LoadedIndex {
   IndexBuildManifest manifest;
 };
 
+struct IndexPayloadRange {
+  uint64_t offset = 0;
+  uint64_t length = 0;
+};
+
 enum class IndexLoadValidation {
   Full,
   Structural,
@@ -118,6 +123,15 @@ LoadedIndex load_index_payload_range(
     const std::string& path,
     uint64_t offset,
     uint64_t length,
+    const IndexBuildManifest& shared_manifest,
+    IndexLoadValidation validation =
+        IndexLoadValidation::Full);
+
+// Decode several independently stored payloads from one container while
+// sharing one file mapping and one input stream. Results preserve range order.
+std::vector<LoadedIndex> load_index_payload_ranges(
+    const std::string& path,
+    const std::vector<IndexPayloadRange>& ranges,
     const IndexBuildManifest& shared_manifest,
     IndexLoadValidation validation =
         IndexLoadValidation::Full);
