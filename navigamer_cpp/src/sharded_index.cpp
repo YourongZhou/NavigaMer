@@ -238,10 +238,22 @@ size_t read_size(std::istream& in, const char* field) {
 void hash_bytes(
     uint64_t* hash, const void* data, size_t size) {
   const auto* bytes = static_cast<const uint8_t*>(data);
-  for (size_t idx = 0; idx < size; ++idx) {
-    *hash ^= bytes[idx];
-    *hash *= kFnvPrime;
+  uint64_t value = *hash;
+  while (size >= 8) {
+#pragma GCC unroll 8
+    for (size_t idx = 0; idx < 8; ++idx) {
+      value ^= bytes[idx];
+      value *= kFnvPrime;
+    }
+    bytes += 8;
+    size -= 8;
   }
+  while (size != 0) {
+    value ^= *bytes++;
+    value *= kFnvPrime;
+    --size;
+  }
+  *hash = value;
 }
 
 template <typename T>
@@ -2420,7 +2432,48 @@ bool PackedReferenceFile::matches_packed_acgt(
       length > static_cast<size_t>(contig.end) - begin) {
     return false;
   }
-  validate_checksum_range(begin, begin + length);
+  if (length == 0) return true;
+  const size_t first_checksum = begin / checksum_block_bases;
+  const size_t last_checksum =
+      (begin + length - 1) / checksum_block_bases;
+  if (first_checksum != last_checksum ||
+      mapping->begin_block_validation(first_checksum)) {
+    validate_checksum_range(begin, begin + length);
+  }
+
+  const size_t fast_block_idx = begin / block_bases;
+  if ((begin + length - 1) / block_bases == fast_block_idx) {
+    const size_t word = fast_block_idx >> 6;
+    const uint64_t bit_mask =
+        uint64_t{1} << (fast_block_idx & 63);
+    if ((ambiguity_blocks[word] & bit_mask) == 0) {
+      const size_t base_shift = 2 * (begin & 3);
+      const size_t packed_byte_count =
+          (base_shift + 2 * length + 7) / 8;
+      const size_t raw_offset = payload_offset + begin / 4;
+      if (raw_offset > mapping->size() ||
+          packed_byte_count > mapping->size() - raw_offset) {
+        throw std::runtime_error(
+            "packed reference block lies outside its file");
+      }
+      uint64_t low = 0;
+      std::memcpy(
+          &low, mapping->data() + raw_offset,
+          std::min(packed_byte_count, sizeof(low)));
+      uint64_t reference_word = low >> base_shift;
+      if (packed_byte_count > sizeof(low)) {
+        reference_word |=
+            static_cast<uint64_t>(
+                mapping->data()[raw_offset + sizeof(low)])
+            << (64 - base_shift);
+      }
+      const size_t packed_bits = 2 * length;
+      const uint64_t mask = packed_bits == 64
+          ? std::numeric_limits<uint64_t>::max()
+          : (uint64_t{1} << packed_bits) - 1;
+      return (reference_word & mask) == (packed_expected & mask);
+    }
+  }
 
   size_t cursor_pos = begin;
   size_t expected_pos = 0;

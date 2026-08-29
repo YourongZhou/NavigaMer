@@ -106,10 +106,22 @@ void hash_pod(uint64_t* hash, T value) {
 
 void hash_bytes(uint64_t* hash, const void* data, size_t size) {
   const auto* bytes = static_cast<const uint8_t*>(data);
-  for (size_t idx = 0; idx < size; ++idx) {
-    *hash ^= bytes[idx];
-    *hash *= kFnvPrime;
+  uint64_t value = *hash;
+  while (size >= 8) {
+#pragma GCC unroll 8
+    for (size_t idx = 0; idx < 8; ++idx) {
+      value ^= bytes[idx];
+      value *= kFnvPrime;
+    }
+    bytes += 8;
+    size -= 8;
   }
+  while (size != 0) {
+    value ^= *bytes++;
+    value *= kFnvPrime;
+    --size;
+  }
+  *hash = value;
 }
 
 void hash_string(uint64_t* hash, const std::string& value) {

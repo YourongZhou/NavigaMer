@@ -284,6 +284,18 @@ void test_indexed_reference_file_slices() {
     }
     return packed;
   };
+  for (size_t begin = 100; begin < 104; ++begin) {
+    const std::string exact = first.substr(begin, 32);
+    assert(packed_reference.matches_packed_acgt(
+        0, begin, packed_acgt(exact), exact.size()));
+    // Exercise the already-validated checksum-block path as well.
+    assert(packed_reference.matches_packed_acgt(
+        0, begin, packed_acgt(exact), exact.size()));
+    std::string mismatch = exact;
+    mismatch[31] = mismatch[31] == 'A' ? 'C' : 'A';
+    assert(!packed_reference.matches_packed_acgt(
+        0, begin, packed_acgt(mismatch), mismatch.size()));
+  }
   const std::string packed_match = first.substr(4090, 24);
   assert(packed_reference.matches_packed_acgt(
       0, 4090, packed_acgt(packed_match), packed_match.size()));

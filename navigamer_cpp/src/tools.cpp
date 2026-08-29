@@ -432,28 +432,28 @@ int compute_distance_bounded_myers_prepared(
 }
 
 #if NAVIGAMER_HAS_MYERS_BATCH4_AVX2
-__attribute__((target("avx2")))
-bool compute_distance_bounded_myers_prepared_batch4_avx2(
+template <size_t BlockCount>
+__attribute__((target("avx2"), always_inline))
+inline bool compute_distance_bounded_myers_prepared_batch4_avx2_fixed(
     const PreparedMyersDnaPattern& pattern,
     const std::array<std::string_view, 4>& texts,
     int tau,
     std::array<int, 4>& distances) {
   const size_t pattern_length = pattern.pattern_length;
-  const size_t block_count = pattern.block_count;
   const size_t text_length = texts[0].size();
   const __m256i zero = _mm256_setzero_si256();
   const __m256i one = _mm256_set1_epi64x(1);
   const __m256i sign = _mm256_set1_epi64x(
       static_cast<long long>(uint64_t{1} << 63));
   const __m256i all_ones = _mm256_set1_epi64x(-1);
-  __m256i pv[4] = {};
-  __m256i mv[4] = {};
-  __m256i xv[4] = {};
-  __m256i ph[4] = {};
-  __m256i mh[4] = {};
-  __m256i masks[4] = {};
+  __m256i pv[BlockCount] = {};
+  __m256i mv[BlockCount] = {};
+  __m256i xv[BlockCount] = {};
+  __m256i ph[BlockCount] = {};
+  __m256i mh[BlockCount] = {};
+  __m256i masks[BlockCount] = {};
 #pragma GCC unroll 4
-  for (size_t block = 0; block < block_count; ++block) {
+  for (size_t block = 0; block < BlockCount; ++block) {
     masks[block] = _mm256_set1_epi64x(
         static_cast<long long>(pattern.masks[block]));
     pv[block] = masks[block];
@@ -462,7 +462,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
 
   __m256i scores = _mm256_set1_epi64x(
       static_cast<long long>(pattern_length));
-  const size_t last_block = block_count - 1;
+  constexpr size_t last_block = BlockCount - 1;
   const __m256i top_bit = _mm256_set1_epi64x(
       static_cast<long long>(
           uint64_t{1} << ((pattern_length - 1) % 64)));
@@ -480,7 +480,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
 
     __m256i carry = zero;
 #pragma GCC unroll 4
-    for (size_t block = 0; block < block_count; ++block) {
+    for (size_t block = 0; block < BlockCount; ++block) {
       const __m256i eq = _mm256_set_epi64x(
           static_cast<long long>(pattern.peq[block][code3]),
           static_cast<long long>(pattern.peq[block][code2]),
@@ -525,7 +525,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
     __m256i ph_carry = one;
     __m256i mh_carry = zero;
 #pragma GCC unroll 4
-    for (size_t block = 0; block < block_count; ++block) {
+    for (size_t block = 0; block < BlockCount; ++block) {
       const __m256i next_ph_carry =
           _mm256_srli_epi64(ph[block], 63);
       const __m256i next_mh_carry =
@@ -543,7 +543,7 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
     }
 
 #pragma GCC unroll 4
-    for (size_t block = 0; block < block_count; ++block) {
+    for (size_t block = 0; block < BlockCount; ++block) {
       mv[block] = _mm256_and_si256(
           _mm256_and_si256(ph[block], xv[block]), masks[block]);
       pv[block] = _mm256_and_si256(
@@ -581,6 +581,30 @@ bool compute_distance_bounded_myers_prepared_batch4_avx2(
                           : tau + 1;
   }
   return true;
+}
+
+__attribute__((target("avx2")))
+bool compute_distance_bounded_myers_prepared_batch4_avx2(
+    const PreparedMyersDnaPattern& pattern,
+    const std::array<std::string_view, 4>& texts,
+    int tau,
+    std::array<int, 4>& distances) {
+  switch (pattern.block_count) {
+    case 1:
+      return compute_distance_bounded_myers_prepared_batch4_avx2_fixed<1>(
+          pattern, texts, tau, distances);
+    case 2:
+      return compute_distance_bounded_myers_prepared_batch4_avx2_fixed<2>(
+          pattern, texts, tau, distances);
+    case 3:
+      return compute_distance_bounded_myers_prepared_batch4_avx2_fixed<3>(
+          pattern, texts, tau, distances);
+    case 4:
+      return compute_distance_bounded_myers_prepared_batch4_avx2_fixed<4>(
+          pattern, texts, tau, distances);
+    default:
+      return false;
+  }
 }
 #endif
 
