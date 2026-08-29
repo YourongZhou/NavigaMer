@@ -240,8 +240,19 @@ uint32_t packed_position_bits(size_t position_count) {
   return bits;
 }
 
-uint32_t packed_position_at(
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+inline uint32_t packed_position_at(
     const uint8_t* positions, size_t entry, uint32_t position_bits) {
+  // A 28-bit entry always occupies one unaligned 32-bit word: consecutive
+  // entries alternate between bit shifts 0 and 4.
+  if (position_bits == 28) {
+    const size_t bit_offset = entry * size_t{28};
+    uint32_t word = 0;
+    std::memcpy(&word, positions + (bit_offset >> 3), sizeof(word));
+    return (word >> (bit_offset & 7)) & 0x0fffffffU;
+  }
   const size_t bit_offset = entry * position_bits;
   const size_t byte_offset = bit_offset >> 3;
   const uint32_t shift = static_cast<uint32_t>(bit_offset & 7);
@@ -868,24 +879,25 @@ size_t containing_contig(
 void sort_unique_uint32(std::vector<uint32_t>* values) {
   if (!values || values->size() < 2) return;
   constexpr size_t kRadixThreshold = size_t{32} << 10;
-  if (values->size() < kRadixThreshold) {
+  if (values->size() < kRadixThreshold ||
+      values->size() > std::numeric_limits<uint32_t>::max()) {
     std::sort(values->begin(), values->end());
   } else {
     constexpr size_t kBucketCount = size_t{1} << 16;
-    std::vector<size_t> offsets(kBucketCount);
+    std::vector<uint32_t> offsets(kBucketCount);
     std::vector<uint32_t> scratch(values->size());
     // Two stable 16-bit passes produce the same unsigned order as std::sort,
     // but avoid comparison-sort growth on repeat-heavy posting lists.
     const auto pass = [&](const std::vector<uint32_t>& source,
                           std::vector<uint32_t>* destination,
                           uint32_t shift) {
-      std::fill(offsets.begin(), offsets.end(), size_t{0});
+      std::fill(offsets.begin(), offsets.end(), uint32_t{0});
       for (uint32_t value : source) {
         ++offsets[(value >> shift) & 0xffffU];
       }
-      size_t begin = 0;
+      uint32_t begin = 0;
       for (size_t bucket = 0; bucket < offsets.size(); ++bucket) {
-        const size_t count = offsets[bucket];
+        const uint32_t count = offsets[bucket];
         offsets[bucket] = begin;
         begin += count;
       }

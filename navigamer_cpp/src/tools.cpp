@@ -499,18 +499,20 @@ inline bool compute_distance_bounded_myers_prepared_batch4_avx2_fixed(
       carry = _mm256_and_si256(
           _mm256_or_si256(carry1, carry2), one);
 
-      const __m256i xh = _mm256_and_si256(
-          _mm256_or_si256(
-              _mm256_xor_si256(sum2, pv[block]), xv[block]),
-          masks[block]);
-      ph[block] = _mm256_and_si256(
-          _mm256_or_si256(
-              mv[block],
-              _mm256_andnot_si256(
-                  _mm256_or_si256(xh, pv[block]), all_ones)),
-          masks[block]);
-      mh[block] = _mm256_and_si256(
-          _mm256_and_si256(pv[block], xh), masks[block]);
+      __m256i xh = _mm256_or_si256(
+          _mm256_xor_si256(sum2, pv[block]), xv[block]);
+      if (block == last_block) {
+        xh = _mm256_and_si256(xh, masks[block]);
+      }
+      ph[block] = _mm256_or_si256(
+          mv[block],
+          _mm256_andnot_si256(
+              _mm256_or_si256(xh, pv[block]), all_ones));
+      mh[block] = _mm256_and_si256(pv[block], xh);
+      if (block == last_block) {
+        ph[block] = _mm256_and_si256(ph[block], masks[block]);
+        mh[block] = _mm256_and_si256(mh[block], masks[block]);
+      }
     }
 
     const __m256i ph_zero = _mm256_cmpeq_epi64(
@@ -530,28 +532,29 @@ inline bool compute_distance_bounded_myers_prepared_batch4_avx2_fixed(
           _mm256_srli_epi64(ph[block], 63);
       const __m256i next_mh_carry =
           _mm256_srli_epi64(mh[block], 63);
-      ph[block] = _mm256_and_si256(
-          _mm256_or_si256(
-              _mm256_slli_epi64(ph[block], 1), ph_carry),
-          masks[block]);
-      mh[block] = _mm256_and_si256(
-          _mm256_or_si256(
-              _mm256_slli_epi64(mh[block], 1), mh_carry),
-          masks[block]);
+      ph[block] = _mm256_or_si256(
+          _mm256_slli_epi64(ph[block], 1), ph_carry);
+      mh[block] = _mm256_or_si256(
+          _mm256_slli_epi64(mh[block], 1), mh_carry);
+      if (block == last_block) {
+        ph[block] = _mm256_and_si256(ph[block], masks[block]);
+        mh[block] = _mm256_and_si256(mh[block], masks[block]);
+      }
       ph_carry = next_ph_carry;
       mh_carry = next_mh_carry;
     }
 
 #pragma GCC unroll 4
     for (size_t block = 0; block < BlockCount; ++block) {
-      mv[block] = _mm256_and_si256(
-          _mm256_and_si256(ph[block], xv[block]), masks[block]);
-      pv[block] = _mm256_and_si256(
-          _mm256_or_si256(
-              mh[block],
-              _mm256_andnot_si256(
-                  _mm256_or_si256(ph[block], xv[block]), all_ones)),
-          masks[block]);
+      mv[block] = _mm256_and_si256(ph[block], xv[block]);
+      pv[block] = _mm256_or_si256(
+          mh[block],
+          _mm256_andnot_si256(
+              _mm256_or_si256(ph[block], xv[block]), all_ones));
+      if (block == last_block) {
+        mv[block] = _mm256_and_si256(mv[block], masks[block]);
+        pv[block] = _mm256_and_si256(pv[block], masks[block]);
+      }
     }
 
     // The current score is ED(pattern, text_prefix). Appending the remaining
@@ -559,7 +562,7 @@ inline bool compute_distance_bounded_myers_prepared_batch4_avx2_fixed(
     // so score - remaining is an exact lower bound on the final distance.
     // Check only periodically to keep the accepted/near-candidate hot path
     // cheap, and stop only when every SIMD lane is provably outside tau.
-    if ((text_idx & 1U) == 1U) {
+    if ((text_idx & 7U) == 7U) {
       const __m256i remaining = _mm256_set1_epi64x(
           static_cast<long long>(text_length - text_idx - 1));
       const __m256i threshold = _mm256_set1_epi64x(tau);
